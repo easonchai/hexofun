@@ -21,6 +21,9 @@ pub mod test_vrf;
 pub mod touch;
 pub mod utils;
 pub mod vrf;
+// Yield-claimer ticket 02 prototype; test-only, never in the binary.
+#[cfg(test)]
+mod weight_tree_proto;
 
 use anchor_lang::prelude::*;
 
