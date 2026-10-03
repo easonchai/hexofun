@@ -1,5 +1,9 @@
 # Depositors earn a base yield, paid only from a budget already in the vault
 
+> **2026-10-04: superseded by [ADR 0017](0017-live-yield-index-and-instant-withdraw.md).**
+> Base yield is the depositors' share of what the venue paid, under a `base_rate_bps` ceiling,
+> credited through a live Yield index. The Yield budget and `fund_yield` are removed.
+
 Until now every unit of yield became the prize, the PoolTogether v5 model, and depositors earned nothing directly. The product now promises savers a fixed rate on top of their deposit. Each Player therefore keeps `principal_acc`, a running sum of Principal × seconds built exactly like `weight_acc`, and `register` credits `principal_acc × base_rate_bps / year` into Principal once per ended epoch. Credits come out of `Pool.yield_budget`, which the permissionless `fund_yield` raises by moving real USDC into the principal vault, and a credit never exceeds what the budget holds. When the budget runs dry the credit is short, the shortfall is reported, and nobody is owed money the pool does not have.
 
 Considered and rejected: crediting on each Player's Principal at the end of the day. It is one multiplication, but a deposit at 23:59 would earn a full day. Time-weighting reuses the pattern `touch` already has and matches how Kamino and marginfi accrue per second.

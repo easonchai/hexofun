@@ -58,3 +58,12 @@ once did (see `runbook.md`'s history of that); `docs/ops/environments.md` says w
 ID is still warranted despite this. `docs/ops/deploy.md` has the full deploy and upgrade
 procedure, including the Ledger-signed mainnet path and the cosmetic `anchor build` warning this
 feature split causes.
+
+2026-10-04 amendment: the append-only rule is suspended once, for the live-yield rewrite of
+ADRs 0017, 0018 and 0019, because no mainnet pool and no mainnet deposit exist yet. That rewrite
+deletes the Base yield, Weight and registration fields from `Pool` and `Player`, folds the venue
+state into `Pool`, gives `Round` 64 reserved bytes and `Position` 32, which ends their no-padding
+exception, and bumps `version` on every account it changes. Dev pools are not upgraded in place:
+the rewrite deploys to a fresh program ID per environment and pools are bootstrapped anew, as
+`pool-cutover` describes. This is the one exception. From the first mainnet deposit the rule
+above applies again, with no further exception.

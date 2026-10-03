@@ -22,20 +22,16 @@ _Avoid_: Stake, mine, buy-in
 A depositor's 1:1 claim on the USDC they deposited, tracked as a number in their Player account. Never at risk in the game or the draw.
 _Avoid_: PT, principal token, receipt, balance
 
-**Deployed principal**:
-The USDC the Admin has moved out of the principal vault to earn yield during an epoch. Readers derive it as `total_principal` minus the vault's balance; no account stores it. `admin_withdraw` refuses a pull that would leave the vault holding less than the pool's Pending withdrawals.
-_Avoid_: Invested principal, float, TVL, deployed capital
-
 **Withdraw**:
-Removing principal from the pool, in two steps. A request for `x` requires Principal of at least `x`, and deducts `x` from Principal and `min(Tickets, x)` from Tickets at once. It pays out after the epoch in which it was requested ends, when anyone may push the transfer. A pause never blocks a request. Code calls the two instructions `request_withdraw` and `process_withdraw`.
-_Avoid_: Unstake, redeem, cash out, instant withdrawal
+Removing Principal from the pool, by one of two paths. The instant path pays in the same transaction: it needs Tickets of at least the amount, takes the amount off both Principal and Tickets, pays from free idle in the principal vault, and redeems any gap from the venue in the same instruction. When the venue's free liquidity cannot cover the gap the instant path fails whole and the screen offers the queued path instead. A queued request for `x` needs Principal of at least `x`, deducts `x` from Principal and `min(Tickets, x)` from Tickets at once, and pays after the epoch it was requested in ends, when anyone may push the transfer. A pause blocks neither path, and while the pool is Impaired both pay a Haircut. Code calls the queued pair `request_withdraw` and `process_withdraw`.
+_Avoid_: Unstake, redeem (a venue operation), cash out
 
 **Pending withdrawal**:
 A requested withdrawal whose USDC has not moved yet. It lives on the Player as `pending_withdraw` and `pending_epoch`, and is summed across the pool as `Pool.pending_withdrawals`. The Principal and Tickets behind it are already gone; the transfer happens on the first `process_withdraw` after `pending_epoch` ends, and fails with `InsufficientVaultLiquidity` while the vault is short.
 _Avoid_: Queue, unbonding, escrow, claim
 
 **Player**:
-One wallet's account in one pool: its Principal, Tickets, weight accumulator, and registration interval.
+One wallet's account in one pool: its Principal, Tickets, the Yield index at its last settle, and its Leaf in the Weight tree.
 _Avoid_: User account, position (a game concept)
 
 **House**:
@@ -43,7 +39,7 @@ The Player account owned by the Operator key. It holds no Principal, receives fo
 _Avoid_: Admin wallet, protocol player, operator (a service, not an account)
 
 **Treasury**:
-The USDC account that receives 20% of a prize the House wins. `create_pool` is given its address, and on mainnet that address is the Admin multisig's associated token account.
+The USDC account that receives the Yield fee at each Harvest and 20% of a prize the House wins. `create_pool` is given its address and the Admin can change it, and on mainnet that address is the Admin multisig's associated token account.
 _Avoid_: Fee account, protocol revenue
 
 **Buyback reserve**:
@@ -51,17 +47,41 @@ The USDC account that receives 50% of a prize the House wins, earmarked for a fu
 _Avoid_: Buyback wallet, HEX fund
 
 **Base yield**:
-The fixed rate every depositor earns on their time-weighted Principal, credited into Principal once per ended epoch. Paid only out of the Yield budget, so it stops rather than runs a debt when the budget is empty.
-_Avoid_: Interest, APY (as the mechanism name), staking reward
+The depositors' share of what the venue paid: the gain left after the Yield fee, up to a ceiling of `base_rate_bps` a year on `total_principal`. It floats with the venue's rate and with how much of the pool is deployed, and anything above the ceiling goes to the Prize. Credited through the Yield index, never from a budget. The screen shows it as "up to X%" beside the rate actually paid over the last 7 days.
+_Avoid_: Interest, APY (as the mechanism name), staking reward, fixed rate, Yield budget (retired)
 
-**Yield budget**:
-USDC already sitting in the principal vault that is earmarked for Base yield and not yet credited to anyone. Anyone can top it up; each credit draws it down.
-_Avoid_: Reserve, yield pool
+**Sync**:
+The first step of every instruction that moves USDC or changes Principal. It values the pool's venue position, repays any recorded deficit from the gain, splits the rest into the Yield fee, the Base yield share and the prize share, and raises the Yield index by the Base yield share. It moves no USDC and never runs on its own; a second Sync in the same second does nothing.
+_Avoid_: Harvest (which moves USDC), accrue, refresh (klend's reserve update, which Sync calls), crank
+
+**Yield index**:
+A pool-wide number, scaled by 1e18, that rises at each Sync by the Base yield share per unit of Principal and never falls. A Player settles against it when they act: their Principal times the rise since their last settle is added to their Principal and Tickets. A credit that rounds to zero leaves the Player's stored index where it was, so a small balance accumulates instead of losing every fraction.
+_Avoid_: Share price, exchange rate (klend's cToken term), accumulator, APY
+
+**Yield fee**:
+The team's cut of each venue gain, taken first at Sync: `yield_fee_bps` of the gain, default 10%, capped at 20% by a program constant. It is owed on the Pool until Harvest sends it to the Treasury.
+_Avoid_: House cut (a game cut, paid in Tickets), performance fee, rake, protocol revenue
+
+**Idle band**:
+The share of the pool's USDC kept in the principal vault instead of at the venue, between a floor of 5% and a target of 10% by default. Free idle is the vault balance minus Pending withdrawals. Anyone may deploy what sits above the target to the venue, and anyone may recall from the venue while free idle is under the target. Either key can pause deployment; only the Admin restarts it.
+_Avoid_: Buffer, reserve (klend's lending reserve), float, Deployed principal (retired)
+
+**Harvest**:
+The permissionless instruction that redeems the Yield fee owed and the prize share owed from the venue, sends the first to the Treasury and the second to the jackpot vault, and emits both amounts. The Operator runs it once per epoch before `epoch_end`; a missed one makes that day's Prize smaller and the next one larger. It touches no Player and is refused while Impaired.
+_Avoid_: Sync (which moves no USDC), claim, sweep, funding the jackpot
+
+**Impaired**:
+A pool state set when the venue position's value falls between two Syncs by more than the loss tolerance, 1 bps by default. The prize share owed absorbs the loss first, then the Yield fee owed; what remains is a recorded deficit. While Impaired, Harvest and deploy are refused and every withdrawal pays a Haircut. It clears when later gains or the permissionless `cover_deficit` bring the deficit to zero. The Yield index does not fall.
+_Avoid_: Paused (a separate switch), insolvent, frozen, default
+
+**Haircut**:
+What a withdrawal pays while the pool is Impaired: the amount times the pool's real value, `vault balance + venue value − Pending withdrawals − owed amounts`, divided by `total_principal`, rounded down. Principal and Tickets still fall by the full amount, and a Player who leaves this way takes no part in a later recovery. Instant, queued and Emergency withdraw all apply it.
+_Avoid_: Loss (the venue's fall in value), slashing, penalty, exit fee
 
 ### Lottery
 
 **Bought tickets**:
-Tickets a depositor pays USDC for, at a pool-set number of Tickets per USDC, up to their Principal in USDC per epoch. The USDC goes to the jackpot vault and is never returned. Bought tickets are ordinary Tickets from the moment they land.
+Tickets a depositor pays USDC for, at a pool-set number of Tickets per USDC, up to their Principal in USDC per epoch. The USDC goes to the jackpot vault and is never returned. Bought tickets are ordinary Tickets from the moment they land. `buy_tickets` is refused while the pool's on-chain buy-tickets pause is set, which only the Admin changes and which is on at mainnet launch.
 _Avoid_: Purchased entries, deposit (a bought ticket is not Principal)
 
 **Granted tickets**:
@@ -78,8 +98,16 @@ A depositor's current balance of lottery weight units. Created 1:1 with Principa
 _Avoid_: Entries (on screen), ET, entry token, chances, chips
 
 **Weight**:
-A player's time-weighted Tickets over one epoch: the integral of Tickets held over seconds elapsed. Depositing later in an epoch earns less Weight. Weight, not Tickets, is what the draw selects over.
-_Avoid_: TWAB, average balance, odds
+A Player's time-weighted Tickets over one epoch: Tickets held times seconds. It is credited forward: every Ticket change adds the change times the seconds left until `epoch_end`, so the number is final the moment the epoch ends, with no transaction. A change after `epoch_end` and before the next epoch begins credits nothing, so a deposit in that gap starts earning Weight when the new epoch starts. Depositing later in an epoch earns less Weight. Weight, not Tickets, is what the draw selects over.
+_Avoid_: TWAB, average balance, odds, registered weight (retired)
+
+**Weight tree**:
+One zero-copy account per pool that holds every Player's Weight as a Fenwick tree, one entry per Player ever created. Each entry keeps two epoch-parity slots, so a new epoch starts with no transaction and the ended one stays readable until the epoch after next begins. The root is the epoch's total Weight, and the Draw walks down from it to the winner. It grows by one entry at a Player's first deposit, paid for by that depositor, up to 10 MiB, about 145,000 Players. It replaced per-Player registration.
+_Avoid_: Sum tree (the general structure), registration, snapshot, Merkle tree
+
+**Leaf**:
+A Player's place in the Weight tree: an index assigned at first deposit, stored on the Player, never reused. A Fenwick entry holds a range sum, not one Player's value, so a Player's own Weight is the difference of two prefix sums; the Indexer computes it. `payout` checks the winner's Leaf against the draw's target.
+_Avoid_: Node, entry (a tree slot that sums a range), slot (one epoch-parity half of an entry), registration interval
 
 **Epoch**:
 One lottery cycle. Its boundaries are points on a fixed grid: the pool's Anchor sets where the grid sits, and the cycle length, a pool parameter, sets the spacing. Epochs are contiguous, and a late crank lands on the same grid a punctual one would, so an operator outage skips whole epochs instead of moving the boundary. A pool's first epoch is the short stub from launch to the next grid point.
@@ -94,19 +122,15 @@ The player-facing name for one epoch's draw and payout. The screen says "daily d
 _Avoid_: Jackpot, lottery, raffle
 
 **Prize**:
-What the jackpot vault holds for an epoch at close, paid in full to the daily draw's single winner: yield the pool earned above Base yield, sponsor money, and Bought tickets' USDC. The Admin harvests the yield and funds the jackpot vault by hand before the draw, through the permissionless `fund_jackpot`. Code and the API call this amount the jackpot (`jackpotAmount`, `fund_jackpot`).
+What the jackpot vault holds for an epoch at close, paid in full to the daily draw's single winner: the prize share of venue yield, which is whatever is left above the Base yield ceiling after the Yield fee, plus sponsor money sent through `fund_jackpot` and Bought tickets' USDC. Harvest moves the prize share into the jackpot vault before the epoch ends. Code and the API call this amount the jackpot (`jackpotAmount`, `fund_jackpot`).
 _Avoid_: Jackpot (on screen), pot, reward (a game concept)
 
 **Hexpot**:
 The jackpot vault's current balance: this epoch's prize once funded, plus anything a rollover or the House's 30% seed left behind. Shown on the odometer under the board, served by the Read model, which reads the vault balance on the browser's behalf.
 _Avoid_: Jackpot (on screen), honeypot, prize pool
 
-**Registration**:
-Recording one Player's final Weight for an ended epoch as a contiguous interval in that epoch's total. Permissionless; the operator cranks it for every player right after the epoch ends.
-_Avoid_: Snapshot, Merkle commit, freeze
-
 **Draw**:
-The verifiable random selection of one point in an epoch's total registered Weight via ORAO VRF. The Player whose interval contains the point wins the Prize.
+The verifiable random selection of one point in an epoch's total Weight via ORAO VRF, from a hash of all 64 bytes of its randomness. The Player whose Leaf in the Weight tree covers the point wins the Prize.
 _Avoid_: Snapshot, lottery, raffle
 
 **Payout**:
@@ -114,7 +138,7 @@ Moving the Prize from the jackpot vault into the principal vault and adding it t
 _Avoid_: Claim, redeem
 
 **Rollover**:
-A Prize that stays in the hexpot for the next epoch because nobody registered, the draw's randomness never arrived, or the jackpot vault held less than the pool's `min_jackpot` when registration closed.
+A Prize that stays in the hexpot for the next epoch because the epoch ended with no Weight, the draw's randomness never arrived, or the jackpot vault held less than the pool's `min_jackpot` when the draw was requested.
 _Avoid_: Expiry, unclaimed prize
 
 ### Game
@@ -132,15 +156,15 @@ A Player's immutable placement in one round: a set of tiles and one uniform stak
 _Avoid_: Bet, wager, deployment, mine, top-up
 
 **Round pot**:
-All Tickets staked in a round plus any carry from a voided round. After the House cut, the rest is distributed pro rata to the positions covering the winning tile, so the total Tickets in the pool is unchanged by a round.
+All Tickets staked in a round. The positions covering the winning tile get their own stakes back, and the losers' pot, the rest of the pot after the House cut, is distributed to them pro rata, so the total Tickets in the pool is unchanged by a round.
 _Avoid_: Bonus, reward pool, prize pool
 
 **House cut**:
-A pool-configurable percentage of a settled round's pot, credited to the House as Tickets before the winners split the remainder. It is taken from the pot as a whole, so every winner pays it on their gross round reward, own stake included. Forfeited and voided rounds have no House cut. PRD-V2 calls this the round fee.
-_Avoid_: Round fee, tax, rake, commission
+A pool-configurable percentage of a settled round's losers' pot, the pot minus the winning tile's total, credited to the House as Tickets. Winners get their own stake back whole and pay the cut only on what they win. Forfeited and voided rounds have no House cut. PRD-V2 calls this the round fee.
+_Avoid_: Round fee, tax, rake, commission, Yield fee (a cut of venue yield)
 
 **Round reward**:
-A winning position's share of the round pot after the House cut, credited as Tickets.
+A winning position's own stake back plus its share of the losers' pot after the House cut, credited as Tickets.
 _Avoid_: Winnings, payout (a lottery concept), bonus
 
 **Forfeit**:
@@ -148,8 +172,8 @@ A round pot whose winning tile nobody covered. It is credited to the House as Ti
 _Avoid_: Burn, rollover (a lottery concept)
 
 **Void**:
-A round whose randomness never arrived. Its pot carries into the next round's pot.
-_Avoid_: Cancel, refund
+A round whose randomness never arrived within `vrf_timeout`. Every Position's stake comes back as Tickets when it settles, and no House cut is taken.
+_Avoid_: Cancel, carry (the retired rule that moved a voided pot into the next round)
 
 ### Growth
 
@@ -172,19 +196,19 @@ _Avoid_: Active referral (outside screen copy), crew member
 ### Operations
 
 **Admin**:
-The multisig or wallet that changes pool parameters, unpauses (including starting the game and the jackpot on a new pool), rotates the Operator key, and moves principal out of the vault to a yield venue and back. It is `Pool.admin` in the program, a Squads multisig on mainnet, and it never signs a round. The role moves in two steps, `propose_admin` then `accept_admin`, so a typo cannot hand the pool to an address nobody holds.
+The multisig or wallet that changes pool parameters, venue parameters included, unpauses (including starting the game and the jackpot on a new pool, and restarting deployment), sets the Bought tickets pause, changes the Treasury and Buyback reserve accounts, and rotates the Operator key. No instruction lets it send pool USDC anywhere. It is `Pool.admin` in the program, a Squads multisig on mainnet, and it never signs a round. The role moves in two steps, `propose_admin` then `accept_admin`, so a typo cannot hand the pool to an address nobody holds.
 _Avoid_: Authority (the removed program role), owner, admin wallet, Operator
 
 **Operator key**:
-The hot keypair on the VPS that the Operator service signs with, and `Pool.operator` in the program. It exclusively opens epochs and rounds and crank registration closed; settling, voiding, drawing and rolling over an epoch are permissionless (production-hardening ticket 01), so the Operator key still cranks them but a stalled or stolen one cannot withhold a fulfilled result or leave a timed-out request stuck. It owns the House Player. Paying the winner needs no signer, so it only pays that transaction's fee. It cannot change parameters, unpause, or move principal. The Admin rotates it in one transaction.
+The hot keypair on the VPS that the Operator service signs with, and `Pool.operator` in the program. It exclusively opens epochs and rounds and requests the draw's randomness; settling, voiding, drawing and rolling over an epoch are permissionless (production-hardening ticket 01), and so are deploy, recall and Harvest, so the Operator key still cranks them but a stalled or stolen one cannot withhold a fulfilled result or leave a timed-out request stuck. It owns the House Player. Paying the winner needs no signer, so it only pays that transaction's fee. It can pause deployment but not restart it. It cannot change parameters, unpause, or move principal. The Admin rotates it in one transaction.
 _Avoid_: Authority keypair, pool authority, admin key, hot wallet
 
 **Operator**:
-The backend service that advances the protocol: opens epochs and rounds, requests randomness, settles rounds and positions, cranks registration, pays the winner, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
+The backend service that advances the protocol: opens epochs and rounds, requests randomness, settles rounds and positions, deploys to and recalls from the venue to keep the Idle band, runs Harvest once per epoch, pays the winner, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
 _Avoid_: Bot, cron, CLI, admin (a separate role), authority (the removed program role)
 
 **Sparring player**:
-A backend-owned Player that deposits once and buys one Position in every Round, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House.
+A backend-owned Player that deposits once and buys one Position in every Round, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House. It runs only when its backend environment flag is set, and no production env file sets it.
 _Avoid_: Bot, house player, NPC, dummy user
 
 **Read model**:
@@ -196,7 +220,7 @@ The backend component that mirrors program accounts and finalized events into Po
 _Avoid_: Cache, backend (too broad)
 
 **Pause**:
-A reversible pool state (`Pool.paused`) that stops all Ticket movement, `buy_position` and both `grant_tickets` paths, while leaving an open Round free to finish: `request_withdraw`, `process_withdraw`, `settle_round`, `void_round`, `settle_position`, `close_round`, the epoch cranks and `fund_*` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
+A reversible pool state (`Pool.paused`) that stops all Ticket movement, `buy_position` and both `grant_tickets` paths, while leaving an open Round free to finish: both Withdraw paths, `settle_round`, `void_round`, `settle_position`, `close_round`, the epoch cranks and `fund_jackpot` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
 _Avoid_: Shutdown (a separate, irreversible state), freeze, halt
 
 **Shutdown**:
@@ -208,7 +232,7 @@ A reversible pool switch (`Pool.game_paused`) that stops new Rounds opening and 
 _Avoid_: Freeze, stop the board
 
 **Jackpot pause**:
-A reversible pool switch (`Pool.jackpot_paused`) that stops the epoch cycle at its next step: no new Epoch begins, no Tickets are bought or granted, and a Registering Epoch does not close for the draw. Registration stays open, and an Epoch already Drawing or Drawn still draws and pays. Rounds live inside an Epoch, so once the current one ends the game stops too. Same key rules and starting state as the Game pause.
+A reversible pool switch (`Pool.jackpot_paused`) that stops the epoch cycle at its next step: no new Epoch begins, no Tickets are bought or granted, and an ended Epoch does not request its draw. An Epoch already Drawing or Drawn still draws and pays. Rounds live inside an Epoch, so once the current one ends the game stops too. Same key rules and starting state as the Game pause.
 _Avoid_: Draw freeze, skip the draw
 
 **Feature gate**:
@@ -220,12 +244,8 @@ A permissionless crank, valid only once a pool is shut down, that pays one Playe
 _Avoid_: Force withdraw, bailout, rescue
 
 **Sweep**:
-The admin-only `sweep_house`, valid only once a pool is shut down, that moves the jackpot vault's surplus over `jackpot_reserved` and whatever of the Yield budget the principal vault still holds unspent to the Treasury. Never touches Principal; callable more than once.
+The admin-only `sweep_house`, valid only once a pool is shut down, that moves the jackpot vault's surplus over `jackpot_reserved` to the Treasury. Never touches Principal; callable more than once.
 _Avoid_: Drain, liquidate, close out
-
-**Principal out**:
-`total_principal` plus Pending withdrawals plus the Yield budget, minus the principal vault's live balance, floored at zero: how much the Admin has moved out via `admin_withdraw` and not yet returned. Wider than Deployed principal above, which ignores Pending withdrawals and the Yield budget. Read with `admin principal-out` or `GET /status`'s `principalOut`.
-_Avoid_: Deployed principal (the narrower figure), TVL gap
 
 **Environment**:
 One deployment of the whole stack: its own program keypair, its own pools, its own Postgres database and its own env file. Dev, staging and mainnet share nothing but the box and Traefik. See `docs/ops/environments.md`.

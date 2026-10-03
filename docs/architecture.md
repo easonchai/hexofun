@@ -84,16 +84,12 @@ sends the transaction.
 | `deposit` | owner | |
 | `request_withdraw` | owner | |
 | `process_withdraw` | anyone | Destination is pinned to `player.owner` |
-| `admin_withdraw` | admin | Destination is pinned to the admin's own ATA |
 | `emergency_withdraw` | anyone | Only valid while shut down; destination pinned to `player.owner`; House excluded |
 | `sweep_house` | admin | Only valid while shut down |
 | `buy_tickets` | owner | |
 | `grant_tickets` | admin or operator | Operator path is capped; admin path is not |
 | `begin_epoch` | operator | |
-| `register` | anyone | |
 | `fund_jackpot` | anyone (source authority) | Permissionless top-up |
-| `fund_yield` | anyone (source authority) | Permissionless top-up |
-| `close_registration` | operator | |
 | `draw` | operator | |
 | `payout` | anyone | Winner and destination are both fixed on chain |
 | `rollover_epoch` | operator | |
@@ -104,6 +100,12 @@ sends the transaction.
 | `settle_position` | anyone | Rent returns to the Position's own owner |
 | `void_round` | operator | |
 | `close_round` | anyone | Rent returns to `pool.operator`; refuses while any Position is open |
+
+The live-yield rewrite removes `admin_withdraw` and `fund_yield` (ADR 0017) and `register` and
+`close_registration` (ADR 0018), so they are gone from this table. Instant withdraw, deploy,
+recall, Harvest, `cover_deficit` and the new Admin setters join it as their tickets in
+`docs/plan/yield-claimer/` land. Until then the fund flow, epoch lifecycle and backend jobs
+below still draw the program as deployed today.
 
 ## Fund flow
 
