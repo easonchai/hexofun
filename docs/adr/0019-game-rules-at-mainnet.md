@@ -10,8 +10,11 @@ Tickets, `carry_pot` is deleted, and a void charges no House cut. A void happens
 randomness does not arrive within `vrf_timeout`, which is an oracle outage, not something a player
 did, and every parimutuel precedent read refunds in that case. The carry rule also gave a VRF node
 a free option: stall on an outcome it dislikes, and the stakers lose while someone else gains.
-Under a refund, stalling only delays the round. Whether the refund still lands when the round's
-epoch has already rolled over is for the prototype to confirm and ticket 11 to record. A forfeit
+Under a refund, stalling only delays the round. Prototype 02 settled what happens when the round's
+epoch has already rolled over: the epoch boundary already resets every Player's Tickets to
+Principal, so the stake is counted again, and a refund paid then would count it twice. The refund
+therefore lands only while the round's epoch is the current one, the rule `settle_position` already
+applies to rewards. The Player loses nothing either way. A forfeit
 does not change: a round nobody covered on the winning tile still sends its whole pot to the House.
 
 The House cut comes off the losers' pot. The cut is `house_cut_bps` of the pot minus the winning
