@@ -6,13 +6,42 @@ pub const TILE_MASK: u64 = (1u64 << TILE_COUNT) - 1;
 /// capped at this.
 pub const BPS_DENOMINATOR: u16 = 10_000;
 
-/// Written to `version` on a freshly created `Pool`, `Epoch` or `Player`.
-/// There is no migration code yet, since nothing has shipped an older
-/// version; see ADR 0013.
-pub const CURRENT_VERSION: u8 = 1;
+/// Written to `version` on a freshly created `Epoch`. Epoch kept its layout
+/// through the live-yield rewrite. See ADR 0013.
+pub const EPOCH_VERSION: u8 = 1;
+
+/// Written to `version` on `Pool`, `Player`, `Round` and `Position` since the
+/// live-yield layout rewrite (yield-claimer ticket 04, ADR 0013 amendment).
+/// Version 1 of each had a different layout and a different discriminator
+/// (see `state.rs`), so Anchor refuses a version-1 account with
+/// `AccountDiscriminatorMismatch` before reading a byte of it.
+pub const LAYOUT_VERSION: u8 = 2;
+
+/// Written to the Weight tree header by `create_pool`.
+pub const WEIGHT_TREE_VERSION: u8 = 1;
 
 /// Denominator for `base_rate_bps`, an APR: seconds in a 365-day year.
 pub const SECONDS_PER_YEAR: u128 = 31_536_000;
+
+// Venue parameter defaults, written by `create_pool` (spec "Layout
+// rewrite"). Ticket 10's `set_venue_params` changes them within the caps.
+
+/// Yield fee: the team's share of every venue gain.
+pub const DEFAULT_YIELD_FEE_BPS: u16 = 1_000;
+/// No key can raise the Yield fee past this.
+pub const MAX_YIELD_FEE_BPS: u16 = 2_000;
+/// Idle band: free idle USDC as a share of the pool.
+pub const DEFAULT_IDLE_FLOOR_BPS: u16 = 500;
+pub const DEFAULT_IDLE_TARGET_BPS: u16 = 1_000;
+/// Deploy cap: the pool's largest share of the reserve's supply.
+pub const DEFAULT_RESERVE_SHARE_CAP_BPS: u16 = 500;
+/// Deploy cap: free liquidity the reserve must keep after a deploy, as a
+/// multiple of the pool's position in basis points. 20_000 is twice it.
+pub const DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS: u16 = 20_000;
+/// Smallest deploy or recall: 100 USDC at 6 decimals.
+pub const DEFAULT_MIN_VENUE_MOVE: u64 = 100_000_000;
+/// A fall in venue value past this share of it is a venue loss.
+pub const DEFAULT_LOSS_TOLERANCE_BPS: u16 = 1;
 
 /// Floors for the two timeouts that gate the permissionless `void_round` and
 /// `rollover_epoch` (production-hardening 14, Finding 5). Below these, a
@@ -20,8 +49,11 @@ pub const SECONDS_PER_YEAR: u128 = 31_536_000;
 /// rolled over by any stranger the second the timeout passes. Localnet tests
 /// run epochs of a few seconds, so `test-vrf` builds keep the floor at 1;
 /// `lib.rs` refuses that feature together with `staging` or `mainnet`.
+///
+/// 180 s since ADR 0019: ORAO's measured tail reached 62 to 77 s, and a 60 s
+/// floor would void about one round in six.
 #[cfg(not(feature = "test-vrf"))]
-pub const MIN_VRF_TIMEOUT: i64 = 60;
+pub const MIN_VRF_TIMEOUT: i64 = 180;
 #[cfg(feature = "test-vrf")]
 pub const MIN_VRF_TIMEOUT: i64 = 1;
 #[cfg(not(feature = "test-vrf"))]
@@ -39,6 +71,8 @@ pub const SEED_POSITION: &[u8] = b"position";
 
 /// `Epoch::status`. An epoch is Open while it is the current one, then walks
 /// Registering → Drawing → Drawn → Paid, or short-circuits to RolledOver.
+/// Since ticket 04 removed `close_registration`, an ended epoch stays
+/// Registering until `rollover_epoch`; ticket 08's `request_draw` replaces it.
 pub mod epoch_status {
     pub const OPEN: u8 = 0;
     pub const REGISTERING: u8 = 1;
@@ -56,4 +90,16 @@ pub mod round_status {
     pub const SETTLED: u8 = 2;
     pub const FORFEITED: u8 = 3;
     pub const VOIDED: u8 = 4;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `cargo test` builds without `test-vrf`, so this is the deployable floor
+    // `create_pool` and `set_params` enforce (ADR 0019).
+    #[test]
+    fn the_deployable_vrf_timeout_floor_is_180_seconds() {
+        assert_eq!(MIN_VRF_TIMEOUT, 180);
+    }
 }

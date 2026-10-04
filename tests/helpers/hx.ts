@@ -10,6 +10,7 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
+  type TransactionInstruction,
 } from "@solana/web3.js";
 import {
   createAccount,
@@ -92,6 +93,29 @@ export function principalVaultPda(pool: PublicKey): PublicKey {
 
 export function jackpotVaultPda(pool: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync([Buffer.from("jackpot"), pool.toBuffer()], PROGRAM_ID)[0];
+}
+
+/** Discriminator plus the zero-copy header; `create_pool` wants exactly
+ *  this, a tree with zero nodes (yield-claimer ticket 04). */
+export const WEIGHT_TREE_SPACE = 8 + 48;
+
+/**
+ * The top-level `create_account` that has to precede `create_pool` in the
+ * same transaction: a fresh program-owned account sized for the Weight tree
+ * header. Sign the transaction with `keypair` as well as `payer`.
+ */
+async function weightTreeAccount(
+  payer: PublicKey,
+): Promise<{ keypair: Keypair; ix: TransactionInstruction }> {
+  const keypair = Keypair.generate();
+  const ix = SystemProgram.createAccount({
+    fromPubkey: payer,
+    newAccountPubkey: keypair.publicKey,
+    space: WEIGHT_TREE_SPACE,
+    lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
+    programId: PROGRAM_ID,
+  });
+  return { keypair, ix };
 }
 
 /** The test-vrf stand-in PDA for a request seed (see vrf::randomness_address). */
@@ -338,20 +362,15 @@ export interface PoolParamsOverrides {
   /** House cut in basis points, 0..=10_000. Defaults to the bootstrap rate,
    * so every round test settles against the cut the product ships with. */
   houseCutBps?: number;
-  /** Jackpot floor below which `close_registration` rolls the epoch over.
-   * Defaults to 0 (no floor) so a test that never funds the jackpot still
-   * reaches the draw; the low-jackpot test sets it. */
+  /** Jackpot floor below which the draw rolls the epoch over. Defaults to 0
+   * (no floor) so a test that never funds the jackpot still reaches the
+   * draw; the low-jackpot test sets it. */
   minJackpot?: number;
-  /** Seconds past `ends_at` before `close_registration` is accepted.
-   * Defaults to 0, so every suite keeps the timing it had before the window
-   * existed; the window test sets it. */
-  registrationWindow?: number;
   /** Seconds a Drawn epoch waits for its payout before `rollover_epoch` will
    * take it. Defaults to a day, well past any test's run. */
   payoutTimeout?: number;
-  /** Base yield's APR in basis points. Defaults to the bootstrap rate
-   * (~5% APY with daily compounding); `yield_budget` starts at 0 regardless,
-   * so no test is credited yield unless it also calls `fund_yield`. */
+  /** Ceiling on the depositor share, as an APR in basis points. Defaults to
+   * the bootstrap rate. */
   baseRateBps?: number;
   /** Tickets credited per USDC spent in `buy_tickets`. Defaults to the
    * bootstrap rate. */
@@ -375,7 +394,6 @@ const DEFAULT_PARAMS = {
   minDeposit: 1_000_000, // 1 hexUSDC at 6 decimals
   houseCutBps: 600, // 6%, the bootstrap default
   minJackpot: 0,
-  registrationWindow: 0,
   // Strictly less than epochSeconds: set_params requires payout_timeout <
   // epoch_seconds (beta-launch-fixes ticket 03), so a pool bootstrapped here
   // has to satisfy that from the start or its very first set_params call
@@ -401,6 +419,7 @@ export interface PoolCtx {
   principalVault: PublicKey;
   jackpotVault: PublicKey;
   house: PublicKey;
+  weightTree: PublicKey;
   minDeposit: bigint;
   houseCutBps: number;
   baseRateBps: number;
@@ -450,6 +469,7 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
   const jackpotVault = jackpotVaultPda(pool);
   const house = playerPda(pool, operator.publicKey);
   const epochAnchor = overrides.epochAnchor ?? (await onChainNowSeconds());
+  const weightTree = await weightTreeAccount(operator.publicKey);
 
   await program.methods
     .createPool({
@@ -465,7 +485,6 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       minDeposit: new BN(params.minDeposit),
       houseCutBps: params.houseCutBps,
       minJackpot: new BN(params.minJackpot),
-      registrationWindow: new BN(params.registrationWindow),
       payoutTimeout: new BN(params.payoutTimeout),
       baseRateBps: params.baseRateBps,
       ticketsPerUsdc: params.ticketsPerUsdc,
@@ -478,12 +497,14 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       principalVault,
       jackpotVault,
       house,
+      weightTree: weightTree.keypair.publicKey,
       treasury,
       buybackReserve,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
-    .signers([operator])
+    .preInstructions([weightTree.ix])
+    .signers([operator, weightTree.keypair])
     .rpc();
 
   // A new pool starts with both the game and the jackpot paused (spec
@@ -525,6 +546,7 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
     principalVault,
     jackpotVault,
     house,
+    weightTree: weightTree.keypair.publicKey,
     minDeposit: BigInt(params.minDeposit),
     houseCutBps: params.houseCutBps,
     baseRateBps: params.baseRateBps,

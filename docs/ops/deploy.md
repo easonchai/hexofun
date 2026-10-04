@@ -77,16 +77,20 @@ program extend <program-id> <bytes>` command and, outside `--dry-run`, asks to r
 before continuing; `solana program deploy` also auto-extends if a required extend was skipped, so
 declining here is not a hard stop.
 
-**Deploy an upgrade only when no `Round` is open.** `Round` has no reserved padding by design
-(ADR 0013): it is short-lived and reclaimed by `close_round`, so a layout change is acceptable
-there but only for rounds that open after the upgrade. A `Round` account already open at the
-moment of an upgrade that changes `Round`'s layout fails to deserialize on the next instruction
-that touches it, until the round is abandoned; its Entries (not USDC) become unclaimable and its
-rent is never reclaimed. Check `GET /status` (`openRoundId`) or wait for the current round to
-settle before running `--upgrade`.
+**Never `--upgrade` across the live-yield layout rewrite.** That rewrite (yield-claimer ticket 04)
+changed the layout and discriminator of `Pool`, `Player`, `Round` and `Position`, so it deploys to
+a fresh program ID per environment with pools bootstrapped anew. See
+[`environments.md`](environments.md#the-live-yield-layout-rewrite-needs-one-in-every-environment).
 
-`Pool`, `Epoch` and `Player` carry `version` and `_reserved` padding precisely so an upgrade that
-only adds a field there needs no such care; see ADR 0013.
+**Deploy an upgrade only when no `Round` is open.** Before the rewrite, `Round` had no reserved
+padding, so a `Round` account open at the moment of an upgrade that changed `Round`'s layout
+failed to deserialize on the next instruction that touched it. Since the rewrite `Round` carries
+64 reserved bytes and `Position` 32, but an open round is still the one account an upgrade can
+strand mid-flight, so the rule stays. Check `GET /status` (`openRoundId`) or wait for the current
+round to settle before running `--upgrade`.
+
+`Pool`, `Epoch`, `Player`, `Round` and `Position` carry `version` and `_reserved` padding so an
+upgrade that only adds a field there needs no such care; see ADR 0013.
 
 ### Rollback
 
@@ -163,8 +167,9 @@ Three things bit on devnew on 2026-09-28, all outside this repo:
   lazily on first touch.
 - A new capability is a new instruction (`foo_v2`), not a new required argument on an existing
   one; old clients keep working.
-- `Round` and `Position` are exempt: no padding, because they are short-lived and reclaimed, and
-  the affected-in-flight-rounds cost is accepted (see "Upgrading" above).
+- The live-yield layout rewrite was the one exception, on a fresh program ID per environment
+  (ADR 0013's 2026-10-04 amendment). It also gave `Round` and `Position` padding, so they follow
+  this policy from then on.
 
 ## Admin signing: local key, Ledger or Squads
 

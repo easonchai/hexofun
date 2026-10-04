@@ -57,6 +57,20 @@ An additive field taken from `_reserved`, a new instruction, a new event or erro
 admin parameter change never needs a new program ID; that is the point of ADR 0013's upgrade
 policy. See [`docs/ops/deploy.md`](deploy.md#upgrade-policy-adr-0013).
 
+### The live-yield layout rewrite needs one in every environment
+
+The live-yield rewrite (yield-claimer ticket 04, the 2026-10-04 amendment to ADR 0013) is the
+one exception to the append-only rule. It deletes fields from `Pool` and `Player`, gives `Round`
+and `Position` padding, and gives all four a new discriminator and `version = 2`. Code from that
+rewrite on cannot read a single account the earlier code wrote: it refuses each one with
+`AccountDiscriminatorMismatch`. So it never goes out as `scripts/deploy.sh <env> --upgrade` onto a
+program that holds pools. Each environment (dev, devnew, staging) gets a fresh program keypair,
+the new ID goes into `declare_id!`, `Anchor.toml` and the env files, and its pools are bootstrapped
+anew from pool ID 1, the same way a new environment starts. `create_pool` also needs the Weight
+tree account created in the same transaction, which only the post-rewrite bootstrap does. Mainnet
+holds no pool, so the rule only bites there if its ID already runs the old code: then it gets a
+fresh ID too.
+
 A new program ID does not carry the database over yet. The boot guard refuses any Pool row
 whose address does not derive from its `poolId` under the configured `PROGRAM_ID`, which is how
 it catches a wrong `DATABASE_URL`, and a pool from the old program looks exactly like that. A

@@ -34,6 +34,10 @@ anchor-lang = { version = "1.1.2", features = ["init-if-needed"] }
 anchor-spl = { version = "1.1.2", features = ["token_2022"] }
 solana-keccak-hasher = "2.2.1"
 solana-sha256-hasher = "2.2.1"
+# Anchor's `#[account(zero_copy)]` (the Weight tree, yield-claimer ticket 04)
+# derives bytemuck's Pod and Zeroable by path, so the crate must name it.
+# Already in the lockfile through anchor-lang.
+bytemuck = { version = "1.25", features = ["derive", "min_const_generics"] }
 # ops-and-envs ticket 12: embeds a security.txt ELF section so researchers
 # can find a contact from the deployed program address. No default features:
 # the `parser` feature (thiserror + memchr) is only needed to read one back.

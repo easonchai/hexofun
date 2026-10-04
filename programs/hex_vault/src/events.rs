@@ -45,7 +45,6 @@ pub struct ParamsSet {
     pub min_deposit: u64,
     pub house_cut_bps: u16,
     pub min_jackpot: u64,
-    pub registration_window: i64,
     pub payout_timeout: i64,
     pub base_rate_bps: u16,
     pub tickets_per_usdc: u16,
@@ -96,23 +95,12 @@ pub struct Withdrawn {
     pub entries: u64,
 }
 
-/// The admin pulled principal out to a yield venue. Coming back is a plain
-/// SPL transfer into the vault, so there is no matching event for the return.
-#[event]
-pub struct PrincipalDeployed {
-    pub pool: Pubkey,
-    pub amount: u64,
-    pub vault_remaining: u64,
-}
-
 #[event]
 pub struct RoundOpened {
     pub round_id: u64,
     pub epoch_id: u64,
     pub starts_at: i64,
     pub ends_at: i64,
-    /// Entries carried in from a voided round.
-    pub carry_in: u64,
 }
 
 #[event]
@@ -139,7 +127,6 @@ pub struct RoundSettled {
 #[event]
 pub struct RoundVoided {
     pub round_id: u64,
-    pub carry_pot: u64,
 }
 
 /// Permissionless: `close_round` reclaimed a finished Round's rent for
@@ -162,15 +149,6 @@ pub struct EpochBegan {
     pub epoch_id: u64,
     pub starts_at: i64,
     pub ends_at: i64,
-}
-
-#[event]
-pub struct Registered {
-    pub epoch_id: u64,
-    pub owner: Pubkey,
-    pub weight: u128,
-    pub reg_start: u128,
-    pub reg_end: u128,
 }
 
 #[event]
@@ -202,22 +180,6 @@ pub struct JackpotPaid {
 pub struct EpochRolledOver {
     pub epoch_id: u64,
     pub jackpot_amount: u64,
-}
-
-#[event]
-pub struct YieldFunded {
-    pub amount: u64,
-    pub budget: u64,
-}
-
-/// `shortfall` is what `base_rate_bps` would have credited beyond what
-/// `yield_budget` could cover, 0 when the budget paid in full.
-#[event]
-pub struct YieldCredited {
-    pub epoch_id: u64,
-    pub owner: Pubkey,
-    pub amount: u64,
-    pub shortfall: u64,
 }
 
 #[event]
@@ -255,11 +217,9 @@ pub struct EmergencyWithdrawn {
     pub total: u64,
 }
 
-/// Admin-only: `sweep_house` moved the whole jackpot and any unspent yield
-/// budget to `pool.treasury` once the pool was shut down. Principal is never
-/// swept.
+/// Admin-only: `sweep_house` moved the jackpot's unreserved balance to
+/// `pool.treasury` once the pool was shut down. Principal is never swept.
 #[event]
 pub struct HouseSwept {
     pub jackpot: u64,
-    pub yield_budget: u64,
 }

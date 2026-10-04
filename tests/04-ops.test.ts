@@ -119,21 +119,6 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
     .rpc();
 }
 
-async function fundYield(pool: PoolCtx, source: Wallet, amount: bigint) {
-  return program.methods
-    .fundYield(new BN(amount.toString()))
-    .accountsPartial({
-      sourceAuthority: source.keypair.publicKey,
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      source: source.tokenAccount,
-      principalVault: pool.principalVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .signers([source.keypair])
-    .rpc();
-}
-
 async function fundJackpot(pool: PoolCtx, source: Wallet, amount: bigint) {
   return program.methods
     .fundJackpot(new BN(amount.toString()))
@@ -149,6 +134,9 @@ async function fundJackpot(pool: PoolCtx, source: Wallet, amount: bigint) {
     .rpc();
 }
 
+// `register` and `closeRegistration` call instructions the layout rewrite
+// removed. Only the tests skipped until yield-claimer ticket 08 use them;
+// ticket 08 swaps them for `request_draw`.
 async function register(pool: PoolCtx, epochId: bigint, owner: PublicKey) {
   return program.methods
     .register()
@@ -380,32 +368,6 @@ async function fetchEpoch(pool: PoolCtx, epochId: bigint) {
 const vaultBalance = async (account: PublicKey): Promise<bigint> =>
   BigInt((await program.provider.connection.getTokenAccountBalance(account)).value.amount);
 
-async function adminAta(pool: PoolCtx): Promise<PublicKey> {
-  return (
-    await getOrCreateAssociatedTokenAccount(
-      program.provider.connection,
-      pool.operator,
-      pool.mint,
-      pool.admin.publicKey,
-    )
-  ).address;
-}
-
-async function adminWithdraw(pool: PoolCtx, adminToken: PublicKey, amount: bigint) {
-  return program.methods
-    .adminWithdraw(new BN(amount.toString()))
-    .accountsPartial({
-      admin: pool.admin.publicKey,
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      adminToken,
-      principalVault: pool.principalVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .signers([pool.admin])
-    .rpc();
-}
-
 async function emergencyWithdraw(
   pool: PoolCtx,
   owner: PublicKey,
@@ -433,13 +395,16 @@ async function sweepHouse(pool: PoolCtx, admin: Keypair = pool.admin) {
       pool: pool.pool,
       acceptedMint: pool.mint,
       jackpotVault: pool.jackpotVault,
-      principalVault: pool.principalVault,
       treasury: pool.treasury,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([admin])
     .rpc();
 }
+
+// Skipped until yield-claimer ticket 08: these reach a Drawn epoch through
+// `register` and `close_registration`, which the layout rewrite removed.
+const itAfterDraw = it.skip;
 
 describe("shutdown", () => {
   it(
@@ -492,7 +457,7 @@ describe("shutdown", () => {
     TIMEOUT,
   );
 
-  it(
+  itAfterDraw(
     "payout of an epoch already Drawn before shutdown still pays",
     async () => {
       const pool = await setupPool({ epochSeconds: 6 });
@@ -524,7 +489,7 @@ describe("shutdown", () => {
     TIMEOUT,
   );
 
-  it(
+  itAfterDraw(
     "draw succeeds after Shutdown: shut down while Drawing, fulfil, draw, pay out",
     async () => {
       // beta-launch-fixes ticket 03: shutdown must never strand a Prize that
@@ -592,12 +557,11 @@ describe("shutdown", () => {
       await expect(createRound(pool, 1n, 2n, 0, 60)).rejects.toThrow(/PoolShutDown/);
       await expect(buyPosition(pool, owner, roundId, 1n, 1n)).rejects.toThrow(/PoolShutDown/);
       await expect(beginEpoch(pool, 1n)).rejects.toThrow(/PoolShutDown/);
-      await expect(closeRegistration(pool, 1n)).rejects.toThrow(/PoolShutDown/);
       // `draw` deliberately does NOT check shutdown any more
       // (beta-launch-fixes ticket 03): an Epoch still Drawing when shutdown
       // lands must still be drawn so its Prize reaches its winner. See the
-      // dedicated "draw succeeds after Shutdown" test below.
-      await expect(fundYield(pool, owner, 1_000_000n)).rejects.toThrow(/PoolShutDown/);
+      // dedicated "draw succeeds after Shutdown" test above. Ticket 08 adds
+      // its `request_draw` to this list.
     },
     TIMEOUT,
   );
@@ -669,26 +633,10 @@ describe("emergency_withdraw", () => {
     TIMEOUT,
   );
 
-  it(
-    "a short vault fails with InsufficientVault and pays nothing",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 4_000_000n);
-      await shutdown(pool);
-      await adminWithdraw(pool, await adminAta(pool), 4_000_000n); // vault now empty
-
-      const walletBefore = await vaultBalance(owner.tokenAccount);
-      await expect(
-        emergencyWithdraw(pool, owner.keypair.publicKey, owner.tokenAccount),
-      ).rejects.toThrow(/InsufficientVault/);
-
-      expect(await vaultBalance(owner.tokenAccount)).toBe(walletBefore);
-      const player = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(player.principal.toString()).toBe("4000000"); // unchanged: the whole tx reverted
-    },
-    TIMEOUT,
-  );
+  // "A short vault fails with InsufficientVault and pays nothing" emptied
+  // the vault with `admin_withdraw`, which the layout rewrite removed. It
+  // returns with ticket 05, which deploys the vault to the test venue before
+  // shutdown (and ticket 10 decides what emergency_withdraw pays then).
 
   it(
     "the House refuses, even though it holds no principal",
@@ -745,7 +693,7 @@ describe("sweep_house", () => {
   );
 
   it(
-    "sweeps the whole jackpot and the unspent yield budget, leaving the principal vault at total_principal + pending_withdrawals",
+    "sweeps the whole jackpot and never the principal vault",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
@@ -753,7 +701,6 @@ describe("sweep_house", () => {
       await requestWithdraw(pool, owner, 1_000_000n); // 3M principal, 1M pending
 
       const funder = await pool.fundedWallet(10_000_000n);
-      await fundYield(pool, funder, 500_000n);
       await fundJackpot(pool, funder, 2_000_000n);
       await shutdown(pool);
 
@@ -761,83 +708,21 @@ describe("sweep_house", () => {
       const sig = await sweepHouse(pool);
 
       expect(await vaultBalance(pool.jackpotVault)).toBe(0n);
-      expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore + 2_500_000n);
+      expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore + 2_000_000n);
       expect(await vaultBalance(pool.principalVault)).toBe(4_000_000n); // 3M + 1M
-      expect((await program.account.pool.fetch(pool.pool)).yieldBudget.toString()).toBe("0");
 
-      const event = await findEvent<{ jackpot: BN; yieldBudget: BN }>(sig, "houseSwept");
+      const event = await findEvent<{ jackpot: BN }>(sig, "houseSwept");
       expect(event?.jackpot.toString()).toBe("2000000");
-      expect(event?.yieldBudget.toString()).toBe("500000");
 
       // Callable again: a later fund_jackpot can be swept a second time.
       await fundJackpot(pool, funder, 100_000n);
       await sweepHouse(pool);
-      expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore + 2_600_000n);
+      expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore + 2_100_000n);
     },
     TIMEOUT,
   );
 
-  it(
-    "with principal pulled out via admin_withdraw, the yield-budget sweep is capped at the real surplus",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 4_000_000n);
-
-      const funder = await pool.fundedWallet(10_000_000n);
-      await fundYield(pool, funder, 500_000n);
-      // Vault now holds 4.5M (4M principal + 0.5M yield budget). Pulling all
-      // 4.5M out leaves the vault at exactly total_principal (4M is still
-      // owed once returned) -- no surplus above obligations remains.
-      await adminWithdraw(pool, await adminAta(pool), 4_500_000n);
-      await shutdown(pool);
-
-      const treasuryBefore = await vaultBalance(pool.treasury);
-      const sig = await sweepHouse(pool);
-
-      expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore); // nothing to sweep
-      // beta-launch-fixes ticket 03: sweep_house deducts only what it swept
-      // (0 here, the real surplus) rather than zeroing the whole budget, so
-      // the 500k that never actually left the vault is still accounted for.
-      expect((await program.account.pool.fetch(pool.pool)).yieldBudget.toString()).toBe(
-        "500000",
-      );
-      const event = await findEvent<{ jackpot: BN; yieldBudget: BN }>(sig, "houseSwept");
-      expect(event?.yieldBudget.toString()).toBe("0");
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "sweep_house deducts only the yield it actually swept, leaving the rest of the budget accounted for",
-    async () => {
-      // beta-launch-fixes ticket 03: a partial sweep (surplus < yield_budget,
-      // some principal deployed at sweep time) must not zero the whole
-      // budget -- only what actually left the vault comes off it.
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 4_000_000n);
-
-      const funder = await pool.fundedWallet(10_000_000n);
-      await fundYield(pool, funder, 1_000_000n); // vault: 4M principal + 1M yield budget
-      // Deploy 700k of the surplus, leaving only 300k of it in the vault.
-      await adminWithdraw(pool, await adminAta(pool), 700_000n);
-      await shutdown(pool);
-
-      const treasuryBefore = await vaultBalance(pool.treasury);
-      const sig = await sweepHouse(pool);
-
-      expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore + 300_000n);
-      expect((await program.account.pool.fetch(pool.pool)).yieldBudget.toString()).toBe(
-        "700000", // 1M budget - 300k actually swept, not zeroed
-      );
-      const event = await findEvent<{ yieldBudget: BN }>(sig, "houseSwept");
-      expect(event?.yieldBudget.toString()).toBe("300000");
-    },
-    TIMEOUT,
-  );
-
-  it(
+  itAfterDraw(
     "never touches jackpot_reserved, so an already-drawn epoch can still pay after a sweep",
     async () => {
       const pool = await setupPool({ epochSeconds: 6 });

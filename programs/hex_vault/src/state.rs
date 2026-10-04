@@ -1,14 +1,22 @@
-//! Account layouts. Fixed by `docs/plan/rebuild/spec.md` §2.1 — changing a
-//! field here churns the IDL, the indexer's Prisma schema, and the frontend.
+//! Account layouts. Changing a field here churns the IDL, the indexer's
+//! Prisma schema, and the frontend.
+//!
+//! `Pool`, `Player`, `Round` and `Position` were rewritten once for live
+//! yield and the Weight tree (yield-claimer ticket 04, ADR 0013 amendment).
+//! Each carries `version = LAYOUT_VERSION` and a discriminator of its own
+//! instead of Anchor's default, so a version-1 account fails to load with
+//! `AccountDiscriminatorMismatch` instead of being misread. The rewrite ships
+//! on a fresh program ID per environment, so none should ever be met. From
+//! the first mainnet deposit the append-only rule of ADR 0013 holds again.
 
 use anchor_lang::prelude::*;
 
-use crate::constants::{CURRENT_VERSION, TILE_COUNT};
+use crate::constants::{LAYOUT_VERSION, TILE_COUNT};
 use crate::errors::HexVaultError;
 
 /// One deployed instance of the product: one accepted mint, one principal
 /// vault, one jackpot vault, one epoch schedule.
-#[account]
+#[account(discriminator = b"HVPool02")]
 #[derive(InitSpace)]
 pub struct Pool {
     pub pool_id: u64,
@@ -64,38 +72,28 @@ pub struct Pool {
     pub next_round_id: u64,
     /// 0 when no round is Open or Requested.
     pub open_round_id: u64,
-    /// Entries carried out of a voided round into the next round's pot.
-    pub carry_pot: u64,
     pub total_principal: u64,
     pub bump: u8,
     pub principal_vault_bump: u8,
     pub jackpot_vault_bump: u8,
-    /// Σ `Player.pending_withdraw` across the pool. `admin_withdraw` refuses
-    /// to leave the principal vault holding less than this.
+    /// Σ `Player.pending_withdraw` across the pool. USDC the principal vault
+    /// holds for queued withdrawals, which no other payout may spend.
     pub pending_withdrawals: u64,
-    /// An epoch whose jackpot vault holds less than this at
-    /// `close_registration` rolls over instead of paying out dust.
+    /// An epoch whose jackpot vault holds less than this at the draw request
+    /// rolls over instead of paying out dust.
     pub min_jackpot: u64,
-    /// Seconds after an epoch's `ends_at` during which `close_registration`
-    /// is refused, so the operator cannot draw before everyone who earned
-    /// weight in that epoch has been registered. `0 <= this < epoch_seconds`.
-    pub registration_window: i64,
     /// Seconds after `Epoch.drawn_at` before a Drawn epoch may be rolled
     /// over unpaid. The escape hatch for a winner nobody can pay.
     pub payout_timeout: i64,
     /// Jackpot already promised to an epoch that is Drawing or Drawn and has
-    /// not paid yet. `close_registration` snapshots the vault minus this, so
-    /// the next epoch cannot take a prize the previous one still owes.
-    /// Released on `payout` and on either branch of `rollover_epoch`.
+    /// not paid yet. The draw request snapshots the vault minus this, so the
+    /// next epoch cannot take a prize the previous one still owes. Released
+    /// on `payout` and on either branch of `rollover_epoch`.
     pub jackpot_reserved: u64,
-    /// Base yield's APR on time-weighted Principal, in basis points, capped
-    /// at `BPS_DENOMINATOR`. An admin parameter, so it can change without a
-    /// program upgrade.
+    /// The ceiling on the depositor share of a venue gain, as an APR on
+    /// `total_principal` in basis points, capped at `BPS_DENOMINATOR`. Gain
+    /// above it goes to the prize share (ADR 0017).
     pub base_rate_bps: u16,
-    /// USDC already in the principal vault, earmarked for Base yield and not
-    /// yet credited to anyone. `fund_yield` raises it; `register` draws it
-    /// down and never credits past what it holds.
-    pub yield_budget: u64,
     /// Tickets credited per USDC spent in `buy_tickets`. An admin parameter,
     /// always greater than zero.
     pub tickets_per_usdc: u16,
@@ -110,30 +108,70 @@ pub struct Pool {
     /// in `bonus_epoch`, capped at `total_principal * bonus_cap_bps /
     /// 10_000`. An admin grant does not count against it.
     pub bonus_granted: u64,
-    /// Set to [`CURRENT_VERSION`] by `create_pool`. Lets a future upgrade
+    /// Set to [`LAYOUT_VERSION`] by `create_pool`. Lets a future upgrade
     /// tell an old account apart from a freshly created one and migrate it
     /// lazily on first touch.
     pub version: u8,
     /// Admin-only and irreversible (spec "Shutdown"). Stops every inflow,
     /// the game and the draw, and lets withdrawals skip the epoch lock.
-    /// Carved from the front of `_reserved` (ops-and-envs ticket 02),
-    /// exercising the ADR 0013 rule once: `false` is the safe zero value.
     pub shutdown: bool,
     /// Stops `create_round` and `buy_position` (game-jackpot-pause ticket
-    /// 01). `create_pool` sets this `true`; the zero value stays the safe
-    /// default for a pool that predates this field. Carved from
-    /// `_reserved` alongside `jackpot_paused`.
+    /// 01). `create_pool` sets this `true`.
     pub game_paused: bool,
-    /// Stops the epoch cycle's next step: `begin_epoch`, `buy_tickets`,
-    /// `grant_tickets` and `close_registration` (game-jackpot-pause ticket
-    /// 01). An epoch already Drawing or Drawn still finishes. `create_pool`
-    /// sets this `true`; the zero value stays the safe default for a pool
-    /// that predates this field. Carved from `_reserved` alongside
-    /// `game_paused`.
+    /// Stops the epoch cycle's next step: `begin_epoch`, `buy_tickets` and
+    /// `grant_tickets` (game-jackpot-pause ticket 01). An epoch already
+    /// Drawing or Drawn still finishes. `create_pool` sets this `true`.
     pub jackpot_paused: bool,
+
+    // Live yield (ADR 0017) and the Weight tree (ADR 0018), added by the
+    // ticket 04 rewrite. Everything below starts at the value `create_pool`
+    // writes; nothing reads the yield state until ticket 05's sync.
+    /// The pool's [`WeightTree`] account, created at `create_pool`.
+    pub weight_tree: Pubkey,
+    /// The pinned klend program, lending market, reserve and the pool's
+    /// cToken account. Ticket 05 makes `create_pool` take them; until then
+    /// they are `Pubkey::default()`.
+    pub klend_program: Pubkey,
+    pub klend_market: Pubkey,
+    pub klend_reserve: Pubkey,
+    pub klend_ctoken: Pubkey,
+    /// Depositor share per unit of Principal, scaled by 1e18. Only rises.
+    pub yield_index: u128,
+    /// The venue position's value at the last sync, and when that was.
+    pub venue_value: u64,
+    pub last_sync_at: i64,
+    /// Depositor yield the index has credited and no Player has settled.
+    pub yield_owed: u64,
+    /// Yield fee owed to the Treasury, paid out by harvest.
+    pub fee_owed: u64,
+    /// Prize share owed to the jackpot vault, paid out by harvest.
+    pub prize_owed: u64,
+    /// Venue loss not yet repaid. Nonzero only while `impaired`.
+    pub deficit: u64,
+    /// The team's share of every gain, at most `MAX_YIELD_FEE_BPS`.
+    pub yield_fee_bps: u16,
+    /// Idle band: free idle USDC as a share of the pool. Recall below the
+    /// floor, deploy above the target.
+    pub idle_floor_bps: u16,
+    pub idle_target_bps: u16,
+    /// Deploy cap: the pool's largest share of the reserve's supply.
+    pub reserve_share_cap_bps: u16,
+    /// Deploy cap: free liquidity the reserve must keep after a deploy, as a
+    /// multiple of the pool's position in basis points (20_000 is twice it).
+    pub reserve_liquidity_floor_bps: u16,
+    /// Smallest deploy or recall, in USDC atomic units.
+    pub min_venue_move: u64,
+    /// A fall in venue value past this share of it is a venue loss.
+    pub loss_tolerance_bps: u16,
+    /// Stops deploy. Either key sets it, only the Admin clears it.
+    pub deploy_paused: bool,
+    /// Set by a venue loss, cleared when `deficit` reaches zero.
+    pub impaired: bool,
+    /// Stops `buy_tickets` (ADR 0019). Admin-only setter in ticket 11.
+    pub buy_tickets_paused: bool,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.
-    pub _reserved: [u8; 125],
+    pub _reserved: [u8; 128],
 }
 
 /// One lottery cycle. Contiguous: the next opens the moment this one ends.
@@ -147,7 +185,7 @@ pub struct Epoch {
     pub status: u8,
     pub registered_weight: u128,
     pub registered_count: u32,
-    /// Jackpot vault balance snapshotted at `close_registration`.
+    /// Jackpot vault balance snapshotted at the draw request.
     pub jackpot_amount: u64,
     pub vrf_seed: [u8; 32],
     pub requested_at: i64,
@@ -158,13 +196,12 @@ pub struct Epoch {
     /// When `draw` landed. 0 until then. `rollover_epoch` measures
     /// `Pool.payout_timeout` from here.
     pub drawn_at: i64,
-    /// When `begin_epoch` moved this epoch to Registering, which is when
-    /// anyone could first register for it. 0 until then.
-    /// `close_registration` measures `Pool.registration_window` from the
-    /// later of this and `ends_at`, so an operator who delays `begin_epoch`
-    /// cannot bundle the whole registration window into one transaction.
+    /// When `begin_epoch` moved this epoch to Registering. 0 until then.
+    /// `rollover_epoch` measures `Pool.vrf_timeout` from the later of this
+    /// and `ends_at` for an epoch that was never sent to the draw.
     pub registration_opened_at: i64,
-    /// Set to [`CURRENT_VERSION`] by `begin_epoch`. See `Pool::version`.
+    /// Set to [`crate::constants::EPOCH_VERSION`] by `begin_epoch`. See
+    /// `Pool::version`.
     pub version: u8,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.
@@ -172,7 +209,7 @@ pub struct Epoch {
 }
 
 /// One 60 second game on the 36-tile hex board.
-#[account]
+#[account(discriminator = b"HVRond02")]
 #[derive(InitSpace)]
 pub struct Round {
     pub round_id: u64,
@@ -182,8 +219,8 @@ pub struct Round {
     /// [`RoundStatus`]
     pub status: u8,
     pub tile_totals: [u64; TILE_COUNT as usize],
-    /// Entries staked in this round plus any carry from a voided round.
-    /// Stays gross: the House cut is never subtracted from it.
+    /// Entries staked in this round. Stays gross: the House cut is never
+    /// subtracted from it.
     pub pot: u64,
     /// Entries taken out of `pot` for the House at settlement. 0 until then,
     /// and on forfeited or voided rounds.
@@ -195,34 +232,29 @@ pub struct Round {
     /// Positions bought on this round still open (not yet settled).
     /// Incremented in `buy_position`, decremented when `settle_position`
     /// closes its Position. `close_round` refuses while this is nonzero.
-    /// No `_reserved` to carve this from: Round has none by design (spec),
-    /// since it is short-lived and reclaimed by `close_round` (ops-and-envs
-    /// ticket 05), so a layout change here only affects in-flight rounds.
     pub open_positions: u32,
+    /// Slot `request_round_randomness` landed in. 0 until then.
+    pub vrf_request_slot: u64,
+    /// Set to [`LAYOUT_VERSION`] by `create_round`.
+    pub version: u8,
+    /// Take new fields from here. See ADR 0013.
+    pub _reserved: [u8; 64],
 }
 
 /// One wallet's account in one pool.
-#[account]
+#[account(discriminator = b"HVPlyr02")]
 #[derive(InitSpace)]
 pub struct Player {
     pub owner: Pubkey,
     /// 1:1 claim on deposited USDC. Never at risk.
     pub principal: u64,
-    /// Lottery weight units. Moved between players by the game.
+    /// Tickets: lottery weight units, moved between players by the game.
     pub entries: u64,
-    /// Σ entries × seconds within `epoch_id`.
-    pub weight_acc: u128,
-    pub last_update: i64,
-    /// The epoch `weight_acc` belongs to.
+    /// The epoch `entries` belongs to. [`crate::touch::touch`] resets
+    /// `entries` to `principal` the first time the Player is touched in a
+    /// later epoch. The Weight tree holds range sums, not per-Player stamps,
+    /// so this lazy reset still lives here (ticket 02's progress note).
     pub epoch_id: u64,
-    /// Final weight for `frozen_epoch`, set by [`crate::touch::touch`].
-    pub frozen_weight: u128,
-    pub frozen_epoch: u64,
-    /// Epoch this player is registered for. `reg_start`/`reg_end` are its
-    /// interval in that epoch's `registered_weight`.
-    pub reg_epoch: u64,
-    pub reg_start: u128,
-    pub reg_end: u128,
     pub is_house: bool,
     pub bump: u8,
     /// Principal already deducted and waiting for `process_withdraw` to move
@@ -235,16 +267,6 @@ pub struct Player {
     /// request matures, so a stalled operator who never calls `begin_epoch`
     /// cannot freeze a depositor's money.
     pub requested_at: i64,
-    /// Σ principal × seconds within `epoch_id`. Mirrors `weight_acc` with
-    /// Principal in place of Entries.
-    pub principal_acc: u128,
-    /// Final principal-seconds for `frozen_epoch`, set by
-    /// [`crate::touch::touch`] alongside `frozen_weight`.
-    pub frozen_principal_acc: u128,
-    /// The epoch Base yield was last credited for. Guards `register` against
-    /// crediting the same epoch twice, independent of `reg_epoch` (which a
-    /// zero-weight registration never sets).
-    pub yield_epoch: u64,
     /// The epoch `bought_amount` is counted against. `buy_tickets` resets
     /// `bought_amount` to 0 when this no longer matches the pool's current
     /// epoch.
@@ -260,17 +282,22 @@ pub struct Player {
     /// far in `bonus_epoch`, capped at `principal`. An admin grant does not
     /// count against it.
     pub bonus_granted: u64,
-    /// Set to [`CURRENT_VERSION`] by `Player::init_if_fresh`. See
-    /// `Pool::version`.
+    /// `Pool.yield_index` at this Player's last settle (ADR 0017).
+    pub yield_index: u128,
+    /// This Player's 1-based Leaf in the Weight tree, assigned at first
+    /// deposit by ticket 08. 0 means no Leaf yet.
+    pub leaf_index: u32,
+    /// Set to [`LAYOUT_VERSION`] by `Player::init_if_fresh` and
+    /// `create_pool`. See `Pool::version`.
     pub version: u8,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013. Smaller
-    /// than `Pool`'s and `Epoch`'s: Player rent is paid by the depositor.
+    /// than `Pool`'s: Player rent is paid by the depositor.
     pub _reserved: [u8; 64],
 }
 
 /// A Player's single immutable placement in one round.
-#[account]
+#[account(discriminator = b"HVPosn02")]
 #[derive(InitSpace)]
 pub struct Position {
     pub owner: Pubkey,
@@ -279,23 +306,52 @@ pub struct Position {
     pub tiles: u64,
     pub stake_per_tile: u64,
     pub bump: u8,
+    /// Set to [`LAYOUT_VERSION`] by `buy_position`.
+    pub version: u8,
+    /// Take new fields from here. See ADR 0013.
+    pub _reserved: [u8; 32],
+}
+
+/// Bytes per Weight tree node: `principal_sum` plus two epoch-parity slots
+/// of `stamp`, `base` and a `u128` weight stored as two `u64` halves, which
+/// keeps the node 8-aligned and 72 bytes on host and SBF alike (ticket 02).
+pub const WEIGHT_TREE_NODE_SIZE: u32 = 72;
+
+/// Header of the pool's Fenwick weight tree (ADR 0018). The nodes follow it
+/// in the same account, `node_count` of them, `node_size` bytes each,
+/// starting 8-aligned right after this header. `create_pool` sizes the
+/// account for zero nodes; ticket 08 grows it by one node per first deposit.
+///
+/// Created by a top-level `system_program::create_account` in the
+/// `create_pool` transaction, owned by this program and zeroed, because an
+/// in-program create is capped at 10 KiB and the tree may pass that.
+#[account(zero_copy)]
+pub struct WeightTree {
+    /// [`crate::constants::WEIGHT_TREE_VERSION`].
+    pub version: u8,
+    pub _padding: [u8; 3],
+    /// [`WEIGHT_TREE_NODE_SIZE`].
+    pub node_size: u32,
+    pub node_count: u64,
+    /// The `Pool` this tree belongs to.
+    pub pool: Pubkey,
 }
 
 impl Player {
     /// Fills a freshly `init_if_needed`ed account. A no-op on an existing
     /// one, so callers can run it unconditionally before `touch`.
     ///
-    /// Without this a new Player has `last_update = 0`, and `touch` would
-    /// accrue weight from the unix epoch.
-    pub fn init_if_fresh(&mut self, owner: Pubkey, pool: &Pool, now: i64, bump: u8) {
+    /// A new Player starts at the pool's current Yield index, so it earns
+    /// nothing that accrued before it arrived (ADR 0017).
+    pub fn init_if_fresh(&mut self, owner: Pubkey, pool: &Pool, bump: u8) {
         if self.owner != Pubkey::default() {
             return;
         }
         self.owner = owner;
-        self.last_update = now;
         self.epoch_id = pool.current_epoch_id;
+        self.yield_index = pool.yield_index;
         self.bump = bump;
-        self.version = CURRENT_VERSION;
+        self.version = LAYOUT_VERSION;
     }
 }
 
@@ -319,15 +375,113 @@ impl Round {
 mod tests {
     use super::*;
 
+    use anchor_lang::error::ErrorCode;
+    use core::mem::{offset_of, size_of};
+
     // Pins every account's on-chain size to a literal so a field added,
     // removed, reordered or resized has to update this test on purpose
     // (ticket ops-and-envs/01) instead of silently churning the layout.
     #[test]
     fn account_sizes_are_pinned_to_their_literal_byte_counts() {
-        assert_eq!(Pool::INIT_SPACE, 653);
+        assert_eq!(Pool::INIT_SPACE, 879);
         assert_eq!(Epoch::INIT_SPACE, 223);
-        assert_eq!(Player::INIT_SPACE, 307);
-        assert_eq!(Round::INIT_SPACE, 383);
-        assert_eq!(Position::INIT_SPACE, 81);
+        assert_eq!(Player::INIT_SPACE, 199);
+        assert_eq!(Round::INIT_SPACE, 456);
+        assert_eq!(Position::INIT_SPACE, 114);
+        assert_eq!(size_of::<WeightTree>(), 48);
+    }
+
+    /// On-chain offset (discriminator included) of whichever field `set`
+    /// makes nonzero, found by serialising an otherwise all-zero account.
+    fn offset<T: AnchorSerialize + AnchorDeserialize>(space: usize, set: impl FnOnce(&mut T)) -> usize {
+        let mut account = T::deserialize(&mut &vec![0u8; space][..]).expect("zeroed account");
+        set(&mut account);
+        let mut bytes = Vec::new();
+        account.serialize(&mut bytes).expect("serialise");
+        8 + bytes.iter().position(|b| *b != 0).expect("field set")
+    }
+
+    #[test]
+    fn rewritten_fields_sit_at_pinned_offsets() {
+        let pool =|set: fn(&mut Pool)| offset(Pool::INIT_SPACE, set);
+        assert_eq!(pool(|p| p.total_principal = 1), 443);
+        assert_eq!(pool(|p| p.version = 1), 508);
+        assert_eq!(pool(|p| p.jackpot_paused = true), 511);
+        assert_eq!(pool(|p| p.weight_tree = Pubkey::new_from_array([1; 32])), 512);
+        assert_eq!(pool(|p| p.klend_program = Pubkey::new_from_array([1; 32])), 544);
+        assert_eq!(pool(|p| p.klend_market = Pubkey::new_from_array([1; 32])), 576);
+        assert_eq!(pool(|p| p.klend_reserve = Pubkey::new_from_array([1; 32])), 608);
+        assert_eq!(pool(|p| p.klend_ctoken = Pubkey::new_from_array([1; 32])), 640);
+        assert_eq!(pool(|p| p.yield_index = 1), 672);
+        assert_eq!(pool(|p| p.venue_value = 1), 688);
+        assert_eq!(pool(|p| p.last_sync_at = 1), 696);
+        assert_eq!(pool(|p| p.yield_owed = 1), 704);
+        assert_eq!(pool(|p| p.fee_owed = 1), 712);
+        assert_eq!(pool(|p| p.prize_owed = 1), 720);
+        assert_eq!(pool(|p| p.deficit = 1), 728);
+        assert_eq!(pool(|p| p.yield_fee_bps = 1), 736);
+        assert_eq!(pool(|p| p.idle_floor_bps = 1), 738);
+        assert_eq!(pool(|p| p.idle_target_bps = 1), 740);
+        assert_eq!(pool(|p| p.reserve_share_cap_bps = 1), 742);
+        assert_eq!(pool(|p| p.reserve_liquidity_floor_bps = 1), 744);
+        assert_eq!(pool(|p| p.min_venue_move = 1), 746);
+        assert_eq!(pool(|p| p.loss_tolerance_bps = 1), 754);
+        assert_eq!(pool(|p| p.deploy_paused = true), 756);
+        assert_eq!(pool(|p| p.impaired = true), 757);
+        assert_eq!(pool(|p| p.buy_tickets_paused = true), 758);
+        assert_eq!(pool(|p| p._reserved[0] = 1), 759);
+
+        let player = |set: fn(&mut Player)| offset(Player::INIT_SPACE, set);
+        // `owner` at 8 is what the indexer's per-owner memcmp filters on.
+        assert_eq!(player(|p| p.owner = Pubkey::new_from_array([1; 32])), 8);
+        assert_eq!(player(|p| p.epoch_id = 1), 56);
+        assert_eq!(player(|p| p.bonus_granted = 1), 114);
+        assert_eq!(player(|p| p.yield_index = 1), 122);
+        assert_eq!(player(|p| p.leaf_index = 1), 138);
+        assert_eq!(player(|p| p.version = 1), 142);
+        assert_eq!(player(|p| p._reserved[0] = 1), 143);
+
+        let round = |set: fn(&mut Round)| offset(Round::INIT_SPACE, set);
+        assert_eq!(round(|r| r.open_positions = 1), 387);
+        assert_eq!(round(|r| r.vrf_request_slot = 1), 391);
+        assert_eq!(round(|r| r.version = 1), 399);
+        assert_eq!(round(|r| r._reserved[0] = 1), 400);
+
+        let position = |set: fn(&mut Position)| offset(Position::INIT_SPACE, set);
+        assert_eq!(position(|p| p.version = 1), 89);
+        assert_eq!(position(|p| p._reserved[0] = 1), 90);
+
+        // Zero-copy, so `repr(C)` offsets; the nodes start right after.
+        assert_eq!(8 + offset_of!(WeightTree, version), 8);
+        assert_eq!(8 + offset_of!(WeightTree, node_size), 12);
+        assert_eq!(8 + offset_of!(WeightTree, node_count), 16);
+        assert_eq!(8 + offset_of!(WeightTree, pool), 24);
+        assert_eq!(8 + size_of::<WeightTree>(), 56);
+    }
+
+    /// A version-1 account: Anchor's default discriminator, then zeroes for
+    /// the old size. Every rewritten type must refuse it by name.
+    fn v1_account(name: &str, old_space: usize) -> Vec<u8> {
+        let disc = solana_sha256_hasher::hash(format!("account:{name}").as_bytes()).to_bytes();
+        [&disc[..8], &vec![0u8; old_space][..]].concat()
+    }
+
+    fn assert_refused<T: AccountDeserialize>(data: Vec<u8>) {
+        match T::try_deserialize(&mut &data[..]) {
+            Err(Error::AnchorError(e)) => assert_eq!(
+                e.error_code_number,
+                ErrorCode::AccountDiscriminatorMismatch as u32
+            ),
+            Err(other) => panic!("wrong error: {other:?}"),
+            Ok(_) => panic!("a version-1 account deserialised"),
+        }
+    }
+
+    #[test]
+    fn a_version_1_account_fails_with_discriminator_mismatch() {
+        assert_refused::<Pool>(v1_account("Pool", 653));
+        assert_refused::<Player>(v1_account("Player", 307));
+        assert_refused::<Round>(v1_account("Round", 383));
+        assert_refused::<Position>(v1_account("Position", 81));
     }
 }

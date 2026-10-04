@@ -12,7 +12,10 @@
 
 use anchor_lang::prelude::*;
 
-use crate::constants::{round_status, BPS_DENOMINATOR, SEED_EPOCH, SEED_PLAYER, SEED_POOL, SEED_POSITION, SEED_ROUND, TILE_COUNT};
+use crate::constants::{
+    round_status, BPS_DENOMINATOR, LAYOUT_VERSION, SEED_EPOCH, SEED_PLAYER, SEED_POOL,
+    SEED_POSITION, SEED_ROUND, TILE_COUNT,
+};
 use crate::errors::HexVaultError;
 use crate::events::{
     PositionBought, PositionSettled, RoundClosed, RoundOpened, RoundSettled, RoundVoided,
@@ -63,8 +66,6 @@ pub fn create_round(ctx: Context<CreateRound>, starts_at: i64, ends_at: i64) -> 
         .next_round_id
         .checked_add(1)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let pot = pool.carry_pot;
-    pool.carry_pot = 0;
     pool.open_round_id = round_id;
     let epoch_id = pool.current_epoch_id;
 
@@ -75,7 +76,7 @@ pub fn create_round(ctx: Context<CreateRound>, starts_at: i64, ends_at: i64) -> 
     round.ends_at = ends_at;
     round.status = round_status::OPEN;
     round.tile_totals = [0; TILE_COUNT as usize];
-    round.pot = pot;
+    round.pot = 0;
     round.house_cut = 0;
     // Unknowable until `request_round_randomness` mixes in the Operator's
     // nonce (beta-launch-fixes ticket 02): a seed precomputed here, from
@@ -86,13 +87,14 @@ pub fn create_round(ctx: Context<CreateRound>, starts_at: i64, ends_at: i64) -> 
     round.winning_tile = 0;
     round.bump = ctx.bumps.round;
     round.open_positions = 0;
+    round.vrf_request_slot = 0;
+    round.version = LAYOUT_VERSION;
 
     emit!(RoundOpened {
         round_id,
         epoch_id,
         starts_at,
         ends_at,
-        carry_in: pot,
     });
     Ok(())
 }
@@ -101,7 +103,7 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
     let now = utils::now()?;
     let pool = &ctx.accounts.pool;
     let player = &mut ctx.accounts.player;
-    touch(player, pool, now)?;
+    touch(player, pool);
 
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
     // Pause stops all Ticket movement (production-hardening ticket 02); an
@@ -129,22 +131,9 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     require!(player.entries >= total, HexVaultError::InsufficientEntries);
 
-    // Pre-credit the Weight this stake would have earned for the rest of the
-    // round before it leaves Entries, so buying a position is Weight-neutral
-    // for the lottery draw (spec §2.3).
-    let remaining = round
-        .ends_at
-        .checked_sub(now)
-        .and_then(|s| u64::try_from(s).ok())
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let credited = u128::from(total)
-        .checked_mul(u128::from(remaining))
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    player.weight_acc = player
-        .weight_acc
-        .checked_add(credited)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-
+    // The round's Weight pre-credit (`total × (round_end − now)`) moved off
+    // the Player with the layout rewrite. Ticket 08 feeds it to the Weight
+    // tree as one net delta with the Ticket debit below.
     player.entries = player
         .entries
         .checked_sub(total)
@@ -173,6 +162,7 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
     position.tiles = tiles;
     position.stake_per_tile = stake_per_tile;
     position.bump = ctx.bumps.position;
+    position.version = LAYOUT_VERSION;
 
     emit!(PositionBought {
         round_id,
@@ -222,11 +212,11 @@ pub fn request_round_randomness(ctx: Context<RequestRoundRandomness>, nonce: [u8
     round.vrf_seed = seed;
     round.status = round_status::REQUESTED;
     round.requested_at = now;
+    round.vrf_request_slot = Clock::get()?.slot;
     Ok(())
 }
 
 pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
-    let now = utils::now()?;
     let pool = &mut ctx.accounts.pool;
     let round = &mut ctx.accounts.round;
 
@@ -275,7 +265,7 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
 
     if epoch_is_current && (forfeited || house_credit > 0) {
         let house = &mut ctx.accounts.house;
-        touch(house, pool, now)?;
+        touch(house, pool);
         house.entries = house
             .entries
             .checked_add(house_credit)
@@ -304,11 +294,10 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
 }
 
 pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
-    let now = utils::now()?;
     let pool = &ctx.accounts.pool;
     let round = &mut ctx.accounts.round;
     let player = &mut ctx.accounts.player;
-    touch(player, pool, now)?;
+    touch(player, pool);
 
     require!(
         matches!(
@@ -406,21 +395,15 @@ pub fn void_round(ctx: Context<VoidRound>) -> Result<()> {
         require!(now > timeout_at, HexVaultError::VrfTimeoutNotElapsed);
     }
 
-    // Same evaporation rule as `settle_round`: once the Round's Epoch has
-    // rolled over, the Entries that funded this pot are already back with
-    // their owners, so nothing carries forward (audit-fixes/01).
-    if round.epoch_id == pool.current_epoch_id {
-        pool.carry_pot = pool
-            .carry_pot
-            .checked_add(round.pot)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
-    }
+    // `carry_pot` is gone (ADR 0019). Until ticket 11 refunds each stake at
+    // `settle_position`, a voided pot is returned to nobody this epoch; the
+    // epoch boundary still resets everyone's Tickets to Principal.
     round.status = round_status::VOIDED;
     pool.open_round_id = 0;
 
-    let round_id = round.round_id;
-    let carry_pot = pool.carry_pot;
-    emit!(RoundVoided { round_id, carry_pot });
+    emit!(RoundVoided {
+        round_id: round.round_id,
+    });
     Ok(())
 }
 
@@ -465,7 +448,9 @@ pub struct CreateRound<'info> {
         bump = pool.bump,
         has_one = operator,
     )]
-    pub pool: Account<'info, Pool>,
+    // Boxed: the layout rewrite's larger Pool pushed `try_accounts` over the
+    // BPF stack frame.
+    pub pool: Box<Account<'info, Pool>>,
 
     /// CHECK: the pool's current epoch. Only read (and its address checked)
     /// when one is open (`pool.current_epoch_id != 0`); any account may be
@@ -480,7 +465,7 @@ pub struct CreateRound<'info> {
         bump,
         space = 8 + Round::INIT_SPACE,
     )]
-    pub round: Account<'info, Round>,
+    pub round: Box<Account<'info, Round>>,
 
     pub system_program: Program<'info, System>,
 }

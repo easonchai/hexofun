@@ -150,4 +150,8 @@ pub enum HexVaultError {
     GamePaused,
     #[msg("the jackpot is paused")]
     JackpotPaused,
+
+    // Layout rewrite (yield-claimer ticket 04). Appended too.
+    #[msg("payout is disabled until the Weight tree draw lands (yield-claimer ticket 08)")]
+    DrawPendingWeightTree,
 }

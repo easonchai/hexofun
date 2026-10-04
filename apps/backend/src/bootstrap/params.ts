@@ -90,7 +90,8 @@ export const DEFAULT_POOL_PARAMS: PoolParams = {
   epochAnchor: nextSundayAnchor(new Date()),
   roundSeconds: 90,
   closeBuffer: 5,
-  vrfTimeout: 120,
+  // The program's floor since ADR 0019 (was 120, under the new floor).
+  vrfTimeout: 180,
   minDeposit: 1_000_000n, // 1 hexUSDC at 6 decimals
   houseCutBps: 600, // 6%, the rate PRD-V2 §5.4 asks for
   minJackpot: 1_000_000n, // 1 hexUSDC at 6 decimals

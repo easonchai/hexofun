@@ -1,150 +1,38 @@
 //! Epoch lifecycle (spec §2.3 "Epochs").
 //!
-//! `begin_epoch` and `close_registration` are operator-only via
-//! `has_one = operator` on the Pool account. `register`, `fund_jackpot` and
-//! `payout` are permissionless.
+//! `begin_epoch` is operator-only via `has_one = operator` on the Pool
+//! account. `fund_jackpot` and `payout` are permissionless.
 //!
 //! `draw` and `rollover_epoch` are permissionless too (production-hardening
 //! ticket 01): the first account, `caller`, is any signer, so an operator
 //! that stops cranking cannot withhold a fulfilled result or leave a
 //! timed-out request stuck.
+//!
+//! `register` and `close_registration` were removed by the layout rewrite
+//! (yield-claimer ticket 04, ADR 0018). Until ticket 08 adds the Weight
+//! tree's `request_draw`, an ended epoch stays Registering until
+//! `rollover_epoch` takes it, and `payout` refuses every winner.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 use crate::constants::{
-    epoch_status, BPS_DENOMINATOR, SECONDS_PER_YEAR, SEED_EPOCH, SEED_JACKPOT, SEED_PLAYER,
-    SEED_POOL, SEED_PRINCIPAL,
+    epoch_status, EPOCH_VERSION, SEED_EPOCH, SEED_JACKPOT, SEED_PLAYER, SEED_POOL,
+    SEED_PRINCIPAL,
 };
 use crate::errors::HexVaultError;
-use crate::events::{
-    EpochBegan, EpochDrawn, EpochRolledOver, JackpotFunded, JackpotPaid, Registered, YieldCredited,
-    YieldFunded,
-};
+use crate::events::{EpochBegan, EpochDrawn, EpochRolledOver, JackpotFunded, JackpotPaid};
 use crate::state::{Epoch, Player, Pool};
 use crate::touch::touch;
 use crate::utils;
 use crate::vrf;
 
-/// Seconds between two instants, clamped at zero. Mirrors `touch::elapsed`;
-/// duplicated here because that one is private to its module and registering
-/// never touches a player (spec §2.3), so it has no reason to import it.
-fn elapsed(from: i64, to: i64) -> u128 {
-    u128::from(u64::try_from(to.saturating_sub(from)).unwrap_or(0))
-}
-
-fn weight_of(entries: u64, seconds: u128) -> Result<u128> {
-    u128::from(entries)
-        .checked_mul(seconds)
-        .ok_or_else(|| HexVaultError::ArithmeticOverflow.into())
-}
-
-/// `principal_seconds × base_rate_bps / (10_000 × seconds_per_year)`, the
-/// Base yield an ended epoch's principal-seconds earns before the budget
-/// clamp. Floors like any integer division, so a span too short to earn a
-/// whole atomic unit earns zero rather than rounding up.
-fn yield_for(principal_seconds: u128, base_rate_bps: u16) -> Result<u64> {
-    let numerator = principal_seconds
-        .checked_mul(u128::from(base_rate_bps))
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let denominator = u128::from(BPS_DENOMINATOR)
-        .checked_mul(SECONDS_PER_YEAR)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let whole = numerator
-        .checked_div(denominator)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    u64::try_from(whole).map_err(|_| HexVaultError::ArithmeticOverflow.into())
-}
-
-/// Weight and principal-seconds an ended epoch owes this player, the three
-/// cases from spec §2.3. Read-only: registering never advances the player (a
-/// later deposit/withdraw/touch/credit still owns that).
-fn weight_and_principal_seconds(epoch: &Epoch, player: &Player) -> Result<(u128, u128)> {
-    if player.epoch_id == epoch.epoch_id {
-        // Not touched since the epoch ended: finish both accumulators with
-        // the same math `touch` would use at the boundary, without mutating
-        // the player (this player has not been touched since the epoch
-        // ended).
-        let tail = elapsed(player.last_update, epoch.ends_at);
-        let w = player
-            .weight_acc
-            .checked_add(weight_of(player.entries, tail)?)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
-        let ps = player
-            .principal_acc
-            .checked_add(weight_of(player.principal, tail)?)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
-        Ok((w, ps))
-    } else if player.epoch_id > epoch.epoch_id {
-        // Touched again in a later epoch before registering for this one:
-        // only the immediately-previous epoch's weight survives a touch, so
-        // this only works if that was this exact epoch.
-        require!(
-            player.frozen_epoch == epoch.epoch_id,
-            HexVaultError::FrozenEpochMismatch
-        );
-        Ok((player.frozen_weight, player.frozen_principal_acc))
-    } else {
-        // Idle through all of this epoch (and whatever came before it):
-        // Entries equalled Principal for its entire length, so weight and
-        // principal-seconds are the same figure.
-        let idle = weight_of(player.principal, elapsed(epoch.starts_at, epoch.ends_at))?;
-        Ok((idle, idle))
-    }
-}
-
-/// Credits an ended epoch's Base yield into `player.principal`, `entries`
-/// and `pool.total_principal`, clamped at `pool.yield_budget`. Returns
-/// `(credited, shortfall)`.
-///
-/// When `credited > 0`, touches the player first, on the pre-credit balance,
-/// so the credit only earns further weight and yield from the instant it
-/// lands (`now`). Without this, a later idle-epoch calculation --
-/// `register`'s own Branch A tail or Branch C idle span, or `touch`'s
-/// boundary freeze -- would read the post-credit `principal` for a span that
-/// started before the credit actually landed, over-crediting weight and
-/// yield alike. This is the same hazard `payout`'s compounding has to close
-/// by touching the winner before adding the prize.
-fn credit_yield(pool: &mut Pool, player: &mut Player, ps: u128, now: i64) -> Result<(u64, u64)> {
-    let desired = yield_for(ps, pool.base_rate_bps)?;
-    let credited = desired.min(pool.yield_budget);
-    let shortfall = desired
-        .checked_sub(credited)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-
-    // The House holds no Principal, so its principal-seconds (and thus its
-    // credit) is always zero; asserted rather than special-cased.
-    debug_assert!(
-        !player.is_house || credited == 0,
-        "the House cannot earn yield"
-    );
-
-    // Only touch when a credit is actually about to change `principal`: an
-    // empty budget (or the House's always-zero `ps`) mutates nothing, so
-    // there is nothing to backdate and `register` keeps its promise that a
-    // call crediting no yield never advances the player either.
-    if credited > 0 {
-        touch(player, pool, now)?;
-    }
-
-    player.principal = player
-        .principal
-        .checked_add(credited)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    player.entries = player
-        .entries
-        .checked_add(credited)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    pool.total_principal = pool
-        .total_principal
-        .checked_add(credited)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    pool.yield_budget = pool
-        .yield_budget
-        .checked_sub(credited)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-
-    Ok((credited, shortfall))
+/// Checks that `winner` holds the drawn target in `epoch`. Registration's
+/// `reg_start <= target < reg_end` went with the layout rewrite; ticket 08
+/// replaces this with the Weight tree's leaf-range check. Until then no
+/// winner can be confirmed, so every payout is refused by name.
+fn check_winner(_winner: &Player, _epoch: &Epoch) -> Result<()> {
+    err!(HexVaultError::DrawPendingWeightTree)
 }
 
 /// Most recent point of the `anchor + k * period` grid at or before `t`.
@@ -200,8 +88,8 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         require!(now >= previous.ends_at, HexVaultError::EpochNotEnded);
         let previous_ends_at = previous.ends_at;
         previous.status = epoch_status::REGISTERING;
-        // Registration only opens now, however late this call is, and
-        // `close_registration` measures its window from here.
+        // `rollover_epoch` measures its deadline from here, however late
+        // this call is. Ticket 08 replaces this hand-off with `request_draw`.
         previous.registration_opened_at = now;
 
         let mut buf = Vec::with_capacity(data.len());
@@ -249,82 +137,12 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
     new_epoch.bump = ctx.bumps.new_epoch;
     new_epoch.drawn_at = 0;
     new_epoch.registration_opened_at = 0;
-    new_epoch.version = crate::constants::CURRENT_VERSION;
+    new_epoch.version = EPOCH_VERSION;
 
     emit!(EpochBegan {
         epoch_id: new_epoch.epoch_id,
         starts_at,
         ends_at,
-    });
-    Ok(())
-}
-
-pub fn register(ctx: Context<Register>) -> Result<()> {
-    let pool = &mut ctx.accounts.pool;
-    let epoch = &mut ctx.accounts.epoch;
-    let player = &mut ctx.accounts.player;
-
-    require!(
-        epoch.status == epoch_status::REGISTERING,
-        HexVaultError::EpochNotRegistering
-    );
-    require!(
-        pool.current_epoch_id > 0 && epoch.epoch_id == pool.current_epoch_id - 1,
-        HexVaultError::NotPreviousEpoch
-    );
-    require!(
-        player.reg_epoch != epoch.epoch_id,
-        HexVaultError::AlreadyRegistered
-    );
-
-    // Weight and principal-seconds cases from spec §2.3. This deliberately
-    // never calls `touch`: registering only reads what the player's state
-    // implies, it does not advance it (a later deposit/withdraw/touch/credit
-    // still owns that).
-    let (w, ps) = weight_and_principal_seconds(epoch, player)?;
-
-    // Base yield, credited once per Player per ended epoch regardless of
-    // `w`: a Player who lost every Entry in a game still owns Principal and
-    // still earns yield on it. Guarded separately from `reg_epoch`, which a
-    // zero-weight registration below never sets, or a second permissionless
-    // `register` call on such a Player would credit it twice.
-    if player.yield_epoch != epoch.epoch_id {
-        let now = utils::now()?;
-        let (credited, shortfall) = credit_yield(pool, player, ps, now)?;
-        player.yield_epoch = epoch.epoch_id;
-
-        emit!(YieldCredited {
-            epoch_id: epoch.epoch_id,
-            owner: player.owner,
-            amount: credited,
-            shortfall,
-        });
-    }
-
-    if w == 0 {
-        return Ok(());
-    }
-
-    let reg_start = epoch.registered_weight;
-    let reg_end = reg_start
-        .checked_add(w)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-
-    player.reg_epoch = epoch.epoch_id;
-    player.reg_start = reg_start;
-    player.reg_end = reg_end;
-    epoch.registered_weight = reg_end;
-    epoch.registered_count = epoch
-        .registered_count
-        .checked_add(1)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-
-    emit!(Registered {
-        epoch_id: epoch.epoch_id,
-        owner: player.owner,
-        weight: w,
-        reg_start,
-        reg_end,
     });
     Ok(())
 }
@@ -348,116 +166,6 @@ pub fn fund_jackpot(ctx: Context<FundJackpot>, amount: u64) -> Result<()> {
         source: ctx.accounts.source.key(),
         amount,
     });
-    Ok(())
-}
-
-/// Raises `yield_budget` by moving real USDC into the principal vault.
-/// Permissionless like `fund_jackpot`: anyone can top up what Base yield
-/// draws down.
-pub fn fund_yield(ctx: Context<FundYield>, amount: u64) -> Result<()> {
-    require!(!ctx.accounts.pool.shutdown, HexVaultError::PoolShutDown);
-
-    token_interface::transfer_checked(
-        CpiContext::new(
-            ctx.accounts.token_program.key(),
-            TransferChecked {
-                from: ctx.accounts.source.to_account_info(),
-                mint: ctx.accounts.accepted_mint.to_account_info(),
-                to: ctx.accounts.principal_vault.to_account_info(),
-                authority: ctx.accounts.source_authority.to_account_info(),
-            },
-        ),
-        amount,
-        ctx.accounts.accepted_mint.decimals,
-    )?;
-
-    let pool = &mut ctx.accounts.pool;
-    pool.yield_budget = pool
-        .yield_budget
-        .checked_add(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-
-    emit!(YieldFunded {
-        amount,
-        budget: pool.yield_budget,
-    });
-    Ok(())
-}
-
-/// `nonce` is a 32-byte value the Operator generates fresh for this request
-/// and mixes into the seed (beta-launch-fixes ticket 02), so the resulting
-/// randomness address is unknowable before this instruction runs and cannot
-/// be griefed by pre-creating ORAO's request account for it.
-pub fn close_registration(ctx: Context<CloseRegistration>, nonce: [u8; 32]) -> Result<()> {
-    let now = utils::now()?;
-    let pool = &mut ctx.accounts.pool;
-    let epoch = &mut ctx.accounts.epoch;
-
-    require!(!pool.shutdown, HexVaultError::PoolShutDown);
-    require!(!pool.jackpot_paused, HexVaultError::JackpotPaused);
-    require!(
-        epoch.status == epoch_status::REGISTERING,
-        HexVaultError::EpochNotRegistering
-    );
-    // Registration is permissionless and only opens when `begin_epoch` flips
-    // this epoch to Registering, which the operator controls and can delay
-    // past `ends_at`. Measuring from the later of the two means the window
-    // is always a real window, not one the operator can have already spent.
-    let opened = epoch.registration_opened_at.max(epoch.ends_at);
-    let closes_at = opened
-        .checked_add(pool.registration_window)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    require!(now >= closes_at, HexVaultError::RegistrationWindowOpen);
-
-    // Whatever an epoch that has drawn but not paid still owes is not this
-    // epoch's to snapshot, or two epochs would promise the same USDC and the
-    // older one could never be paid.
-    epoch.jackpot_amount = ctx
-        .accounts
-        .jackpot_vault
-        .amount
-        .saturating_sub(pool.jackpot_reserved);
-
-    // Nothing to draw for, or too little to be worth drawing for: roll the
-    // prize into the next epoch rather than spend a randomness request on it.
-    if epoch.registered_weight == 0 || epoch.jackpot_amount < pool.min_jackpot {
-        epoch.status = epoch_status::ROLLED_OVER;
-        emit!(EpochRolledOver {
-            epoch_id: epoch.epoch_id,
-            jackpot_amount: epoch.jackpot_amount,
-        });
-        return Ok(());
-    }
-
-    let seed = utils::vrf_seed(b"epoch", &pool.key(), epoch.epoch_id, &nonce);
-    // Checked here the same way `request_round_randomness` checks its own
-    // request (production-hardening ticket 02): unlike before, the seed is
-    // now known before the CPI (it only depends on this instruction's own
-    // nonce argument), so there is something to check it against.
-    require_keys_eq!(
-        ctx.accounts.randomness.key(),
-        vrf::randomness_address(&seed),
-        HexVaultError::InvalidRandomnessAccount
-    );
-    epoch.vrf_seed = seed;
-
-    vrf::request_randomness(
-        &ctx.accounts.operator.to_account_info(),
-        &ctx.accounts.vrf_network_state.to_account_info(),
-        &ctx.accounts.vrf_treasury.to_account_info(),
-        &ctx.accounts.randomness.to_account_info(),
-        &ctx.accounts.vrf_program.to_account_info(),
-        &ctx.accounts.system_program.to_account_info(),
-        seed,
-    )?;
-
-    epoch.status = epoch_status::DRAWING;
-    epoch.requested_at = now;
-    // The prize is now promised to this epoch until it pays or rolls over.
-    pool.jackpot_reserved = pool
-        .jackpot_reserved
-        .checked_add(epoch.jackpot_amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
     Ok(())
 }
 
@@ -497,14 +205,7 @@ pub fn payout(ctx: Context<Payout>) -> Result<()> {
         epoch.status == epoch_status::DRAWN,
         HexVaultError::EpochNotDrawn
     );
-    require!(
-        winner.reg_epoch == epoch.epoch_id,
-        HexVaultError::NotRegistered
-    );
-    require!(
-        winner.reg_start <= epoch.target && epoch.target < winner.reg_end,
-        HexVaultError::NotTheWinner
-    );
+    check_winner(winner, epoch)?;
 
     let amount = epoch.jackpot_amount;
     let is_house = winner.is_house;
@@ -550,11 +251,9 @@ pub fn payout(ctx: Context<Payout>) -> Result<()> {
         )?;
     } else {
         // Compounds into the winner's Principal instead of paying their
-        // token account: touch first, on the pre-prize balance, so the
-        // prize only earns weight and yield from the instant it lands here
-        // (the same hazard `register`'s yield credit closes against).
-        let now = utils::now()?;
-        touch(winner, pool, now)?;
+        // token account: touch first, so the prize lands on this epoch's
+        // Tickets. Ticket 06 adds sync and settle here.
+        touch(winner, pool);
 
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
@@ -610,23 +309,19 @@ pub fn rollover_epoch(ctx: Context<RolloverEpoch>) -> Result<()> {
     let epoch = &mut ctx.accounts.epoch;
 
     match epoch.status {
-        // Still Registering past its own close deadline plus the VRF
-        // timeout: `close_registration` never landed at all, so there is no
-        // request to check a fulfilled/unfulfilled state against
+        // Ended and never sent to the draw, past the VRF timeout: there is
+        // no request to check a fulfilled/unfulfilled state against
         // (beta-launch-fixes ticket 02). Behaves as the existing no-draw
         // Rollover below: nothing was ever reserved for this epoch
         // (`jackpot_amount` is still 0), so the Prize stays in the hexpot.
+        // Until ticket 08 every ended epoch leaves this way.
         epoch_status::REGISTERING => {
-            // The jackpot pause holds `close_registration` back on purpose,
-            // and the spec promises registration stays open meanwhile; a
-            // stranger must not be able to end the draw in its place
-            // (production-hardening 14, finding 3).
+            // The jackpot pause holds the draw back on purpose; a stranger
+            // must not be able to end it in its place (production-hardening
+            // 14, finding 3).
             require!(!pool.jackpot_paused, HexVaultError::JackpotPaused);
             let opened = epoch.registration_opened_at.max(epoch.ends_at);
-            let closes_at = opened
-                .checked_add(pool.registration_window)
-                .ok_or(HexVaultError::ArithmeticOverflow)?;
-            let deadline = closes_at
+            let deadline = opened
                 .checked_add(pool.vrf_timeout)
                 .ok_or(HexVaultError::ArithmeticOverflow)?;
             require!(now > deadline, HexVaultError::VrfTimeoutNotElapsed);
@@ -689,7 +384,9 @@ pub struct BeginEpoch<'info> {
         bump = pool.bump,
         has_one = operator,
     )]
-    pub pool: Account<'info, Pool>,
+    // Boxed: the layout rewrite's larger Pool pushed `try_accounts` over the
+    // BPF stack frame.
+    pub pool: Box<Account<'info, Pool>>,
 
     /// CHECK: the epoch that just ended, moved to Registering. Does not
     /// exist yet on the very first call (`pool.current_epoch_id == 0`); the
@@ -725,26 +422,6 @@ pub struct BeginEpoch<'info> {
 }
 
 #[derive(Accounts)]
-pub struct Register<'info> {
-    #[account(mut, seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
-    pub pool: Account<'info, Pool>,
-
-    #[account(
-        mut,
-        seeds = [SEED_EPOCH, pool.key().as_ref(), &epoch.epoch_id.to_le_bytes()],
-        bump = epoch.bump,
-    )]
-    pub epoch: Account<'info, Epoch>,
-
-    #[account(
-        mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), player.owner.as_ref()],
-        bump = player.bump,
-    )]
-    pub player: Account<'info, Player>,
-}
-
-#[derive(Accounts)]
 pub struct FundJackpot<'info> {
     #[account(mut)]
     pub source_authority: Signer<'info>,
@@ -766,83 +443,6 @@ pub struct FundJackpot<'info> {
     pub jackpot_vault: InterfaceAccount<'info, TokenAccount>,
 
     pub token_program: Interface<'info, TokenInterface>,
-}
-
-#[derive(Accounts)]
-pub struct FundYield<'info> {
-    #[account(mut)]
-    pub source_authority: Signer<'info>,
-
-    #[account(mut, seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
-    pub pool: Account<'info, Pool>,
-
-    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
-    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
-
-    #[account(mut, token::mint = pool.accepted_mint, token::authority = source_authority)]
-    pub source: InterfaceAccount<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        seeds = [SEED_PRINCIPAL, pool.key().as_ref()],
-        bump = pool.principal_vault_bump,
-    )]
-    pub principal_vault: InterfaceAccount<'info, TokenAccount>,
-
-    pub token_program: Interface<'info, TokenInterface>,
-}
-
-#[derive(Accounts)]
-pub struct CloseRegistration<'info> {
-    /// Pays ORAO's request fee and the request account's rent, so it must be
-    /// writable.
-    #[account(mut)]
-    pub operator: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
-        bump = pool.bump,
-        has_one = operator,
-    )]
-    pub pool: Account<'info, Pool>,
-
-    #[account(
-        mut,
-        seeds = [SEED_EPOCH, pool.key().as_ref(), &epoch.epoch_id.to_le_bytes()],
-        bump = epoch.bump,
-    )]
-    pub epoch: Account<'info, Epoch>,
-
-    #[account(
-        seeds = [SEED_JACKPOT, pool.key().as_ref()],
-        bump = pool.jackpot_vault_bump,
-    )]
-    pub jackpot_vault: InterfaceAccount<'info, TokenAccount>,
-
-    /// CHECK: ORAO randomness account for this epoch's draw, verified
-    /// against `vrf::randomness_address(&seed)` in the handler once the seed
-    /// is computed from the instruction's own `nonce` argument
-    /// (production-hardening ticket 02).
-    #[account(mut)]
-    pub randomness: UncheckedAccount<'info>,
-
-    /// CHECK: ORAO VRF network state, pinned on the pool at `create_pool`.
-    /// `mut` because `request_v2` increments its `num_received`: the CPI marks
-    /// it writable, and an outer context that is not cannot grant that.
-    #[account(mut, address = pool.vrf_network_state @ HexVaultError::InvalidRandomnessAccount)]
-    pub vrf_network_state: UncheckedAccount<'info>,
-
-    /// CHECK: ORAO's fee treasury (`network_state.config.treasury`). ORAO
-    /// rejects any other account, so it is only forwarded here.
-    #[account(mut)]
-    pub vrf_treasury: UncheckedAccount<'info>,
-
-    /// CHECK: ORAO VRF program.
-    #[account(address = vrf::ORAO_VRF_PROGRAM_ID)]
-    pub vrf_program: UncheckedAccount<'info>,
-
-    pub system_program: Program<'info, System>,
 }
 
 /// Permissionless (production-hardening ticket 01): `caller` may be any
@@ -1005,206 +605,5 @@ mod tests {
             assert_eq!(point.rem_euclid(WEEK), 316_800, "hour {hour} left Sunday");
             assert!(point <= t && t - point < WEEK, "hour {hour} is not the floor");
         }
-    }
-
-    // --- `weight_and_principal_seconds` / `credit_yield` (hexo-referrals
-    // ticket 02): ticket 01 only closed the retroactive-attribution gap for
-    // a player already touched into the pool's current epoch. These check
-    // the idle-player path ticket 01 left open.
-
-    fn pool_at(id: u64, start: i64, base_rate_bps: u16, yield_budget: u64) -> Pool {
-        Pool {
-            pool_id: 1,
-            admin: Pubkey::default(),
-            operator: Pubkey::default(),
-            pending_admin: Pubkey::default(),
-            accepted_mint: Pubkey::default(),
-            principal_vault: Pubkey::default(),
-            jackpot_vault: Pubkey::default(),
-            treasury: Pubkey::default(),
-            buyback_reserve: Pubkey::default(),
-            house: Pubkey::default(),
-            vrf_network_state: Pubkey::default(),
-            epoch_seconds: DAY,
-            epoch_anchor: 1,
-            round_seconds: 60,
-            close_buffer: 5,
-            vrf_timeout: 120,
-            min_deposit: 1,
-            house_cut_bps: 0,
-            paused: false,
-            current_epoch_id: id,
-            current_epoch_start: start,
-            current_epoch_ends_at: start + DAY,
-            previous_epoch_start: start - DAY,
-            previous_epoch_ends_at: start,
-            next_round_id: 1,
-            open_round_id: 0,
-            carry_pot: 0,
-            total_principal: 0,
-            bump: 0,
-            principal_vault_bump: 0,
-            jackpot_vault_bump: 0,
-            pending_withdrawals: 0,
-            min_jackpot: 1_000_000,
-            registration_window: 0,
-            payout_timeout: DAY,
-            jackpot_reserved: 0,
-            base_rate_bps,
-            yield_budget,
-            tickets_per_usdc: 10,
-            bonus_cap_bps: 500,
-            bonus_epoch: 0,
-            bonus_granted: 0,
-            version: 1,
-            shutdown: false,
-            game_paused: false,
-            jackpot_paused: false,
-            _reserved: [0; 125],
-        }
-    }
-
-    fn epoch_at(epoch_id: u64, starts_at: i64, ends_at: i64) -> Epoch {
-        Epoch {
-            epoch_id,
-            starts_at,
-            ends_at,
-            status: epoch_status::REGISTERING,
-            registered_weight: 0,
-            registered_count: 0,
-            jackpot_amount: 0,
-            vrf_seed: [0u8; 32],
-            requested_at: 0,
-            target: 0,
-            winner: Pubkey::default(),
-            bump: 0,
-            drawn_at: 0,
-            registration_opened_at: 0,
-            version: 1,
-            _reserved: [0; 64],
-        }
-    }
-
-    fn player(principal: u64, entries: u64, epoch_id: u64, last_update: i64) -> Player {
-        Player {
-            owner: Pubkey::new_unique(),
-            principal,
-            entries,
-            weight_acc: 0,
-            last_update,
-            epoch_id,
-            frozen_weight: 0,
-            frozen_epoch: 0,
-            reg_epoch: 0,
-            reg_start: 0,
-            reg_end: 0,
-            is_house: false,
-            bump: 0,
-            pending_withdraw: 0,
-            pending_epoch: 0,
-            requested_at: 0,
-            principal_acc: 0,
-            frozen_principal_acc: 0,
-            yield_epoch: 0,
-            bought_epoch: 0,
-            bought_amount: 0,
-            bonus_epoch: 0,
-            bonus_granted: 0,
-            version: 1,
-            _reserved: [0; 64],
-        }
-    }
-
-    #[test]
-    fn credit_yield_touches_before_crediting_so_a_later_idle_span_does_not_backdate_it() {
-        // A player idle since before epoch 1 is credited by `register(1)` a
-        // little late (100s into epoch 2, as a delayed operator crank would
-        // run it), then never touched before `register(2)` reads epoch 2's
-        // idle span. Without touching the player at credit time (ticket 01
-        // only did this when the player was already touched into the pool's
-        // current epoch), that idle span treats the epoch-1 credit as if it
-        // had sat in `principal` since epoch 2's own start, over-counting
-        // principal-seconds -- and therefore weight and yield -- by
-        // `credited * 100`.
-        let principal: u64 = 1_000_000_000;
-        let epoch1 = epoch_at(1, 0, DAY);
-        let mut p = player(principal, principal, 0, 0);
-
-        let (_, ps1) = weight_and_principal_seconds(&epoch1, &p).expect("epoch 1 ps");
-        assert_eq!(
-            ps1,
-            u128::from(principal) * DAY as u128,
-            "idle for all of epoch 1"
-        );
-
-        let mut pool = pool_at(2, DAY, 488, u64::MAX);
-        let credit_at = DAY + 100; // 100s into epoch 2: the crank ran late
-        let (credited1, shortfall1) =
-            credit_yield(&mut pool, &mut p, ps1, credit_at).expect("credit 1");
-        assert_eq!(shortfall1, 0);
-        assert!(
-            credited1 > 0,
-            "the rate and span must actually earn something"
-        );
-        assert_eq!(
-            p.epoch_id, 2,
-            "touch rolled the player into the pool's current epoch"
-        );
-        assert_eq!(p.last_update, credit_at);
-
-        // Epoch 2 is later registered once it, too, has ended.
-        let epoch2 = epoch_at(2, DAY, 2 * DAY);
-        let (_, ps2) = weight_and_principal_seconds(&epoch2, &p).expect("epoch 2 ps");
-
-        let post_credit_principal = u128::from(principal) + u128::from(credited1);
-        let correct = u128::from(principal) * 100 + post_credit_principal * (DAY as u128 - 100);
-        let backdated = post_credit_principal * DAY as u128; // the over-count this test guards against
-
-        assert_eq!(
-            ps2, correct,
-            "only the time after the credit landed may use the larger, post-credit balance"
-        );
-        assert!(
-            ps2 < backdated,
-            "must not attribute the epoch-1 credit to time before it landed in epoch 2"
-        );
-    }
-
-    #[test]
-    fn credit_yield_never_credits_the_house() {
-        let epoch1 = epoch_at(1, 0, DAY);
-        let mut house = player(0, 0, 0, 0);
-        house.is_house = true;
-
-        let (_, ps) = weight_and_principal_seconds(&epoch1, &house).expect("epoch 1 ps");
-        assert_eq!(ps, 0, "the House holds no Principal");
-
-        let mut pool = pool_at(2, DAY, 488, u64::MAX);
-        let (credited, shortfall) =
-            credit_yield(&mut pool, &mut house, ps, DAY + 1).expect("credit");
-        assert_eq!(credited, 0);
-        assert_eq!(shortfall, 0);
-        assert_eq!(house.principal, 0);
-    }
-
-    #[test]
-    fn credit_yield_does_not_touch_when_the_budget_credits_nothing() {
-        // register() must stay read-only for a Player whose credit is 0 (an
-        // empty budget): a later natural touch (deposit/withdraw) still owns
-        // rolling epoch_id/weight_acc forward, exactly as it does for a
-        // Player earning no yield at all.
-        let principal: u64 = 1_000_000_000;
-        let epoch1 = epoch_at(1, 0, DAY);
-        let mut p = player(principal, principal, 0, 0);
-
-        let (_, ps1) = weight_and_principal_seconds(&epoch1, &p).expect("epoch 1 ps");
-        let mut pool = pool_at(2, DAY, 488, 0); // empty budget
-        let (credited, shortfall) =
-            credit_yield(&mut pool, &mut p, ps1, DAY + 100).expect("credit");
-
-        assert_eq!(credited, 0);
-        assert!(shortfall > 0);
-        assert_eq!(p.epoch_id, 0, "untouched: nothing was actually credited");
-        assert_eq!(p.last_update, 0);
     }
 }

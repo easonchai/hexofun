@@ -2,12 +2,10 @@
 //! and `docs/plan/rebuild/spec.md`).
 //!
 //! This module only declares instructions and delegates to their owning
-//! module. Custody (`create_pool`, `set_params`, `set_pause`, `deposit`,
-//! `request_withdraw`, `process_withdraw`, `admin_withdraw`) is implemented
-//! in `custody.rs`. Rounds and epochs are stubs
-//! here on purpose: their accounts are final so the IDL does not churn, but
-//! their bodies land in tickets 03 and 04, entirely inside `rounds.rs` and
-//! `epochs.rs` so this file never needs to change again for them.
+//! module: custody in `custody.rs`, rounds in `rounds.rs`, epochs in
+//! `epochs.rs`. `register`, `close_registration`, `admin_withdraw` and
+//! `fund_yield` were removed by the live-yield layout rewrite (yield-claimer
+//! ticket 04; ADRs 0017, 0018).
 
 pub mod constants;
 pub mod custody;
@@ -121,7 +119,7 @@ pub mod hex_vault {
     }
 
     /// Admin-only, only valid once shut down (ops-and-envs ticket 04): moves
-    /// the jackpot and any unspent yield budget to `pool.treasury`.
+    /// the jackpot's unreserved balance to `pool.treasury`.
     pub fn sweep_house(ctx: Context<SweepHouse>) -> Result<()> {
         custody::sweep_house(ctx)
     }
@@ -150,10 +148,6 @@ pub mod hex_vault {
         custody::process_withdraw(ctx)
     }
 
-    pub fn admin_withdraw(ctx: Context<AdminWithdraw>, amount: u64) -> Result<()> {
-        custody::admin_withdraw(ctx, amount)
-    }
-
     pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         custody::buy_tickets(ctx, amount)
     }
@@ -162,7 +156,7 @@ pub mod hex_vault {
         custody::grant_tickets(ctx, amount)
     }
 
-    // Rounds (spec §2.3 "Rounds") - stubs, ticket 03 implements these.
+    // Rounds (spec §2.3 "Rounds").
 
     pub fn create_round(ctx: Context<CreateRound>, starts_at: i64, ends_at: i64) -> Result<()> {
         rounds::create_round(ctx, starts_at, ends_at)
@@ -197,26 +191,16 @@ pub mod hex_vault {
         rounds::close_round(ctx)
     }
 
-    // Epochs (spec §2.3 "Epochs") - stubs, ticket 04 implements these.
+    // Epochs (spec §2.3 "Epochs"). Ticket 08 replaces the draw with the
+    // Weight tree's `request_draw`; until then nothing moves an epoch to
+    // Drawing, and `payout` refuses with `DrawPendingWeightTree`.
 
     pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         epochs::begin_epoch(ctx)
     }
 
-    pub fn register(ctx: Context<Register>) -> Result<()> {
-        epochs::register(ctx)
-    }
-
     pub fn fund_jackpot(ctx: Context<FundJackpot>, amount: u64) -> Result<()> {
         epochs::fund_jackpot(ctx, amount)
-    }
-
-    pub fn fund_yield(ctx: Context<FundYield>, amount: u64) -> Result<()> {
-        epochs::fund_yield(ctx, amount)
-    }
-
-    pub fn close_registration(ctx: Context<CloseRegistration>, nonce: [u8; 32]) -> Result<()> {
-        epochs::close_registration(ctx, nonce)
     }
 
     pub fn draw(ctx: Context<Draw>) -> Result<()> {

@@ -675,7 +675,9 @@ describe("rounds", () => {
     TIMEOUT,
   );
 
-  it(
+  // Skipped until yield-claimer ticket 08: the round's Weight pre-credit left
+  // `Player.weight_acc` with the layout rewrite and lands in the Weight tree.
+  it.skip(
     "buying a position is weight-neutral: staking everything matches just holding",
     async () => {
       const pool = await setupPool({ roundSeconds: 20, closeBuffer: 2 });
@@ -729,7 +731,9 @@ describe("rounds", () => {
     TIMEOUT,
   );
 
-  it(
+  // Skipped until yield-claimer ticket 11: `carry_pot` is gone (ADR 0019),
+  // and a void refunds each stake at `settle_position` instead.
+  it.skip(
     "voiding after the vrf timeout carries the pot into the next round",
     async () => {
       const pool = await setupPool({
@@ -862,12 +866,13 @@ describe("rounds", () => {
       expect(Buffer.from(seed)).toEqual(Buffer.from(seedB));
       const requested = await program.account.round.fetch(round);
       expect(requested.status).toBe(1); // Requested
+      expect(requested.vrfRequestSlot.toNumber()).toBeGreaterThan(0);
     },
     TIMEOUT,
   );
 
   it(
-    "a Round left OPEN past ends_at + vrf_timeout can be voided by anyone, and its pot carries",
+    "a Round left OPEN past ends_at + vrf_timeout can be voided by anyone",
     async () => {
       // beta-launch-fixes ticket 02: a Round that never even got its
       // randomness request through (e.g. the Operator crashed before
@@ -888,12 +893,7 @@ describe("rounds", () => {
 
       const voided = await program.account.round.fetch(round);
       expect(voided.status).toBe(4); // Voided
-      const poolAfterVoid = await program.account.pool.fetch(pool.pool);
-      expect(poolAfterVoid.carryPot.toString()).toBe("1000000");
-
-      const { round: round2 } = await createRound(pool, 4);
-      const round2Account = await program.account.round.fetch(round2);
-      expect(round2Account.pot.toString()).toBe("1000000");
+      // Where the stake goes is ticket 11's void refund; `carry_pot` is gone.
     },
     TIMEOUT,
   );
