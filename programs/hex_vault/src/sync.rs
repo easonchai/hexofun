@@ -104,6 +104,13 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
         pool.fee_owed = fee_owed;
         pool.yield_owed = yield_owed;
         pool.prize_owed = prize_owed;
+        // Running totals for the next harvest event (ticket 07). They only
+        // describe history, so a saturated total is harmless: saturate rather
+        // than fail a sync over a counter.
+        pool.harvest_gain = pool.harvest_gain.saturating_add(gain);
+        pool.harvest_fee = pool.harvest_fee.saturating_add(split.fee);
+        pool.harvest_depositor = pool.harvest_depositor.saturating_add(split.depositor);
+        pool.harvest_prize = pool.harvest_prize.saturating_add(split.prize);
         out.gain = gain;
         out.split = split;
     } else if value_now < before {

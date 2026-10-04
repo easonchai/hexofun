@@ -21,6 +21,8 @@ use crate::events::{
     AdminChanged, AdminProposed, Deposited, EmergencyWithdrawn, FeaturePaused, HouseSwept,
     OperatorChanged, ParamsSet, Paused, PoolCreated, PoolShutdown, TicketsBought, TicketsGranted,
     VenueDeployed, WithdrawRequested, Withdrawn,
+    // yield-claimer ticket 07
+    Harvested, TreasuryAccountsSet, VenueRecalled,
 };
 use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
 use crate::sync::{settle, settle_before_growth};
@@ -734,6 +736,217 @@ pub fn deploy_to_venue<'info>(
     Ok(())
 }
 
+/// Permissionless (yield-claimer ticket 07). Syncs, then redeems `amount`
+/// from the venue into the principal vault.
+///
+/// Free idle is the vault balance minus Pending withdrawals. It goes negative
+/// when the vault holds less than is queued, which is the case recall exists
+/// for, so the idle arithmetic is signed.
+///
+/// Before Shutdown a recall must:
+///  - find free idle strictly under the idle target,
+///  - leave free idle at or under it, and
+///  - be at least `min_venue_move`, unless `amount` is exactly the gap between
+///    the vault and `pending_withdrawals`, so a small queued withdrawal can
+///    always be made payable.
+///
+/// After Shutdown none of that applies: the whole position may come home.
+pub fn recall<'info>(ctx: Context<'info, Recall<'info>>, amount: u64) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+
+    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+
+    let pool = &a.pool;
+    require!(amount > 0, HexVaultError::ZeroAmount);
+
+    if !pool.shutdown {
+        let vault = i128::from(a.principal_vault.amount);
+        let free_idle = vault - i128::from(pool.pending_withdrawals);
+        // A pool that is solvent never has a negative total; clamp so a
+        // broken invariant cannot turn into a negative target.
+        let total = (free_idle + i128::from(pool.venue_value)).max(0) as u128;
+        // Rounded up, as in `deploy_to_venue`.
+        let target = total
+            .checked_mul(u128::from(pool.idle_target_bps))
+            .and_then(|v| v.checked_add(u128::from(BPS_DENOMINATOR) - 1))
+            .ok_or(HexVaultError::ArithmeticOverflow)?
+            / u128::from(BPS_DENOMINATOR);
+        let target = i128::try_from(target).map_err(|_| error!(HexVaultError::ArithmeticOverflow))?;
+        require!(free_idle < target, HexVaultError::RecallNotNeeded);
+
+        let short = pool.pending_withdrawals.saturating_sub(a.principal_vault.amount);
+        require!(
+            amount >= pool.min_venue_move || (short > 0 && amount == short),
+            HexVaultError::VenueMoveTooSmall
+        );
+        require!(
+            free_idle + i128::from(amount) <= target,
+            HexVaultError::RecallExceedsTarget
+        );
+    }
+
+    // The venue's own value, not the booked one: a gain a same-second sync
+    // skipped can be recalled too.
+    require!(amount <= read, HexVaultError::VenueIlliquid);
+
+    let before = a.principal_vault.amount;
+    let funds = Funds {
+        vault: &a.principal_vault,
+        mint: &a.accepted_mint,
+        token_program: &a.token_program,
+    };
+    venue::redeem(&a.pool, &venue, &funds, amount)?;
+    let after = venue::value(&a.pool, &venue)?;
+    let fall = read
+        .checked_sub(after)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    a.principal_vault.reload()?;
+    let received = a.principal_vault.amount.saturating_sub(before);
+    require!(received >= amount, HexVaultError::VenueShortReturn);
+
+    // Book the fall in value now, so the recall is not a loss at the next
+    // sync. Measured from `read`, so a gain a same-second sync skipped is not
+    // booked here; if this recall takes it, it is simply never credited. What
+    // the value fell by beyond what arrived is rounding dust: it comes off the
+    // fee owed, floored at zero.
+    let pool = &mut a.pool;
+    pool.venue_value = pool.venue_value.saturating_sub(fall);
+    pool.fee_owed = pool.fee_owed.saturating_sub(fall.saturating_sub(amount));
+
+    emit!(VenueRecalled {
+        pool: pool.key(),
+        amount,
+        venue_value: pool.venue_value,
+    });
+    Ok(())
+}
+
+/// Permissionless (ticket 07). Syncs, redeems the fee owed plus the prize
+/// share owed, pays the first to `pool.treasury` and the second to the
+/// jackpot vault, and zeroes both. Depositors' yield, every Player and the
+/// index are untouched.
+///
+/// With nothing owed it fails with `NothingToHarvest`, moving no USDC.
+///
+/// A gain is booked against the venue's value, so the owed USDC is at the
+/// venue. The one case where it is not is after a recall that brought the
+/// whole position home (Shutdown): then `venue_value` is under what is owed,
+/// the rest already sits in the vault, and only `min(owed, venue_value)` is
+/// redeemed. If the venue cannot return that much the redeem fails with
+/// `VenueIlliquid` and the whole instruction reverts, sync included, with
+/// nothing paid and nothing zeroed.
+pub fn harvest<'info>(ctx: Context<'info, Harvest<'info>>) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+
+    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+
+    require!(!a.pool.impaired, HexVaultError::PoolImpaired);
+    let fee_owed = a.pool.fee_owed;
+    let prize_owed = a.pool.prize_owed;
+    let owed = fee_owed
+        .checked_add(prize_owed)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    require!(owed > 0, HexVaultError::NothingToHarvest);
+
+    let from_venue = owed.min(read);
+    let mut dust = 0;
+    if from_venue > 0 {
+        let before = a.principal_vault.amount;
+        let funds = Funds {
+            vault: &a.principal_vault,
+            mint: &a.accepted_mint,
+            token_program: &a.token_program,
+        };
+        venue::redeem(&a.pool, &venue, &funds, from_venue)?;
+        let after = venue::value(&a.pool, &venue)?;
+        let fall = read
+            .checked_sub(after)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        a.principal_vault.reload()?;
+        let received = a.principal_vault.amount.saturating_sub(before);
+        require!(received >= from_venue, HexVaultError::VenueShortReturn);
+        a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
+        dust = fall.saturating_sub(from_venue);
+    }
+
+    // The dust the redeem cost is the fee's to bear: pay that much less, and
+    // the vault keeps exactly what the venue lost beyond the redeem.
+    let fee_paid = fee_owed.saturating_sub(dust);
+    let pool = &mut a.pool;
+    let pool_id_bytes = pool.pool_id.to_le_bytes();
+    let pool_bump = [pool.bump];
+    let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
+    for (to, amount) in [
+        (a.treasury.to_account_info(), fee_paid),
+        (a.jackpot_vault.to_account_info(), prize_owed),
+    ] {
+        if amount == 0 {
+            continue;
+        }
+        token_interface::transfer_checked(
+            CpiContext::new_with_signer(
+                a.token_program.key(),
+                TransferChecked {
+                    from: a.principal_vault.to_account_info(),
+                    mint: a.accepted_mint.to_account_info(),
+                    to,
+                    authority: pool.to_account_info(),
+                },
+                &[signer_seeds],
+            ),
+            amount,
+            a.accepted_mint.decimals,
+        )?;
+    }
+
+    pool.fee_owed = 0;
+    pool.prize_owed = 0;
+    emit!(Harvested {
+        pool: pool.key(),
+        gain: pool.harvest_gain,
+        fee: pool.harvest_fee,
+        depositor_share: pool.harvest_depositor,
+        prize_share: pool.harvest_prize,
+        fee_paid,
+        prize_paid: prize_owed,
+    });
+    pool.harvest_gain = 0;
+    pool.harvest_fee = 0;
+    pool.harvest_depositor = 0;
+    pool.harvest_prize = 0;
+    Ok(())
+}
+
+/// Admin-only (ticket 07). Both accounts must hold the pool's mint. Nothing
+/// else is checked, as at `create_pool`: on mainnet they are the multisig's
+/// own accounts. `harvest` and `payout` pin their destinations to these two
+/// addresses (`has_one`), so the change is the next call's destination.
+pub fn set_treasury_accounts(ctx: Context<SetTreasuryAccounts>) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    pool.treasury = ctx.accounts.treasury.key();
+    pool.buyback_reserve = ctx.accounts.buyback_reserve.key();
+    emit!(TreasuryAccountsSet {
+        pool: pool.key(),
+        treasury: pool.treasury,
+        buyback_reserve: pool.buyback_reserve,
+    });
+    Ok(())
+}
+
 /// Permissionless crank, only valid once the pool is shut down: pays one
 /// Player's whole `principal + pending_withdraw` to their own USDC ATA, so a
 /// depositor gets out even if the team disappears (spec
@@ -1184,6 +1397,117 @@ pub struct DeployToVenue<'info> {
     pub klend_ctoken: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
+}
+
+/// Permissionless, same accounts as `DeployToVenue` (ticket 07).
+#[derive(Accounts)]
+pub struct Recall<'info> {
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL, pool.key().as_ref()],
+        bump = pool.principal_vault_bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+/// Permissionless. The two destinations are the Pool's own, so a caller
+/// cannot redirect them.
+#[derive(Accounts)]
+pub struct Harvest<'info> {
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = treasury,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL, pool.key().as_ref()],
+        bump = pool.principal_vault_bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_JACKPOT, pool.key().as_ref()],
+        bump = pool.jackpot_vault_bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub jackpot_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(mut, token::mint = accepted_mint)]
+    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+#[derive(Accounts)]
+pub struct SetTreasuryAccounts<'info> {
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = admin,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(constraint = treasury.mint == accepted_mint.key() @ HexVaultError::MintMismatch)]
+    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(constraint = buyback_reserve.mint == accepted_mint.key() @ HexVaultError::MintMismatch)]
+    pub buyback_reserve: Box<InterfaceAccount<'info, TokenAccount>>,
 }
 
 #[derive(Accounts)]

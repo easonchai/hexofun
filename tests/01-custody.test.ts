@@ -385,8 +385,9 @@ describe("custody", () => {
   );
 
   // The short-vault payout case ("fails, changes nothing, pays once the
-  // USDC is back") needs USDC to leave the vault. `admin_withdraw` did that;
-  // ticket 05's deploy and ticket 07's recall bring it back.
+  // USDC is back") needed USDC to leave the vault, which `admin_withdraw`
+  // did. It now deploys to the test venue and recalls: see "makes a Pending
+  // withdrawal the vault could not cover payable" in 07-recall-harvest.test.ts.
 
   it(
     "a stalled operator cannot freeze a request: it matures on its own clock",

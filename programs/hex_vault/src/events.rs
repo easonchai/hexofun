@@ -246,3 +246,37 @@ pub struct VenueDeployed {
 pub struct HouseSwept {
     pub jackpot: u64,
 }
+
+/// `recall` moved `amount` of USDC from the venue back into the principal
+/// vault (yield-claimer ticket 07). `venue_value` is the recorded value after.
+#[event]
+pub struct VenueRecalled {
+    pub pool: Pubkey,
+    pub amount: u64,
+    pub venue_value: u64,
+}
+
+/// `harvest` paid the yield fee to the Treasury and the prize share to the
+/// jackpot vault (ticket 07). `gain`, `fee`, `depositor_share` and
+/// `prize_share` are the totals booked since the previous harvest. `fee_paid`
+/// is `fee_owed` less any rounding dust the redeem cost, so it can be a few
+/// units under what the pool owed. `prize_paid` is the whole prize owed.
+#[event]
+pub struct Harvested {
+    pub pool: Pubkey,
+    pub gain: u64,
+    pub fee: u64,
+    pub depositor_share: u64,
+    pub prize_share: u64,
+    pub fee_paid: u64,
+    pub prize_paid: u64,
+}
+
+/// Admin-only: `set_treasury_accounts` replaced the Treasury and the buyback
+/// reserve (ticket 07).
+#[event]
+pub struct TreasuryAccountsSet {
+    pub pool: Pubkey,
+    pub treasury: Pubkey,
+    pub buyback_reserve: Pubkey,
+}

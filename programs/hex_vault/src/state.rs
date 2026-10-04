@@ -169,9 +169,17 @@ pub struct Pool {
     pub impaired: bool,
     /// Stops `buy_tickets` (ADR 0019). Admin-only setter in ticket 11.
     pub buy_tickets_paused: bool,
+    /// Running totals of every gain booked since the last harvest, for the
+    /// harvest event (yield-claimer ticket 07). `apply_sync` adds to them,
+    /// `harvest` reads and zeroes them. They are not claims: only the owed
+    /// amounts above are.
+    pub harvest_gain: u64,
+    pub harvest_fee: u64,
+    pub harvest_depositor: u64,
+    pub harvest_prize: u64,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.
-    pub _reserved: [u8; 128],
+    pub _reserved: [u8; 96],
 }
 
 /// One lottery cycle. Contiguous: the next opens the moment this one ends.
@@ -429,7 +437,11 @@ mod tests {
         assert_eq!(pool(|p| p.deploy_paused = true), 756);
         assert_eq!(pool(|p| p.impaired = true), 757);
         assert_eq!(pool(|p| p.buy_tickets_paused = true), 758);
-        assert_eq!(pool(|p| p._reserved[0] = 1), 759);
+        assert_eq!(pool(|p| p.harvest_gain = 1), 759);
+        assert_eq!(pool(|p| p.harvest_fee = 1), 767);
+        assert_eq!(pool(|p| p.harvest_depositor = 1), 775);
+        assert_eq!(pool(|p| p.harvest_prize = 1), 783);
+        assert_eq!(pool(|p| p._reserved[0] = 1), 791);
 
         let player = |set: fn(&mut Player)| offset(Player::INIT_SPACE, set);
         // `owner` at 8 is what the indexer's per-owner memcmp filters on.

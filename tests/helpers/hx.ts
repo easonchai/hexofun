@@ -676,3 +676,53 @@ export async function assertSolvent(ctx: PoolCtx): Promise<void> {
     throw new Error(`insolvent: vault ${vault} + venue ${assets - vault} < claims ${claims}`);
   }
 }
+
+// --- Recall, harvest, treasury accounts (yield-claimer ticket 07) -------------
+
+/** Builder for `recall`; permissionless, so there is no signer to name. */
+export function recallMethod(ctx: PoolCtx, amount: bigint, venue: VenueAccounts = ctx.venue) {
+  return program.methods.recall(new BN(amount.toString())).accountsPartial({
+    pool: ctx.pool,
+    principalVault: ctx.principalVault,
+    acceptedMint: ctx.mint,
+    ...venue,
+    tokenProgram: TOKEN_PROGRAM_ID,
+  });
+}
+
+/** Builder for `harvest`. `treasury` overrides the pool's own for the
+ *  wrong-destination test. */
+export function harvestMethod(
+  ctx: PoolCtx,
+  treasury: PublicKey = ctx.treasury,
+  venue: VenueAccounts = ctx.venue,
+) {
+  return program.methods.harvest().accountsPartial({
+    pool: ctx.pool,
+    principalVault: ctx.principalVault,
+    jackpotVault: ctx.jackpotVault,
+    treasury,
+    acceptedMint: ctx.mint,
+    ...venue,
+    tokenProgram: TOKEN_PROGRAM_ID,
+  });
+}
+
+/** Builder for `set_treasury_accounts`, signed by `admin` unless told otherwise. */
+export function setTreasuryAccountsMethod(
+  ctx: PoolCtx,
+  treasury: PublicKey,
+  buybackReserve: PublicKey,
+  admin: Keypair = ctx.admin,
+) {
+  return program.methods
+    .setTreasuryAccounts()
+    .accountsPartial({
+      admin: admin.publicKey,
+      pool: ctx.pool,
+      acceptedMint: ctx.mint,
+      treasury,
+      buybackReserve,
+    })
+    .signers([admin]);
+}

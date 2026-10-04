@@ -170,4 +170,14 @@ pub enum HexVaultError {
     DeployPaused,
     #[msg("the pool is impaired by a venue loss")]
     PoolImpaired,
+
+    // Recall, harvest and treasury accounts (yield-claimer ticket 07). Appended too.
+    #[msg("free idle USDC is already at or above the idle target")]
+    RecallNotNeeded,
+    #[msg("the amount would lift free idle USDC above the idle target")]
+    RecallExceedsTarget,
+    #[msg("the venue returned less USDC than was asked for")]
+    VenueShortReturn,
+    #[msg("no yield fee or prize share is owed")]
+    NothingToHarvest,
 }

@@ -239,6 +239,23 @@ pub mod hex_vault {
         custody::deploy_to_venue(ctx, amount)
     }
 
+    /// Permissionless (yield-claimer ticket 07): syncs, then redeems `amount`
+    /// from the venue while free idle is under the idle target.
+    pub fn recall<'info>(ctx: Context<'info, Recall<'info>>, amount: u64) -> Result<()> {
+        custody::recall(ctx, amount)
+    }
+
+    /// Permissionless (ticket 07): pays the yield fee owed to the Treasury and
+    /// the prize share owed to the jackpot vault.
+    pub fn harvest<'info>(ctx: Context<'info, Harvest<'info>>) -> Result<()> {
+        custody::harvest(ctx)
+    }
+
+    /// Admin-only (ticket 07): sets `treasury` and `buyback_reserve`.
+    pub fn set_treasury_accounts(ctx: Context<SetTreasuryAccounts>) -> Result<()> {
+        custody::set_treasury_accounts(ctx)
+    }
+
     // Localnet only: the stub venue behind `venue.rs` (yield-claimer ticket
     // 05). Created once after `create_pool`, repriced by the tests.
     #[cfg(feature = "test-venue")]
