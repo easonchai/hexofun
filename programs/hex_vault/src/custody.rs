@@ -23,6 +23,7 @@ use crate::events::{
     VenueDeployed, WithdrawRequested, Withdrawn,
 };
 use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
+use crate::sync::{settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
@@ -451,14 +452,28 @@ pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
     Ok(())
 }
 
-pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
-    let pool = &mut ctx.accounts.pool;
-    let player = &mut ctx.accounts.player;
+pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Result<()> {
+    let now = utils::now()?;
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+    // Sync before a fresh Player is stamped, so it starts at the index after
+    // any gain the venue already paid and never earns that gain.
+    venue::sync(&mut a.pool, &venue)?;
+
+    let pool = &mut a.pool;
+    let player = &mut a.player;
 
     // Stamps a fresh Player with the current epoch and Yield index, or is a
     // no-op on an existing one.
-    player.init_if_fresh(ctx.accounts.owner.key(), pool, ctx.bumps.player);
+    player.init_if_fresh(a.owner.key(), pool, ctx.bumps.player);
     touch(player, pool);
+    settle_before_growth(pool, player, now)?;
 
     require!(!player.is_house, HexVaultError::HouseCannotDeposit);
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
@@ -470,16 +485,16 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
 
     token_interface::transfer_checked(
         CpiContext::new(
-            ctx.accounts.token_program.key(),
+            a.token_program.key(),
             TransferChecked {
-                from: ctx.accounts.owner_token.to_account_info(),
-                mint: ctx.accounts.accepted_mint.to_account_info(),
-                to: ctx.accounts.principal_vault.to_account_info(),
-                authority: ctx.accounts.owner.to_account_info(),
+                from: a.owner_token.to_account_info(),
+                mint: a.accepted_mint.to_account_info(),
+                to: a.principal_vault.to_account_info(),
+                authority: a.owner.to_account_info(),
             },
         ),
         amount,
-        ctx.accounts.accepted_mint.decimals,
+        a.accepted_mint.decimals,
     )?;
 
     player.principal = player
@@ -496,7 +511,7 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         .ok_or(HexVaultError::ArithmeticOverflow)?;
 
     emit!(Deposited {
-        owner: ctx.accounts.owner.key(),
+        owner: a.owner.key(),
         amount,
         principal: player.principal,
         entries: player.entries,
@@ -512,11 +527,25 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
 /// `pending_epoch`, so an unpaid earlier request slides to the later epoch.
 /// The operator pays every due request at each epoch start, so that only
 /// costs a depositor who requests again before the first payout landed.
-pub fn request_withdraw(ctx: Context<RequestWithdraw>, amount: u64) -> Result<()> {
+pub fn request_withdraw<'info>(
+    ctx: Context<'info, RequestWithdraw<'info>>,
+    amount: u64,
+) -> Result<()> {
     let now = utils::now()?;
-    let pool = &mut ctx.accounts.pool;
-    let player = &mut ctx.accounts.player;
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+    venue::sync(&mut a.pool, &venue)?;
+    let pool = &mut a.pool;
+    let player = &mut a.player;
     touch(player, pool);
+    // Yield earned so far joins Principal first, so it can be requested too.
+    settle(pool, player, now)?;
 
     // Invariant 3: a withdrawal is never blocked by `paused`.
     require!(amount > 0, HexVaultError::ZeroAmount);
@@ -551,7 +580,7 @@ pub fn request_withdraw(ctx: Context<RequestWithdraw>, amount: u64) -> Result<()
     player.requested_at = now;
 
     emit!(WithdrawRequested {
-        owner: ctx.accounts.owner.key(),
+        owner: a.owner.key(),
         amount,
         pending: player.pending_withdraw,
         pending_epoch: player.pending_epoch,
@@ -710,10 +739,22 @@ pub fn deploy_to_venue<'info>(
 /// depositor gets out even if the team disappears (spec
 /// "emergency_withdraw"). House is skipped: its principal is protocol money
 /// and leaves through `sweep_house` instead.
-pub fn emergency_withdraw(ctx: Context<EmergencyWithdraw>) -> Result<()> {
-    let pool = &mut ctx.accounts.pool;
-    let player = &mut ctx.accounts.player;
+pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) -> Result<()> {
+    let now = utils::now()?;
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+    venue::sync(&mut a.pool, &venue)?;
+    let pool = &mut a.pool;
+    let player = &mut a.player;
     touch(player, pool);
+    // Yield earned so far is paid out with the Principal, in this call.
+    settle(pool, player, now)?;
 
     require!(pool.shutdown, HexVaultError::PoolNotShutDown);
     require!(
@@ -730,7 +771,7 @@ pub fn emergency_withdraw(ctx: Context<EmergencyWithdraw>) -> Result<()> {
     // No partial payouts: either the vault covers this Player in full, or
     // nothing moves and the next attempt starts from the same numbers.
     require!(
-        ctx.accounts.principal_vault.amount >= total,
+        a.principal_vault.amount >= total,
         HexVaultError::InsufficientVault
     );
 
@@ -752,17 +793,17 @@ pub fn emergency_withdraw(ctx: Context<EmergencyWithdraw>) -> Result<()> {
 
     token_interface::transfer_checked(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.key(),
+            a.token_program.key(),
             TransferChecked {
-                from: ctx.accounts.principal_vault.to_account_info(),
-                mint: ctx.accounts.accepted_mint.to_account_info(),
-                to: ctx.accounts.owner_token.to_account_info(),
+                from: a.principal_vault.to_account_info(),
+                mint: a.accepted_mint.to_account_info(),
+                to: a.owner_token.to_account_info(),
                 authority: pool.to_account_info(),
             },
             &[signer_seeds],
         ),
         total,
-        ctx.accounts.accepted_mint.decimals,
+        a.accepted_mint.decimals,
     )?;
 
     emit!(EmergencyWithdrawn {
@@ -1283,11 +1324,23 @@ pub struct Deposit<'info> {
     )]
     pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
+
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
-/// No token accounts: the request moves nothing.
+/// No token accounts: the request moves nothing. The venue accounts are for
+/// sync only.
 #[derive(Accounts)]
 pub struct RequestWithdraw<'info> {
     pub owner: Signer<'info>,
@@ -1297,14 +1350,25 @@ pub struct RequestWithdraw<'info> {
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
     )]
-    pub pool: Account<'info, Pool>,
+    pub pool: Box<Account<'info, Pool>>,
 
     #[account(
         mut,
         seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
         bump = player.bump,
     )]
-    pub player: Account<'info, Player>,
+    pub player: Box<Account<'info, Player>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
@@ -1389,6 +1453,17 @@ pub struct EmergencyWithdraw<'info> {
         token::token_program = token_program,
     )]
     pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
 }

@@ -23,6 +23,7 @@ pub mod touch;
 pub mod utils;
 pub mod venue;
 pub mod vrf;
+pub mod weight;
 // Yield-claimer ticket 02 prototype; test-only, never in the binary.
 #[cfg(test)]
 mod weight_tree_proto;
@@ -124,7 +125,7 @@ pub mod hex_vault {
 
     /// Permissionless, only valid once shut down (ops-and-envs ticket 03):
     /// pays one Player's whole balance to their own USDC ATA.
-    pub fn emergency_withdraw(ctx: Context<EmergencyWithdraw>) -> Result<()> {
+    pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) -> Result<()> {
         custody::emergency_withdraw(ctx)
     }
 
@@ -146,11 +147,14 @@ pub mod hex_vault {
         custody::accept_admin(ctx)
     }
 
-    pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Result<()> {
         custody::deposit(ctx, amount)
     }
 
-    pub fn request_withdraw(ctx: Context<RequestWithdraw>, amount: u64) -> Result<()> {
+    pub fn request_withdraw<'info>(
+        ctx: Context<'info, RequestWithdraw<'info>>,
+        amount: u64,
+    ) -> Result<()> {
         custody::request_withdraw(ctx, amount)
     }
 
@@ -217,7 +221,7 @@ pub mod hex_vault {
         epochs::draw(ctx)
     }
 
-    pub fn payout(ctx: Context<Payout>) -> Result<()> {
+    pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         epochs::payout(ctx)
     }
 

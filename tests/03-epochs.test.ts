@@ -71,6 +71,7 @@ function depositAccounts(pool: PoolCtx, owner: Wallet) {
     acceptedMint: pool.mint,
     ownerToken: owner.tokenAccount,
     principalVault: pool.principalVault,
+    ...pool.venue,
     tokenProgram: TOKEN_PROGRAM_ID,
     systemProgram: SystemProgram.programId,
   };
@@ -91,6 +92,7 @@ async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
       owner: owner.keypair.publicKey,
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
+      ...pool.venue,
     })
     .signers([owner.keypair])
     .rpc();
@@ -289,6 +291,7 @@ async function payout(pool: PoolCtx, epochId: bigint, winner: PublicKey) {
       principalVault: pool.principalVault,
       treasury: pool.treasury,
       buybackReserve: pool.buybackReserve,
+      ...pool.venue,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .rpc();

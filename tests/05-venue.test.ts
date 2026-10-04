@@ -53,6 +53,7 @@ async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
       acceptedMint: ctx.mint,
       ownerToken: owner.tokenAccount,
       principalVault: ctx.principalVault,
+      ...ctx.venue,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
@@ -68,6 +69,7 @@ async function requestWithdraw(ctx: PoolCtx, owner: Wallet, amount: bigint) {
       owner: owner.keypair.publicKey,
       pool: ctx.pool,
       player: playerPda(ctx.pool, owner.keypair.publicKey),
+      ...ctx.venue,
     })
     .signers([owner.keypair])
     .rpc();

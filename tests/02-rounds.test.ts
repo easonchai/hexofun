@@ -48,6 +48,7 @@ function depositAccounts(pool: PoolCtx, owner: Wallet) {
     acceptedMint: pool.mint,
     ownerToken: owner.tokenAccount,
     principalVault: pool.principalVault,
+    ...pool.venue,
     tokenProgram: TOKEN_PROGRAM_ID,
     systemProgram: SystemProgram.programId,
   };

@@ -18,6 +18,7 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
+  assertSolvent,
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
   epochPda,
@@ -54,6 +55,7 @@ function depositAccounts(pool: PoolCtx, owner: Awaited<ReturnType<PoolCtx["funde
     acceptedMint: pool.mint,
     ownerToken: owner.tokenAccount,
     principalVault: pool.principalVault,
+    ...pool.venue,
     tokenProgram: TOKEN_PROGRAM_ID,
     systemProgram: SystemProgram.programId,
   };
@@ -61,30 +63,47 @@ function depositAccounts(pool: PoolCtx, owner: Awaited<ReturnType<PoolCtx["funde
 
 type Wallet = Awaited<ReturnType<PoolCtx["fundedWallet"]>>;
 
+/** Awaits one instruction, then checks the solvency invariant (ticket 06):
+ *  every instruction this suite runs through a helper must leave it holding. */
+async function thenSolvent(pool: PoolCtx, tx: Promise<string>): Promise<string> {
+  const signature = await tx;
+  await assertSolvent(pool);
+  return signature;
+}
+
 async function deposit(pool: PoolCtx, owner: Wallet, amount: bigint) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .deposit(new BN(amount.toString()))
     .accountsPartial(depositAccounts(pool, owner))
     .signers([owner.keypair])
-    .rpc();
+    .rpc(),
+  );
 }
 
 /** Books the withdrawal. No token accounts: nothing moves here. */
 async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .requestWithdraw(new BN(amount.toString()))
     .accountsPartial({
       owner: owner.keypair.publicKey,
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
+      ...pool.venue,
     })
     .signers([owner.keypair])
-    .rpc();
+    .rpc(),
+  );
 }
 
 /** Pays a matured request. Signed by nobody; the test wallet just pays fees. */
 async function processWithdraw(pool: PoolCtx, owner: Wallet) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .processWithdraw()
     .accountsPartial({
       pool: pool.pool,
@@ -94,13 +113,16 @@ async function processWithdraw(pool: PoolCtx, owner: Wallet) {
       principalVault: pool.principalVault,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
-    .rpc();
+    .rpc(),
+  );
 }
 
 /** `currentEpochId` is `pool.currentEpochId` *before* this call. */
 async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
   const twoBehindId = currentEpochId > 0n ? currentEpochId - 1n : 0n;
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .beginEpoch()
     .accountsPartial({
       operator: pool.operator.publicKey,
@@ -111,36 +133,46 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
-    .rpc();
+    .rpc(),
+  );
 }
 
 const vaultBalance = async (account: PublicKey): Promise<bigint> =>
   BigInt((await program.provider.connection.getTokenAccountBalance(account)).value.amount);
 
 async function setPause(pool: PoolCtx, paused: boolean) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .setPause(paused)
     .accountsPartial({ signer: pool.admin.publicKey, pool: pool.pool })
     .signers([pool.admin])
-    .rpc();
+    .rpc(),
+  );
 }
 
 type Feature = "Game" | "Jackpot";
 
 async function setFeaturePause(pool: PoolCtx, signer: Keypair, feature: Feature, paused: boolean) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .setFeaturePause(feature === "Game" ? { game: {} } : { jackpot: {} }, paused)
     .accountsPartial({ signer: signer.publicKey, pool: pool.pool })
     .signers([signer])
-    .rpc();
+    .rpc(),
+  );
 }
 
 async function shutdown(pool: PoolCtx) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .shutdown()
     .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool })
     .signers([pool.admin])
-    .rpc();
+    .rpc(),
+  );
 }
 
 describe("custody", () => {
@@ -251,6 +283,7 @@ describe("custody", () => {
             acceptedMint: pool.mint,
             ownerToken: operatorAta.address,
             principalVault: pool.principalVault,
+            ...pool.venue,
             tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })

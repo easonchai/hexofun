@@ -23,8 +23,10 @@ use crate::constants::{
 use crate::errors::HexVaultError;
 use crate::events::{EpochBegan, EpochDrawn, EpochRolledOver, JackpotFunded, JackpotPaid};
 use crate::state::{Epoch, Player, Pool};
+use crate::sync::settle_before_growth;
 use crate::touch::touch;
 use crate::utils;
+use crate::venue::{self, Venue};
 use crate::vrf;
 
 /// Checks that `winner` holds the drawn target in `epoch`. Registration's
@@ -196,10 +198,20 @@ pub fn draw(ctx: Context<Draw>) -> Result<()> {
     Ok(())
 }
 
-pub fn payout(ctx: Context<Payout>) -> Result<()> {
-    let pool = &mut ctx.accounts.pool;
-    let epoch = &mut ctx.accounts.epoch;
-    let winner = &mut ctx.accounts.winner;
+pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
+    let now = utils::now()?;
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+    venue::sync(&mut a.pool, &venue)?;
+    let pool = &mut a.pool;
+    let epoch = &mut a.epoch;
+    let winner = &mut a.winner;
 
     require!(
         epoch.status == epoch_status::DRAWN,
@@ -209,7 +221,7 @@ pub fn payout(ctx: Context<Payout>) -> Result<()> {
 
     let amount = epoch.jackpot_amount;
     let is_house = winner.is_house;
-    let decimals = ctx.accounts.accepted_mint.decimals;
+    let decimals = a.accepted_mint.decimals;
     let pool_id_bytes = pool.pool_id.to_le_bytes();
     let pool_bump = [pool.bump];
     let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
@@ -222,11 +234,11 @@ pub fn payout(ctx: Context<Payout>) -> Result<()> {
 
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.key(),
+                a.token_program.key(),
                 TransferChecked {
-                    from: ctx.accounts.jackpot_vault.to_account_info(),
-                    mint: ctx.accounts.accepted_mint.to_account_info(),
-                    to: ctx.accounts.buyback_reserve.to_account_info(),
+                    from: a.jackpot_vault.to_account_info(),
+                    mint: a.accepted_mint.to_account_info(),
+                    to: a.buyback_reserve.to_account_info(),
                     authority: pool.to_account_info(),
                 },
                 &[signer_seeds],
@@ -237,11 +249,11 @@ pub fn payout(ctx: Context<Payout>) -> Result<()> {
 
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.key(),
+                a.token_program.key(),
                 TransferChecked {
-                    from: ctx.accounts.jackpot_vault.to_account_info(),
-                    mint: ctx.accounts.accepted_mint.to_account_info(),
-                    to: ctx.accounts.treasury.to_account_info(),
+                    from: a.jackpot_vault.to_account_info(),
+                    mint: a.accepted_mint.to_account_info(),
+                    to: a.treasury.to_account_info(),
                     authority: pool.to_account_info(),
                 },
                 &[signer_seeds],
@@ -251,17 +263,20 @@ pub fn payout(ctx: Context<Payout>) -> Result<()> {
         )?;
     } else {
         // Compounds into the winner's Principal instead of paying their
-        // token account: touch first, so the prize lands on this epoch's
-        // Tickets. Ticket 06 adds sync and settle here.
+        // token account. Touch first, so the prize lands on this epoch's
+        // Tickets, then settle (the sync ran above): the winner's yield so far
+        // joins Principal before the prize does, so the prize earns only from
+        // here on, never retroactively.
         touch(winner, pool);
+        settle_before_growth(pool, winner, now)?;
 
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.key(),
+                a.token_program.key(),
                 TransferChecked {
-                    from: ctx.accounts.jackpot_vault.to_account_info(),
-                    mint: ctx.accounts.accepted_mint.to_account_info(),
-                    to: ctx.accounts.principal_vault.to_account_info(),
+                    from: a.jackpot_vault.to_account_info(),
+                    mint: a.accepted_mint.to_account_info(),
+                    to: a.principal_vault.to_account_info(),
                     authority: pool.to_account_info(),
                 },
                 &[signer_seeds],
@@ -519,6 +534,17 @@ pub struct Payout<'info> {
 
     #[account(mut)]
     pub buyback_reserve: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
 }
