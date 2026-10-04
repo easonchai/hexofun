@@ -154,7 +154,7 @@ fi
 so_path="target/deploy/hex_vault.so"
 idl_path="target/idl/hex_vault.json"
 
-# --- 3. refuse a test-vrf artifact -----------------------------------------
+# --- 3. refuse a test-vrf or test-venue artifact ---------------------------
 sh scripts/check-deployable.sh "$so_path"
 
 # --- 4. keypair must match this build's declare_id! ------------------------

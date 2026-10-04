@@ -217,6 +217,29 @@ pub struct EmergencyWithdrawn {
     pub total: u64,
 }
 
+/// A sync saw the venue's value rise and split the gain (yield-claimer
+/// ticket 05). `fee + depositor_share + prize_share` is the gain. Not emitted
+/// for a sync that saw no gain, or that ran in the same second as the last.
+#[event]
+pub struct Synced {
+    pub pool: Pubkey,
+    pub gain: u64,
+    pub fee: u64,
+    pub depositor_share: u64,
+    pub prize_share: u64,
+    pub yield_index: u128,
+    pub venue_value: u64,
+}
+
+/// `deploy_to_venue` moved `amount` of idle USDC into the venue.
+/// `venue_value` is the pool's recorded venue value afterwards.
+#[event]
+pub struct VenueDeployed {
+    pub pool: Pubkey,
+    pub amount: u64,
+    pub venue_value: u64,
+}
+
 /// Admin-only: `sweep_house` moved the jackpot's unreserved balance to
 /// `pool.treasury` once the pool was shut down. Principal is never swept.
 #[event]

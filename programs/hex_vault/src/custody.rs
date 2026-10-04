@@ -20,11 +20,12 @@ use crate::errors::HexVaultError;
 use crate::events::{
     AdminChanged, AdminProposed, Deposited, EmergencyWithdrawn, FeaturePaused, HouseSwept,
     OperatorChanged, ParamsSet, Paused, PoolCreated, PoolShutdown, TicketsBought, TicketsGranted,
-    WithdrawRequested, Withdrawn,
+    VenueDeployed, WithdrawRequested, Withdrawn,
 };
 use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
 use crate::touch::touch;
 use crate::utils;
+use crate::venue::{self, Funds, Venue};
 
 /// Which switch `set_feature_pause` changes (game-jackpot-pause ticket 01).
 /// `set_pause`'s own `paused` field is untouched by either variant.
@@ -126,6 +127,20 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         HexVaultError::UnsupportedMint
     );
 
+    // A default key would pin a venue nobody can ever pass, bricking deploy
+    // and every instruction that syncs.
+    let klend_program = ctx.accounts.klend_program.key();
+    let klend_market = ctx.accounts.klend_market.key();
+    let klend_reserve = ctx.accounts.klend_reserve.key();
+    let klend_ctoken = ctx.accounts.klend_ctoken.key();
+    require!(
+        klend_program != Pubkey::default()
+            && klend_market != Pubkey::default()
+            && klend_reserve != Pubkey::default()
+            && klend_ctoken != Pubkey::default(),
+        HexVaultError::InvalidParameter
+    );
+
     let pool_key = ctx.accounts.pool.key();
     // The tree starts with zero nodes; ticket 08 appends one per first
     // deposit. `zero` on the account struct already checked that it is ours
@@ -170,8 +185,13 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     pool.version = LAYOUT_VERSION;
     pool.paused = false;
     pool.weight_tree = tree_key;
-    // Venue addresses stay `Pubkey::default()` until ticket 05 makes this
-    // instruction take and pin them. The yield state starts at zero.
+    // The four venue addresses are pinned here for good: every venue
+    // instruction checks its accounts against them (`venue::check`). The rest
+    // of the yield state starts at zero.
+    pool.klend_program = klend_program;
+    pool.klend_market = klend_market;
+    pool.klend_reserve = klend_reserve;
+    pool.klend_ctoken = klend_ctoken;
     pool.yield_fee_bps = DEFAULT_YIELD_FEE_BPS;
     pool.idle_floor_bps = DEFAULT_IDLE_FLOOR_BPS;
     pool.idle_target_bps = DEFAULT_IDLE_TARGET_BPS;
@@ -604,6 +624,87 @@ pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
     Ok(())
 }
 
+/// Permissionless (yield-claimer ticket 05). Syncs, then moves idle USDC
+/// above the idle target into the venue. Pending withdrawals are not free
+/// idle, so they never leave. The two reserve caps are ticket 10's.
+pub fn deploy_to_venue<'info>(
+    ctx: Context<'info, DeployToVenue<'info>>,
+    amount: u64,
+) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+
+    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+
+    let pool = &a.pool;
+    require!(!pool.shutdown, HexVaultError::PoolShutDown);
+    require!(!pool.deploy_paused, HexVaultError::DeployPaused);
+    require!(!pool.impaired, HexVaultError::PoolImpaired);
+    require!(amount > 0, HexVaultError::ZeroAmount);
+    require!(
+        amount >= pool.min_venue_move,
+        HexVaultError::VenueMoveTooSmall
+    );
+
+    let free_idle = a
+        .principal_vault
+        .amount
+        .checked_sub(pool.pending_withdrawals)
+        .ok_or(HexVaultError::BelowPendingWithdrawals)?;
+    let total = u128::from(free_idle)
+        .checked_add(u128::from(pool.venue_value))
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    // Rounded up: the idle band is never undershot by rounding.
+    let target = total
+        .checked_mul(u128::from(pool.idle_target_bps))
+        .and_then(|v| v.checked_add(u128::from(BPS_DENOMINATOR) - 1))
+        .ok_or(HexVaultError::ArithmeticOverflow)?
+        / u128::from(BPS_DENOMINATOR);
+    require!(
+        u128::from(amount) <= u128::from(free_idle).saturating_sub(target),
+        HexVaultError::DeployExceedsIdle
+    );
+
+    let funds = Funds {
+        vault: &a.principal_vault,
+        mint: &a.accepted_mint,
+        token_program: &a.token_program,
+    };
+    venue::deposit(&a.pool, &venue, &funds, amount)?;
+
+    // Book only what the deposit itself added to the venue's value, on top of
+    // what the pool already recorded, so the deploy is not a gain at the next
+    // sync and a gain a same-second sync skipped stays visible to it. The
+    // part of `amount` the venue did not credit (rounding) is not the
+    // depositors' to lose, so it comes off the fee owed, floored at zero.
+    let after = venue::value(&a.pool, &venue)?;
+    let rise = after
+        .checked_sub(read)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    let dust = amount
+        .checked_sub(rise)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    let pool = &mut a.pool;
+    pool.venue_value = pool
+        .venue_value
+        .checked_add(rise)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    pool.fee_owed = pool.fee_owed.saturating_sub(dust);
+
+    emit!(VenueDeployed {
+        pool: pool.key(),
+        amount,
+        venue_value: pool.venue_value,
+    });
+    Ok(())
+}
+
 /// Permissionless crank, only valid once the pool is shut down: pays one
 /// Player's whole `principal + pending_withdraw` to their own USDC ATA, so a
 /// depositor gets out even if the team disappears (spec
@@ -990,8 +1091,58 @@ pub struct CreatePool<'info> {
     #[account(constraint = buyback_reserve.mint == accepted_mint.key() @ HexVaultError::MintMismatch)]
     pub buyback_reserve: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    // The venue, pinned onto the Pool below. Nothing here is checked beyond
+    // not being the default key: on mainnet these are klend's own accounts,
+    // which only the Admin's choice of arguments can vouch for.
+    /// CHECK: pinned to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: pinned to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: pinned to `pool.klend_reserve`.
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: pinned to `pool.klend_ctoken`.
+    pub klend_ctoken: UncheckedAccount<'info>,
+
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+}
+
+/// Permissionless: no signer, like `process_withdraw`. Extra accounts a
+/// venue backing needs go in `remaining_accounts`.
+#[derive(Accounts)]
+pub struct DeployToVenue<'info> {
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL, pool.key().as_ref()],
+        bump = pool.principal_vault_bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
+
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]

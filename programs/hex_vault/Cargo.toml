@@ -19,6 +19,10 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 # Localnet only: compiles in `test_fulfill`, which fabricates a fulfilled
 # randomness account so the suite needs no ORAO deployment.
 test-vrf = []
+# Localnet only: backs the venue module with a stub reserve and compiles in
+# `test_venue_init`, `test_set_venue_rate` and `test_sync`, so the suite needs
+# no klend. `lib.rs` refuses it together with `staging` or `mainnet`.
+test-venue = []
 # One program ID per environment (ops-and-envs ticket 06): `declare_id!` in
 # lib.rs picks the dev, staging or mainnet keypair off these. Default (no
 # feature) is dev. `scripts/check-deployable.sh` refuses `test-vrf` combined

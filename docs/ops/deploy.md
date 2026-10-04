@@ -21,7 +21,7 @@ The script, in order:
    for dev and staging, `.env.mainnet`'s `RPC_URL` for mainnet).
 2. Builds: `anchor build -- --features <feature>` for dev and staging, `solana-verify build --
    --features mainnet` for mainnet (see "Verifiable build" below).
-3. Runs `scripts/check-deployable.sh`, which refuses a `test-vrf` artifact.
+3. Runs `scripts/check-deployable.sh`, which refuses a `test-vrf` or `test-venue` artifact.
 4. Asserts that the keypair's pubkey matches the built `declare_id!` (read from the built IDL's
    `address` field), so a mismatched keypair fails before anything is written on chain.
 5. Writes a buffer, then deploys or upgrades against it. Both calls carry a priority fee

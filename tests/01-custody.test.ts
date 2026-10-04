@@ -37,6 +37,7 @@ import {
   setupPool,
   sleepUntilOnChain,
   testNonce,
+  venueAccountsFor,
   vrfSeed,
   WEIGHT_TREE_SPACE,
   type PoolCtx,
@@ -900,6 +901,9 @@ describe("create_pool guards", () => {
       house: playerPda(pool, payer.publicKey),
       treasury,
       buybackReserve,
+      // Pinned unchecked; these cases never reach a sync, so the stub's
+      // accounts need not exist.
+      ...venueAccountsFor(pool),
       tokenProgram,
       systemProgram: SystemProgram.programId,
     };

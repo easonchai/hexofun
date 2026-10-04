@@ -95,6 +95,40 @@ export function jackpotVaultPda(pool: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync([Buffer.from("jackpot"), pool.toBuffer()], PROGRAM_ID)[0];
 }
 
+/** The test-venue stub's reserve: shares held and the USDC-per-share rate. */
+export function testVenueReservePda(pool: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("test-venue-reserve"), pool.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
+/** The test-venue stub's USDC vault, owned by the pool PDA. */
+export function testVenueVaultPda(pool: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("test-venue-vault"), pool.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
+/** The four addresses `create_pool` pins and every syncing instruction is
+ *  handed. Under test-venue: this program, the pool, and the stub's two PDAs. */
+export interface VenueAccounts {
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
+}
+
+export function venueAccountsFor(pool: PublicKey): VenueAccounts {
+  return {
+    klendProgram: PROGRAM_ID,
+    klendMarket: pool,
+    klendReserve: testVenueReservePda(pool),
+    klendCtoken: testVenueVaultPda(pool),
+  };
+}
+
 /** Discriminator plus the zero-copy header; `create_pool` wants exactly
  *  this, a tree with zero nodes (yield-claimer ticket 04). */
 export const WEIGHT_TREE_SPACE = 8 + 48;
@@ -420,6 +454,8 @@ export interface PoolCtx {
   jackpotVault: PublicKey;
   house: PublicKey;
   weightTree: PublicKey;
+  /** Spread into any instruction that syncs. */
+  venue: VenueAccounts;
   minDeposit: bigint;
   houseCutBps: number;
   baseRateBps: number;
@@ -470,6 +506,7 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
   const house = playerPda(pool, operator.publicKey);
   const epochAnchor = overrides.epochAnchor ?? (await onChainNowSeconds());
   const weightTree = await weightTreeAccount(operator.publicKey);
+  const venue = venueAccountsFor(pool);
 
   await program.methods
     .createPool({
@@ -500,11 +537,27 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       weightTree: weightTree.keypair.publicKey,
       treasury,
       buybackReserve,
+      ...venue,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .preInstructions([weightTree.ix])
     .signers([operator, weightTree.keypair])
+    .rpc();
+
+  // The stub venue's reserve and USDC vault, once per pool (test-venue).
+  await program.methods
+    .testVenueInit()
+    .accountsPartial({
+      payer: operator.publicKey,
+      pool,
+      acceptedMint: mint,
+      reserve: venue.klendReserve,
+      venueVault: venue.klendCtoken,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([operator])
     .rpc();
 
   // A new pool starts with both the game and the jackpot paused (spec
@@ -547,6 +600,7 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
     jackpotVault,
     house,
     weightTree: weightTree.keypair.publicKey,
+    venue,
     minDeposit: BigInt(params.minDeposit),
     houseCutBps: params.houseCutBps,
     baseRateBps: params.baseRateBps,
@@ -554,4 +608,71 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
     bonusCapBps: params.bonusCapBps,
     fundedWallet,
   };
+}
+
+// --- Stub venue (test-venue) -------------------------------------------------
+
+const big = (n: { toString(): string }): bigint => BigInt(n.toString());
+
+/** Builder for `deploy_to_venue`; `.rpc()` it, or `.transaction()` it to pick
+ *  the fee payer. `venue` overrides the pinned accounts for mismatch tests. */
+export function deployMethod(ctx: PoolCtx, amount: bigint, venue: VenueAccounts = ctx.venue) {
+  return program.methods.deployToVenue(new BN(amount.toString())).accountsPartial({
+    pool: ctx.pool,
+    principalVault: ctx.principalVault,
+    acceptedMint: ctx.mint,
+    ...venue,
+    tokenProgram: TOKEN_PROGRAM_ID,
+  });
+}
+
+export function deployToVenue(ctx: PoolCtx, amount: bigint, venue: VenueAccounts = ctx.venue) {
+  return deployMethod(ctx, amount, venue).rpc();
+}
+
+/** The stub's USDC-per-share rate scaled by 1e18, up or down. */
+export function setVenueRate(ctx: PoolCtx, rate: bigint) {
+  return program.methods
+    .testSetVenueRate(new BN(rate.toString()))
+    .accountsPartial({ pool: ctx.pool, reserve: ctx.venue.klendReserve });
+}
+
+/** Builder for `test_sync`: sync and nothing else. */
+export function testSyncMethod(ctx: PoolCtx, venue: VenueAccounts = ctx.venue) {
+  return program.methods.testSync().accountsPartial({ pool: ctx.pool, ...venue });
+}
+
+/** Blocks until the chain clock is past the pool's `last_sync_at`, so the next
+ *  sync is not swallowed by the same-second no-op. */
+export async function waitPastLastSync(ctx: PoolCtx): Promise<void> {
+  const pool = await program.account.pool.fetch(ctx.pool);
+  await sleepUntilOnChain(Number(pool.lastSyncAt.toString()) + 1);
+}
+
+/** The stub's live value, `floor(shares x rate / 1e18)`, in USDC atomic units. */
+export async function stubVenueValue(ctx: PoolCtx): Promise<bigint> {
+  const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+  return (big(reserve.shares) * big(reserve.rate)) / 10n ** 18n;
+}
+
+/**
+ * The solvency invariant (spec "Solvency invariant"): principal vault balance
+ * plus venue value covers every claim on it. Call after every instruction.
+ */
+export async function assertSolvent(ctx: PoolCtx): Promise<void> {
+  const pool = await program.account.pool.fetch(ctx.pool);
+  const vault = big(
+    (await provider.connection.getTokenAccountBalance(ctx.principalVault)).value.amount,
+  );
+  const assets = vault + (await stubVenueValue(ctx));
+  const claims =
+    big(pool.totalPrincipal) +
+    big(pool.pendingWithdrawals) +
+    big(pool.yieldOwed) +
+    big(pool.feeOwed) +
+    big(pool.prizeOwed) -
+    big(pool.deficit);
+  if (assets < claims) {
+    throw new Error(`insolvent: vault ${vault} + venue ${assets - vault} < claims ${claims}`);
+  }
 }

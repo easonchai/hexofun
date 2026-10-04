@@ -14,10 +14,14 @@ pub mod errors;
 pub mod events;
 pub mod rounds;
 pub mod state;
+pub mod sync;
+#[cfg(feature = "test-venue")]
+pub mod test_venue;
 #[cfg(feature = "test-vrf")]
 pub mod test_vrf;
 pub mod touch;
 pub mod utils;
+pub mod venue;
 pub mod vrf;
 // Yield-claimer ticket 02 prototype; test-only, never in the binary.
 #[cfg(test)]
@@ -28,6 +32,8 @@ use anchor_lang::prelude::*;
 use custody::*;
 use epochs::*;
 use rounds::*;
+#[cfg(feature = "test-venue")]
+use test_venue::*;
 #[cfg(feature = "test-vrf")]
 use test_vrf::*;
 
@@ -45,6 +51,10 @@ compile_error!("feature `devnew` cannot combine with `staging` or `mainnet`");
 // skips `scripts/deploy.sh`'s runtime check.
 #[cfg(all(feature = "test-vrf", any(feature = "staging", feature = "mainnet")))]
 compile_error!("feature `test-vrf` cannot combine with `staging` or `mainnet`");
+// yield-claimer ticket 05: a `test-venue` build values and moves USDC against
+// a stub reserve anyone can reprice, so it is as undeployable as `test-vrf`.
+#[cfg(all(feature = "test-venue", any(feature = "staging", feature = "mainnet")))]
+compile_error!("feature `test-venue` cannot combine with `staging` or `mainnet`");
 
 #[cfg(feature = "mainnet")]
 declare_id!("EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH");
@@ -213,6 +223,34 @@ pub mod hex_vault {
 
     pub fn rollover_epoch(ctx: Context<RolloverEpoch>) -> Result<()> {
         epochs::rollover_epoch(ctx)
+    }
+
+    /// Permissionless (yield-claimer ticket 05): syncs, then moves idle USDC
+    /// above the idle target into the venue. Venue-specific extra accounts go
+    /// in `remaining_accounts`.
+    pub fn deploy_to_venue<'info>(
+        ctx: Context<'info, DeployToVenue<'info>>,
+        amount: u64,
+    ) -> Result<()> {
+        custody::deploy_to_venue(ctx, amount)
+    }
+
+    // Localnet only: the stub venue behind `venue.rs` (yield-claimer ticket
+    // 05). Created once after `create_pool`, repriced by the tests.
+    #[cfg(feature = "test-venue")]
+    pub fn test_venue_init(ctx: Context<TestVenueInit>) -> Result<()> {
+        test_venue::test_venue_init(ctx)
+    }
+
+    #[cfg(feature = "test-venue")]
+    pub fn test_set_venue_rate(ctx: Context<TestSetVenueRate>, rate: u128) -> Result<()> {
+        test_venue::test_set_venue_rate(ctx, rate)
+    }
+
+    /// Runs sync and nothing else, because only deploy runs it in ticket 05.
+    #[cfg(feature = "test-venue")]
+    pub fn test_sync<'info>(ctx: Context<'info, TestSync<'info>>) -> Result<()> {
+        test_venue::test_sync(ctx)
     }
 
     // Localnet only (spec §2.5): fabricates a fulfilled ORAO randomness

@@ -154,4 +154,20 @@ pub enum HexVaultError {
     // Layout rewrite (yield-claimer ticket 04). Appended too.
     #[msg("payout is disabled until the Weight tree draw lands (yield-claimer ticket 08)")]
     DrawPendingWeightTree,
+
+    // Venue, sync and deploy (yield-claimer ticket 05). Appended too.
+    #[msg("a venue account does not match the address pinned on the pool")]
+    VenueMismatch,
+    #[msg("no yield venue is built into this program yet")]
+    VenueUnavailable,
+    #[msg("the venue cannot return that much right now")]
+    VenueIlliquid,
+    #[msg("the amount is below the pool's minimum venue move")]
+    VenueMoveTooSmall,
+    #[msg("the amount is more than the idle USDC above the idle target")]
+    DeployExceedsIdle,
+    #[msg("deploying to the venue is paused")]
+    DeployPaused,
+    #[msg("the pool is impaired by a venue loss")]
+    PoolImpaired,
 }

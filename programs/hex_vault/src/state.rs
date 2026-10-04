@@ -125,12 +125,12 @@ pub struct Pool {
 
     // Live yield (ADR 0017) and the Weight tree (ADR 0018), added by the
     // ticket 04 rewrite. Everything below starts at the value `create_pool`
-    // writes; nothing reads the yield state until ticket 05's sync.
+    // writes; ticket 05's sync is the first thing to move them.
     /// The pool's [`WeightTree`] account, created at `create_pool`.
     pub weight_tree: Pubkey,
     /// The pinned klend program, lending market, reserve and the pool's
-    /// cToken account. Ticket 05 makes `create_pool` take them; until then
-    /// they are `Pubkey::default()`.
+    /// cToken account. `create_pool` takes them (never the default key) and
+    /// every venue instruction checks its accounts against them.
     pub klend_program: Pubkey,
     pub klend_market: Pubkey,
     pub klend_reserve: Pubkey,
