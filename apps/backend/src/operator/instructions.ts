@@ -41,7 +41,8 @@ interface BuiltAccounts {
 }
 
 interface MethodBuilder {
-  accountsPartial(accounts: Record<string, PublicKey>): BuiltAccounts;
+  /** `null` leaves an optional account out. */
+  accountsPartial(accounts: Record<string, PublicKey | null>): BuiltAccounts;
 }
 
 type MethodFactory = (...args: unknown[]) => MethodBuilder;
@@ -177,8 +178,9 @@ export class OperatorInstructions {
 
   /**
    * Step 6b: pay one batch of due withdrawal requests. `process_withdraw`
-   * syncs, settles and writes the Weight tree, so it names both. It takes no
-   * signer, so the operator is here only as the fee payer and as
+   * syncs, settles and writes the Weight tree, so it names both. The optional
+   * owner signer is left out (the tick sends none while the pool is impaired,
+   * the only time the program wants it), so the operator is here only as the fee payer and as
    * the payer of the owner token accounts it creates. Each payout is
    * preceded by an idempotent ATA creation: the program transfers to a
    * token account of the accepted mint owned by `player.owner`, and a
@@ -205,6 +207,8 @@ export class OperatorInstructions {
             .accountsPartial({
               pool: pool.address,
               player: this.player(pool, owner),
+              // Null, not omitted: the client would fill the operator in.
+              owner: null,
               weightTree: pool.weightTree,
               acceptedMint: pool.acceptedMint,
               ownerToken,

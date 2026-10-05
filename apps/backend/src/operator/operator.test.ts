@@ -1102,6 +1102,85 @@ describe("runTick", () => {
     expect(outcome.withdrawState?.singleMode).toBe(true);
   });
 
+  it("6b. sends no withdrawal while the pool is impaired, and resumes when it clears", async () => {
+    const due = pending(2);
+    let asked = 0;
+    const withdrawals = async () => {
+      asked += 1;
+      return due;
+    };
+    const impaired = context({
+      pool: pool({ openRoundId: 0n, paused: true, impaired: true }),
+      openRound: null,
+      duePendingWithdrawals: withdrawals,
+    });
+    const held = await runTick(impaired.ctx);
+    expect(held.action).toBeNull();
+    expect(held.stepError).toBeUndefined();
+    expect(impaired.sent).toHaveLength(0);
+    expect(asked).toBe(0);
+
+    const cleared = context({
+      pool: pool({ openRoundId: 0n, paused: true, impaired: false }),
+      openRound: null,
+      duePendingWithdrawals: withdrawals,
+    });
+    const resumed = await runTick(cleared.ctx);
+    expect(resumed.action).toBe("process_withdraw");
+    expect((cleared.sent[0] ?? []).filter((ix) => label(ix) === "process_withdraw")).toHaveLength(2);
+  });
+
+  it("6b. retries an owner whose Position is still open on a later tick, with no alert", async () => {
+    const owners = pending(3);
+    let refuse = true;
+    const send = async (ixs: TransactionInstruction[]) => {
+      if (refuse && ixs.some((ix) => label(ix) === "process_withdraw")) {
+        throw new Error("OpenPositions");
+      }
+      return "signature";
+    };
+    const first = await runTick(
+      context({
+        pool: pool({ openRoundId: 0n, paused: true }),
+        openRound: null,
+        duePendingWithdrawals: async () => owners,
+        send,
+      }).ctx,
+    );
+    expect(first.action).toBeNull();
+    expect(first.stepError).toBeUndefined();
+    // Single sends from here, and nobody is skipped or counted as failing.
+    expect(first.withdrawState?.singleMode).toBe(true);
+    expect(first.withdrawState?.skipped.size).toBe(0);
+
+    // Still open on the next tick: the same quiet answer.
+    const second = await runTick(
+      context({
+        pool: pool({ openRoundId: 0n, paused: true }),
+        openRound: null,
+        duePendingWithdrawals: async () => owners,
+        lastWithdrawState: first.withdrawState ?? null,
+        send,
+      }).ctx,
+    );
+    expect(second.stepError).toBeUndefined();
+    expect(second.withdrawState?.failures.size).toBe(0);
+    expect(second.withdrawState?.skipped.size).toBe(0);
+
+    // Settled: the same owner is paid.
+    refuse = false;
+    const third = await runTick(
+      context({
+        pool: pool({ openRoundId: 0n, paused: true }),
+        openRound: null,
+        duePendingWithdrawals: async () => owners,
+        lastWithdrawState: second.withdrawState ?? null,
+        send,
+      }).ctx,
+    );
+    expect(third.action).toBe("process_withdraw");
+  });
+
   it("6b. (ticket 06) falls back to single sends after a batch failure", async () => {
     const owners = pending(3);
     let attempt = 0;

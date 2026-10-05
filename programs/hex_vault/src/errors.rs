@@ -50,22 +50,28 @@ pub enum HexVaultError {
     // Epochs
     #[msg("the current epoch has not ended yet")]
     EpochNotEnded,
+    // Unused since the layout rewrite, kept only to hold its code.
     #[msg("epoch is not accepting registrations")]
     EpochNotRegistering,
     #[msg("epoch is not drawing")]
     EpochNotDrawing,
     #[msg("epoch has not been drawn")]
     EpochNotDrawn,
+    // Unused since the layout rewrite, kept only to hold its code.
     #[msg("only the epoch immediately before the current one may be registered")]
     NotPreviousEpoch,
+    // Unused since the layout rewrite, kept only to hold its code.
     #[msg("player is already registered for this epoch")]
     AlreadyRegistered,
+    // Unused since the layout rewrite, kept only to hold its code.
     #[msg("player's frozen weight belongs to a different epoch")]
     FrozenEpochMismatch,
+    // Unused since the layout rewrite, kept only to hold its code.
     #[msg("player is not registered for this epoch")]
     NotRegistered,
     #[msg("the drawn target is outside this player's registered interval")]
     NotTheWinner,
+    // Unused since the layout rewrite, kept only to hold its code.
     #[msg("no weight was registered for this epoch")]
     NothingRegistered,
 
@@ -220,4 +226,10 @@ pub enum HexVaultError {
     // Rounds end inside their epoch (yield-claimer ticket 21). Appended too.
     #[msg("the round would end after the current epoch ends")]
     RoundStraddlesEpoch,
+
+    // Mainnet review fixes (tickets 02 and 04). Appended too.
+    #[msg("the player has a Position open; settle it, then process the withdrawal")]
+    OpenPositions,
+    #[msg("the pool is impaired; the player's owner must sign this exit")]
+    OwnerSignatureRequired,
 }

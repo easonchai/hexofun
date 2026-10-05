@@ -249,7 +249,7 @@ export function randomnessForTarget(total: bigint, lo: bigint, hi: bigint): Uint
 
 // --- vrf_seed(domain, pool, id, nonce) --------------------------------------
 //
-// `request_round_randomness` and `close_registration` (beta-launch-fixes
+// `request_round_randomness` and `request_draw` (beta-launch-fixes
 // ticket 02) mix a 32-byte nonce into the seed, so a test has to derive the
 // same seed client-side to know which randomness account to pass -- the
 // address is unknowable from public inputs alone any more. No dependency in

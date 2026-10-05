@@ -23,14 +23,19 @@ import {
   coverDeficitMethod,
   deployMethod,
   deployToVenue,
+  epochPda,
   findEvent,
+  fulfillRandomness,
   grantTicketsAsAdmin,
   harvestMethod,
   playerPda,
   program,
   provider,
+  randomnessForTarget,
   recallMethod,
   refundAccounts,
+  requestDrawMethod,
+  retryUntilOk,
   setDeployPauseMethod,
   setReserveStats,
   setupPool,
@@ -95,29 +100,37 @@ async function requestWithdraw(ctx: PoolCtx, owner: Wallet, amount: bigint) {
   await assertSolvent(ctx);
 }
 
-function processMethod(ctx: PoolCtx, owner: Wallet) {
-  return program.methods.processWithdraw().accountsPartial({
-    pool: ctx.pool,
-    player: playerPda(ctx.pool, owner.keypair.publicKey),
-    acceptedMint: ctx.mint,
-    ownerToken: owner.tokenAccount,
-    principalVault: ctx.principalVault,
-    tokenProgram: TOKEN_PROGRAM_ID,
+/** `signed` adds the owner as the optional signer, which an impaired pool needs. */
+function processMethod(ctx: PoolCtx, owner: Wallet, signed = false) {
+  return program.methods
+    .processWithdraw()
+    .accountsPartial({
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, owner.keypair.publicKey),
+      owner: signed ? owner.keypair.publicKey : null,
+      acceptedMint: ctx.mint,
+      ownerToken: owner.tokenAccount,
+      principalVault: ctx.principalVault,
+      tokenProgram: TOKEN_PROGRAM_ID,
       ...ctx.venue,
-  });
+    })
+    .signers(signed ? [owner.keypair] : []);
 }
 
-function emergencyMethod(ctx: PoolCtx, owner: Wallet) {
-  return program.methods.emergencyWithdraw().accountsPartial({
-    pool: ctx.pool,
-    player: playerPda(ctx.pool, owner.keypair.publicKey),
-    owner: owner.keypair.publicKey,
-    acceptedMint: ctx.mint,
-    ownerToken: owner.tokenAccount,
-    principalVault: ctx.principalVault,
-    ...ctx.venue,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  });
+function emergencyMethod(ctx: PoolCtx, owner: Wallet, signed = false) {
+  return program.methods
+    .emergencyWithdraw()
+    .accountsPartial({
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, owner.keypair.publicKey),
+      owner: signed ? owner.keypair.publicKey : null,
+      acceptedMint: ctx.mint,
+      ownerToken: owner.tokenAccount,
+      principalVault: ctx.principalVault,
+      ...ctx.venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers(signed ? [owner.keypair] : []);
 }
 
 /** `request_withdraw` for a Player whose Principal is a pending deposit, which
@@ -312,23 +325,28 @@ describe("venue loss and the haircut", () => {
   );
 
   it(
-    "refuses harvest and deploy while impaired, and still takes deposits, queued requests and recalls",
+    "refuses harvest, deploy and deposits while impaired, and still takes queued requests and recalls",
     async () => {
       const { ctx, wallets } = await deployedPool([1_000n * USDC]);
       const [alice] = wallets as [Wallet];
       await beginFirstEpoch(ctx); // Alice's deposit is active, so her request queues
       // A 1 USDC floor, so a small recall is allowed. Also exercises the setter.
       await setVenueParamsMethod(ctx, { minVenueMove: 1n * USDC }).rpc();
+      // Bob's deposit pushes free idle over the target, which deploy would
+      // normally take, but not while impaired.
+      const bob = await ctx.fundedWallet(501n * USDC);
+      await deposit(ctx, bob, 500n * USDC);
       await reprice(ctx, RATE_08);
       expect((await fetchPool(ctx)).impaired).toBe(true);
 
       await refused(ctx, harvestMethod(ctx).rpc(), /PoolImpaired/);
-
-      // Deposit still works, and pushes free idle over the target...
-      const bob = await ctx.fundedWallet(500n * USDC);
-      await deposit(ctx, bob, 500n * USDC);
-      // ...which deploy would normally take, but not while impaired.
       await refused(ctx, deployMethod(ctx, 100n * USDC).rpc(), /PoolImpaired/);
+      // A newcomer would lose the haircut share on arrival, so a deposit is
+      // refused before any USDC moves.
+      const vaultBefore0 = await balance(ctx.principalVault);
+      await refused(ctx, deposit(ctx, bob, 1n * USDC), /PoolImpaired/);
+      expect(await balance(ctx.principalVault)).toBe(vaultBefore0);
+      expect(await balance(bob.tokenAccount)).toBe(1n * USDC);
 
       // A queued request still works. 540 pending leaves 60 free idle, under
       // the target of 10% of 780.
@@ -454,7 +472,7 @@ describe("venue loss and the haircut", () => {
       await shutdown(ctx);
 
       const walletBefore = await balance(alice.tokenAccount);
-      const signature = await processMethod(ctx, alice).rpc();
+      const signature = await processMethod(ctx, alice, true).rpc();
       await assertSolvent(ctx);
       expect((await balance(alice.tokenAccount)) - walletBefore).toBe(82n * USDC);
       const pool = await fetchPool(ctx);
@@ -482,7 +500,7 @@ describe("venue loss and the haircut", () => {
       expect(await balance(ctx.principalVault)).toBe(820n * USDC);
 
       const walletBefore = await balance(alice.tokenAccount);
-      const signature = await emergencyMethod(ctx, alice).rpc();
+      const signature = await emergencyMethod(ctx, alice, true).rpc();
       await assertSolvent(ctx);
       // Principal is 1,000 and holds the queued 100. At 0.82 that is 820.
       expect((await balance(alice.tokenAccount)) - walletBefore).toBe(820n * USDC);
@@ -593,6 +611,184 @@ describe("cover deficit", () => {
       const walletBefore = await balance(alice.tokenAccount);
       await refund(ctx, alice, 1_000n * USDC);
       expect((await balance(alice.tokenAccount)) - walletBefore).toBe(1_000n * USDC);
+    },
+    TIMEOUT,
+  );
+});
+
+describe("deposits while impaired", () => {
+  it(
+    "refuses a deposit before any USDC moves, and takes one again once cover_deficit clears the deficit",
+    async () => {
+      const { ctx } = await impairedPool();
+      const bob = await ctx.fundedWallet(200n * USDC);
+      const vaultBefore = await balance(ctx.principalVault);
+      await refused(ctx, deposit(ctx, bob, 100n * USDC), /PoolImpaired/);
+      expect(await balance(ctx.principalVault)).toBe(vaultBefore);
+      expect(await balance(bob.tokenAccount)).toBe(200n * USDC);
+      expect((await fetchPool(ctx)).totalPrincipal.toString()).toBe((1_000n * USDC).toString());
+
+      const payer = await ctx.fundedWallet(200n * USDC);
+      await coverDeficitMethod(ctx, 180n * USDC, payer.keypair, payer.tokenAccount).rpc();
+      await assertSolvent(ctx);
+      expect((await fetchPool(ctx)).impaired).toBe(false);
+
+      await deposit(ctx, bob, 100n * USDC);
+      expect(big((await fetchPlayer(ctx, bob)).principal)).toBe(100n * USDC);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "still pays a Prize, which compounds into the winner's Principal",
+    async () => {
+      const ctx = await setupPool({ epochSeconds: 8 });
+      const alice = await ctx.fundedWallet(1_000n * USDC);
+      const funder = await ctx.fundedWallet(2n * USDC);
+      const key = alice.keypair.publicKey;
+      const beginEpoch = (id: bigint) =>
+        retryUntilOk(() =>
+          program.methods
+            .beginEpoch()
+            .accountsPartial({
+              operator: ctx.operator.publicKey,
+              pool: ctx.pool,
+              currentEpoch: epochPda(ctx.pool, id),
+              epochTwoBehind: epochPda(ctx.pool, id > 0n ? id - 1n : 0n),
+              newEpoch: epochPda(ctx.pool, id + 1n),
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([ctx.operator])
+            .rpc(),
+        );
+      await beginEpoch(0n); // epoch 1
+      await deposit(ctx, alice, 1_000n * USDC);
+      await program.methods
+        .fundJackpot(new BN((2n * USDC).toString()))
+        .accountsPartial({
+          sourceAuthority: funder.keypair.publicKey,
+          pool: ctx.pool,
+          acceptedMint: ctx.mint,
+          source: funder.tokenAccount,
+          jackpotVault: ctx.jackpotVault,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([funder.keypair])
+        .rpc();
+      await deploy(ctx, 900n * USDC);
+      await beginEpoch(1n); // epoch 2: Alice's 1,000 are Tickets
+      await beginEpoch(2n); // epoch 3: epoch 2 can be drawn
+      await requestDrawMethod(ctx, 2n).rpc();
+      const drawing = await program.account.epoch.fetch(epochPda(ctx.pool, 2n));
+      await program.methods
+        .draw()
+        .accountsPartial({
+          caller: ctx.operator.publicKey,
+          pool: ctx.pool,
+          epoch: epochPda(ctx.pool, 2n),
+          randomness: await fulfillRandomness(
+            Uint8Array.from(drawing.vrfSeed),
+            randomnessForTarget(big(drawing.registeredWeight), 0n, big(drawing.registeredWeight)),
+          ),
+        })
+        .signers([ctx.operator])
+        .rpc();
+
+      await reprice(ctx, RATE_08);
+      expect((await fetchPool(ctx)).impaired).toBe(true);
+      const before = await fetchPlayer(ctx, alice);
+
+      await program.methods
+        .payout()
+        .accountsPartial({
+          pool: ctx.pool,
+          acceptedMint: ctx.mint,
+          epoch: epochPda(ctx.pool, 2n),
+          winner: playerPda(ctx.pool, key),
+          jackpotVault: ctx.jackpotVault,
+          principalVault: ctx.principalVault,
+          treasury: ctx.treasury,
+          buybackReserve: ctx.buybackReserve,
+          ...ctx.venue,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+      await assertSolvent(ctx);
+      const after = await fetchPlayer(ctx, alice);
+      expect(big(after.principal)).toBe(big(before.principal) + 2n * USDC);
+      expect((await fetchPool(ctx)).impaired).toBe(true);
+    },
+    TIMEOUT,
+  );
+});
+
+describe("a Haircut exit needs the owner", () => {
+  it(
+    "refuses a stranger's process_withdraw while impaired, pays the owner's at the Haircut value, and pays a stranger's in full once the deficit clears",
+    async () => {
+      const { ctx, wallets } = await deployedPool([500n * USDC, 500n * USDC]);
+      const [alice, bob] = wallets as [Wallet, Wallet];
+      await beginFirstEpoch(ctx); // both deposits are active, so the requests queue
+      await requestWithdraw(ctx, alice, 100n * USDC);
+      await requestWithdraw(ctx, bob, 100n * USDC);
+      await reprice(ctx, RATE_08); // 1,000 of Principal against 820: 0.82
+      await shutdown(ctx); // makes both requests due in this epoch
+
+      // A stranger's push is refused and changes nothing.
+      await refused(ctx, processMethod(ctx, alice).rpc(), /OwnerSignatureRequired/);
+      expect((await fetchPlayer(ctx, alice)).pendingWithdraw.toString()).toBe(
+        (100n * USDC).toString(),
+      );
+
+      // The owner's own is paid the Haircut value, and the loss comes off the deficit.
+      const aliceBefore = await balance(alice.tokenAccount);
+      await processMethod(ctx, alice, true).rpc();
+      await assertSolvent(ctx);
+      expect((await balance(alice.tokenAccount)) - aliceBefore).toBe(82n * USDC);
+      expect(big((await fetchPool(ctx)).deficit)).toBe(162n * USDC);
+
+      // Once the deficit is covered, a stranger's push pays in full.
+      const payer = await ctx.fundedWallet(200n * USDC);
+      await coverDeficitMethod(ctx, 162n * USDC, payer.keypair, payer.tokenAccount).rpc();
+      await assertSolvent(ctx);
+      expect((await fetchPool(ctx)).impaired).toBe(false);
+      const bobBefore = await balance(bob.tokenAccount);
+      await processMethod(ctx, bob).rpc();
+      await assertSolvent(ctx);
+      expect((await balance(bob.tokenAccount)) - bobBefore).toBe(100n * USDC);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "applies the same three cases to emergency_withdraw after Shutdown",
+    async () => {
+      const { ctx, wallets } = await deployedPool([500n * USDC, 500n * USDC]);
+      const [alice, bob] = wallets as [Wallet, Wallet];
+      await reprice(ctx, RATE_08);
+      await shutdown(ctx);
+      // After Shutdown a recall has no limit: bring the position home.
+      await recallMethod(ctx, 720n * USDC).rpc();
+      await assertSolvent(ctx);
+      expect(await balance(ctx.principalVault)).toBe(820n * USDC);
+
+      await refused(ctx, emergencyMethod(ctx, alice).rpc(), /OwnerSignatureRequired/);
+      expect((await fetchPlayer(ctx, alice)).principal.toString()).toBe((500n * USDC).toString());
+
+      const aliceBefore = await balance(alice.tokenAccount);
+      await emergencyMethod(ctx, alice, true).rpc();
+      await assertSolvent(ctx);
+      expect((await balance(alice.tokenAccount)) - aliceBefore).toBe(410n * USDC);
+      expect(big((await fetchPool(ctx)).deficit)).toBe(90n * USDC);
+
+      const payer = await ctx.fundedWallet(100n * USDC);
+      await coverDeficitMethod(ctx, 90n * USDC, payer.keypair, payer.tokenAccount).rpc();
+      await assertSolvent(ctx);
+      expect((await fetchPool(ctx)).impaired).toBe(false);
+      const bobBefore = await balance(bob.tokenAccount);
+      await emergencyMethod(ctx, bob).rpc();
+      await assertSolvent(ctx);
+      expect((await balance(bob.tokenAccount)) - bobBefore).toBe(500n * USDC);
     },
     TIMEOUT,
   );

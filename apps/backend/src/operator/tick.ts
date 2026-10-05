@@ -760,9 +760,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
     ctx.lastWithdrawState?.epochId === pool.currentEpochId
       ? ctx.lastWithdrawState
       : EMPTY_WITHDRAW_STATE(pool.currentEpochId);
-  const due = (await ctx.duePendingWithdrawals(pool.currentEpochId)).filter(
-    (entry) => !withdrawStateIn.skipped.has(entry.owner),
-  );
+  // Impaired, every payout is the Haircut value, so the program wants the
+  // owner's own signature and the crank sends nothing until the pool recovers.
+  const due = pool.impaired
+    ? []
+    : (await ctx.duePendingWithdrawals(pool.currentEpochId)).filter(
+        (entry) => !withdrawStateIn.skipped.has(entry.owner),
+      );
   let withdrawShortfall = 0n;
   if (due.length > 0) {
     // Ticket 06: once a batch send has failed, every following tick pays the
@@ -797,6 +801,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
           `principal vault holds ${held} against ${owed} of due withdrawals; short by ${withdrawShortfall}`,
         );
         withdrawStateOut = withdrawStateIn;
+      } else if (message === "OpenPositions") {
+        // A Position is still on the board: step 5 settles it, and a later
+        // tick pays. No alert, no failure count and no skip, but one at a
+        // time so the owners behind this one are not held by the whole batch.
+        // ponytail: an owner whose Position stays open holds the single-mode
+        // queue behind them, bounded by how fast step 5 settles it.
+        withdrawStateOut = { ...withdrawStateIn, singleMode: true };
       } else if (!withdrawStateIn.singleMode) {
         // First failure of a batch: never blame a specific owner yet, just
         // switch strategy so the next tick isolates the bad one.
@@ -885,6 +896,8 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // request re-stamped `pending_epoch` to the epoch now running.
   "NothingPending",
   "NotPreviousEpoch",
+  // `process_withdraw` for a Player whose Position is not settled yet.
+  "OpenPositions",
   // The admin's shutdown() landed between this tick's read of `pool.shutdown`
   // and one of the steps it gates confirming (ops-and-envs ticket 02): the
   // gates above make this rare, not impossible, and the next tick reads the

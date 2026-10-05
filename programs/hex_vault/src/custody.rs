@@ -61,8 +61,8 @@ pub struct CreatePoolParams {
     pub house_cut_bps: u16,
     pub min_jackpot: u64,
     pub payout_timeout: i64,
-    /// Ceiling on the depositor share, as an APR in basis points, capped at
-    /// `BPS_DENOMINATOR`.
+    /// Ceiling on the depositor share, as an annual rate in basis points,
+    /// capped at `BPS_DENOMINATOR`. No floor.
     pub base_rate_bps: u16,
     /// Tickets credited per USDC spent in `buy_tickets`. Must be > 0.
     pub tickets_per_usdc: u16,
@@ -496,6 +496,9 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
     require!(!player.is_house, HexVaultError::HouseCannotDeposit);
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
     require!(!pool.paused, HexVaultError::PoolPaused);
+    // A deposit into a short pool would take the haircut share of its money at
+    // once. It reopens when the deficit clears.
+    require!(!pool.impaired, HexVaultError::PoolImpaired);
     require!(
         amount >= pool.min_deposit,
         HexVaultError::BelowMinimumDeposit
@@ -723,8 +726,14 @@ pub fn request_withdraw<'info>(
     Ok(())
 }
 
-/// Pays a matured request. No signer at all: the operator pushes these every
-/// epoch, and the depositor (or anyone) can push their own if it does not.
+/// Pays a matured request. Not impaired, no signer at all: the operator pushes
+/// these every epoch, and the depositor (or anyone) can push their own if it
+/// does not. Impaired, the payout is the haircut value, so the Player's owner
+/// must sign for it (`OwnerSignatureRequired`).
+///
+/// Refused with `OpenPositions` while the Player has a Position on the board,
+/// because the stake would come back at settle to a Player whose Principal has
+/// left. Anyone can settle a finished Position, then this goes through.
 ///
 /// Syncs, settles and touches first, so the yield earned up to this second
 /// stays with the Player and the Tickets reset has run. Then Principal falls by
@@ -754,6 +763,10 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         a.pool.shutdown || a.pool.current_epoch_id > a.player.pending_epoch || now > deadline,
         HexVaultError::WithdrawalNotDue
     );
+    require!(
+        a.player.open_positions == 0,
+        HexVaultError::OpenPositions
+    );
 
     let venue = Venue {
         program: &a.klend_program,
@@ -763,6 +776,11 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         remaining: ctx.remaining_accounts,
     };
     venue::sync(&mut a.pool, &venue)?;
+    // After the sync, which can set or clear the impaired flag.
+    require!(
+        !a.pool.impaired || a.owner.is_some(),
+        HexVaultError::OwnerSignatureRequired
+    );
     touch(&mut a.player, &a.pool);
     let owed = settle(&mut a.pool, &mut a.player)?;
     let mut change = Change::default();
@@ -1232,6 +1250,8 @@ pub struct SetVenueParamsArgs {
 /// Admin-only (ticket 10). Each value is bounded by a program constant, and
 /// the idle floor may not pass the idle target. The pair is judged on where it
 /// ends up, so one call can move both. Pinned venue addresses are not settable.
+/// The base rate (`set_params`) is the exception: it has no floor, so the Admin
+/// can send all yield above the Yield fee to the Prize.
 pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
     if let Some(v) = params.yield_fee_bps {
@@ -1279,11 +1299,12 @@ pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs
     Ok(())
 }
 
-/// Permissionless crank, only valid once the pool is shut down: pays one
-/// Player's whole Principal, which already holds the pending deposit and the
-/// queued withdrawal, to their own USDC ATA, so a
+/// Permissionless crank while the pool is not impaired, only valid once the
+/// pool is shut down: pays one Player's whole Principal, which already holds
+/// the pending deposit and the queued withdrawal, to their own USDC ATA, so a
 /// depositor gets out even if the team disappears (spec
-/// "emergency_withdraw"). House is skipped: its principal is protocol money
+/// "emergency_withdraw"). Impaired, the payout is the haircut value and the
+/// Player's owner must sign for it (`OwnerSignatureRequired`). House is skipped: its principal is protocol money
 /// and leaves through `sweep_house` instead.
 pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) -> Result<()> {
     let a = &mut *ctx.accounts;
@@ -1295,6 +1316,11 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         remaining: ctx.remaining_accounts,
     };
     venue::sync(&mut a.pool, &venue)?;
+    // After the sync, which can set or clear the impaired flag.
+    require!(
+        !a.pool.impaired || a.owner.is_some(),
+        HexVaultError::OwnerSignatureRequired
+    );
     let pool = &mut a.pool;
     let player = &mut a.player;
     touch(player, pool);
@@ -1459,7 +1485,7 @@ pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
 
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
     require!(!pool.paused, HexVaultError::PoolPaused);
-    // Bought before Epoch 1 exists would be Entries with nowhere to register
+    // Bought before Epoch 1 exists would be Entries with no epoch to count in
     // and no epoch boundary to reset them, so they are just lost the moment
     // `begin_epoch` first runs (beta-launch-fixes ticket 03).
     require!(pool.current_epoch_id > 0, HexVaultError::NoEpochYet);
@@ -2169,6 +2195,11 @@ pub struct ProcessWithdraw<'info> {
     )]
     pub player: Box<Account<'info, Player>>,
 
+    /// Needed only while the pool is impaired, when this exit pays the haircut
+    /// value. Leave it out otherwise.
+    #[account(address = player.owner)]
+    pub owner: Option<Signer<'info>>,
+
     #[account(mut)]
     pub weight_tree: AccountLoader<'info, WeightTree>,
 
@@ -2207,10 +2238,9 @@ pub struct ProcessWithdraw<'info> {
     pub token_program: Interface<'info, TokenInterface>,
 }
 
-/// Permissionless: no signer at all, like `process_withdraw`. `owner` is
-/// unchecked but pinned to `player.owner`, and the destination below has to
-/// belong to that same owner, so nobody but the Player's own owner can ever
-/// receive the payout.
+/// Permissionless while the pool is not impaired, like `process_withdraw`. The
+/// destination below has to belong to `player.owner`, so nobody but the
+/// Player's own owner can ever receive the payout.
 #[derive(Accounts)]
 pub struct EmergencyWithdraw<'info> {
     #[account(
@@ -2231,9 +2261,9 @@ pub struct EmergencyWithdraw<'info> {
     #[account(mut)]
     pub weight_tree: AccountLoader<'info, WeightTree>,
 
-    /// CHECK: pinned to `player.owner` by the `address` constraint below.
+    /// Needed only while the pool is impaired. Leave it out otherwise.
     #[account(address = player.owner)]
-    pub owner: UncheckedAccount<'info>,
+    pub owner: Option<Signer<'info>>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2241,7 +2271,7 @@ pub struct EmergencyWithdraw<'info> {
     #[account(
         mut,
         token::mint = accepted_mint,
-        token::authority = owner,
+        token::authority = player.owner,
         token::token_program = token_program,
     )]
     pub owner_token: Box<InterfaceAccount<'info, TokenAccount>>,

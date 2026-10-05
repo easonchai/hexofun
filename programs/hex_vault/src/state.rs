@@ -90,9 +90,10 @@ pub struct Pool {
     /// next epoch cannot take a prize the previous one still owes. Released
     /// on `payout` and on either branch of `rollover_epoch`.
     pub jackpot_reserved: u64,
-    /// The ceiling on the depositor share of a venue gain, as an APR on
+    /// The ceiling on the depositor share of a venue gain, as an annual rate on
     /// `total_principal` in basis points, capped at `BPS_DENOMINATOR`. Gain
-    /// above it goes to the prize share (ADR 0017).
+    /// above it goes to the prize share (ADR 0017). It has no floor: at zero
+    /// every gain above the Yield fee goes to the prize share.
     pub base_rate_bps: u16,
     /// Tickets credited per USDC spent in `buy_tickets`. An admin parameter,
     /// always greater than zero.
@@ -150,8 +151,9 @@ pub struct Pool {
     pub deficit: u64,
     /// The team's share of every gain, at most `MAX_YIELD_FEE_BPS`.
     pub yield_fee_bps: u16,
-    /// Idle band: free idle USDC as a share of the pool. Recall below the
-    /// floor, deploy above the target.
+    /// Idle band: free idle USDC as a share of the pool. The program never
+    /// reads the floor. The Operator recalls when free idle is under it. Deploy
+    /// moves idle above the target.
     pub idle_floor_bps: u16,
     pub idle_target_bps: u16,
     /// Deploy cap: the pool's largest share of the reserve's supply.
@@ -192,8 +194,8 @@ pub struct Epoch {
     /// [`EpochStatus`]
     pub status: u8,
     /// The Weight tree's root for this epoch, snapshotted by `request_draw`:
-    /// every Player's Tickets at the epoch's end. Named for the registration
-    /// it replaced.
+    /// every Player's Tickets at the epoch's end. The name is from before the
+    /// Weight tree, kept to hold the layout.
     pub registered_weight: u64,
     pub registered_count: u32,
     /// Jackpot vault balance snapshotted at the draw request.
@@ -207,7 +209,7 @@ pub struct Epoch {
     /// When `draw` landed. 0 until then. `rollover_epoch` measures
     /// `Pool.payout_timeout` from here.
     pub drawn_at: i64,
-    /// When `begin_epoch` moved this epoch to Registering. 0 until then.
+    /// When `begin_epoch` ended this epoch and started the next. 0 until then.
     /// `rollover_epoch` measures `Pool.vrf_timeout` from the later of this
     /// and `ends_at` for an epoch that was never sent to the draw.
     pub registration_opened_at: i64,
@@ -309,10 +311,15 @@ pub struct Player {
     pub pending_deposit: u64,
     /// The epoch of the latest deposit. Its Tickets count from the next one.
     pub pending_deposit_epoch: u64,
+    /// Positions this Player has bought and not yet settled. `buy_position`
+    /// raises it and `settle_position` lowers it. `process_withdraw` refuses
+    /// while it is above zero, so a stake on the board can never come back to a
+    /// Player whose Principal has already left.
+    pub open_positions: u32,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013. Smaller
     /// than `Pool`'s: Player rent is paid by the depositor.
-    pub _reserved: [u8; 48],
+    pub _reserved: [u8; 44],
 }
 
 /// A Player's single immutable placement in one round.
@@ -463,7 +470,8 @@ mod tests {
         assert_eq!(player(|p| p.version = 1), 142);
         assert_eq!(player(|p| p.pending_deposit = 1), 143);
         assert_eq!(player(|p| p.pending_deposit_epoch = 1), 151);
-        assert_eq!(player(|p| p._reserved[0] = 1), 159);
+        assert_eq!(player(|p| p.open_positions = 1), 159);
+        assert_eq!(player(|p| p._reserved[0] = 1), 163);
 
         let round = |set: fn(&mut Round)| offset(Round::INIT_SPACE, set);
         assert_eq!(round(|r| r.open_positions = 1), 387);

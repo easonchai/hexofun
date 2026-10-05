@@ -166,3 +166,17 @@ export function pendingWithdrawal(
   const due = shutdown || (currentEpoch !== null && currentEpoch > pendingEpoch);
   return { kind: due ? "due" : "pending", amount, epoch: pendingEpoch };
 }
+
+/** The program refuses `deposit` while the pool is paused or impaired. */
+export const depositOpen = (paused: boolean, impaired: boolean): boolean => !paused && !impaired;
+
+/**
+ * What `process_withdraw` pays for `amount` while the pool is impaired: the
+ * pool's haircut share, rounded down. `factor` is the API's `haircutFactor`
+ * (0 to 1), null when the pool is whole, which pays the full amount.
+ */
+export function haircutValue(amount: bigint, factor: number | null): bigint {
+  if (factor === null || factor >= 1) return amount;
+  const parts = BigInt(Math.floor(Math.max(factor, 0) * 1_000_000));
+  return (amount * parts) / 1_000_000n;
+}

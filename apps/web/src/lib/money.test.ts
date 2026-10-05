@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   addCapped,
   clampDecimals,
+  depositOpen,
   effectiveTickets,
   formatAddress,
   formatAtomic,
   formatAtomic2,
   formatMoney2,
+  haircutValue,
   parseAtomic,
   pendingTickets,
   pendingWithdrawal,
@@ -170,5 +172,26 @@ describe("splitWithdraw", () => {
 
   it("pays the pending part now and queues the rest", () => {
     expect(splitWithdraw(700n, 400n)).toEqual({ payNow: 400n, queued: 300n });
+  });
+});
+
+describe("depositOpen", () => {
+  it("closes the deposit form while the pool is paused or impaired", () => {
+    expect(depositOpen(false, false)).toBe(true);
+    expect(depositOpen(true, false)).toBe(false);
+    expect(depositOpen(false, true)).toBe(false);
+  });
+});
+
+describe("haircutValue", () => {
+  it("pays the whole amount when the pool is whole", () => {
+    expect(haircutValue(500n, null)).toBe(500n);
+    expect(haircutValue(500n, 1)).toBe(500n);
+  });
+
+  it("pays the haircut share, rounded down", () => {
+    expect(haircutValue(500_000_000n, 0.82)).toBe(410_000_000n);
+    expect(haircutValue(100n, 0.333333)).toBe(33n);
+    expect(haircutValue(500n, 0)).toBe(0n);
   });
 });

@@ -37,9 +37,11 @@ import { CLUSTER, type HexVaultProgram } from "../chain.js";
 import {
   addCapped,
   clampDecimals,
+  depositOpen,
   effectiveTickets,
   formatAtomic,
   formatAtomic2,
+  haircutValue,
   parseAtomic,
   pendingTickets,
   pendingWithdrawal,
@@ -197,8 +199,11 @@ export function Vault(props: VaultScreenProps) {
   );
   const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
 
-  // While the pool is impaired every withdrawal pays a share of the amount.
-  const haircutFactor = useLivePool()?.live.haircutFactor ?? null;
+  // While the pool is impaired every withdrawal pays a share of the amount, and
+  // the program takes no deposit.
+  const livePool = useLivePool();
+  const haircutFactor = livePool?.live.haircutFactor ?? null;
+  const impaired = livePool?.pool.impaired ?? false;
 
   // The payout landed (or the request was never there): drop the flag, so a
   // later request for the same amount does not inherit this one's state.
@@ -365,7 +370,7 @@ export function Vault(props: VaultScreenProps) {
     amount > 0n &&
     !overCap &&
     !underMin &&
-    !(mode === "deposit" && paused);
+    !(mode === "deposit" && !depositOpen(paused, impaired));
 
   const ctaText = !connected
     ? "CONNECT WALLET"
@@ -375,7 +380,9 @@ export function Vault(props: VaultScreenProps) {
         ? "POOL CLOSED"
         : mode === "deposit" && paused
           ? "POOL PAUSED"
-          : mode.toUpperCase();
+          : mode === "deposit" && impaired
+            ? "DEPOSITS CLOSED"
+            : mode.toUpperCase();
 
   return (
     <div className="vault" data-testid="vault-screen">
@@ -511,6 +518,11 @@ export function Vault(props: VaultScreenProps) {
                           ? "paying out…"
                           : "ready"}
                     </span>
+                    {pending.kind === "due" && impaired ? (
+                      <span data-testid="pending-withdraw-haircut">
+                        pays {fmt2(haircutValue(pending.amount, haircutFactor))} {SYMBOL} now
+                      </span>
+                    ) : null}
                     {pending.kind === "due" ? (
                       <button
                         type="button"
@@ -519,7 +531,7 @@ export function Vault(props: VaultScreenProps) {
                         disabled={busy}
                         onClick={() => void payOutNow()}
                       >
-                        PAY OUT NOW
+                        {impaired ? "TAKE IT NOW" : "PAY OUT NOW"}
                       </button>
                     ) : null}
                   </dd>
@@ -545,6 +557,10 @@ export function Vault(props: VaultScreenProps) {
               ) : mode === "deposit" && paused ? (
                 <span className="vault-note">
                   Pool is paused: deposits are blocked; withdrawals stay live.
+                </span>
+              ) : mode === "deposit" && impaired ? (
+                <span className="vault-note" data-testid="deposit-impaired-note">
+                  Deposits reopen when the pool recovers from its venue loss.
                 </span>
               ) : null}
               {mode === "withdraw" ? (

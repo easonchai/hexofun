@@ -84,6 +84,7 @@ async function processWithdraw(pool: PoolCtx, owner: Wallet) {
     .accountsPartial({
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
+      owner: null,
       acceptedMint: pool.mint,
       ownerToken: owner.tokenAccount,
       principalVault: pool.principalVault,
@@ -357,7 +358,7 @@ async function emergencyWithdraw(
     .accountsPartial({
       pool: pool.pool,
       player: playerPda(pool.pool, owner),
-      owner,
+      owner: null,
       acceptedMint: pool.mint,
       ownerToken,
       principalVault: pool.principalVault,

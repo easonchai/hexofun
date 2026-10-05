@@ -20,7 +20,7 @@ pub const LAYOUT_VERSION: u8 = 2;
 /// Written to the Weight tree header by `create_pool`.
 pub const WEIGHT_TREE_VERSION: u8 = 1;
 
-/// Denominator for `base_rate_bps`, an APR: seconds in a 365-day year.
+/// Denominator for `base_rate_bps`, an annual rate: seconds in a 365-day year.
 pub const SECONDS_PER_YEAR: u128 = 31_536_000;
 
 // Venue parameter defaults, written by `create_pool` (spec "Layout
@@ -44,8 +44,9 @@ pub const DEFAULT_MIN_VENUE_MOVE: u64 = 100_000_000;
 pub const DEFAULT_LOSS_TOLERANCE_BPS: u16 = 1;
 
 // Bounds `set_venue_params` enforces (yield-claimer ticket 10). The fee cap is
-// `MAX_YIELD_FEE_BPS` above. A stolen Admin key can move each setting only
-// inside these.
+// `MAX_YIELD_FEE_BPS` above. A stolen Admin key can move each venue setting
+// only inside these. The exception is `set_params`: the base rate has no floor,
+// so the Admin can send all yield above the Yield fee to the Prize.
 
 /// The idle target cannot pass this share of the pool. The idle floor cannot
 /// pass the target.

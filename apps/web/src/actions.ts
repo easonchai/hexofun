@@ -7,7 +7,8 @@
  * message)` — instead of a bare signature or a thrown error, and triggers
  * the chain re-read only on `landed`.
  *
- * `settlePosition` and `processWithdraw` are permissionless: the
+ * `settlePosition` and `processWithdraw` are permissionless (`processWithdraw`
+ * wants the owner's signature while the pool is impaired): the
  * program takes no signer for them, so the connected wallet is only the fee
  * payer.
  */
@@ -486,9 +487,10 @@ export async function requestWithdraw(
 }
 
 /**
- * Pays out the whole pending amount. The program takes no signer, so this is
- * the depositor's own escape hatch when the operator has not pushed it yet:
- * the wallet only pays the fee. Fails with `WithdrawalNotDue` before the
+ * Pays out the whole pending amount. The wallet signs as the owner, which the
+ * program needs while the pool is impaired (the payout is the haircut value)
+ * and ignores otherwise, so this is the depositor's own escape hatch when the
+ * operator has not pushed it yet. Fails with `WithdrawalNotDue` before the
  * requesting epoch has ended and `InsufficientVaultLiquidity` while the
  * vault is short, so the caller gates it on the pending row's `due` state.
  */
@@ -503,6 +505,7 @@ export async function processWithdraw(
     .accounts({
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      owner: o,
       weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken,
@@ -578,6 +581,7 @@ export async function shutdownWithdraw(
       .accounts({
         pool: pool.address,
         player: playerAddress(pool.address, o),
+        owner: o,
         weightTree: pool.weightTree,
         acceptedMint: pool.acceptedMint,
         ownerToken,

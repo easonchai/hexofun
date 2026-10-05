@@ -165,6 +165,10 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
         .open_positions
         .checked_add(1)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    player.open_positions = player
+        .open_positions
+        .checked_add(1)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
 
     let round_id = round.round_id;
     let round_key = round.key();
@@ -388,6 +392,8 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
         .open_positions
         .checked_sub(1)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    // Saturating: a Position bought before this count existed settles from zero.
+    player.open_positions = player.open_positions.saturating_sub(1);
 
     emit!(PositionSettled {
         round_id: round.round_id,

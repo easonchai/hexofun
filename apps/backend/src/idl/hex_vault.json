@@ -1251,7 +1251,12 @@
           ]
         },
         {
-          "name": "owner"
+          "name": "owner",
+          "docs": [
+            "Needed only while the pool is impaired. Leave it out otherwise."
+          ],
+          "signer": true,
+          "optional": true
         },
         {
           "name": "accepted_mint"
@@ -1842,6 +1847,15 @@
               }
             ]
           }
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Needed only while the pool is impaired, when this exit pays the haircut",
+            "value. Leave it out otherwise."
+          ],
+          "signer": true,
+          "optional": true
         },
         {
           "name": "weight_tree",
@@ -4398,6 +4412,16 @@
       "code": 6085,
       "name": "RoundStraddlesEpoch",
       "msg": "the round would end after the current epoch ends"
+    },
+    {
+      "code": 6086,
+      "name": "OpenPositions",
+      "msg": "the player has a Position open; settle it, then process the withdrawal"
+    },
+    {
+      "code": 6087,
+      "name": "OwnerSignatureRequired",
+      "msg": "the pool is impaired; the player's owner must sign this exit"
     }
   ],
   "types": [
@@ -4525,8 +4549,8 @@
           {
             "name": "base_rate_bps",
             "docs": [
-              "Ceiling on the depositor share, as an APR in basis points, capped at",
-              "`BPS_DENOMINATOR`."
+              "Ceiling on the depositor share, as an annual rate in basis points,",
+              "capped at `BPS_DENOMINATOR`. No floor."
             ],
             "type": "u16"
           },
@@ -4681,8 +4705,8 @@
             "name": "registered_weight",
             "docs": [
               "The Weight tree's root for this epoch, snapshotted by `request_draw`:",
-              "every Player's Tickets at the epoch's end. Named for the registration",
-              "it replaced."
+              "every Player's Tickets at the epoch's end. The name is from before the",
+              "Weight tree, kept to hold the layout."
             ],
             "type": "u64"
           },
@@ -4736,7 +4760,7 @@
           {
             "name": "registration_opened_at",
             "docs": [
-              "When `begin_epoch` moved this epoch to Registering. 0 until then.",
+              "When `begin_epoch` ended this epoch and started the next. 0 until then.",
               "`rollover_epoch` measures `Pool.vrf_timeout` from the later of this",
               "and `ends_at` for an epoch that was never sent to the draw."
             ],
@@ -5284,6 +5308,16 @@
             "type": "u64"
           },
           {
+            "name": "open_positions",
+            "docs": [
+              "Positions this Player has bought and not yet settled. `buy_position`",
+              "raises it and `settle_position` lowers it. `process_withdraw` refuses",
+              "while it is above zero, so a stake on the board can never come back to a",
+              "Player whose Principal has already left."
+            ],
+            "type": "u32"
+          },
+          {
             "name": "_reserved",
             "docs": [
               "Take new fields from here. Their zero value must be the safe default,",
@@ -5293,7 +5327,7 @@
             "type": {
               "array": [
                 "u8",
-                48
+                44
               ]
             }
           }
@@ -5529,9 +5563,10 @@
           {
             "name": "base_rate_bps",
             "docs": [
-              "The ceiling on the depositor share of a venue gain, as an APR on",
+              "The ceiling on the depositor share of a venue gain, as an annual rate on",
               "`total_principal` in basis points, capped at `BPS_DENOMINATOR`. Gain",
-              "above it goes to the prize share (ADR 0017)."
+              "above it goes to the prize share (ADR 0017). It has no floor: at zero",
+              "every gain above the Yield fee goes to the prize share."
             ],
             "type": "u16"
           },
@@ -5687,8 +5722,9 @@
           {
             "name": "idle_floor_bps",
             "docs": [
-              "Idle band: free idle USDC as a share of the pool. Recall below the",
-              "floor, deploy above the target."
+              "Idle band: free idle USDC as a share of the pool. The program never",
+              "reads the floor. The Operator recalls when free idle is under it. Deploy",
+              "moves idle above the target."
             ],
             "type": "u16"
           },

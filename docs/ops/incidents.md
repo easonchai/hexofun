@@ -96,7 +96,10 @@ Starts with whichever code names the damage, or none if the report comes in firs
    - **Funds need to come out for good**: let any already-drawn epoch's `payout` land, then
      `shutdown --confirm <pool-id>`, recall the venue position, `emergency-crank [--batch N]`,
      `sweep-house`, in that order
-     ([`docs/ops/funds.md`](funds.md#shutdown-and-the-emergency-exits)).
+     ([`docs/ops/funds.md`](funds.md#shutdown-and-the-emergency-exits)). While the pool is
+     Impaired, `emergency-crank` fails with `OwnerSignatureRequired`, because each owner must sign
+     their own exit at the Haircut value (ADR 0021). Run `cover-deficit` first, or leave the exits
+     to the owners.
 4. There is no on-call rotation yet (production-hardening ticket 13 sets up the uptime monitor's
    paging target); until it exists, whoever notices the incident runs this playbook and pulls the
    rest of the team in directly. `security.txt`'s `project_url` and `contacts` are still `TODO` in

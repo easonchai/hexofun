@@ -486,7 +486,7 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       const accounts = {
         pool: ctx.pool,
         player: playerPda(ctx.pool, a.keypair.publicKey),
-        owner: a.keypair.publicKey,
+        owner: null,
         acceptedMint: ctx.mint,
         ownerToken: a.tokenAccount,
         principalVault: ctx.principalVault,

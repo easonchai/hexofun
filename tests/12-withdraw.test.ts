@@ -117,36 +117,44 @@ async function request(ctx: PoolCtx, owner: Wallet, amount: bigint) {
   return signature;
 }
 
-/** Builder for `process_withdraw`. Signed by nobody; the test wallet only pays. */
-function processMethod(ctx: PoolCtx, owner: Wallet) {
-  return program.methods.processWithdraw().accountsPartial({
-    pool: ctx.pool,
-    player: playerPda(ctx.pool, owner.keypair.publicKey),
-    acceptedMint: ctx.mint,
-    ownerToken: owner.tokenAccount,
-    principalVault: ctx.principalVault,
-    ...ctx.venue,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  });
+/** Builder for `process_withdraw`. Signed by nobody unless `signed`, which adds
+ *  the owner as the optional signer an impaired pool needs. */
+function processMethod(ctx: PoolCtx, owner: Wallet, signed = false) {
+  return program.methods
+    .processWithdraw()
+    .accountsPartial({
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, owner.keypair.publicKey),
+      owner: signed ? owner.keypair.publicKey : null,
+      acceptedMint: ctx.mint,
+      ownerToken: owner.tokenAccount,
+      principalVault: ctx.principalVault,
+      ...ctx.venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers(signed ? [owner.keypair] : []);
 }
 
-async function processWithdraw(ctx: PoolCtx, owner: Wallet) {
-  const signature = await processMethod(ctx, owner).rpc();
+async function processWithdraw(ctx: PoolCtx, owner: Wallet, signed = false) {
+  const signature = await processMethod(ctx, owner, signed).rpc();
   await assertSolvent(ctx);
   return signature;
 }
 
-function emergencyMethod(ctx: PoolCtx, owner: Wallet) {
-  return program.methods.emergencyWithdraw().accountsPartial({
-    pool: ctx.pool,
-    player: playerPda(ctx.pool, owner.keypair.publicKey),
-    owner: owner.keypair.publicKey,
-    acceptedMint: ctx.mint,
-    ownerToken: owner.tokenAccount,
-    principalVault: ctx.principalVault,
-    ...ctx.venue,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  });
+function emergencyMethod(ctx: PoolCtx, owner: Wallet, signed = false) {
+  return program.methods
+    .emergencyWithdraw()
+    .accountsPartial({
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, owner.keypair.publicKey),
+      owner: signed ? owner.keypair.publicKey : null,
+      acceptedMint: ctx.mint,
+      ownerToken: owner.tokenAccount,
+      principalVault: ctx.principalVault,
+      ...ctx.venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers(signed ? [owner.keypair] : []);
 }
 
 /** A refused call changes nothing, so solvency must still hold. */
@@ -334,15 +342,16 @@ describe("the refund of a pending deposit", () => {
       await request(ctx, a, 1_000n * USDC);
       expect(big((await fetchPool(ctx)).pendingWithdrawals)).toBe(1_000n * USDC);
 
-      // The venue loses half its value: 900 becomes 450, impaired, deficit 450.
-      await reprice(ctx, SCALE / 2n);
-      expect((await fetchPool(ctx)).impaired).toBe(true);
-
       // B deposits 800 into epoch 2, so the vault holds 900, all of it
-      // reserved for A (1,000 queued). Free idle is nothing.
+      // reserved for A (1,000 queued). Free idle is nothing. A pool that is
+      // impaired takes no deposit, so B comes in first.
       const b = await ctx.fundedWallet(800n * USDC);
       await deposit(ctx, b, 800n * USDC);
       expect(await balance(ctx.principalVault)).toBe(900n * USDC);
+
+      // The venue loses half its value: 900 becomes 450, impaired, deficit 450.
+      await reprice(ctx, SCALE / 2n);
+      expect((await fetchPool(ctx)).impaired).toBe(true);
 
       // The Haircut is 900 + 450 over 1,800 of Principal: 800 refunds as 600.
       // None of it can come from the vault, and the venue is worth 450.
@@ -578,7 +587,7 @@ describe("the Haircut while the pool is impaired", () => {
 
       await beginEpoch(ctx, 2n);
       const walletBefore = await balance(owner.tokenAccount);
-      const signature = await processWithdraw(ctx, owner);
+      const signature = await processWithdraw(ctx, owner, true);
 
       // 500 at 0.82. The queued amount is inside Principal, so the ratio is
       // over 1,000 and not over 1,500.
@@ -611,7 +620,7 @@ describe("emergency withdraw", () => {
       expect(await balance(ctx.principalVault)).toBe(820n * USDC);
 
       const walletBefore = await balance(owner.tokenAccount);
-      const signature = await emergencyMethod(ctx, owner).rpc();
+      const signature = await emergencyMethod(ctx, owner, true).rpc();
       await assertSolvent(ctx);
       // Principal is 1,000 and holds the queued 100. At 0.82 that is 820.
       expect((await balance(owner.tokenAccount)) - walletBefore).toBe(820n * USDC);
@@ -782,6 +791,183 @@ describe("Tickets lost in the game", () => {
       await emergencyMethod(ctx, a).rpc();
       await assertSolvent(ctx);
       expect((await balance(a.tokenAccount)) - walletMid).toBe(5n * USDC);
+    },
+    TIMEOUT,
+  );
+});
+
+const ALL_TILES = (1n << 36n) - 1n;
+
+/** A round that starts now and ends in 5 seconds, in epoch `epochId`. */
+async function openRound(ctx: PoolCtx, roundId: bigint, epochId: bigint) {
+  const startsAt = await onChainNowSeconds();
+  await program.methods
+    .createRound(new BN(startsAt), new BN(startsAt + 5))
+    .accountsPartial({
+      operator: ctx.operator.publicKey,
+      pool: ctx.pool,
+      currentEpoch: epochPda(ctx.pool, epochId),
+      round: roundPda(ctx.pool, roundId),
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([ctx.operator])
+    .rpc();
+}
+
+/** Stakes `stakePerTile` on every tile. */
+async function stakeAll(ctx: PoolCtx, owner: Wallet, roundId: bigint, stakePerTile: bigint) {
+  const key = owner.keypair.publicKey;
+  await program.methods
+    .buyPosition(new BN(ALL_TILES.toString()), new BN(stakePerTile.toString()))
+    .accountsPartial({
+      owner: key,
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, key),
+      round: roundPda(ctx.pool, roundId),
+      position: positionPda(roundPda(ctx.pool, roundId), key),
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([owner.keypair])
+    .rpc();
+  await assertSolvent(ctx);
+}
+
+/** Requests randomness once the round closes and settles it on `tile`. */
+async function settleRoundOn(ctx: PoolCtx, roundId: bigint, tile: number) {
+  const nonce = testNonce();
+  const seed = vrfSeed("round", ctx.pool, roundId, nonce);
+  await retryUntilOk(() =>
+    program.methods
+      .requestRoundRandomness(Array.from(nonce))
+      .accountsPartial({
+        payer: ctx.operator.publicKey,
+        pool: ctx.pool,
+        round: roundPda(ctx.pool, roundId),
+        randomness: randomnessPda(seed),
+        vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
+        vrfTreasury: DEVNET_VRF_TREASURY,
+        vrfProgram: ORAO_VRF_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([ctx.operator])
+      .rpc(),
+  );
+  await program.methods
+    .settleRound()
+    .accountsPartial({
+      caller: ctx.operator.publicKey,
+      pool: ctx.pool,
+      round: roundPda(ctx.pool, roundId),
+      randomness: await fulfillRandomness(seed, randomnessFor(tile)),
+      house: ctx.house,
+    })
+    .signers([ctx.operator])
+    .rpc();
+  await assertSolvent(ctx);
+}
+
+/** Anyone can settle a finished Position: the provider wallet pays, not the owner. */
+async function settlePositionOf(ctx: PoolCtx, owner: Wallet, roundId: bigint) {
+  const key = owner.keypair.publicKey;
+  await program.methods
+    .settlePosition()
+    .accountsPartial({
+      pool: ctx.pool,
+      round: roundPda(ctx.pool, roundId),
+      player: playerPda(ctx.pool, key),
+      owner: key,
+      position: positionPda(roundPda(ctx.pool, roundId), key),
+    })
+    .rpc();
+  await assertSolvent(ctx);
+}
+
+describe("open Positions block the queued payout", () => {
+  it(
+    "refuses process_withdraw while a stake is on the board, pays after the settle, and leaves no Tickets behind",
+    async () => {
+      const ctx = await setupPool({ epochSeconds: 20, roundSeconds: 5, closeBuffer: 1 });
+      const a = await ctx.fundedWallet(36n * USDC);
+      const owner = a.keypair.publicKey;
+      await beginEpoch(ctx, 0n); // epoch 1
+      await deposit(ctx, a, 36n * USDC);
+      await beginEpoch(ctx, 1n); // epoch 2: the 36 is active Tickets
+      await request(ctx, a, 36n * USDC); // queue all
+      await beginEpoch(ctx, 2n); // epoch 3: the request is due
+
+      // Stake every Tile in epoch 3: the Tickets leave the Player and the tree.
+      await openRound(ctx, 1n, 3n);
+      await stakeAll(ctx, a, 1n, 1n * USDC);
+      let player = await fetchPlayer(ctx, a);
+      expect(big(player.entries)).toBe(0n);
+      expect(player.openPositions).toBe(1);
+
+      // Due, but refused with nothing changed, before and after the round settles.
+      const poolBefore = await fetchPool(ctx);
+      await refused(ctx, processMethod(ctx, a).rpc(), /OpenPositions/);
+      await settleRoundOn(ctx, 1n, 7);
+      await refused(ctx, processMethod(ctx, a).rpc(), /OpenPositions/);
+      const poolAfter = await fetchPool(ctx);
+      expect(big(poolAfter.totalPrincipal)).toBe(big(poolBefore.totalPrincipal));
+      expect(big(poolAfter.pendingWithdrawals)).toBe(36n * USDC);
+      expect(big((await fetchPlayer(ctx, a)).pendingWithdraw)).toBe(36n * USDC);
+
+      // Anyone can settle it, and the stake comes home.
+      await settlePositionOf(ctx, a, 1n);
+      player = await fetchPlayer(ctx, a);
+      expect(player.openPositions).toBe(0);
+      // The stake and the winners' share of the pot, less the House cut.
+      expect(big(player.entries) > 0n).toBe(true);
+
+      const walletBefore = await balance(a.tokenAccount);
+      await processWithdraw(ctx, a);
+      expect((await balance(a.tokenAccount)) - walletBefore).toBe(36n * USDC);
+      player =await fetchPlayer(ctx, a);
+      expect(big(player.principal)).toBe(0n);
+      expect(big(player.entries)).toBe(0n);
+      // No Tickets without Principal, in the Player or in the epoch's root.
+      expect(await ticketsOf(ctx, owner, 3n)).toBe(0n);
+      // What is left in the root is the House's cut of the round, not the Player's.
+      const cut = big((await program.account.round.fetch(roundPda(ctx.pool, 1n))).houseCut);
+      expect(await root(ctx, 3n)).toBe(cut);
+      expect(await treePrincipal(ctx, a)).toBe(0n);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "keeps a Position left open from an earlier epoch blocking the payout until anyone settles it",
+    async () => {
+      const ctx = await setupPool({ epochSeconds: 20, roundSeconds: 5, closeBuffer: 1 });
+      const a = await ctx.fundedWallet(36n * USDC);
+      await beginEpoch(ctx, 0n); // epoch 1
+      await deposit(ctx, a, 36n * USDC);
+      await beginEpoch(ctx, 1n); // epoch 2
+      await request(ctx, a, 36n * USDC);
+      await beginEpoch(ctx, 2n); // epoch 3
+      await openRound(ctx, 1n, 3n);
+      await stakeAll(ctx, a, 1n, 1n * USDC);
+      await settleRoundOn(ctx, 1n, 7);
+
+      // Nobody settles it, and the epoch rolls on. The request is long due.
+      await beginEpoch(ctx, 3n); // epoch 4
+      expect((await fetchPlayer(ctx, a)).openPositions).toBe(1);
+      await refused(ctx, processMethod(ctx, a).rpc(), /OpenPositions/);
+
+      // A stranger's settle clears it. The stake is already back from the epoch
+      // reset, so the settle credits only the winners' share of the pot.
+      await settlePositionOf(ctx, a, 1n);
+      const player = await fetchPlayer(ctx, a);
+      expect(player.openPositions).toBe(0);
+      expect(big(player.entries) > 36n * USDC).toBe(true);
+
+      const walletBefore = await balance(a.tokenAccount);
+      await processWithdraw(ctx, a);
+      expect((await balance(a.tokenAccount)) - walletBefore).toBe(36n * USDC);
+      const paid = await fetchPlayer(ctx, a);
+      expect(big(paid.principal)).toBe(0n);
+      expect(big(paid.pendingWithdraw)).toBe(0n);
+      expect(paid.openPositions).toBe(0);
     },
     TIMEOUT,
   );

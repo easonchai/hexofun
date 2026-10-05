@@ -123,6 +123,7 @@ async function processWithdraw(pool: PoolCtx, owner: Wallet) {
     .accountsPartial({
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
+      owner: null,
       acceptedMint: pool.mint,
       ownerToken: owner.tokenAccount,
       principalVault: pool.principalVault,
@@ -680,6 +681,9 @@ describe("epochs", () => {
 
       const before = await program.provider.connection.getTokenAccountBalance(alice.tokenAccount);
       await retryUntilOk(() => beginEpoch(pool, 1n));
+      // An open Position holds the payout (mainnet-review-fixes ticket 02).
+      await expect(processWithdraw(pool, alice)).rejects.toThrow(/OpenPositions/);
+      await settlePosition(pool, 1n, alice.keypair.publicKey);
       await processWithdraw(pool, alice);
       const after = await program.provider.connection.getTokenAccountBalance(alice.tokenAccount);
       expect(BigInt(after.value.amount) - BigInt(before.value.amount)).toBe(5_000_000n);
