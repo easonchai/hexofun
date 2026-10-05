@@ -518,8 +518,19 @@ function operatorGated(pool: PoolCtx, signer: PublicKey) {
       newEpoch: epochPda(pool.pool, 2n),
       systemProgram: SystemProgram.programId,
     }),
-    // `close_registration` went with the layout rewrite; ticket 08's
-    // `request_draw` takes its place in this matrix.
+    // `request_draw` replaced `close_registration` (ticket 08): operator-only,
+    // since the signer also pays ORAO's fee.
+    requestDraw: m.requestDraw(Array.from(testNonce())).accountsPartial({
+      operator: signer,
+      pool: pool.pool,
+      epoch,
+      jackpotVault: pool.jackpotVault,
+      randomness: randomnessPda(vrfSeed("epoch", pool.pool, 1n, testNonce())),
+      vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
+      vrfTreasury: DEVNET_VRF_TREASURY,
+      vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
+      systemProgram: SystemProgram.programId,
+    }),
     // `payout` is deliberately absent: it takes no signer at all, so the
     // operator cannot veto a winner by sitting out `payout_timeout`. A
     // stranger paying one successfully is in tests/03-epochs.test.ts.
@@ -558,18 +569,20 @@ describe("roles", () => {
   );
 
   it(
-    "create_pool writes the Weight tree header with zero nodes and the venue defaults",
+    "create_pool writes the Weight tree header, the House's leaf and the venue defaults",
     async () => {
       const pool = await setupPool();
 
       const tree = await program.account.weightTree.fetch(pool.weightTree);
       expect(tree.version).toBe(1);
       expect(tree.nodeSize).toBe(72);
-      expect(tree.nodeCount.toString()).toBe("0");
+      // The House never deposits but can win, so create_pool gives it leaf 1.
+      expect(tree.nodeCount.toString()).toBe("1");
       expect(tree.pool.toBase58()).toBe(pool.pool.toBase58());
       const info = await program.provider.connection.getAccountInfo(pool.weightTree);
-      expect(info?.data.length).toBe(WEIGHT_TREE_SPACE);
+      expect(info?.data.length).toBe(WEIGHT_TREE_SPACE + 72);
       expect(info?.owner.toBase58()).toBe(program.programId.toBase58());
+      expect((await program.account.player.fetch(pool.house)).leafIndex).toBe(1);
 
       const account = await program.account.pool.fetch(pool.pool);
       expect(account.version).toBe(2);
@@ -589,7 +602,7 @@ describe("roles", () => {
       ]);
       const house = await program.account.player.fetch(pool.house);
       expect(house.version).toBe(2);
-      expect(house.leafIndex).toBe(0);
+      expect(house.leafIndex).toBe(1);
     },
     TIMEOUT,
   );
@@ -1101,7 +1114,8 @@ describe("create_pool guards", () => {
       // Zero would let a Drawn epoch be rolled over in the block it was
       // drawn in, which is what the timeout exists to stop.
       await expect(attempt(0)).rejects.toThrow(/InvalidParameter/);
-      // The tree starts with zero nodes; ticket 08 grows it one at a time.
+      // The account arrives header-sized and create_pool grows it by the
+      // House's leaf, so one that already holds a node is refused.
       await expect(attempt(86_400, WEIGHT_TREE_SPACE + 72)).rejects.toThrow(/InvalidParameter/);
       await attempt(86_400);
     },

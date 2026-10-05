@@ -26,7 +26,9 @@ import {
   setupPool,
   sleep,
   testNonce,
+  txInfo,
   vrfSeed,
+  weightOf,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -108,6 +110,24 @@ async function chainNow(): Promise<number> {
   const prev = await provider.connection.getBlockTime(Math.max(0, slot - 1));
   if (prev != null) return prev;
   throw new Error("chainNow: validator has no block time yet");
+}
+
+/** Opens epoch 1, which the Weight tree needs to credit anything. */
+async function beginFirstEpoch(pool: PoolCtx) {
+  return program.methods
+    .beginEpoch()
+    .accountsPartial({
+      operator: pool.operator.publicKey,
+      pool: pool.pool,
+      currentEpoch: epochPda(pool.pool, 0n),
+      // Never read at current_epoch_id 0 (< 2); the address still has to be
+      // supplied.
+      epochTwoBehind: epochPda(pool.pool, 0n),
+      newEpoch: epochPda(pool.pool, 1n),
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([pool.operator])
+    .rpc();
 }
 
 /** Creates a round starting now (validator time). `currentEpoch` only
@@ -676,17 +696,16 @@ describe("rounds", () => {
     TIMEOUT,
   );
 
-  // Skipped until yield-claimer ticket 08: the round's Weight pre-credit left
-  // `Player.weight_acc` with the layout rewrite and lands in the Weight tree.
-  it.skip(
-    "buying a position is weight-neutral: staking everything matches just holding",
+  it(
+    "buying a position is weight-neutral: staking everything matches just holding until the round ends",
     async () => {
       const pool = await setupPool({ roundSeconds: 20, closeBuffer: 2 });
+      await beginFirstEpoch(pool);
       const staker = await pool.fundedWallet(10_000_000n);
       const holder = await pool.fundedWallet(10_000_000n);
-      // Both deposits in one transaction so both players' `last_update` is
-      // the exact same on-chain instant -- comparing across two separately
-      // submitted transactions would add a real (if small) timing skew.
+      // Both deposits in one transaction so both players deposit at the exact
+      // same on-chain instant -- comparing across two separately submitted
+      // transactions would add a real (if small) timing skew.
       const depositIxs = await Promise.all(
         [staker, holder].map((w) =>
           program.methods
@@ -695,39 +714,29 @@ describe("rounds", () => {
             .instruction(),
         ),
       );
-      await provider.sendAndConfirm(new Transaction().add(...depositIxs), [
+      const depositSig = await provider.sendAndConfirm(new Transaction().add(...depositIxs), [
         staker.keypair,
         holder.keypair,
       ]);
+      const depositTime = (await txInfo(depositSig)).time;
 
-      const holderAfterDeposit = await program.account.player.fetch(
-        playerPda(pool.pool, holder.keypair.publicKey),
-      );
-      const holderWeight = BigInt(holderAfterDeposit.weightAcc.toString());
-      const holderEntries = BigInt(holderAfterDeposit.entries.toString());
-      const holderLastUpdate = BigInt(holderAfterDeposit.lastUpdate.toString());
-
-      const { round, endsAt } = await createRound(pool, 20);
-      // Stakes everything immediately: from this point her weight_acc never
-      // changes again (entries == 0), pre-credited as if she held to ends_at.
+      const { round, endsAt } = await createRound(pool, 20, epochPda(pool.pool, 1n));
+      // Stakes everything immediately. The tree credited her Tickets up to the
+      // epoch's end when she deposited; the buy takes them back out and gives
+      // the same Weight back up to the round's end, as one net change.
       await buyPosition(pool, staker, round, 1n << 0n, 5_000_000n);
 
-      const stakerAfter = await program.account.player.fetch(
-        playerPda(pool.pool, staker.keypair.publicKey),
-      );
+      const epochEnd = BigInt((await program.account.epoch.fetch(epochPda(pool.pool, 1n))).endsAt.toString());
+      const holderWeight = await weightOf(pool, holder.keypair.publicKey, 1n);
+      const stakerWeight = await weightOf(pool, staker.keypair.publicKey, 1n);
 
-      // The holder is never touched again, so her weight at ends_at is
-      // exactly what a future `touch` would compute: what's already
-      // accumulated, plus her (unchanged) entries times the time left. Since
-      // both players had identical entries and last_update the moment
-      // before the round opened, this is also what the staker's weight
-      // should be once she buys, whenever in the round she actually does.
-      const holderProjectedAtEnd =
-        holderWeight + holderEntries * (BigInt(endsAt) - holderLastUpdate);
-
-      expect(BigInt(stakerAfter.weightAcc.toString())).toBe(
-        holderProjectedAtEnd,
-      );
+      // The holder is never touched again, so her Weight is her Tickets to the
+      // epoch's end. Since both players deposited at the same instant, the
+      // staker's is the same minus what the epoch would have earned after
+      // the round: nothing is lost while the stake is at risk.
+      expect(holderWeight).toBe(5_000_000n * (epochEnd - depositTime));
+      expect(stakerWeight).toBe(5_000_000n * (BigInt(endsAt) - depositTime));
+      expect(stakerWeight).toBe(holderWeight - 5_000_000n * (epochEnd - BigInt(endsAt)));
     },
     TIMEOUT,
   );

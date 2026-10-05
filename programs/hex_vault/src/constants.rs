@@ -69,13 +69,13 @@ pub const SEED_ROUND: &[u8] = b"round";
 pub const SEED_PLAYER: &[u8] = b"player";
 pub const SEED_POSITION: &[u8] = b"position";
 
-/// `Epoch::status`. An epoch is Open while it is the current one, then walks
-/// Registering → Drawing → Drawn → Paid, or short-circuits to RolledOver.
-/// Since ticket 04 removed `close_registration`, an ended epoch stays
-/// Registering until `rollover_epoch`; ticket 08's `request_draw` replaces it.
+/// `Epoch::status`. An epoch is Open while it is the current one. `begin_epoch`
+/// moves it to Ended, then `request_draw` walks it Drawing → Drawn → Paid, or
+/// short-circuits to RolledOver. An Ended epoch nobody draws for leaves
+/// through `rollover_epoch`.
 pub mod epoch_status {
     pub const OPEN: u8 = 0;
-    pub const REGISTERING: u8 = 1;
+    pub const ENDED: u8 = 1;
     pub const DRAWING: u8 = 2;
     pub const DRAWN: u8 = 3;
     pub const PAID: u8 = 4;

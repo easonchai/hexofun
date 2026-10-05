@@ -7,7 +7,6 @@ use anchor_lang::prelude::*;
 use crate::constants::{BPS_DENOMINATOR, MAX_YIELD_FEE_BPS, SECONDS_PER_YEAR};
 use crate::errors::HexVaultError;
 use crate::state::{Player, Pool};
-use crate::weight;
 
 /// Scale of `Pool::yield_index`: depositor share per unit of Principal.
 pub const INDEX_SCALE: u128 = 1_000_000_000_000_000_000;
@@ -128,10 +127,14 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
 /// Pays `player` its share of the Yield index rise since its last settle and
 /// returns the amount. Call after sync, and after `touch` (ADR 0017).
 ///
-/// `touch` runs first because the Weight credit below lands in the current
-/// epoch: a stale Player must be reset into it before its new Tickets count.
-/// The result does not depend on the order, since `touch` sets Tickets to the
-/// Principal it sees and settle then adds `owed` to both.
+/// `touch` runs first so a stale Player is reset into the current epoch before
+/// its new Tickets are added. The result does not depend on the order, since
+/// `touch` sets Tickets to the Principal it sees and settle then adds `owed`
+/// to both.
+///
+/// The caller owns the Weight tree side: `owed` is new Principal and new
+/// Tickets alike, so it goes into the instruction's
+/// [`crate::weight::Change`] with [`crate::weight::Change::settled`].
 ///
 /// owed = floor(principal x (pool index - player index) / 1e18).
 /// - The House never earns. It holds no Principal, and the early return keeps
@@ -142,7 +145,7 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
 ///   across settles instead of losing each fraction.
 /// - Otherwise `owed` moves from `yield_owed` into Principal,
 ///   `total_principal` and Tickets, and the stored index catches up.
-pub fn settle(pool: &mut Pool, player: &mut Player, now: i64) -> Result<u64> {
+pub fn settle(pool: &mut Pool, player: &mut Player) -> Result<u64> {
     if player.is_house {
         return Ok(0);
     }
@@ -172,7 +175,6 @@ pub fn settle(pool: &mut Pool, player: &mut Player, now: i64) -> Result<u64> {
     player.principal = principal;
     player.entries = entries;
     player.yield_index = pool.yield_index;
-    weight::credit_tickets(pool, player, owed, now)?;
     Ok(owed)
 }
 
@@ -182,8 +184,8 @@ pub fn settle(pool: &mut Pool, player: &mut Player, now: i64) -> Result<u64> {
 /// arrived. So the index is brought current here, which drops the fraction
 /// of a unit that settle was holding back. Withdrawals do not need this: less
 /// Principal against a stale index can only under-pay.
-pub fn settle_before_growth(pool: &mut Pool, player: &mut Player, now: i64) -> Result<u64> {
-    let owed = settle(pool, player, now)?;
+pub fn settle_before_growth(pool: &mut Pool, player: &mut Player) -> Result<u64> {
+    let owed = settle(pool, player)?;
     if !player.is_house {
         player.yield_index = pool.yield_index;
     }
@@ -367,12 +369,12 @@ mod tests {
         pool.yield_index = INDEX_SCALE / 2;
         pool.yield_owed = 500;
         let mut p = player(1_000, 0);
-        assert_eq!(settle(&mut pool, &mut p, 0).unwrap(), 500);
+        assert_eq!(settle(&mut pool, &mut p).unwrap(), 500);
         assert_eq!((p.principal, p.entries), (1_500, 1_500));
         assert_eq!((pool.total_principal, pool.yield_owed), (1_500, 0));
         assert_eq!(p.yield_index, pool.yield_index);
         // Settling again at the same index owes nothing.
-        assert_eq!(settle(&mut pool, &mut p, 0).unwrap(), 0);
+        assert_eq!(settle(&mut pool, &mut p).unwrap(), 0);
         assert_eq!(p.principal, 1_500);
     }
 
@@ -382,7 +384,7 @@ mod tests {
         pool.yield_index = 7 * INDEX_SCALE;
         pool.yield_owed = 100;
         let mut p = player(0, 0);
-        assert_eq!(settle(&mut pool, &mut p, 0).unwrap(), 0);
+        assert_eq!(settle(&mut pool, &mut p).unwrap(), 0);
         assert_eq!(p.yield_index, 7 * INDEX_SCALE);
         assert_eq!((p.principal, pool.total_principal, pool.yield_owed), (0, 1_000, 100));
     }
@@ -394,11 +396,11 @@ mod tests {
         let mut p = player(10, 0);
         // 10 x 0.05 = 0.5, floors to 0: nothing moves and the index stays.
         pool.yield_index = INDEX_SCALE / 20;
-        assert_eq!(settle(&mut pool, &mut p, 0).unwrap(), 0);
+        assert_eq!(settle(&mut pool, &mut p).unwrap(), 0);
         assert_eq!((p.yield_index, p.principal, pool.yield_owed), (0, 10, 10));
         // 10 x 0.15 = 1.5 against the unchanged index floors to 1, not 0 + 1.
         pool.yield_index = 3 * INDEX_SCALE / 20;
-        assert_eq!(settle(&mut pool, &mut p, 0).unwrap(), 1);
+        assert_eq!(settle(&mut pool, &mut p).unwrap(), 1);
         assert_eq!((p.principal, p.yield_index), (11, pool.yield_index));
         assert_eq!((pool.total_principal, pool.yield_owed), (11, 9));
     }
@@ -411,7 +413,7 @@ mod tests {
         // Even if it somehow held Principal.
         let mut house = player(500, 0);
         house.is_house = true;
-        assert_eq!(settle(&mut pool, &mut house, 0).unwrap(), 0);
+        assert_eq!(settle(&mut pool, &mut house).unwrap(), 0);
         assert_eq!((house.principal, house.entries, house.yield_index), (500, 500, 0));
         assert_eq!((pool.total_principal, pool.yield_owed), (1_000, 1_000));
     }
@@ -422,17 +424,17 @@ mod tests {
         pool.yield_owed = 1_000_000;
         pool.yield_index = INDEX_SCALE / 2; // 1 unit x 0.5 floors to 0
         let mut p = player(1, 0);
-        assert_eq!(settle_before_growth(&mut pool, &mut p, 0).unwrap(), 0);
+        assert_eq!(settle_before_growth(&mut pool, &mut p).unwrap(), 0);
         assert_eq!(p.yield_index, pool.yield_index);
         p.principal += 1_000_000;
         // With no new gain, the larger balance owes nothing.
-        assert_eq!(settle(&mut pool, &mut p, 0).unwrap(), 0);
+        assert_eq!(settle(&mut pool, &mut p).unwrap(), 0);
         assert_eq!((p.principal, pool.yield_owed), (1_000_001, 1_000_000));
         // Plain settle on the same stale index would have paid 500,000.
         let mut q = player(1, 0);
-        assert_eq!(settle(&mut pool, &mut q, 0).unwrap(), 0);
+        assert_eq!(settle(&mut pool, &mut q).unwrap(), 0);
         q.principal += 1_000_000;
-        assert_eq!(settle(&mut pool, &mut q, 0).unwrap(), 500_000);
+        assert_eq!(settle(&mut pool, &mut q).unwrap(), 500_000);
     }
 
     #[test]
@@ -452,7 +454,7 @@ mod tests {
                 if i == players.len() {
                     players.push(player(0, pool.yield_index));
                 }
-                settled += settle(&mut pool, &mut players[i], now).unwrap() as u128;
+                settled += settle(&mut pool, &mut players[i]).unwrap() as u128;
                 if rng.below(3) == 0 {
                     let d = rng.below(1 << 30);
                     players[i].principal += d;

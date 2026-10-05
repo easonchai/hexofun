@@ -3,6 +3,7 @@
 // `program.methods.x().accounts({...}).rpc()` directly instead of going
 // through a per-instruction wrapper.
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   Connection,
@@ -185,14 +186,78 @@ export async function fulfillRandomness(
   return account;
 }
 
-/**
- * 64 randomness bytes whose leading LE u64 is `value`, so a test can pick the
- * winning tile or draw target instead of guessing what the oracle returns.
- */
-export function randomnessFor(value: bigint | number): Uint8Array {
-  const bytes = new Uint8Array(64).fill(0);
-  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+// --- The program's reduction of 64 randomness bytes (ADR 0019) --------------
+//
+// `vrf::unbiased_u64` and `unbiased_u128` hash all 64 bytes with SHA-256 and
+// sample the digest, so a test can no longer write the outcome into the first
+// bytes. It searches instead for randomness that reduces to the outcome it
+// wants. This mirrors `vrf.rs` line for line, tail re-derivation included.
+
+const sha256 = (bytes: Uint8Array): Buffer => createHash("sha256").update(bytes).digest();
+
+function rederive(base: Buffer, counter: number): Buffer {
+  return sha256(Buffer.concat([base, Buffer.from([counter])]));
+}
+
+function leBig(bytes: Uint8Array): bigint {
+  let n = 0n;
+  for (let i = bytes.length - 1; i >= 0; i -= 1) n = (n << 8n) | BigInt(bytes[i] as number);
+  return n;
+}
+
+/** `vrf::unbiased_u64`. */
+export function unbiasedU64(randomness: Uint8Array, range: bigint): bigint {
+  const max = (1n << 64n) - 1n;
+  const limit = max - (max % range);
+  const base = sha256(randomness);
+  for (let counter = 0; counter < 256; counter += 1) {
+    const digest = counter === 0 ? base : rederive(base, counter);
+    const sample = leBig(digest.subarray(0, 8));
+    if (sample < limit) return sample % range;
+  }
+  throw new Error("randomness rejected");
+}
+
+/** `vrf::unbiased_u128`. */
+export function unbiasedU128(randomness: Uint8Array, range: bigint): bigint {
+  const max = (1n << 128n) - 1n;
+  const limit = max - (max % range);
+  const base = sha256(randomness);
+  for (let counter = 0; counter < 256; counter += 1) {
+    const digest = counter === 0 ? base : rederive(base, counter);
+    const sample = leBig(digest.subarray(0, 16));
+    if (sample < limit) return sample % range;
+  }
+  throw new Error("randomness rejected");
+}
+
+function randomnessCandidate(n: number): Uint8Array {
+  const bytes = new Uint8Array(64);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(n), true);
   return bytes;
+}
+
+/**
+ * 64 randomness bytes that make a round land on tile `value`, so a test can
+ * pick the winning tile instead of guessing what the oracle returns.
+ */
+export function randomnessFor(value: bigint | number, tiles = 36n): Uint8Array {
+  const want = BigInt(value);
+  for (let n = 0; n < 100_000; n += 1) {
+    const candidate = randomnessCandidate(n);
+    if (unbiasedU64(candidate, tiles) === want) return candidate;
+  }
+  throw new Error(`no randomness found for tile ${value}`);
+}
+
+/** 64 randomness bytes whose draw target under `total` lies in `[lo, hi)`. */
+export function randomnessForTarget(total: bigint, lo: bigint, hi: bigint): Uint8Array {
+  for (let n = 0; n < 100_000; n += 1) {
+    const candidate = randomnessCandidate(n);
+    const target = unbiasedU128(candidate, total);
+    if (target >= lo && target < hi) return candidate;
+  }
+  throw new Error(`no randomness found for a target in [${lo}, ${hi})`);
 }
 
 // --- vrf_seed(domain, pool, id, nonce) --------------------------------------
@@ -725,4 +790,180 @@ export function setTreasuryAccountsMethod(
       buybackReserve,
     })
     .signers([admin]);
+}
+
+// --- Weight tree (yield-claimer ticket 08) -------------------------------------
+//
+// A TypeScript port of the reads in `weight_tree.rs`: the same slot and idle
+// rules, so a test can ask what the tree says about a Player's Weight in the
+// current epoch or the one before it, and find the draw's winner.
+
+const TREE_HEADER = 56;
+const TREE_NODE = 72;
+
+export interface TreeSlot {
+  stamp: bigint;
+  base: bigint;
+  weight: bigint;
+}
+export interface TreeNode {
+  principalSum: bigint;
+  slots: [TreeSlot, TreeSlot];
+}
+export interface TreeClock {
+  current: bigint;
+  curStart: bigint;
+  curEnd: bigint;
+  prevStart: bigint;
+  prevEnd: bigint;
+}
+export interface TreeView {
+  nodes: TreeNode[];
+  clock: TreeClock;
+  /** Bytes of tree account data, header included. */
+  dataLen: number;
+}
+
+function parseSlot(data: Buffer, at: number): TreeSlot {
+  return {
+    stamp: data.readBigUInt64LE(at),
+    base: data.readBigUInt64LE(at + 8),
+    weight: data.readBigUInt64LE(at + 16) | (data.readBigUInt64LE(at + 24) << 64n),
+  };
+}
+
+export function treeClockOf(pool: {
+  currentEpochId: { toString(): string };
+  currentEpochStart: { toString(): string };
+  currentEpochEndsAt: { toString(): string };
+  previousEpochStart: { toString(): string };
+  previousEpochEndsAt: { toString(): string };
+}): TreeClock {
+  return {
+    current: big(pool.currentEpochId),
+    curStart: big(pool.currentEpochStart),
+    curEnd: big(pool.currentEpochEndsAt),
+    prevStart: big(pool.previousEpochStart),
+    prevEnd: big(pool.previousEpochEndsAt),
+  };
+}
+
+export async function fetchTree(ctx: PoolCtx): Promise<TreeView> {
+  const [info, pool] = await Promise.all([
+    provider.connection.getAccountInfo(ctx.weightTree, "confirmed"),
+    program.account.pool.fetch(ctx.pool),
+  ]);
+  if (!info) throw new Error("weight tree account is missing");
+  const data = info.data;
+  const count = Number(data.readBigUInt64LE(16));
+  const nodes: TreeNode[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const at = TREE_HEADER + i * TREE_NODE;
+    nodes.push({
+      principalSum: data.readBigUInt64LE(at),
+      slots: [parseSlot(data, at + 8), parseSlot(data, at + 40)],
+    });
+  }
+  return { nodes, clock: treeClockOf(pool), dataLen: data.length };
+}
+
+const elapsed = (from: bigint, to: bigint): bigint => (to > from ? to - from : 0n);
+
+function epochLength(clock: TreeClock, e: bigint): bigint {
+  if (e === clock.current) return elapsed(clock.curStart, clock.curEnd);
+  if (e + 1n === clock.current) return elapsed(clock.prevStart, clock.prevEnd);
+  throw new Error(`epoch ${e} is not readable at epoch ${clock.current}`);
+}
+
+/** One entry's Weight in epoch `e`, by the slot rule and then the idle rule. */
+function entryWeight(node: TreeNode, e: bigint, clock: TreeClock): bigint {
+  const len = epochLength(clock, e);
+  const slot = node.slots[Number(e % 2n)] as TreeSlot;
+  if (slot.stamp === e) return slot.weight;
+  const next = node.slots[Number((e + 1n) % 2n)] as TreeSlot;
+  const base = next.stamp === e + 1n ? next.base : node.principalSum;
+  return base * len;
+}
+
+/** Every leaf's Weight in epoch `e`, leaf 1 first. */
+export function leafWeights(tree: TreeView, e: bigint): bigint[] {
+  const prefix = [0n];
+  for (let i = 1; i <= tree.nodes.length; i += 1) {
+    const low = i & -i;
+    prefix.push((prefix[i - low] as bigint) + entryWeight(tree.nodes[i - 1] as TreeNode, e, tree.clock));
+  }
+  return prefix.slice(1).map((p, i) => p - (prefix[i] as bigint));
+}
+
+/** The 1-based leaf whose range in `weights` holds `target`. */
+export function leafHolding(weights: bigint[], target: bigint): number {
+  let start = 0n;
+  for (let i = 0; i < weights.length; i += 1) {
+    const end = start + (weights[i] as bigint);
+    if (target >= start && target < end) return i + 1;
+    start = end;
+  }
+  throw new Error(`no leaf holds ${target}`);
+}
+
+/** `owner`'s Weight in epoch `e` (the current epoch or the one before). */
+export async function weightOf(ctx: PoolCtx, owner: PublicKey, e: bigint): Promise<bigint> {
+  const player = await program.account.player.fetch(playerPda(ctx.pool, owner));
+  const tree = await fetchTree(ctx);
+  return leafWeights(tree, e)[player.leafIndex - 1] as bigint;
+}
+
+/** The owner of the leaf that holds epoch `e`'s drawn target. */
+export async function drawnWinner(
+  ctx: PoolCtx,
+  e: bigint,
+  candidates: PublicKey[],
+): Promise<PublicKey> {
+  const epoch = await program.account.epoch.fetch(epochPda(ctx.pool, e));
+  const leaf = leafHolding(leafWeights(await fetchTree(ctx), e), big(epoch.target));
+  for (const owner of candidates) {
+    const player = await program.account.player.fetch(playerPda(ctx.pool, owner));
+    if (player.leafIndex === leaf) return owner;
+  }
+  throw new Error(`leaf ${leaf} belongs to none of the candidates`);
+}
+
+/** Builder for `request_draw`. `nonce` is mixed into the seed, which is read
+ *  back off the Epoch account once this succeeds. */
+export function requestDrawMethod(
+  ctx: PoolCtx,
+  epochId: bigint,
+  nonce: Uint8Array = testNonce(),
+  randomness?: PublicKey,
+) {
+  const seed = vrfSeed("epoch", ctx.pool, epochId, nonce);
+  return program.methods
+    .requestDraw(Array.from(nonce))
+    .accountsPartial({
+      operator: ctx.operator.publicKey,
+      pool: ctx.pool,
+      epoch: epochPda(ctx.pool, epochId),
+      jackpotVault: ctx.jackpotVault,
+      randomness: randomness ?? randomnessPda(seed),
+      vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
+      vrfTreasury: DEVNET_VRF_TREASURY,
+      vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([ctx.operator]);
+}
+
+/** On-chain unix time and compute units of one confirmed transaction. */
+export async function txInfo(signature: string): Promise<{ time: bigint; units: number }> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const tx = await provider.connection.getTransaction(signature, {
+      commitment: "confirmed",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (tx?.blockTime != null) {
+      return { time: BigInt(tx.blockTime), units: tx.meta?.computeUnitsConsumed ?? 0 };
+    }
+    await sleep(250);
+  }
+  throw new Error(`transaction ${signature} never reported a block time`);
 }

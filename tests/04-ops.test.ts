@@ -21,6 +21,7 @@ import {
   provider,
   randomnessFor,
   randomnessPda,
+  requestDrawMethod,
   retryUntilOk,
   roundPda,
   setupPool,
@@ -33,7 +34,7 @@ import {
 const TIMEOUT = 60_000;
 
 // ORAO's VRF program id, pinned on the pool at create_pool. test-vrf never
-// actually invokes it, so it needs no deployment on localnet; closeRegistration
+// actually invokes it, so it needs no deployment on localnet; request_draw
 // still checks the account's address against this constant.
 const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 
@@ -136,20 +137,6 @@ async function fundJackpot(pool: PoolCtx, source: Wallet, amount: bigint) {
     .rpc();
 }
 
-// `register` and `closeRegistration` call instructions the layout rewrite
-// removed. Only the tests skipped until yield-claimer ticket 08 use them;
-// ticket 08 swaps them for `request_draw`.
-async function register(pool: PoolCtx, epochId: bigint, owner: PublicKey) {
-  return program.methods
-    .register()
-    .accountsPartial({
-      pool: pool.pool,
-      epoch: epochPda(pool.pool, epochId),
-      player: playerPda(pool.pool, owner),
-    })
-    .rpc();
-}
-
 async function buyTickets(pool: PoolCtx, owner: Wallet, amount: bigint) {
   return program.methods
     .buyTickets(new BN(amount.toString()))
@@ -183,27 +170,12 @@ async function grantTickets(pool: PoolCtx, signer: Keypair, owner: PublicKey, am
  * now checks the randomness account against it itself (production-hardening
  * ticket 02), so a throwaway address no longer works.
  */
-async function closeRegistration(
+async function requestDraw(
   pool: PoolCtx,
   epochId: bigint,
   nonce: Uint8Array = testNonce(),
 ) {
-  const seed = vrfSeed("epoch", pool.pool, epochId, nonce);
-  return program.methods
-    .closeRegistration(Array.from(nonce))
-    .accountsPartial({
-      operator: pool.operator.publicKey,
-      pool: pool.pool,
-      epoch: epochPda(pool.pool, epochId),
-      jackpotVault: pool.jackpotVault,
-      randomness: randomnessPda(seed),
-      vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-      vrfTreasury: DEVNET_VRF_TREASURY,
-      vrfProgram: ORAO_VRF_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
+  return requestDrawMethod(pool, epochId, nonce).rpc();
 }
 
 /** Permissionless (production-hardening ticket 01): first account is
@@ -406,10 +378,6 @@ async function sweepHouse(pool: PoolCtx, admin: Keypair = pool.admin) {
     .rpc();
 }
 
-// Skipped until yield-claimer ticket 08: these reach a Drawn epoch through
-// `register` and `close_registration`, which the layout rewrite removed.
-const itAfterDraw = it.skip;
-
 describe("shutdown", () => {
   it(
     "flips shutdown and paused, refuses a second call, emits PoolShutdown, and only the admin may call it",
@@ -461,21 +429,20 @@ describe("shutdown", () => {
     TIMEOUT,
   );
 
-  itAfterDraw(
+  it(
     "payout of an epoch already Drawn before shutdown still pays",
     async () => {
       const pool = await setupPool({ epochSeconds: 6 });
-      await beginEpoch(pool, 0n);
-
       const a = await pool.fundedWallet(10_000_000n);
       await deposit(pool, a, 4_000_000n);
+
+      await beginEpoch(pool, 0n);
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await register(pool, 1n, a.keypair.publicKey);
-      await closeRegistration(pool, 1n);
+      await requestDraw(pool, 1n);
 
       const closed = await fetchEpoch(pool, 1n);
       const randomness = await fulfillRandomness(Uint8Array.from(closed.vrfSeed));
@@ -493,7 +460,7 @@ describe("shutdown", () => {
     TIMEOUT,
   );
 
-  itAfterDraw(
+  it(
     "draw succeeds after Shutdown: shut down while Drawing, fulfil, draw, pay out",
     async () => {
       // beta-launch-fixes ticket 03: shutdown must never strand a Prize that
@@ -502,17 +469,16 @@ describe("shutdown", () => {
       // (randomness requested, not yet fulfilled), so `draw` itself has to
       // run after shutdown for the Prize to ever reach its winner.
       const pool = await setupPool({ epochSeconds: 6 });
-      await beginEpoch(pool, 0n);
-
       const a = await pool.fundedWallet(10_000_000n);
       await deposit(pool, a, 4_000_000n);
+
+      await beginEpoch(pool, 0n);
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await register(pool, 1n, a.keypair.publicKey);
-      await closeRegistration(pool, 1n); // status: Drawing
+      await requestDraw(pool, 1n); // status: Drawing
 
       const drawing = await fetchEpoch(pool, 1n);
       expect(drawing.status).toBe(2); // Drawing
@@ -564,8 +530,8 @@ describe("shutdown", () => {
       // `draw` deliberately does NOT check shutdown any more
       // (beta-launch-fixes ticket 03): an Epoch still Drawing when shutdown
       // lands must still be drawn so its Prize reaches its winner. See the
-      // dedicated "draw succeeds after Shutdown" test above. Ticket 08 adds
-      // its `request_draw` to this list.
+      // dedicated "draw succeeds after Shutdown" test above.
+      await expect(requestDraw(pool, 1n)).rejects.toThrow(/PoolShutDown/);
     },
     TIMEOUT,
   );
@@ -726,21 +692,20 @@ describe("sweep_house", () => {
     TIMEOUT,
   );
 
-  itAfterDraw(
+  it(
     "never touches jackpot_reserved, so an already-drawn epoch can still pay after a sweep",
     async () => {
       const pool = await setupPool({ epochSeconds: 6 });
-      await beginEpoch(pool, 0n);
-
       const a = await pool.fundedWallet(10_000_000n);
       await deposit(pool, a, 4_000_000n);
+
+      await beginEpoch(pool, 0n);
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n); // becomes the reserved prize
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await register(pool, 1n, a.keypair.publicKey);
-      await closeRegistration(pool, 1n); // snapshots jackpot_amount = 2M, reserves it
+      await requestDraw(pool, 1n); // snapshots jackpot_amount = 2M, reserves it
 
       const closed = await fetchEpoch(pool, 1n);
       const randomness = await fulfillRandomness(Uint8Array.from(closed.vrfSeed));

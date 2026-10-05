@@ -181,6 +181,18 @@ pub enum HexVaultError {
     #[msg("no yield fee or prize share is owed")]
     NothingToHarvest,
 
+    // Fenwick draw (yield-claimer ticket 08). Appended too.
+    #[msg("the Weight tree is full: a new Player would push its account past 10 MiB")]
+    WeightTreeFull,
+    #[msg("the Weight tree account is malformed")]
+    WeightTreeInvalid,
+    #[msg("this Player has no leaf in the Weight tree")]
+    PlayerHasNoLeaf,
+    #[msg("the epoch is not readable in the Weight tree any more")]
+    EpochNotReadable,
+    #[msg("the epoch has not ended, or its draw was already requested")]
+    EpochNotAwaitingDraw,
+
     // klend backing (yield-claimer ticket 12). Appended too.
     #[msg("the klend reserve is still stale after the refresh")]
     ReserveStale,

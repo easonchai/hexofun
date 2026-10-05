@@ -29,6 +29,7 @@ use crate::sync::{settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
+use crate::weight::{self, Change};
 
 /// Which switch `set_feature_pause` changes (game-jackpot-pause ticket 01).
 /// `set_pause`'s own `paused` field is untouched by either variant.
@@ -145,9 +146,9 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     );
 
     let pool_key = ctx.accounts.pool.key();
-    // The tree starts with zero nodes; ticket 08 appends one per first
-    // deposit. `zero` on the account struct already checked that it is ours
-    // and uninitialised.
+    // The tree starts with zero nodes and gains one per first deposit. The
+    // House takes leaf 1 below. `zero` on the account struct already checked
+    // that it is ours and uninitialised.
     let tree_key = ctx.accounts.weight_tree.key();
     {
         let mut tree = ctx.accounts.weight_tree.load_init()?;
@@ -235,6 +236,15 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     house.pending_epoch = 0;
     house.requested_at = 0;
     house.version = LAYOUT_VERSION;
+    // The House never deposits but it holds Tickets (forfeited pots, the cut),
+    // so it can win the draw and needs a leaf. The creator pays its rent.
+    house.leaf_index = weight::append_leaves(
+        &ctx.accounts.weight_tree,
+        pool,
+        &ctx.accounts.payer.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        1,
+    )?;
 
     emit!(PoolCreated {
         pool: pool.key(),
@@ -475,7 +485,9 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
     // no-op on an existing one.
     player.init_if_fresh(a.owner.key(), pool, ctx.bumps.player);
     touch(player, pool);
-    settle_before_growth(pool, player, now)?;
+    let owed = settle_before_growth(pool, player)?;
+    let mut change = Change::new(pool, now);
+    change.settled(owed)?;
 
     require!(!player.is_house, HexVaultError::HouseCannotDeposit);
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
@@ -484,6 +496,19 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         amount >= pool.min_deposit,
         HexVaultError::BelowMinimumDeposit
     );
+
+    // A first deposit appends this Player's leaf and the depositor pays the
+    // rent for it. Refused with `WeightTreeFull` before anything moves if
+    // the account would pass 10 MiB.
+    if player.leaf_index == 0 {
+        player.leaf_index = weight::append_leaves(
+            &a.weight_tree,
+            pool,
+            &a.owner.to_account_info(),
+            &a.system_program.to_account_info(),
+            1,
+        )?;
+    }
 
     token_interface::transfer_checked(
         CpiContext::new(
@@ -511,6 +536,9 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         .total_principal
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    change.principal(i128::from(amount))?;
+    change.tickets(i128::from(amount))?;
+    weight::apply(&a.weight_tree, pool, player, change)?;
 
     emit!(Deposited {
         owner: a.owner.key(),
@@ -547,7 +575,9 @@ pub fn request_withdraw<'info>(
     let player = &mut a.player;
     touch(player, pool);
     // Yield earned so far joins Principal first, so it can be requested too.
-    settle(pool, player, now)?;
+    let owed = settle(pool, player)?;
+    let mut change = Change::new(pool, now);
+    change.settled(owed)?;
 
     // Invariant 3: a withdrawal is never blocked by `paused`.
     require!(amount > 0, HexVaultError::ZeroAmount);
@@ -564,7 +594,11 @@ pub fn request_withdraw<'info>(
     // Entries would have reset to Principal anyway, so a player who lost
     // every Entry in rounds is not locked out for an extra epoch. Entries
     // may exceed Principal pool-wide until that boundary.
-    player.entries = player.entries.saturating_sub(amount);
+    let entries_before = player.entries;
+    player.entries = entries_before.saturating_sub(amount);
+    change.principal(-i128::from(amount))?;
+    change.tickets(-i128::from(entries_before - player.entries))?;
+    weight::apply(&a.weight_tree, pool, player, change)?;
     pool.total_principal = pool
         .total_principal
         .checked_sub(amount)
@@ -967,7 +1001,9 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
     let player = &mut a.player;
     touch(player, pool);
     // Yield earned so far is paid out with the Principal, in this call.
-    settle(pool, player, now)?;
+    let owed = settle(pool, player)?;
+    let mut change = Change::new(pool, now);
+    change.settled(owed)?;
 
     require!(pool.shutdown, HexVaultError::PoolNotShutDown);
     require!(
@@ -988,6 +1024,9 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         HexVaultError::InsufficientVault
     );
 
+    change.principal(-i128::from(principal))?;
+    change.tickets(-i128::from(player.entries))?;
+    weight::apply(&a.weight_tree, pool, player, change)?;
     player.principal = 0;
     player.entries = 0;
     player.pending_withdraw = 0;
@@ -1158,6 +1197,9 @@ pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         .entries
         .checked_add(tickets)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    let mut change = Change::new(pool, utils::now()?);
+    change.tickets(i128::from(tickets))?;
+    weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
 
     emit!(TicketsBought {
         owner: player.owner,
@@ -1268,6 +1310,9 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
         .entries
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    let mut change = Change::new(pool, utils::now()?);
+    change.tickets(i128::from(amount))?;
+    weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
 
     emit!(TicketsGranted {
         owner: player.owner,
@@ -1615,6 +1660,7 @@ pub struct Deposit<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
+        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -1626,6 +1672,10 @@ pub struct Deposit<'info> {
         space = 8 + Player::INIT_SPACE,
     )]
     pub player: Box<Account<'info, Player>>,
+
+    /// Grows by one node at this Player's first deposit, `owner` paying.
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -1673,6 +1723,7 @@ pub struct RequestWithdraw<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
+        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -1682,6 +1733,9 @@ pub struct RequestWithdraw<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     /// CHECK: `venue::check` pins it to `pool.klend_program`.
     pub klend_program: UncheckedAccount<'info>,
@@ -1743,7 +1797,12 @@ pub struct ProcessWithdraw<'info> {
 /// receive the payout.
 #[derive(Accounts)]
 pub struct EmergencyWithdraw<'info> {
-    #[account(mut, seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = weight_tree,
+    )]
     pub pool: Box<Account<'info, Pool>>,
 
     #[account(
@@ -1752,6 +1811,9 @@ pub struct EmergencyWithdraw<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     /// CHECK: pinned to `player.owner` by the `address` constraint below.
     #[account(address = player.owner)]
@@ -1828,8 +1890,12 @@ pub struct BuyTickets<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    #[account(seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
-    pub pool: Account<'info, Pool>,
+    #[account(
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = weight_tree,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
 
     /// Must already exist: a Player only has a cap to buy against once it
     /// holds Principal.
@@ -1838,7 +1904,10 @@ pub struct BuyTickets<'info> {
         seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
         bump = player.bump,
     )]
-    pub player: Account<'info, Player>,
+    pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -1871,8 +1940,13 @@ pub struct BuyTickets<'info> {
 pub struct GrantTickets<'info> {
     pub signer: Signer<'info>,
 
-    #[account(mut, seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
-    pub pool: Account<'info, Pool>,
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = weight_tree,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
 
     /// Must already exist, like `BuyTickets`': a Player only has a Principal
     /// cap to grant against once it holds one.
@@ -1881,7 +1955,10 @@ pub struct GrantTickets<'info> {
         seeds = [SEED_PLAYER, pool.key().as_ref(), player.owner.as_ref()],
         bump = player.bump,
     )]
-    pub player: Account<'info, Player>,
+    pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 }
 
 #[cfg(test)]

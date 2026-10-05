@@ -20,10 +20,11 @@ use crate::errors::HexVaultError;
 use crate::events::{
     PositionBought, PositionSettled, RoundClosed, RoundOpened, RoundSettled, RoundVoided,
 };
-use crate::state::{Epoch, Player, Pool, Position, Round};
+use crate::state::{Epoch, Player, Pool, Position, Round, WeightTree};
 use crate::touch::touch;
 use crate::utils;
 use crate::vrf;
+use crate::weight::{self, Change};
 
 pub fn create_round(ctx: Context<CreateRound>, starts_at: i64, ends_at: i64) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
@@ -131,9 +132,25 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     require!(player.entries >= total, HexVaultError::InsufficientEntries);
 
-    // The round's Weight pre-credit (`total × (round_end − now)`) moved off
-    // the Player with the layout rewrite. Ticket 08 feeds it to the Weight
-    // tree as one net delta with the Ticket debit below.
+    // Pre-credit the Weight this stake would have earned for the rest of the
+    // round before it leaves Tickets, so buying a position is Weight-neutral
+    // for the lottery draw (spec §2.3). The tree already credited the Tickets
+    // up to the epoch's end, so the two go in as one net change: minus
+    // `total × (epoch_end − now)` for the Tickets leaving, plus `total ×
+    // (round_end − now)` for the pre-credit. A round never outlasts its
+    // epoch (`create_round`), but the pre-credit is clamped to it anyway, for
+    // a round created before the first epoch began.
+    let credit_end = round.ends_at.min(pool.current_epoch_ends_at);
+    let remaining = u64::try_from(credit_end.saturating_sub(now)).unwrap_or(0);
+    let mut change = Change::new(pool, now);
+    change.weight(
+        i128::from(total)
+            .checked_mul(i128::from(remaining))
+            .ok_or(HexVaultError::ArithmeticOverflow)?,
+    )?;
+    change.tickets(-i128::from(total))?;
+    weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
+
     player.entries = player
         .entries
         .checked_sub(total)
@@ -270,6 +287,9 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
             .entries
             .checked_add(house_credit)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
+        let mut change = Change::new(pool, utils::now()?);
+        change.tickets(i128::from(house_credit))?;
+        weight::apply(&ctx.accounts.weight_tree, pool, house, change)?;
     }
 
     round.status = if forfeited {
@@ -340,6 +360,9 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
             .entries
             .checked_add(reward)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
+        let mut change = Change::new(pool, utils::now()?);
+        change.tickets(i128::from(reward))?;
+        weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
     }
 
     round.open_positions = round
@@ -479,7 +502,11 @@ pub struct BuyPosition<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    #[account(seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
+    #[account(
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = weight_tree,
+    )]
     pub pool: Box<Account<'info, Pool>>,
 
     #[account(
@@ -488,6 +515,9 @@ pub struct BuyPosition<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(
         mut,
@@ -561,6 +591,7 @@ pub struct SettleRound<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
+        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -582,6 +613,9 @@ pub struct SettleRound<'info> {
         constraint = house.key() == pool.house @ HexVaultError::InvalidParameter,
     )]
     pub house: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 }
 
 // Boxed: Pool and Player's growth in hexo-referrals ticket 04 (bonus_*
@@ -589,8 +623,15 @@ pub struct SettleRound<'info> {
 // same issue `SettleRound` above already works around.
 #[derive(Accounts)]
 pub struct SettlePosition<'info> {
-    #[account(seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
+    #[account(
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = weight_tree,
+    )]
     pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     // Mut: `settle_position` decrements `open_positions` (ops-and-envs
     // ticket 05), so `close_round` can tell when every Position on this

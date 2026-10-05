@@ -1,9 +1,9 @@
-//! Prototype of the Fenwick weight tree (yield-claimer ticket 02).
+//! The Fenwick weight tree behind the draw (ADR 0018, yield-claimer ticket 08).
 //!
-//! Test-only: `lib.rs` declares it under `#[cfg(test)]`, so nothing here
-//! ships in the program. Tickets 04 and 08 lift it into the instructions.
-//! Plain Rust with no Anchor types, so a throwaway SBF program can
-//! `#[path]`-include this same file to measure compute.
+//! Lifted from ticket 02's prototype, whose property test against an eager
+//! model of the old `touch` and `register` still runs below. The functions
+//! work on a slice of [`Node`]; `weight.rs` maps that slice onto the pool's
+//! zero-copy tree account.
 //!
 //! Entry `i` (1-based) sums the leaves `(i - lowbit(i), i]`: a live
 //! `principal_sum` and, per epoch parity, a slot of `stamp` (epoch id),
@@ -12,9 +12,11 @@
 //! epoch's end at once, so an epoch's numbers are final when it ends, and a
 //! slot stamped with an older epoch is reset lazily on the next write.
 
+use anchor_lang::zero_copy;
+
 /// One epoch's half of an entry.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
+#[zero_copy]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Slot {
     pub stamp: u64,
     pub base: u64,
@@ -33,8 +35,8 @@ impl Slot {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C)]
+#[zero_copy]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Node {
     pub principal_sum: u64,
     pub slots: [Slot; 2],
@@ -43,12 +45,32 @@ pub struct Node {
 pub const NODE_SIZE: usize = core::mem::size_of::<Node>();
 const _: () = assert!(NODE_SIZE == 72);
 
+/// Bytes ahead of the first node in the tree account: the 8-byte
+/// discriminator and the 48-byte `WeightTree` header. A multiple of 8, so the
+/// nodes start 8-aligned.
+pub const HEADER_BYTES: usize = 8 + 48;
+/// The runtime's cap on one account's data (`MAX_PERMITTED_DATA_LENGTH`).
+pub const MAX_ACCOUNT_BYTES: usize = 10 * 1024 * 1024;
+/// Most Players one tree holds, 145,634. Past it deposits fail with
+/// `WeightTreeFull` (a second tree is out of scope).
+pub const MAX_NODES: usize = (MAX_ACCOUNT_BYTES - HEADER_BYTES) / NODE_SIZE;
+
+/// Account length that holds `nodes` nodes, or `Full` past [`MAX_NODES`].
+pub fn account_len(nodes: usize) -> Result<usize> {
+    if nodes > MAX_NODES {
+        return Err(TreeError::Full);
+    }
+    Ok(HEADER_BYTES + nodes * NODE_SIZE)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum TreeError {
     Overflow,
     EpochNotReadable,
     NoSuchLeaf,
     TargetOutOfRange,
+    /// One more node would pass [`MAX_ACCOUNT_BYTES`].
+    Full,
 }
 
 pub type Result<T> = core::result::Result<T, TreeError>;
@@ -950,5 +972,30 @@ mod tests {
         clock.begin_epoch(LEN, 2 * LEN);
         clock.begin_epoch(2 * LEN, 3 * LEN);
         assert_eq!(read(&tree[0], 1, &clock), Err(TreeError::EpochNotReadable));
+    }
+
+    /// The account holds 145,634 Players and no more: one past that would
+    /// take it over the runtime's 10 MiB limit, so a deposit refuses by name
+    /// before anything changes.
+    #[test]
+    fn the_account_refuses_a_node_past_10_mib() {
+        assert_eq!(MAX_NODES, 145_634);
+        let full = account_len(MAX_NODES).unwrap();
+        assert!(full <= MAX_ACCOUNT_BYTES);
+        assert!(full + NODE_SIZE > MAX_ACCOUNT_BYTES);
+        assert_eq!(account_len(MAX_NODES + 1), Err(TreeError::Full));
+        // The header alone is the account `create_pool` receives.
+        assert_eq!(account_len(0), Ok(HEADER_BYTES));
+    }
+
+    /// The glue reads the nodes out of account bytes with a plain cast, so a
+    /// node must have no padding and the header must leave them 8-aligned.
+    #[test]
+    fn nodes_start_8_aligned_after_the_header() {
+        assert_eq!(HEADER_BYTES % 8, 0);
+        assert_eq!(core::mem::align_of::<Node>(), 8);
+        let node = Node::default();
+        let bytes: &[u8] = anchor_lang::__private::bytemuck::bytes_of(&node);
+        assert_eq!(bytes.len(), NODE_SIZE);
     }
 }

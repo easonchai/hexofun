@@ -5,7 +5,8 @@
 //! module: custody in `custody.rs`, rounds in `rounds.rs`, epochs in
 //! `epochs.rs`. `register`, `close_registration`, `admin_withdraw` and
 //! `fund_yield` were removed by the live-yield layout rewrite (yield-claimer
-//! ticket 04; ADRs 0017, 0018).
+//! ticket 04; ADRs 0017, 0018). The draw reads the Weight tree in
+//! `weight_tree.rs` and `weight.rs`.
 
 pub mod constants;
 pub mod custody;
@@ -18,15 +19,15 @@ pub mod sync;
 #[cfg(feature = "test-venue")]
 pub mod test_venue;
 #[cfg(feature = "test-vrf")]
+pub mod test_tree;
+#[cfg(feature = "test-vrf")]
 pub mod test_vrf;
 pub mod touch;
 pub mod utils;
 pub mod venue;
 pub mod vrf;
 pub mod weight;
-// Yield-claimer ticket 02 prototype; test-only, never in the binary.
-#[cfg(test)]
-mod weight_tree_proto;
+pub mod weight_tree;
 
 use anchor_lang::prelude::*;
 
@@ -35,6 +36,8 @@ use epochs::*;
 use rounds::*;
 #[cfg(feature = "test-venue")]
 use test_venue::*;
+#[cfg(feature = "test-vrf")]
+use test_tree::*;
 #[cfg(feature = "test-vrf")]
 use test_vrf::*;
 
@@ -205,9 +208,8 @@ pub mod hex_vault {
         rounds::close_round(ctx)
     }
 
-    // Epochs (spec §2.3 "Epochs"). Ticket 08 replaces the draw with the
-    // Weight tree's `request_draw`; until then nothing moves an epoch to
-    // Drawing, and `payout` refuses with `DrawPendingWeightTree`.
+    // Epochs (spec §2.3 "Epochs"). The flow is `begin_epoch`, play,
+    // `request_draw`, `draw`, `payout` (yield-claimer ticket 08, ADR 0018).
 
     pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         epochs::begin_epoch(ctx)
@@ -215,6 +217,12 @@ pub mod hex_vault {
 
     pub fn fund_jackpot(ctx: Context<FundJackpot>, amount: u64) -> Result<()> {
         epochs::fund_jackpot(ctx, amount)
+    }
+
+    /// Operator-only (ticket 08): snapshots the ended epoch's Weight total and
+    /// its prize, then asks the VRF for the draw, or rolls the epoch over.
+    pub fn request_draw(ctx: Context<RequestDraw>, nonce: [u8; 32]) -> Result<()> {
+        epochs::request_draw(ctx, nonce)
     }
 
     pub fn draw(ctx: Context<Draw>) -> Result<()> {
@@ -272,6 +280,13 @@ pub mod hex_vault {
     #[cfg(feature = "test-venue")]
     pub fn test_sync<'info>(ctx: Context<'info, TestSync<'info>>) -> Result<()> {
         test_venue::test_sync(ctx)
+    }
+
+    // Localnet only (ticket 08): grows the Weight tree by many leaves at once,
+    // so the compute of a deposit and a position can be measured at 16,384.
+    #[cfg(feature = "test-vrf")]
+    pub fn test_tree_fill(ctx: Context<TestTreeFill>, count: u32) -> Result<()> {
+        test_tree::test_tree_fill(ctx, count)
     }
 
     // Localnet only (spec §2.5): fabricates a fulfilled ORAO randomness

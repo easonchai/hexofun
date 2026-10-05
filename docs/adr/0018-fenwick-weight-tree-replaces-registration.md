@@ -77,3 +77,12 @@ tree as one more shared writable account, next to `Pool`, which it already write
 the Operator's per-epoch transaction fees to a one-time per-Player entry the depositor pays. A
 Fenwick entry is a range sum, not a Leaf value, so one Player's own Weight is the difference of
 two prefix reads; the Indexer computes it, and nothing on chain needs it.
+
+Built in ticket 08 (2026-10-05). The House takes Leaf 1 at `create_pool`, rent paid by the
+creator, because it holds Tickets (forfeited pots, the cut) and can win. The tree holds at most
+145,634 Leaves. `request_draw`, which is Operator-only, snapshots the ended epoch's root and the
+prize; `draw` hashes all 64 VRF bytes with SHA-256 and reduces the digest under that root; `payout`
+checks the winner's Leaf range. On a localnet validator with 16,384 Leaves, a first deposit that
+appends the last Leaf costs about 45,000 to 50,000 CU in all, against 38,000 on a tiny tree, and
+a repeat deposit on the longest path about 33,000. `buy_position` costs 24,000 to 33,000, which is
+mostly the Position account's address search.

@@ -9,9 +9,10 @@
 //! timed-out request stuck.
 //!
 //! `register` and `close_registration` were removed by the layout rewrite
-//! (yield-claimer ticket 04, ADR 0018). Until ticket 08 adds the Weight
-//! tree's `request_draw`, an ended epoch stays Registering until
-//! `rollover_epoch` takes it, and `payout` refuses every winner.
+//! (yield-claimer ticket 04, ADR 0018). The epoch flow is `begin_epoch`, play,
+//! `request_draw`, `draw`, `payout` (ticket 08). `begin_epoch` does no work
+//! per Player: the Weight tree already holds every Player's number for the
+//! ended epoch, and `request_draw` reads its total.
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
@@ -22,20 +23,13 @@ use crate::constants::{
 };
 use crate::errors::HexVaultError;
 use crate::events::{EpochBegan, EpochDrawn, EpochRolledOver, JackpotFunded, JackpotPaid};
-use crate::state::{Epoch, Player, Pool};
+use crate::state::{Epoch, Player, Pool, WeightTree};
 use crate::sync::settle_before_growth;
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Venue};
 use crate::vrf;
-
-/// Checks that `winner` holds the drawn target in `epoch`. Registration's
-/// `reg_start <= target < reg_end` went with the layout rewrite; ticket 08
-/// replaces this with the Weight tree's leaf-range check. Until then no
-/// winner can be confirmed, so every payout is refused by name.
-fn check_winner(_winner: &Player, _epoch: &Epoch) -> Result<()> {
-    err!(HexVaultError::DrawPendingWeightTree)
-}
+use crate::weight::{self, Change};
 
 /// Most recent point of the `anchor + k * period` grid at or before `t`.
 ///
@@ -59,12 +53,12 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
     require!(!pool.jackpot_paused, HexVaultError::JackpotPaused);
 
     // The epoch two behind the one this call is about to create is the one
-    // whose winner's registered interval must survive until Payout
-    // (beta-launch-fixes ticket 03): if it is still Drawing or Drawn, its
-    // winner has not been paid yet, and the next `begin_epoch` (two calls
-    // from now) would otherwise be free to overwrite that Player's interval
-    // before Payout ever reads it. Only checked once such an epoch could
-    // exist (`current_epoch_id >= 2`; epoch ids start at 1).
+    // whose Weight must stay readable until Payout (beta-launch-fixes ticket
+    // 03): the tree keeps only the current epoch and the one before it, so if
+    // that epoch is still Drawing or Drawn, its winner has not been paid yet,
+    // and this call would make its leaf ranges unreadable before Payout ever
+    // checks them. Only checked once such an epoch could exist
+    // (`current_epoch_id >= 2`; epoch ids start at 1).
     if pool.current_epoch_id >= 2 {
         let data = ctx.accounts.epoch_two_behind.try_borrow_data()?;
         let two_behind = Epoch::try_deserialize(&mut &data[..])?;
@@ -89,9 +83,9 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         let mut previous = Epoch::try_deserialize(&mut &data[..])?;
         require!(now >= previous.ends_at, HexVaultError::EpochNotEnded);
         let previous_ends_at = previous.ends_at;
-        previous.status = epoch_status::REGISTERING;
+        previous.status = epoch_status::ENDED;
         // `rollover_epoch` measures its deadline from here, however late
-        // this call is. Ticket 08 replaces this hand-off with `request_draw`.
+        // this call is, for an epoch nobody sends to `request_draw`.
         previous.registration_opened_at = now;
 
         let mut buf = Vec::with_capacity(data.len());
@@ -102,9 +96,9 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         // Contiguous when the operator is merely late, so the schedule
         // holds. Once the operator has been down past a whole grid point,
         // `grid_floor(now)` overtakes the previous end and the dead gap is
-        // skipped: nobody accrued Weight in it (`touch` clamps at the
-        // previous `ends_at`), so nothing is lost, and the boundary stays on
-        // the grid instead of rerolling to `now`.
+        // skipped: nobody accrued Weight in it (a Ticket change after
+        // `ends_at` credits zero), so nothing is lost, and the boundary stays
+        // on the grid instead of rerolling to `now`.
         previous_ends_at.max(grid_floor(pool.epoch_anchor, pool.epoch_seconds, now)?)
     };
 
@@ -171,6 +165,79 @@ pub fn fund_jackpot(ctx: Context<FundJackpot>, amount: u64) -> Result<()> {
     Ok(())
 }
 
+/// Operator-only. Sends an Ended epoch to the draw: snapshots the prize,
+/// reads the Weight tree's total for that epoch, and requests randomness. The
+/// total and the prize are final by then, so nothing a Player does after this
+/// moves the draw (a change in the next epoch writes the other parity slot).
+///
+/// Needs the epoch to still be readable in the tree, which is `begin_epoch`
+/// having run once and not twice since it ended. An epoch the Operator never
+/// sends here leaves through `rollover_epoch`.
+pub fn request_draw(ctx: Context<RequestDraw>, nonce: [u8; 32]) -> Result<()> {
+    let now = utils::now()?;
+    let pool = &mut ctx.accounts.pool;
+    let epoch = &mut ctx.accounts.epoch;
+
+    require!(!pool.shutdown, HexVaultError::PoolShutDown);
+    require!(!pool.jackpot_paused, HexVaultError::JackpotPaused);
+    require!(
+        epoch.status == epoch_status::ENDED,
+        HexVaultError::EpochNotAwaitingDraw
+    );
+    require!(
+        epoch.epoch_id.checked_add(1) == Some(pool.current_epoch_id),
+        HexVaultError::EpochNotReadable
+    );
+
+    // Whatever an epoch that has drawn but not paid still owes is not this
+    // epoch's to snapshot, or two epochs would promise the same USDC and the
+    // older one could never be paid.
+    epoch.jackpot_amount = ctx
+        .accounts
+        .jackpot_vault
+        .amount
+        .saturating_sub(pool.jackpot_reserved);
+    epoch.registered_weight = weight::root(&ctx.accounts.weight_tree, pool, epoch.epoch_id)?;
+
+    // Nothing to draw for, or too little to be worth drawing for: roll the
+    // prize into the next epoch rather than spend a randomness request on it.
+    if epoch.registered_weight == 0 || epoch.jackpot_amount < pool.min_jackpot {
+        epoch.status = epoch_status::ROLLED_OVER;
+        emit!(EpochRolledOver {
+            epoch_id: epoch.epoch_id,
+            jackpot_amount: epoch.jackpot_amount,
+        });
+        return Ok(());
+    }
+
+    let seed = utils::vrf_seed(b"epoch", &pool.key(), epoch.epoch_id, &nonce);
+    require_keys_eq!(
+        ctx.accounts.randomness.key(),
+        vrf::randomness_address(&seed),
+        HexVaultError::InvalidRandomnessAccount
+    );
+    epoch.vrf_seed = seed;
+
+    vrf::request_randomness(
+        &ctx.accounts.operator.to_account_info(),
+        &ctx.accounts.vrf_network_state.to_account_info(),
+        &ctx.accounts.vrf_treasury.to_account_info(),
+        &ctx.accounts.randomness.to_account_info(),
+        &ctx.accounts.vrf_program.to_account_info(),
+        &ctx.accounts.system_program.to_account_info(),
+        seed,
+    )?;
+
+    epoch.status = epoch_status::DRAWING;
+    epoch.requested_at = now;
+    // The prize is now promised to this epoch until it pays or rolls over.
+    pool.jackpot_reserved = pool
+        .jackpot_reserved
+        .checked_add(epoch.jackpot_amount)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    Ok(())
+}
+
 pub fn draw(ctx: Context<Draw>) -> Result<()> {
     let now = utils::now()?;
     let epoch = &mut ctx.accounts.epoch;
@@ -217,7 +284,10 @@ pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         epoch.status == epoch_status::DRAWN,
         HexVaultError::EpochNotDrawn
     );
-    check_winner(winner, epoch)?;
+    // The winner's leaf has to hold the target in the ended epoch's tree.
+    // Checked before this call writes the tree, though the write lands in the
+    // other parity slot and could not move the answer.
+    weight::check_winner(&a.weight_tree, pool, winner, epoch.epoch_id, epoch.target)?;
 
     let amount = epoch.jackpot_amount;
     let is_house = winner.is_house;
@@ -268,7 +338,9 @@ pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         // joins Principal before the prize does, so the prize earns only from
         // here on, never retroactively.
         touch(winner, pool);
-        settle_before_growth(pool, winner, now)?;
+        let owed = settle_before_growth(pool, winner)?;
+        let mut change = Change::new(pool, now);
+        change.settled(owed)?;
 
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
@@ -297,6 +369,9 @@ pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
             .total_principal
             .checked_add(amount)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
+        change.principal(i128::from(amount))?;
+        change.tickets(i128::from(amount))?;
+        weight::apply(&a.weight_tree, pool, winner, change)?;
     }
 
     epoch.winner = winner.owner;
@@ -329,8 +404,7 @@ pub fn rollover_epoch(ctx: Context<RolloverEpoch>) -> Result<()> {
         // (beta-launch-fixes ticket 02). Behaves as the existing no-draw
         // Rollover below: nothing was ever reserved for this epoch
         // (`jackpot_amount` is still 0), so the Prize stays in the hexpot.
-        // Until ticket 08 every ended epoch leaves this way.
-        epoch_status::REGISTERING => {
+        epoch_status::ENDED => {
             // The jackpot pause holds the draw back on purpose; a stranger
             // must not be able to end it in its place (production-hardening
             // 14, finding 3).
@@ -403,7 +477,7 @@ pub struct BeginEpoch<'info> {
     // BPF stack frame.
     pub pool: Box<Account<'info, Pool>>,
 
-    /// CHECK: the epoch that just ended, moved to Registering. Does not
+    /// CHECK: the epoch that just ended, moved to Ended. Does not
     /// exist yet on the very first call (`pool.current_epoch_id == 0`); the
     /// handler skips it entirely in that case, so it is never deserialized
     /// before it exists.
@@ -460,6 +534,62 @@ pub struct FundJackpot<'info> {
     pub token_program: Interface<'info, TokenInterface>,
 }
 
+/// Operator-only (ticket 08): the signer pays ORAO's fee and the request
+/// account's rent, so it is `mut`.
+#[derive(Accounts)]
+pub struct RequestDraw<'info> {
+    #[account(mut)]
+    pub operator: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = operator,
+        has_one = weight_tree,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_EPOCH, pool.key().as_ref(), &epoch.epoch_id.to_le_bytes()],
+        bump = epoch.bump,
+    )]
+    pub epoch: Box<Account<'info, Epoch>>,
+
+    pub weight_tree: AccountLoader<'info, WeightTree>,
+
+    #[account(
+        seeds = [SEED_JACKPOT, pool.key().as_ref()],
+        bump = pool.jackpot_vault_bump,
+    )]
+    pub jackpot_vault: InterfaceAccount<'info, TokenAccount>,
+
+    /// CHECK: ORAO randomness account for this epoch's draw, verified
+    /// against `vrf::randomness_address(&seed)` in the handler once the seed
+    /// is computed from the instruction's own `nonce` argument
+    /// (production-hardening ticket 02).
+    #[account(mut)]
+    pub randomness: UncheckedAccount<'info>,
+
+    /// CHECK: ORAO VRF network state, pinned on the pool at `create_pool`.
+    /// `mut` because `request_v2` increments its `num_received`: the CPI marks
+    /// it writable, and an outer context that is not cannot grant that.
+    #[account(mut, address = pool.vrf_network_state @ HexVaultError::InvalidRandomnessAccount)]
+    pub vrf_network_state: UncheckedAccount<'info>,
+
+    /// CHECK: ORAO's fee treasury (`network_state.config.treasury`). ORAO
+    /// rejects any other account, so it is only forwarded here.
+    #[account(mut)]
+    pub vrf_treasury: UncheckedAccount<'info>,
+
+    /// CHECK: ORAO VRF program.
+    #[account(address = vrf::ORAO_VRF_PROGRAM_ID)]
+    pub vrf_program: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 /// Permissionless (production-hardening ticket 01): `caller` may be any
 /// signer, only paying the transaction's fee.
 #[derive(Accounts)]
@@ -495,8 +625,12 @@ pub struct Payout<'info> {
         bump = pool.bump,
         has_one = treasury,
         has_one = buyback_reserve,
+        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
