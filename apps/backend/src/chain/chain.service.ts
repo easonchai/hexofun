@@ -260,9 +260,12 @@ export class ChainService {
    * transaction actually uses, so simulating first is what lets `send` stop
    * paying for the runtime's 200k-per-instruction default.
    *
-   * A failed simulation is logged once and answered with `undefined`, so
-   * `send` still lands the transaction without a limit instruction, same as
-   * before this ticket.
+   * A simulation that fails inside the program (a custom error code, such
+   * as `NothingToHarvest`) is deterministic: preflight would refuse the same
+   * bytes, so it throws through `mapSendError` and `send` never goes to the
+   * wire. Any other failure (RPC hiccup, no `unitsConsumed`) is logged once
+   * and answered with `undefined`, so `send` still lands the transaction
+   * without a limit instruction, same as before this ticket.
    */
   private async computeUnitLimit(
     instructions: TransactionInstruction[],
@@ -279,6 +282,15 @@ export class ChainService {
     );
     try {
       const { value } = await this.connection.simulateTransaction(tx);
+      const code = customErrorCode(value.err);
+      if (code !== undefined) {
+        // Carries the program's logs (how `mapSendError` names an Anchor
+        // error) and the code (its fallback when the RPC returned none).
+        throw Object.assign(new Error(JSON.stringify(value.err)), {
+          code,
+          logs: value.logs ?? undefined,
+        });
+      }
       if (value.err || value.unitsConsumed === undefined) {
         throw new Error(
           value.err ? JSON.stringify(value.err) : "simulation reported no unitsConsumed",
@@ -286,6 +298,7 @@ export class ChainService {
       }
       return Math.ceil(value.unitsConsumed * COMPUTE_UNIT_MARGIN);
     } catch (cause) {
+      if (cause instanceof Error && "code" in cause) throw cause;
       this.logger.warn(
         `simulate failed, sending without a compute limit: ${
           cause instanceof Error ? cause.message : String(cause)
@@ -452,6 +465,19 @@ export class ChainService {
       )
       .catch(() => 0);
   }
+}
+
+/** The program's own error code inside a simulation's `err`, when it is one:
+ *  `{ InstructionError: [index, { Custom: code }] }`. Anything else (a
+ *  runtime error, an RPC shape, null) answers undefined. */
+function customErrorCode(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null || !("InstructionError" in err)) return undefined;
+  const inner = (err as { InstructionError: unknown }).InstructionError;
+  if (!Array.isArray(inner)) return undefined;
+  const detail: unknown = inner[1];
+  if (typeof detail !== "object" || detail === null || !("Custom" in detail)) return undefined;
+  const code = (detail as { Custom: unknown }).Custom;
+  return typeof code === "number" ? code : undefined;
 }
 
 /** Every writable account across `instructions`, deduplicated — the account

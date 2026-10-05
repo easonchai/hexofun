@@ -216,6 +216,19 @@ describe("ChainService.send", () => {
 
       expect(sentComputeLimit(connection)).toBeUndefined();
     });
+
+    // A program error in simulation is deterministic: preflight would refuse
+    // the same bytes, so `send` throws the named error without going to the
+    // wire (seen as a daily NothingToHarvest warning in the operator log).
+    it("throws the program's named error when simulation fails inside the program", async () => {
+      const connection = new CountingConnection();
+      connection.simulateError = { InstructionError: [1, { Custom: 6071 }] };
+      const chain = chainWith(connection);
+
+      await expect(chain.send(noop)).rejects.toThrow("NothingToHarvest");
+
+      expect(connection.callsTo("sendRawTransaction")).toBe(0);
+    });
   });
 
   // Ticket 10: every send prepends a priority fee, priced off
