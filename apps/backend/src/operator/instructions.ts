@@ -10,6 +10,8 @@ import {
 import {
   PublicKey,
   SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  type AccountMeta,
   type TransactionInstruction,
 } from "@solana/web3.js";
 
@@ -32,11 +34,14 @@ import {
 
 const bn = (value: bigint): BN => new BN(value.toString());
 
-/** The two calls this file makes on an Anchor methods builder. */
+/** The calls this file makes on an Anchor methods builder. */
+interface BuiltAccounts {
+  remainingAccounts(accounts: AccountMeta[]): BuiltAccounts;
+  instruction(): Promise<TransactionInstruction>;
+}
+
 interface MethodBuilder {
-  accountsPartial(accounts: Record<string, PublicKey>): {
-    instruction(): Promise<TransactionInstruction>;
-  };
+  accountsPartial(accounts: Record<string, PublicKey>): BuiltAccounts;
 }
 
 type MethodFactory = (...args: unknown[]) => MethodBuilder;
@@ -86,6 +91,45 @@ export class OperatorInstructions {
     return playerAddress(this.programId, pool.address, owner);
   }
 
+  /** The four pinned klend addresses an instruction that runs sync names. */
+  private venue(pool: PoolState): Record<string, PublicKey> {
+    return {
+      klendProgram: pool.klendProgram,
+      klendMarket: pool.klendMarket,
+      klendReserve: pool.klendReserve,
+      klendCtoken: pool.klendCtoken,
+    };
+  }
+
+  /**
+   * What a venue deposit or redeem needs beyond the pinned four (klend.rs,
+   * in this order): the lending market authority, the reserve's liquidity
+   * supply vault, the cToken mint and the instructions sysvar. klend derives
+   * the first three from the market and the liquidity mint, so no RPC read is
+   * needed, and the program checks each against the reserve itself
+   * (`KlendAccountMismatch`). The `test-venue` stub pins this program as its
+   * own klend and ignores remaining accounts.
+   */
+  private venueRemaining(pool: PoolState): AccountMeta[] {
+    if (pool.klendProgram.equals(this.programId)) return [];
+    const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
+      PublicKey.findProgramAddressSync(
+        seeds.map((seed) => (typeof seed === "string" ? Buffer.from(seed) : seed.toBuffer())),
+        pool.klendProgram,
+      )[0];
+    const meta = (pubkey: PublicKey, isWritable: boolean): AccountMeta => ({
+      pubkey,
+      isSigner: false,
+      isWritable,
+    });
+    return [
+      meta(derive("lma", pool.klendMarket), false),
+      meta(derive("reserve_liq_supply", pool.klendMarket, pool.acceptedMint), true),
+      meta(derive("reserve_coll_mint", pool.klendMarket, pool.acceptedMint), true),
+      meta(SYSVAR_INSTRUCTIONS_PUBKEY, false),
+    ];
+  }
+
   async beginEpoch(pool: PoolState): Promise<TransactionInstruction[]> {
     // `current_epoch` does not exist before the first epoch; the program skips
     // it in that case, but the address still has to be supplied.
@@ -107,28 +151,9 @@ export class OperatorInstructions {
     ];
   }
 
-  async register(
-    pool: PoolState,
-    epochId: bigint,
-    owners: readonly PublicKey[],
-  ): Promise<TransactionInstruction[]> {
-    return Promise.all(
-      owners.map((owner) =>
-        this.method("register")
-          .accountsPartial({
-            pool: pool.address,
-            epoch: this.epoch(pool, epochId),
-            player: this.player(pool, owner),
-          })
-          .instruction(),
-      ),
-    );
-  }
-
   /**
    * Step 3b (docs/plan/hexo-referrals ticket 08): one `grant_tickets` per
-   * referrer, batched into one transaction the way `register` batches
-   * owners. Signed by the operator, so every grant is capped on chain per
+   * referrer, batched into one transaction. Signed by the operator, so every grant is capped on chain per
    * Player per day at their own Principal and pool-wide at `bonus_cap_bps`
    * of `total_principal` (`grant_tickets`' operator path).
    */
@@ -143,6 +168,7 @@ export class OperatorInstructions {
             signer: this.operator,
             pool: pool.address,
             player: this.player(pool, new PublicKey(grant.referrer)),
+            weightTree: pool.weightTree,
           })
           .instruction(),
       ),
@@ -191,31 +217,30 @@ export class OperatorInstructions {
   }
 
   /**
-   * Step 4's tail: the epoch draws on whatever the jackpot vault holds. A
-   * fresh nonce is generated per call and mixed into the seed
-   * (beta-launch-fixes ticket 02), so the randomness address is derived here
-   * rather than read back off the Epoch, and is unknowable before this call.
+   * Step 4: sends the ended epoch to the draw, or rolls it over when it holds
+   * no Weight or a prize under `min_jackpot`. Operator-only. A fresh nonce is
+   * generated per call and mixed into the seed (beta-launch-fixes ticket 02),
+   * so the randomness address is derived here rather than read back off the
+   * Epoch, and is unknowable before this call.
    */
-  async closeRegistration(
-    pool: PoolState,
-    epochId: bigint,
-  ): Promise<TransactionInstruction[]> {
+  async requestDraw(pool: PoolState, epochId: bigint): Promise<TransactionInstruction[]> {
     const nonce = randomNonce();
-    const close = await this.method("closeRegistration", Array.from(nonce))
-      .accountsPartial({
-        operator: this.operator,
-        pool: pool.address,
-        epoch: this.epoch(pool, epochId),
-        jackpotVault: jackpotVaultAddress(this.programId, pool.address),
-        randomness: this.randomnessFor(vrfSeed("epoch", pool.address, epochId, nonce)),
-        vrfNetworkState: pool.vrfNetworkState,
-        vrfTreasury: ORAO_VRF_TREASURY,
-        vrfProgram: ORAO_VRF_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .instruction();
-
-    return [close];
+    return [
+      await this.method("requestDraw", Array.from(nonce))
+        .accountsPartial({
+          operator: this.operator,
+          pool: pool.address,
+          epoch: this.epoch(pool, epochId),
+          weightTree: pool.weightTree,
+          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
+          randomness: this.randomnessFor(vrfSeed("epoch", pool.address, epochId, nonce)),
+          vrfNetworkState: pool.vrfNetworkState,
+          vrfTreasury: ORAO_VRF_TREASURY,
+          vrfProgram: ORAO_VRF_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .instruction(),
+    ];
   }
 
   /** Permissionless (production-hardening ticket 01): the operator still
@@ -268,6 +293,7 @@ export class OperatorInstructions {
       await this.method("payout")
         .accountsPartial({
           pool: pool.address,
+          weightTree: pool.weightTree,
           acceptedMint: pool.acceptedMint,
           epoch: this.epoch(pool, epochId),
           winner: this.player(pool, winner),
@@ -275,6 +301,7 @@ export class OperatorInstructions {
           principalVault: principalVaultAddress(this.programId, pool.address),
           treasury: pool.treasury,
           buybackReserve: pool.buybackReserve,
+          ...this.venue(pool),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .instruction(),
@@ -320,6 +347,7 @@ export class OperatorInstructions {
           round: this.round(pool, round.roundId),
           randomness: this.randomnessFor(round.vrfSeed),
           house: pool.house,
+          weightTree: pool.weightTree,
         })
         .instruction(),
     ];
@@ -356,6 +384,7 @@ export class OperatorInstructions {
         return this.method("settlePosition")
           .accountsPartial({
             pool: pool.address,
+            weightTree: pool.weightTree,
             round,
             player: this.player(pool, owner),
             owner,
@@ -385,6 +414,7 @@ export class OperatorInstructions {
           owner,
           pool: pool.address,
           player: this.player(pool, owner),
+          weightTree: pool.weightTree,
           round,
           position: positionAddress(this.programId, round, owner),
           systemProgram: SystemProgram.programId,
@@ -425,6 +455,61 @@ export class OperatorInstructions {
           round: this.round(pool, pool.nextRoundId),
           systemProgram: SystemProgram.programId,
         })
+        .instruction(),
+    ];
+  }
+
+  /**
+   * The three venue cranks (yield-claimer ticket 13) are permissionless: the
+   * operator is only the fee payer. Each syncs first, and the klend backing
+   * refreshes its own reserve by CPI, so no refresh instruction goes in front.
+   * `amount` is atomic USDC.
+   */
+  async deployToVenue(pool: PoolState, amount: bigint): Promise<TransactionInstruction[]> {
+    return [
+      await this.method("deployToVenue", bn(amount))
+        .accountsPartial({
+          pool: pool.address,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts(this.venueRemaining(pool))
+        .instruction(),
+    ];
+  }
+
+  async recall(pool: PoolState, amount: bigint): Promise<TransactionInstruction[]> {
+    return [
+      await this.method("recall", bn(amount))
+        .accountsPartial({
+          pool: pool.address,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts(this.venueRemaining(pool))
+        .instruction(),
+    ];
+  }
+
+  /** Pays the fee owed to `pool.treasury` and the prize share owed to the
+   *  jackpot vault. */
+  async harvest(pool: PoolState): Promise<TransactionInstruction[]> {
+    return [
+      await this.method("harvest")
+        .accountsPartial({
+          pool: pool.address,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
+          treasury: pool.treasury,
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts(this.venueRemaining(pool))
         .instruction(),
     ];
   }

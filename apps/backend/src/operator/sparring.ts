@@ -97,7 +97,8 @@ const isLostRace = (message: string): boolean =>
 export class SparringService {
   private readonly logger = new Logger(SparringService.name);
   private readonly instructions: OperatorInstructions;
-  /** Null switches the whole service off (no `SPARRING_KEYPAIR`). */
+  /** Null switches the whole service off (`SPARRING_ENABLED` unset, or no
+   *  `SPARRING_KEYPAIR`). */
   private readonly keypair: Keypair | null;
   /** Single-flight: a pass that overruns the interval skips the next one. */
   private running = false;
@@ -106,13 +107,20 @@ export class SparringService {
     private readonly chain: ChainService,
     config: ConfigService<HexVaultEnv, true>,
   ) {
+    // Off unless SPARRING_ENABLED=true (ADR 0019), keypair or not: a wallet
+    // left in an env file must not start it on a pool that ships it off.
     const secret = config.get("SPARRING_KEYPAIR", { infer: true });
-    this.keypair = secret ? Keypair.fromSecretKey(bs58.decode(secret)) : null;
-    this.logger.log(
-      this.keypair
-        ? `sparring player on: ${this.keypair.publicKey.toBase58()}`
-        : "sparring player off",
-    );
+    const enabled = config.get("SPARRING_ENABLED", { infer: true });
+    this.keypair = enabled && secret ? Keypair.fromSecretKey(bs58.decode(secret)) : null;
+    if (enabled && !secret) {
+      this.logger.warn("SPARRING_ENABLED is set but SPARRING_KEYPAIR is not; sparring player off");
+    } else {
+      this.logger.log(
+        this.keypair
+          ? `sparring player on: ${this.keypair.publicKey.toBase58()}`
+          : "sparring player off",
+      );
+    }
     // `buy_position` is permissionless and touches no randomness, so neither
     // the authority nor the test-vrf flag reaches the instruction it builds.
     this.instructions = new OperatorInstructions(

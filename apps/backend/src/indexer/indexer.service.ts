@@ -37,7 +37,6 @@ import {
   playerRow,
   poolRow,
   positionRow,
-  registrationWeight,
   roundRow,
   settledPosition,
   type DecodedEpoch,
@@ -301,18 +300,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     return this.prisma.epoch.findUnique({
       where: { poolAddress_id: { poolAddress: this.activePool, id } },
     });
-  }
-
-  /** Owners the operator still owes a `register` for this ended epoch. */
-  async playersToRegister(epochId: bigint): Promise<string[]> {
-    const epoch = await this.getEpoch(epochId);
-    if (!epoch) return [];
-    const players = await this.prisma.player.findMany({
-      where: { poolAddress: this.activePool, regEpoch: { not: epochId } },
-    });
-    return players
-      .filter((player) => registrationWeight(player, epoch) > 0n)
-      .map((player) => player.owner);
   }
 
   /**

@@ -15,8 +15,9 @@ Starts with `OPERATOR_STALE`, sometimes alongside `INDEXER_STALE`.
    `cursor.ageSeconds` for the indexer.
 2. The operator sleeps until the next chain-clock deadline, a round's `close_buffer`, a request's
    `vrf_timeout`, an epoch's `payout_timeout`, and works through one epoch and one round at a time:
-   `begin_epoch`, `register`, `close_registration`, `draw`, `payout`, and `create_round`, then
-   `settle_round` or `void_round`. A 60s safety tick is the backstop if a deadline is missed.
+   `begin_epoch`, `request_draw`, `draw`, `payout`, and `create_round`, then
+   `settle_round` or `void_round`, with `deploy_to_venue`, `recall` and `harvest` between them as the
+   pool's liquidity needs. A 60s safety tick is the backstop if a deadline is missed.
    Waiting on a deadline is not a stall by itself, as long as `lastTickAt` keeps advancing.
 3. A round whose randomness never arrives voids itself once `vrf_timeout` passes its request; an
    epoch stuck `Drawn` with no payout rolls over once `payout_timeout` passes. Neither needs a
@@ -92,9 +93,9 @@ Starts with whichever code names the damage, or none if the report comes in firs
    - **A code fix is needed**: ship it with `scripts/deploy.sh <env> --upgrade`
      ([`docs/ops/deploy.md`](deploy.md#upgrading)). Run it only once no Round is open
      (`GET /status`'s `openRoundId`).
-   - **Funds need to come out for good**: `return-principal` until `principal-out` reads 0, let any
-     already-drawn epoch's `payout` land, then `shutdown --confirm <pool-id>`, `emergency-crank
-     [--batch N]`, `sweep-house`, in that order
+   - **Funds need to come out for good**: let any already-drawn epoch's `payout` land, then
+     `shutdown --confirm <pool-id>`, recall the venue position, `emergency-crank [--batch N]`,
+     `sweep-house`, in that order
      ([`docs/ops/funds.md`](funds.md#shutdown-and-the-emergency-exits)).
 4. There is no on-call rotation yet (production-hardening ticket 13 sets up the uptime monitor's
    paging target); until it exists, whoever notices the incident runs this playbook and pulls the
@@ -138,19 +139,18 @@ Starts with `OPERATOR_FAILING`.
 
 Starts with `EPOCH_NO_PROGRESS`.
 
-1. First check: `GET /epochs/current`'s `status` against `endsAt`, `registrationWindow` and
-   `vrfTimeout`. This fires only once an epoch has run well past the point every self-healing
+1. First check: `GET /epochs/current`'s `status` against `endsAt` and `vrfTimeout`. This fires only once an epoch has run well past the point every self-healing
    timeout (void, rollover) should already have moved it on, so treat it as "the backstop itself
    didn't fire" and check the operator logs for why: `OPERATOR_STALE`, a stuck RPC, or a bug in the
    void/rollover path.
 2. Push it by hand. Both exits are permissionless and the program enforces the deadline, so a
    too-early call fails with `VrfTimeoutNotElapsed` and changes nothing:
-   `admin rollover-epoch --epoch N` for a Registering, Drawing or Drawn epoch past its timeout,
+   `admin rollover-epoch --epoch N` for an Ended, Drawing or Drawn epoch past its timeout,
    `admin void-round --round N` for an Open or Requested round past `vrf_timeout`. Ids are in
    `GET /epochs/current` and `GET /status`. The operator voids a round itself, Open or Requested,
-   and rolls over a Drawing or Drawn epoch, but never a Registering one: it holds
-   `close_registration` on purpose while the indexer is stale, so that epoch needs a human to
-   decide between fixing the indexer and giving up the draw.
+   and rolls over a Drawing or Drawn epoch, but never an Ended one: it sends that one to the draw
+   with `request_draw`, and an Ended epoch that stays stuck means `request_draw` keeps failing, so
+   read the operator's error before giving up the draw.
 
 ## Drawn epoch sitting unpaid
 

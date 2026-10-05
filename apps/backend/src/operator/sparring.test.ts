@@ -35,6 +35,7 @@ import {
 
 const AUTHORITY = Keypair.generate().publicKey;
 const SPARRING = Keypair.generate().publicKey;
+const WEIGHT_TREE = Keypair.generate().publicKey;
 const PROGRAM_ID = new PublicKey("LFk9ba6QXuM9oYRRNGGPxMGzfo13X3DAr8ghSPz72C6");
 const POOL = poolAddress(PROGRAM_ID, 1n);
 const ROUND = roundAddress(PROGRAM_ID, POOL, 3n);
@@ -72,7 +73,6 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   roundSeconds: 60n,
   closeBuffer: 5n,
   vrfTimeout: 120n,
-  registrationWindow: 0n,
   payoutTimeout: 86_400n,
   paused: false,
   currentEpochId: 2n,
@@ -82,6 +82,20 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   shutdown: false,
   gamePaused: false,
   jackpotPaused: false,
+  weightTree: WEIGHT_TREE,
+  klendProgram: PublicKey.default,
+  klendMarket: PublicKey.default,
+  klendReserve: PublicKey.default,
+  klendCtoken: PublicKey.default,
+  pendingWithdrawals: 0n,
+  venueValue: 0n,
+  feeOwed: 0n,
+  prizeOwed: 0n,
+  idleFloorBps: 500,
+  idleTargetBps: 1_000,
+  minVenueMove: 100_000_000n,
+  deployPaused: false,
+  impaired: false,
   ...over,
 });
 
@@ -156,6 +170,7 @@ describe("playSparring", () => {
       SPARRING.toBase58(),
       POOL.toBase58(),
       playerAddress(PROGRAM_ID, POOL, SPARRING).toBase58(),
+      WEIGHT_TREE.toBase58(),
       ROUND.toBase58(),
       positionAddress(PROGRAM_ID, ROUND, SPARRING).toBase58(),
       SystemProgram.programId.toBase58(),

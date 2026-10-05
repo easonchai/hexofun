@@ -374,20 +374,6 @@ describe("admin run", () => {
     expect(stderr.length).toBeGreaterThan(0);
   });
 
-  it("fund-yield in local mode signs and funds the principal vault, not the jackpot vault", async () => {
-    const { chain, sent } = await harness();
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "fund-yield", amount: 12_000_000n }, chain, mode),
-    );
-
-    expect(sent).toHaveLength(1);
-    expect(stdout).toEqual([]);
-    expect(stderr[0]).toMatch(/^signature /);
-    expect(stderr.join("\n")).toContain("yield budget funded with 12000000 atomic units");
-  });
-
   it("grant-tickets in local mode signs with the loaded key as the admin path", async () => {
     const { chain, sent } = await harness();
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
@@ -437,28 +423,6 @@ describe("admin run", () => {
     );
 
     expect(sent).toHaveLength(1);
-  });
-
-  it("withdraw-principal in multisig mode prints one line carrying both instructions", async () => {
-    const { chain, sent } = await harness();
-    const multisigVault = Keypair.generate().publicKey;
-    const mode: AdminMode = { signer: multisigVault, multisig: true };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "withdraw-principal", amount: "12.5" }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toHaveLength(1);
-    const tx = Transaction.from(bs58.decode(stdout[0] as string));
-    // The destination ATA does not exist yet, so its idempotent creation
-    // rides along in front of admin_withdraw.
-    expect(tx.instructions).toHaveLength(2);
-    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
-    // 12.5 USDC against the mint's six decimals, in the summary on stderr.
-    expect(stderr.join("\n")).toContain("12500000 atomic");
-    // No part of the human-readable summary leaked into the paste.
-    expect(stdout[0]).not.toContain(" ");
   });
 
   it("unpause with a Ledger signer sends through the Ledger, not chain.send (ticket 09)", async () => {
@@ -546,82 +510,6 @@ describe("admin run", () => {
     expect(rawSent).toHaveLength(1);
   });
 
-  it("principal-out reads the pool and vault and sends nothing", async () => {
-    const { chain, sent } = await harness({
-      pool: {
-        totalPrincipal: new BN(3_000_000),
-        pendingWithdrawals: new BN(250_000),
-        yieldBudget: new BN(100_000),
-      },
-      vaultBalance: 1_000_000n,
-    });
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "principal-out" }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toEqual([]);
-    // 3,000,000 + 250,000 + 100,000 - 1,000,000.
-    expect(stderr.join("\n")).toContain("principal_out=2350000");
-  });
-
-  it("return-principal in local mode transfers from the admin's own ATA and prints before/after", async () => {
-    const { chain, sent } = await harness({
-      pool: {
-        totalPrincipal: new BN(3_000_000),
-        pendingWithdrawals: new BN(250_000),
-        yieldBudget: new BN(100_000),
-      },
-      vaultBalance: 1_000_000n,
-    });
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "return-principal", amount: "1" }, chain, mode),
-    );
-
-    expect(sent).toHaveLength(1);
-    // Just the transfer: the admin's own source ATA is assumed to already
-    // exist, same as fundJackpot/fundYield's own source reads.
-    expect(sent[0]).toHaveLength(1);
-    expect(stdout).toEqual([]);
-    const lines = stderr.join("\n");
-    expect(lines).toContain("1000000 atomic");
-    expect(lines).toMatch(/before:.*principal_out=2350000/);
-    expect(lines).toMatch(/after:.*principal_out=2350000/);
-  });
-
-  it("return-principal's transfer names the pool's own principal vault and accepted mint, never a substitute account", async () => {
-    const { chain, sent } = await harness({ vaultBalance: 1_000_000n });
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    await run({ kind: "return-principal", amount: "1" }, chain, mode);
-
-    const keys = sent[0]?.[0]?.keys.map((k) => k.pubkey.toBase58()) ?? [];
-    expect(keys).toContain(principalVaultAddress(PROGRAM_ID, POOL).toBase58());
-    expect(keys).toContain(MINT.toBase58());
-    // Not the jackpot vault: return-principal only ever moves principal.
-    expect(keys).not.toContain(jackpotVaultAddress(PROGRAM_ID, POOL).toBase58());
-  });
-
-  it("return-principal in multisig mode prints principal-out before, not after", async () => {
-    const { chain, sent } = await harness({ vaultBalance: 1_000_000n });
-    const multisigVault = Keypair.generate().publicKey;
-    const mode: AdminMode = { signer: multisigVault, multisig: true };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "return-principal", amount: "1" }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toHaveLength(1);
-    const lines = stderr.join("\n");
-    expect(lines).toContain("before:");
-    expect(lines).not.toContain("after:");
-  });
-
   it("shutdown refuses unless --confirm matches the configured pool, irreversible or not", async () => {
     const { chain, sent } = await harness();
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
@@ -703,7 +591,7 @@ describe("admin run", () => {
     expect(stderr.join("\n")).toContain("paid 1, skipped 0");
   });
 
-  it("emergency-crank stops at the first InsufficientVault and prints principal-out", async () => {
+  it("emergency-crank stops at the first InsufficientVault and prints the vault balance", async () => {
     const alice = Keypair.generate().publicKey;
     const { chain, sent } = await harness({
       pool: {
@@ -726,7 +614,7 @@ describe("admin run", () => {
     expect(sent).toEqual([]);
     const lines = stderr.join("\n");
     expect(lines).toContain("insufficient vault");
-    expect(lines).toContain("principal_out=500000");
+    expect(lines).toContain("principal vault holds 500000");
     expect(lines).toContain("paid 0, skipped 1");
   });
 

@@ -148,7 +148,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService end-of-tick timestamp", () => {
     };
 
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -215,7 +214,6 @@ describe("OperatorService catch-path state write", () => {
       },
     };
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -259,7 +257,6 @@ describe("OperatorService.onModuleDestroy", () => {
     };
     const prisma = { operatorState: { upsert: async () => {} } };
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -362,7 +359,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
       } as unknown as ChainService,
       prisma,
       {
-        playersToRegister: async () => [],
         unsettledPositions: async () => [],
         referralGrantsDue: async () => [],
         markReferralGrantsSent: async () => {},
@@ -415,9 +411,9 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
         epochId: bn(1),
         startsAt: bn(CHAIN_NOW - 100n),
         endsAt: bn(CHAIN_NOW + 86_300n),
-        // Registering, not Open: step 6b tops the jackpot up only while the
-        // Epoch is Open, and that read is not what this test is measuring.
-        status: EPOCH_STATUS.REGISTERING,
+        // Ended, not Open: the Epoch's own status is not what this test is
+        // measuring.
+        status: EPOCH_STATUS.ENDED,
         registeredWeight: bn(0),
         registeredCount: 0,
         jackpotAmount: bn(0),
@@ -447,7 +443,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
       },
     };
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -528,7 +523,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService RPC failure recovery", () => {
       send: async () => "signature",
     };
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -631,7 +625,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService randomness subscription", () => 
       },
     };
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -712,8 +705,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService randomness subscription", () => 
 // Pool cutover (ADR 0016, ticket 02): after POOL_ID moves to a new pool, the
 // database still holds the retired pool's OperatorState and Cursor. The
 // operator must read and write only the Active pool's rows, or it would
-// report the retired pool's last tick as its own and trust the retired
-// pool's fresh cursor to close the new pool's registration.
+// report the retired pool's last tick as its own.
 describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () => {
   const ACTIVE = poolAddress(PROGRAM_ID, 42n);
   const ACTIVE_ADDRESS = ACTIVE.toBase58();
@@ -728,16 +720,11 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
     await prisma.cursor.deleteMany({ where: both });
 
     const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    // The retired pool's indexer was healthy right up to the cutover.
-    await prisma.cursor.create({
-      data: { poolAddress: RETIRED_POOL_ADDRESS, updatedAt: nowSeconds },
-    });
     await prisma.operatorState.create({
       data: { poolAddress: RETIRED_POOL_ADDRESS, lastTickAt: 1n, lastAction: "retired" },
     });
 
-    // Epoch 1 ended and is Registering with an empty list, so close_registration
-    // is due and only the indexer cursor's freshness can hold it back.
+    // Epoch 1 ended and waits for request_draw, so the first tick has a move.
     const CHAIN_NOW = nowSeconds;
     const epoch = (epochId: bigint, status: number, endsAt: bigint) => ({
       epochId: bn(epochId),
@@ -760,14 +747,14 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       ACTIVE_ADDRESS,
       await program.coder.accounts.encode(
         "pool",
-        pool({ poolId: bn(42), currentEpochId: bn(2), registrationWindow: bn(0) }),
+        pool({ poolId: bn(42), currentEpochId: bn(2) }),
       ),
     );
     accounts.set(
       epochAddress(PROGRAM_ID, ACTIVE, 1n).toBase58(),
       await program.coder.accounts.encode(
         "epoch",
-        epoch(1n, EPOCH_STATUS.REGISTERING, CHAIN_NOW - 1_000n),
+        epoch(1n, EPOCH_STATUS.ENDED, CHAIN_NOW - 1_000n),
       ),
     );
     accounts.set(
@@ -797,7 +784,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       },
     };
     const indexer: IndexerQueries = {
-      playersToRegister: async () => [],
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
@@ -817,33 +803,20 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       // No row yet: /status reads null last tick for the new pool.
       expect(await activeState()).toBeNull();
 
-      // First empty registration check; the first tick creates the Active
-      // pool's row beside the retired one instead of overwriting it.
-      await operator.runOnce();
-      const first = await activeState();
-      expect(first?.lastTickAt).not.toBeNull();
-      expect(first?.lastError).toBeNull();
+      // The first tick sends request_draw and creates the Active pool's row
+      // beside the retired one instead of overwriting it.
+      const first = await operator.runOnce();
+      expect(first.action).toBe("request_draw");
+      expect(sent).toHaveLength(1);
+      const row = await activeState();
+      expect(row?.lastTickAt).not.toBeNull();
+      expect(row?.lastError).toBeNull();
+      expect(row?.lastAction).toBe("request_draw");
       const retired = await prisma.operatorState.findUniqueOrThrow({
         where: { poolAddress: RETIRED_POOL_ADDRESS },
       });
       expect(retired.lastTickAt).toBe(1n);
       expect(retired.lastAction).toBe("retired");
-
-      // Close is due, but the new pool's indexer has never synced: the
-      // retired pool's fresh cursor must not stand in for it.
-      const withheld = await operator.runOnce();
-      expect(withheld.action).toBeNull();
-      expect(withheld.indexerStale).toBe(true);
-      expect((await activeState())?.registrationIndexerStale).toBe(true);
-      expect(sent).toHaveLength(0);
-
-      // The new pool's own first sync is what lets it close.
-      await prisma.cursor.create({
-        data: { poolAddress: ACTIVE_ADDRESS, updatedAt: BigInt(Math.floor(Date.now() / 1000)) },
-      });
-      const closed = await operator.runOnce();
-      expect(closed.action).toBe("close_registration");
-      expect(sent).toHaveLength(1);
     } finally {
       await prisma.operatorState.deleteMany({ where: both });
       await prisma.cursor.deleteMany({ where: both });
@@ -876,7 +849,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       } as unknown as ChainService,
       prisma,
       {
-        playersToRegister: async () => [],
         unsettledPositions: async () => [],
         referralGrantsDue: async () => [],
         markReferralGrantsSent: async () => {},

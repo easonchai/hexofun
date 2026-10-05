@@ -184,19 +184,17 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   against it before building any transaction and fails closed on a mismatch.
 - **Squads** (mainnet today): set `ADMIN_ADDRESS` to the multisig vault's address without loading
   its key anywhere. Every admin-gated command (`set-params`, `shutdown`, `sweep-house`,
-  `withdraw-principal`, `return-principal`, `set-operator`, `propose-admin`, `accept-admin`, and
-  `grant-tickets`'s admin path) then builds the instruction with the vault as signer and fee
+  `set-operator`, `propose-admin`, `accept-admin`, and `grant-tickets`'s admin path) then builds the instruction with the vault as signer and fee
   payer and prints one base58 transaction on stdout instead of sending it
   (`apps/backend/src/admin/squads.ts`, `adminMode`); everything else it prints goes to stderr, so
-  `admin withdraw-principal --amount 25000 | pbcopy` hands Squads a clean paste. In Squads:
+  `admin sweep-house | pbcopy` hands Squads a clean paste. In Squads:
   Transaction Builder, Add instruction, Import base58 encoded tx, paste, simulate, then collect
   approvals and execute. `start-game` and `start-jackpot` are admin-gated too and go through
   the same path. The transaction carries a blockhash that expires in about a minute;
   re-run the command for a fresh one if the paste took too long. `pause`, `pause-game`,
-  `pause-jackpot`, `fund-jackpot`,
-  `fund-yield`, `principal-out` and `emergency-crank` never go through Squads: the first three
-  are permissionless or dual-signer by design, and `principal-out` is read-only, so none of them
-  has to wait on multisig approval, which matters most for `pause` in an incident.
+  `pause-jackpot`, `fund-jackpot` and `emergency-crank` never go through Squads: they are
+  permissionless or dual-signer by design, so none of them has to wait on multisig approval,
+  which matters most for `pause` in an incident.
 
 `scripts/deploy.sh mainnet` always signs the program upgrade itself with a Ledger
 (`--upgrade-authority usb://ledger`), independent of whichever of the three modes above the admin

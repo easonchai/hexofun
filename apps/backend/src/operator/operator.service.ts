@@ -35,20 +35,19 @@ import {
   msUntilWake,
   runTick,
   SAFETY_INTERVAL_SECONDS,
-  type RegisterCheck,
   type TickContext,
   type TickOutcome,
   type WithdrawState,
 } from "./tick";
+import type { VenueState } from "./venue";
 import { isFulfilled, randomnessAddress } from "./vrf";
+import { leafHoldingTarget, readNodes } from "./weight-tree";
 
 /** How long a settled Position's address is remembered; well past any sweep lag. */
 const SETTLED_MEMORY_MS = 5 * 60_000;
-/** Ticket 12: how long a `register` attempt is remembered against
- *  `playersToRegister`, well past the longest reasonable registration window
- *  (an epoch's own length), so a zero-weight owner is not resent for the
- *  whole epoch rather than just a few minutes. */
-const REGISTERED_MEMORY_MS = 24 * 60 * 60_000;
+/** How many drawn epochs' winners are remembered; one is ever needed at a
+ *  time, the rest only cover a payout retried after the epoch has moved on. */
+const WINNER_MEMORY = 4;
 /** The slow safety net alongside the deadline-driven sleep (ticket 03): runs
  *  regardless, so a mis-computed deadline degrades to "checked on this
  *  cadence" rather than a stall. Same cadence `nextWakeAt` falls back to. */
@@ -74,9 +73,6 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   /** The self-rescheduling deadline sleep; cleared and replaced on every
    *  tick, on `wake()`, and on shutdown. */
   private deadlineTimer: NodeJS.Timeout | null = null;
-  /** Ticket 04: whether `playersToRegister` came back empty last tick, and
-   *  for which Epoch, so step 4 can require two consecutive empty ticks. */
-  private lastRegisterCheck: RegisterCheck | null = null;
   /**
    * Positions this operator has already settled, by address, with when. The
    * indexer's sweep can re-insert one for a few seconds after the close: the
@@ -89,18 +85,15 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    *  (ops-and-envs ticket 08): keeps an immediate next tick from resending
    *  it before the indexer's `RoundClosed` mirror lands. */
   private closingRounds = new Map<bigint, number>();
-  /** Ticket 12: owners a `register` send was just confirmed for, by when
-   *  (same idea as `settled`): dropped from `playersToRegister` results for a
-   *  while, so a zero-weight owner (a no-op on chain) is not resent forever
-   *  and a Read-model lag cannot resend a batch that already landed. */
-  private registeredRecently = new Map<string, number>();
+  /** Epoch id to the owner whose leaf held its target. A target never moves
+   *  once drawn, so a retried payout does not re-read the whole tree. */
+  private winners = new Map<bigint, string>();
   /** Ticket 06: withdrawal-cranking state across ticks (see `WithdrawState`). */
   private lastWithdrawState: WithdrawState | null = null;
   /** Ticket 12: expected-error repeat counts across ticks, by `action:target`. */
   private lastExpectedErrors = new Map<string, number>();
-  /** Ticket 07: how young the Indexer cursor must be for `close_registration`
-   *  to trust it. */
-  private readonly registrationIndexerFreshSeconds: bigint;
+  /** Ticket 13: what the venue cranks remember across ticks (see `VenueState`). */
+  private lastVenueState: VenueState | null = null;
   /** Ticket 05: holds step 3's very first `begin_epoch` back until this chain
    *  timestamp; null when `LAUNCH_AT` is unset. */
   private readonly launchAt: bigint | null;
@@ -126,9 +119,6 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     private readonly sparring: SparringService,
     config: ConfigService<HexVaultEnv, true>,
   ) {
-    this.registrationIndexerFreshSeconds = BigInt(
-      config.get("REGISTRATION_INDEXER_FRESH_S", { infer: true }),
-    );
     const launchAtIso = config.get("LAUNCH_AT", { infer: true });
     this.launchAt =
       typeof launchAtIso === "string" && launchAtIso.length > 0
@@ -252,8 +242,8 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       }
       const outcome = await runTick(ctx);
       this.syncRandomnessWatch(ctx.openRound);
-      if (outcome.registerCheck) this.lastRegisterCheck = outcome.registerCheck;
       if (outcome.withdrawState) this.lastWithdrawState = outcome.withdrawState;
+      if (outcome.venueState) this.lastVenueState = outcome.venueState;
       if (outcome.expectedErrors) this.lastExpectedErrors = new Map(outcome.expectedErrors);
       if (outcome.action) this.logger.log(`sent ${outcome.action}`);
       if (outcome.stepError) this.logger.warn(`tick step failed: ${outcome.stepError}`);
@@ -297,7 +287,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    * surfacing, not something to swallow silently.
    */
   private async safeWriteState(
-    outcome: Pick<TickOutcome, "action" | "progress" | "withdrawShortfall">,
+    outcome: Pick<TickOutcome, "action" | "withdrawShortfall">,
     error: string | null,
     waitMs: number,
   ): Promise<void> {
@@ -335,27 +325,14 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       openRound,
       lastRound,
       ix: this.instructions,
-      lastRegisterCheck: this.lastRegisterCheck,
       lastWithdrawState: this.lastWithdrawState,
-      indexerCursor: await this.indexerCursorInfo(),
-      indexerFreshThresholdSeconds: this.registrationIndexerFreshSeconds,
+      lastVenueState: this.lastVenueState,
       lastExpectedErrors: this.lastExpectedErrors,
       launchAt: this.launchAt,
       fulfilled: (seed) => this.fulfilled(seed),
       principalVaultBalance: () => this.principalVaultBalance(),
       duePendingWithdrawals: (currentEpochId) =>
         this.duePendingWithdrawals(currentEpochId),
-      playersToRegister: async (epochId) => {
-        const owners = await this.indexer.playersToRegister(epochId);
-        return owners.filter((owner) => !this.registeredRecently.has(owner));
-      },
-      forgetRegistered: async (owners) => {
-        const now = Date.now();
-        for (const [owner, at] of this.registeredRecently) {
-          if (now - at > REGISTERED_MEMORY_MS) this.registeredRecently.delete(owner);
-        }
-        for (const owner of owners) this.registeredRecently.set(owner, now);
-      },
       referralGrantsDue: (epochId) => this.indexer.referralGrantsDue(epochId),
       markReferralGrantsSent: (epochId, referrers, txSig) =>
         this.indexer.markReferralGrantsSent(epochId, referrers, txSig),
@@ -379,8 +356,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         }
         this.closingRounds.set(id, now);
       },
-      winner: (epochId, target) => this.winner(epochId, target),
-      winnerOnChain: (epochId, target) => this.winnerOnChain(epochId, target),
+      winner: (epoch) => this.winner(pool, epoch),
       send: (instructions) => this.chain.send(instructions),
       warn: (message) => this.logger.warn(message),
     };
@@ -516,73 +492,50 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     }));
   }
 
-  /** The registered interval containing `target` (spec §3.4 step 6). */
-  private async winner(
-    epochId: bigint,
-    target: bigint,
-  ): Promise<string | null> {
-    const player = await this.prisma.player.findFirst({
-      where: {
-        poolAddress: this.chain.poolAddress().toBase58(),
-        regEpoch: epochId,
-        regStart: { lte: target.toString() },
-        regEnd: { gt: target.toString() },
-      },
-      select: { owner: true },
-    });
-    return player?.owner ?? null;
-  }
-
   /**
-   * Ticket 12: same lookup as `winner`, scanning every Player account on
-   * chain instead of the Read model, for when it misses — a mirror gap must
-   * never cost a winner their Prize. Only asked on a miss, so this is rare;
-   * ponytail: scans the whole program's Player accounts (fine at beta
-   * scale, same trade `ApiService.liveWeights` already makes), add a
-   * `getProgramAccounts` memcmp filter on `reg_epoch` if it ever grows.
+   * The owner of the leaf that holds the drawn epoch's target (spec §3.4 step
+   * 6, ADR 0018). The target indexes into the epoch's Weight, so the answer
+   * comes from the Weight tree: find the leaf, then the Player account that
+   * was assigned it. No Read model table holds this, so a mirror gap cannot
+   * cost a winner their Prize. Null when no leaf holds the target.
+   *
+   * ponytail: scans every Player account of the program once per drawn epoch
+   * (fine at beta scale, same trade `ApiService.liveWeights` makes), cached
+   * in `winners`. Add a `getProgramAccounts` memcmp filter on `leaf_index` if
+   * it ever grows.
    */
-  private async winnerOnChain(epochId: bigint, target: bigint): Promise<string | null> {
+  private async winner(pool: PoolState, epoch: EpochState): Promise<string | null> {
+    const cached = this.winners.get(epoch.epochId);
+    if (cached !== undefined) return cached;
+
+    const treeInfo = await this.chain.connection.getAccountInfo(pool.weightTree);
+    if (!treeInfo) throw new Error(`weight tree ${pool.weightTree.toBase58()} does not exist`);
+    const leaf = leafHoldingTarget(readNodes(treeInfo.data), epoch);
+    if (leaf === null) return null;
+
     interface DecodedPlayer {
       owner: PublicKey;
-      regEpoch: { toString(): string };
-      regStart: { toString(): string };
-      regEnd: { toString(): string };
+      leafIndex: number;
     }
     // SAFETY: `program.account` is keyed by plain strings in `Program<Idl>`
     // (no generated per-account types), same reason `instructions.ts`'s
     // `method()` casts; the shape is checked structurally by `DecodedPlayer`.
     const accountNamespace = this.chain.program.account as unknown as Record<
       string,
-      { all(): Promise<{ account: DecodedPlayer }[]> } | undefined
+      { all(): Promise<{ publicKey: PublicKey; account: DecodedPlayer }[]> } | undefined
     >;
     const playerAccounts = accountNamespace.player;
     if (!playerAccounts) throw new Error("player account namespace is missing from the IDL");
-    const accounts = await playerAccounts.all();
-    const hit = accounts.find(({ account }) => {
-      const regEpoch = BigInt(account.regEpoch.toString());
-      const regStart = BigInt(account.regStart.toString());
-      const regEnd = BigInt(account.regEnd.toString());
-      return regEpoch === epochId && target >= regStart && target < regEnd;
-    });
-    return hit ? hit.account.owner.toBase58() : null;
-  }
+    const hit = (await playerAccounts.all()).find(
+      ({ publicKey, account }) =>
+        account.leafIndex === leaf && publicKey.equals(this.chain.playerAddress(account.owner)),
+    );
+    if (!hit) return null;
 
-  /** Ticket 07: the Indexer cursor's own staleness, straight off its row.
-   *  The Active pool's row only (ADR 0016): a retired pool's cursor can be
-   *  fresh while this pool's mirror has not synced once. */
-  private async indexerCursorInfo(): Promise<{
-    ageSeconds: number | null;
-    updatedAt: bigint | null;
-  }> {
-    const cursor = await this.prisma.cursor.findUnique({
-      where: { poolAddress: this.chain.poolAddress().toBase58() },
-    });
-    if (cursor?.updatedAt == null) return { ageSeconds: null, updatedAt: null };
-    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-    return {
-      ageSeconds: Number(nowSeconds - cursor.updatedAt),
-      updatedAt: cursor.updatedAt,
-    };
+    const owner = hit.account.owner.toBase58();
+    this.winners.set(epoch.epochId, owner);
+    for (const id of [...this.winners.keys()].slice(0, -WINNER_MEMORY)) this.winners.delete(id);
+    return owner;
   }
 
   /**
@@ -599,10 +552,8 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     outcome: Pick<
       TickOutcome,
       | "action"
-      | "progress"
       | "withdrawShortfall"
       | "withdrawState"
-      | "indexerStale"
       | "epochNoProgress"
       | "drawnUnpaid"
     >,
@@ -619,12 +570,6 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       // recovered".
       ...(error === null ? { lastSuccessAt: nowSeconds } : {}),
       ...(outcome.action === null ? {} : { lastAction: outcome.action }),
-      ...(outcome.progress === undefined
-        ? {}
-        : {
-            registeredCount: outcome.progress.count,
-            registeredTotal: outcome.progress.total,
-          }),
       // Absent on a tick that acted before step 6b: nothing looked, so the
       // last reported figure is still the best one /status has.
       ...(outcome.withdrawShortfall === undefined
@@ -635,9 +580,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       ...(outcome.withdrawState === undefined
         ? {}
         : { withdrawSkippedCount: outcome.withdrawState.skipped.size }),
-      // Ticket 07: only ever true on the tick that withheld `close_registration`
-      // for it; the next tick that does not hit the same wait clears it.
-      ...(outcome.indexerStale === undefined ? {} : { registrationIndexerStale: outcome.indexerStale }),
+      // The stale-indexer hold is gone (ticket 13), so nothing sets this any
+      // more. Written false so a flag an older build left on cannot keep
+      // `/alerts` firing; ticket 14 drops the column and its alert.
+      registrationIndexerStale: false,
       // Ticket 09: present on every tick that reaches decide(), so these
       // always reflect the freshest read.
       ...(outcome.epochNoProgress === undefined ? {} : { epochNoProgress: outcome.epochNoProgress }),

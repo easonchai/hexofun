@@ -19,7 +19,6 @@ export interface SetParamsInput {
   readonly houseCutBps?: number;
   /** Atomic units, from a whole-USDC flag value. */
   readonly minJackpot?: bigint;
-  readonly registrationWindow?: number;
   readonly payoutTimeout?: number;
   readonly baseRateBps?: number;
   readonly ticketsPerUsdc?: number;
@@ -40,14 +39,9 @@ export type AdminCommand =
   | { readonly kind: "start-game" }
   | { readonly kind: "start-jackpot" }
   | { readonly kind: "fund-jackpot"; readonly amount: bigint }
-  /** Raw atomic hexUSDC, same units as fund-jackpot. */
-  | { readonly kind: "fund-yield"; readonly amount: bigint }
   /** Admin path only (uncapped); the operator path is the referral job. */
   | { readonly kind: "grant-tickets"; readonly owner: PublicKey; readonly amount: bigint }
   | { readonly kind: "set-params"; readonly params: SetParamsInput }
-  /** `amount` is USDC as typed, e.g. "250" or "12.5". Scaling to atomic
-   *  units needs the mint's decimals, which only the chain knows. */
-  | { readonly kind: "withdraw-principal"; readonly amount: string }
   | { readonly kind: "set-operator"; readonly key: PublicKey }
   | { readonly kind: "propose-admin"; readonly key: PublicKey }
   | { readonly kind: "accept-admin" }
@@ -59,12 +53,6 @@ export type AdminCommand =
       readonly owner?: PublicKey;
       readonly count: number;
     }
-  /** Read-only (ops-and-envs ticket 08): prints the same figure `/status`
-   *  reports, and its inputs. */
-  | { readonly kind: "principal-out" }
-  /** Plain SPL transfer from the admin's own ATA into the principal vault;
-   *  `amount` is USDC as typed, same shape as `withdraw-principal`. */
-  | { readonly kind: "return-principal"; readonly amount: string }
   /** Irreversible; refused unless `confirm` matches the configured pool. */
   | { readonly kind: "shutdown"; readonly confirm: bigint }
   /** Permissionless: any signer may run this. */
@@ -80,21 +68,17 @@ export type AdminCommand =
 
 export const USAGE = [
   "usage: admin <command> [flags]",
-  "  set-params [--epoch-seconds N] [--epoch-anchor ISO8601] [--round-seconds N] [--close-buffer N] [--vrf-timeout N] [--min-deposit N] [--house-cut-bps N] [--min-jackpot USDC] [--registration-window N] [--payout-timeout N] [--base-rate-bps N] [--tickets-per-usdc N] [--bonus-cap-bps N]",
+  "  set-params [--epoch-seconds N] [--epoch-anchor ISO8601] [--round-seconds N] [--close-buffer N] [--vrf-timeout N] [--min-deposit N] [--house-cut-bps N] [--min-jackpot USDC] [--payout-timeout N] [--base-rate-bps N] [--tickets-per-usdc N] [--bonus-cap-bps N]",
   "  pause",
   "  unpause",
   "  pause-game | pause-jackpot   (operator or admin)",
   "  start-game | start-jackpot   (admin only)",
   "  fund-jackpot --amount N   (N is raw atomic hexUSDC, 6 decimals)",
-  "  fund-yield --amount N   (N is raw atomic hexUSDC, 6 decimals)",
   "  grant-tickets --owner PUBKEY --amount N   (admin path, uncapped; N is a whole number of tickets)",
-  "  withdraw-principal --amount USDC   (whole USDC, up to 6 decimal places)",
   "  set-operator --key PUBKEY",
   "  propose-admin --key PUBKEY",
   "  accept-admin",
   `  create-invite [--max-uses N] [--owner PUBKEY] [--count K]   (max-uses defaults to ${INVITE_CODE_MAX_USES})`,
-  "  principal-out",
-  "  return-principal --amount USDC   (whole USDC, up to 6 decimal places)",
   "  shutdown --confirm POOL_ID   (irreversible; POOL_ID must match the configured pool)",
   `  emergency-crank [--batch N]   (permissionless; N players per transaction, default ${DEFAULT_EMERGENCY_CRANK_BATCH})`,
   "  sweep-house",
@@ -150,48 +134,6 @@ function pubkey(flag: string, raw: string): PublicKey {
   }
 }
 
-/**
- * USDC as the operator types it, kept as a string: `admin_withdraw` takes
- * atomic units, and the scale is the mint's decimals, which the parse cannot
- * reach. Six places is the ceiling any mint this program accepts allows.
- */
-function usdcAmount(flag: string, raw: string): string {
-  if (!/^\d+(\.\d{1,6})?$/.test(raw) || Number(raw) === 0) {
-    throw new Error(
-      `--${flag} must be a positive amount of USDC with up to 6 decimal places, got "${raw}"`,
-    );
-  }
-  return raw;
-}
-
-/** Scales a `usdcAmount` string by the mint's decimals. */
-export function atomicUsdc(amount: string, decimals: number): bigint {
-  const [whole = "0", fraction = ""] = amount.split(".");
-  if (fraction.length > decimals) {
-    throw new Error(
-      `--amount ${amount} has more decimal places than the mint's ${decimals}`,
-    );
-  }
-  return BigInt(whole + fraction.padEnd(decimals, "0"));
-}
-
-/**
- * `set_params` enforces `0 <= registration_window < epoch_seconds` against
- * the epoch length the same call leaves behind, so this runs in the parse
- * when both flags are given and again in index.ts against the pool's current
- * epoch when only the window is.
- */
-export function checkRegistrationWindow(
-  registrationWindow: number,
-  epochSeconds: number,
-): void {
-  if (registrationWindow >= epochSeconds) {
-    throw new Error(
-      `--registration-window must be under the ${epochSeconds}s epoch, got ${registrationWindow}`,
-    );
-  }
-}
-
 /** No flags accepted; `pause`/`unpause`/`accept-admin` take none. */
 function rejectExtra(rest: readonly string[]): void {
   if (rest.length > 0) {
@@ -244,12 +186,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         amount: positiveBigInt("amount", oneFlag(command, "amount", rest)),
       };
 
-    case "fund-yield":
-      return {
-        kind: "fund-yield",
-        amount: positiveBigInt("amount", oneFlag(command, "amount", rest)),
-      };
-
     case "grant-tickets": {
       let values: { owner?: string; amount?: string };
       try {
@@ -274,12 +210,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
       };
     }
 
-    case "withdraw-principal":
-      return {
-        kind: "withdraw-principal",
-        amount: usdcAmount("amount", oneFlag(command, "amount", rest)),
-      };
-
     case "set-operator":
       return { kind: "set-operator", key: pubkey("key", oneFlag(command, "key", rest)) };
 
@@ -300,7 +230,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         "min-deposit"?: string;
         "house-cut-bps"?: string;
         "min-jackpot"?: string;
-        "registration-window"?: string;
         "payout-timeout"?: string;
         "base-rate-bps"?: string;
         "tickets-per-usdc"?: string;
@@ -318,7 +247,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
             "min-deposit": { type: "string" },
             "house-cut-bps": { type: "string" },
             "min-jackpot": { type: "string" },
-            "registration-window": { type: "string" },
             "payout-timeout": { type: "string" },
             "base-rate-bps": { type: "string" },
             "tickets-per-usdc": { type: "string" },
@@ -355,12 +283,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         ...(values["min-jackpot"] !== undefined && {
           minJackpot: wholeUsdc("min-jackpot", values["min-jackpot"]),
         }),
-        ...(values["registration-window"] !== undefined && {
-          registrationWindow: nonNegativeInt(
-            "registration-window",
-            values["registration-window"],
-          ),
-        }),
         ...(values["payout-timeout"] !== undefined && {
           payoutTimeout: positiveInt("payout-timeout", values["payout-timeout"]),
         }),
@@ -376,12 +298,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
       };
       if (Object.keys(params).length === 0) {
         throw new Error(`set-params needs at least one flag\n${USAGE}`);
-      }
-      // The other half of this check needs the pool's epoch length, so it
-      // waits for index.ts; this one costs nothing and fails before any env
-      // or RPC access.
-      if (params.registrationWindow !== undefined && params.epochSeconds !== undefined) {
-        checkRegistrationWindow(params.registrationWindow, params.epochSeconds);
       }
       return { kind: "set-params", params };
     }
@@ -411,16 +327,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         ...(values.owner !== undefined ? { owner: pubkey("owner", values.owner) } : {}),
       };
     }
-
-    case "principal-out":
-      rejectExtra(rest);
-      return { kind: "principal-out" };
-
-    case "return-principal":
-      return {
-        kind: "return-principal",
-        amount: usdcAmount("amount", oneFlag(command, "amount", rest)),
-      };
 
     case "shutdown":
       return {

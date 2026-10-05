@@ -46,6 +46,25 @@ describe("validateEnv", () => {
     expect(() => validateEnv(base)).toThrow(/ACCEPTED_MINT/);
   });
 
+  // ADR 0019: the Sparring player is off unless SPARRING_ENABLED says so, and
+  // a keypair in the env does not turn it on by itself.
+  it("keeps the Sparring player off when SPARRING_ENABLED is unset or empty", () => {
+    const withKey = { ...base, ACCEPTED_MINT: MINT, SPARRING_KEYPAIR: "x" };
+    expect(validateEnv(withKey).SPARRING_ENABLED).toBe(false);
+    expect(validateEnv({ ...withKey, SPARRING_ENABLED: "" }).SPARRING_ENABLED).toBe(false);
+    expect(validateEnv({ ...withKey, SPARRING_ENABLED: "false" }).SPARRING_ENABLED).toBe(false);
+  });
+
+  it("turns the Sparring player on only for an explicit true", () => {
+    expect(validateEnv({ ...base, ACCEPTED_MINT: MINT, SPARRING_ENABLED: "true" }).SPARRING_ENABLED).toBe(true);
+  });
+
+  it("refuses a SPARRING_ENABLED that is neither true nor false", () => {
+    expect(() => validateEnv({ ...base, ACCEPTED_MINT: MINT, SPARRING_ENABLED: "yes" })).toThrow(
+      /SPARRING_ENABLED must be true or false/,
+    );
+  });
+
   it("defaults the operator SOL warning", () => {
     expect(validateEnv({ ...base, ACCEPTED_MINT: MINT }).OPERATOR_SOL_WARN).toBe(
       DEFAULT_OPERATOR_SOL_WARN,

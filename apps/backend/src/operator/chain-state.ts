@@ -6,7 +6,7 @@ import { PublicKey } from "@solana/web3.js";
 
 export const EPOCH_STATUS = {
   OPEN: 0,
-  REGISTERING: 1,
+  ENDED: 1,
   DRAWING: 2,
   DRAWN: 3,
   PAID: 4,
@@ -34,8 +34,6 @@ export interface PoolState {
   readonly roundSeconds: bigint;
   readonly closeBuffer: bigint;
   readonly vrfTimeout: bigint;
-  /** Seconds past an epoch's `endsAt` before `close_registration` is allowed. */
-  readonly registrationWindow: bigint;
   /** Seconds past an epoch's `drawnAt` before an unpaid Drawn epoch may roll over. */
   readonly payoutTimeout: bigint;
   readonly paused: boolean;
@@ -51,9 +49,33 @@ export interface PoolState {
    *  while this is set. A new pool starts with it on. */
   readonly gamePaused: boolean;
   /** Jackpot pause (game-jackpot-pause ticket 02): the tick skips
-   *  begin_epoch, grant_tickets and close_registration while this is set.
+   *  begin_epoch, grant_tickets and request_draw while this is set.
    *  A new pool starts with it on. */
   readonly jackpotPaused: boolean;
+  /** The pool's Weight tree account (`has_one` on every instruction that
+   *  changes Tickets), and the four klend addresses pinned at `create_pool`.
+   *  Under a `test-venue` build `klendProgram` is the hex_vault program. */
+  readonly weightTree: PublicKey;
+  readonly klendProgram: PublicKey;
+  readonly klendMarket: PublicKey;
+  readonly klendReserve: PublicKey;
+  readonly klendCtoken: PublicKey;
+  /** Withdrawals requested and not yet paid; not free idle. */
+  readonly pendingWithdrawals: bigint;
+  /** The pool's position at the venue as of the last sync. */
+  readonly venueValue: bigint;
+  /** Owed to the Treasury and the jackpot vault, paid out by `harvest`. */
+  readonly feeOwed: bigint;
+  readonly prizeOwed: bigint;
+  /** Idle band, in basis points of free idle plus venue value. */
+  readonly idleFloorBps: number;
+  readonly idleTargetBps: number;
+  /** Smallest deploy or recall the program accepts. */
+  readonly minVenueMove: bigint;
+  /** Admin or Operator set; the program refuses `deploy_to_venue` while on. */
+  readonly deployPaused: boolean;
+  /** A venue loss beyond tolerance; deploy and harvest are refused. */
+  readonly impaired: boolean;
 }
 
 export interface EpochState {
@@ -61,17 +83,17 @@ export interface EpochState {
   readonly startsAt: bigint;
   readonly endsAt: bigint;
   readonly status: number;
-  readonly registeredCount: number;
   readonly jackpotAmount: bigint;
   readonly vrfSeed: Uint8Array;
   readonly requestedAt: bigint;
   readonly target: bigint;
   /** When `draw` landed, 0 until then. */
   readonly drawnAt: bigint;
-  /** When `begin_epoch` moved this epoch to Registering, 0 until then. The
-   *  program measures `registrationWindow` from the later of this and
-   *  `endsAt`, so a late `begin_epoch` still owes the whole window. */
-  readonly registrationOpenedAt: bigint;
+  /** When `begin_epoch` moved this epoch to Ended, 0 until then. The program
+   *  measures the `rollover_epoch` deadline of an epoch nobody sent to
+   *  `request_draw` from the later of this and `endsAt`. The field is still
+   *  called `registration_opened_at` on chain. */
+  readonly endedAt: bigint;
 }
 
 export interface RoundState {
@@ -114,7 +136,6 @@ export function decodePool(
     roundSeconds: big(raw.roundSeconds),
     closeBuffer: big(raw.closeBuffer),
     vrfTimeout: big(raw.vrfTimeout),
-    registrationWindow: big(raw.registrationWindow),
     payoutTimeout: big(raw.payoutTimeout),
     paused: raw.paused === true,
     currentEpochId: big(raw.currentEpochId),
@@ -124,6 +145,20 @@ export function decodePool(
     shutdown: raw.shutdown === true,
     gamePaused: raw.gamePaused === true,
     jackpotPaused: raw.jackpotPaused === true,
+    weightTree: raw.weightTree as PublicKey,
+    klendProgram: raw.klendProgram as PublicKey,
+    klendMarket: raw.klendMarket as PublicKey,
+    klendReserve: raw.klendReserve as PublicKey,
+    klendCtoken: raw.klendCtoken as PublicKey,
+    pendingWithdrawals: big(raw.pendingWithdrawals),
+    venueValue: big(raw.venueValue),
+    feeOwed: big(raw.feeOwed),
+    prizeOwed: big(raw.prizeOwed),
+    idleFloorBps: Number(raw.idleFloorBps),
+    idleTargetBps: Number(raw.idleTargetBps),
+    minVenueMove: big(raw.minVenueMove),
+    deployPaused: raw.deployPaused === true,
+    impaired: raw.impaired === true,
   };
 }
 
@@ -134,13 +169,12 @@ export function decodeEpoch(program: Program<Idl>, data: Buffer): EpochState {
     startsAt: big(raw.startsAt),
     endsAt: big(raw.endsAt),
     status: Number(raw.status),
-    registeredCount: Number(raw.registeredCount),
     jackpotAmount: big(raw.jackpotAmount),
     vrfSeed: Uint8Array.from(raw.vrfSeed as number[]),
     requestedAt: big(raw.requestedAt),
     target: big(raw.target),
     drawnAt: big(raw.drawnAt),
-    registrationOpenedAt: big(raw.registrationOpenedAt),
+    endedAt: big(raw.registrationOpenedAt),
   };
 }
 

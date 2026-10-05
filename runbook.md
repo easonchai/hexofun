@@ -42,8 +42,9 @@
   After the backend has been down
 
   Epochs chain: begin_epoch starts the next one at the previous ends_at. Before 2026-09-07 that held no matter how late, so a backend
-  that came back after hours replayed the whole gap one epoch at a time (begin_epoch, register, close_registration, draw, payout,
-  20s to 40s each), paid the jackpot floor to the registered players once per replayed epoch, and opened no Round until it caught up:
+  that came back after hours replayed the whole gap one epoch at a time (begin_epoch, request_draw, draw, payout, 20s to 40s each,
+  with a register and close_registration pair in front of the draw until the Fenwick draw removed them), paid the jackpot floor to
+  the players once per replayed epoch, and opened no Round until it caught up:
   tick step 7 needs a whole round_seconds to fit before the epoch's ends_at, and a replayed epoch has already ended. The UI said
   "no open round" the entire time. Now begin_epoch starts the next epoch at the latest point of the anchor grid it has reached, so
   one begin_epoch after an outage lands in real time and Rounds resume on the next tick. Ordinary lag still chains from the previous
@@ -66,28 +67,31 @@
   Demo cadence (2026-09-10): epoch_seconds 86400, round_seconds 30, close_buffer 12, on the anchored pool bootstrapped with
   --epoch-anchor 2026-09-13T16:00:00Z. One draw a day, landing at 00:00 MYT. Rounds switch on the next Round, epochs on the next
   epoch, and epoch_seconds is now safe to change mid-epoch because touch reads the epoch's stored ends_at instead of adding the
-  parameter to the start. Before this the pool ran hourly at epoch_seconds 3600 off an arbitrary boundary. The operator no
-  longer funds the prize (ticket 03 deleted that step). Someone deposits it by hand before the epoch closes, from any wallet
-  holding the accepted mint:
+  parameter to the start. Before this the pool ran hourly at epoch_seconds 3600 off an arbitrary boundary.
 
-    set -a; . ./.env; set +a; pnpm --filter @hexvault/backend admin fund-jackpot --amount 42069000000
+  Nobody funds the prize or the depositors' yield by hand any more (yield-claimer ticket 13). The operator harvests once per
+  epoch, inside the last 10 minutes before ends_at, which pays the Yield fee to the Treasury and the prize share to the jackpot
+  vault. request_draw snapshots whatever the jackpot vault holds, and an epoch that closes under the pool's min_jackpot rolls over
+  instead of paying a token prize: the vault keeps its balance and the next epoch draws for it. Set that floor with `admin set-params
+  --min-jackpot`, or at bootstrap with `--min-jackpot`; the default is 1 USDC. `admin fund-jackpot` still works for sponsor money,
+  from any wallet holding the accepted mint, and nothing else needs a daily top-up.
 
-  fund_jackpot is permissionless, so the wallet needs no role, only the tokens. close_registration snapshots whatever the
-  jackpot vault holds at that moment, and an epoch that closes under the pool's min_jackpot rolls over instead of paying a
-  token prize: the vault keeps its balance and the next epoch draws for it. Set that floor with `admin set-params
-  --min-jackpot`, or at bootstrap with `--min-jackpot`; the default is 1 USDC.
+  Venue cranks (yield-claimer ticket 13)
 
-  Fund the yield budget (docs/plan/hexo-referrals tickets 01/05)
+  The operator keeps the pool's liquidity in shape without a human signature. Deploy, recall and harvest are permissionless
+  instructions, so anyone can send them if the operator is down. The operator sends them on this schedule:
 
-  Base yield only ever pays out of Pool.yield_budget, so it has to be topped up daily too, next to fund-jackpot, from any
-  wallet holding the accepted mint. Size the top-up as total_principal × rate / 365 (base_rate_bps over 10000 for rate),
-  the atomic USDC one day's credit costs the whole pool at the current base_rate_bps; GET /status's yieldBudget and
-  yieldBudgetLow track how much is left and whether it is under that one-day cost.
+    deploy   free idle (vault less queued withdrawals) is above the idle target and the excess is at least min_venue_move
+    recall   free idle is under the idle floor; recalls up to the target, or exactly the gap when a small queued
+             withdrawal is what is short
+    harvest  once per epoch, in the last 10 minutes before ends_at, if the pool holds a venue position
 
-    set -a; . ./.env; set +a; pnpm --filter @hexvault/backend admin fund-yield --amount 12000000000
+  A matured withdrawal the vault cannot cover triggers a recall first, and the push lands on the next tick. Deploy waits while
+  deploy is paused, the venue is impaired or the pool is shut down. A refused crank is logged as a warning and not retried for 10
+  minutes; a failed harvest never holds up the draw. Every crank passes the klend reserve, the cToken account and the three
+  klend-derived accounts the program needs, and no refresh instruction, since the program refreshes the reserve itself.
 
-  fund_yield is permissionless like fund_jackpot. When the budget runs short, register() credits whatever it can and reports
-  the shortfall; GET /status's yieldShortfall is what the last ended epoch could not cover.
+  Setting the deploy pause from the operator key is pending yield-claimer ticket 10, which adds the instruction.
 
   Daily referral bonus (docs/plan/hexo-referrals ticket 08)
 
@@ -123,9 +127,8 @@
   set-params.
 
   Tune it with set-params if ORAO's latency changes, no redeploy needed. The program still enforces 0 <= close_buffer < round_seconds.
-  set-params also carries --min-jackpot (whole USDC; an epoch closing under it rolls over instead of paying dust), --registration-window
-  (seconds past an epoch's end before close_registration is allowed, 0 <= this < epoch_seconds) and --payout-timeout (seconds a drawn
-  epoch waits for its payout before it may roll over unpaid, above 0), alongside --epoch-seconds, --epoch-anchor, --round-seconds,
+  set-params also carries --min-jackpot (whole USDC; an epoch closing under it rolls over instead of paying dust) and --payout-timeout
+  (seconds a drawn epoch waits for its payout before it may roll over unpaid, above 0), alongside --epoch-seconds, --epoch-anchor, --round-seconds,
   --close-buffer, --vrf-timeout, --min-deposit and --house-cut-bps. Ticket 05 added --base-rate-bps and --bonus-cap-bps (basis points,
   0 to 10000) and --tickets-per-usdc (a positive whole number).
   Run it with the root .env exported first. The CLI reads process.env directly and loads no file of its own, so nothing reaches it
@@ -289,8 +292,9 @@
   (36 Tickets a Round), so a lone human is never playing against an empty board and no pot is forfeited to the House. It looks like any other wallet on screen and competes in the daily
   draw like any Player. It is not the House and never touches the House account.
 
-  SPARRING_KEYPAIR is the base58 secret of that wallet, and it is optional. When it is set the backend plays every Round; when it is
-  empty the backend boots exactly as before and nobody else is on the board.
+  SPARRING_KEYPAIR is the base58 secret of that wallet, and SPARRING_ENABLED=true switches the player on. Both are needed: the flag is
+  off by default, .env.example documents it as off, and no production env template sets it (ADR 0019). With the flag unset the backend
+  boots exactly as before and nobody else is on the board, even when a keypair is still in the file.
 
   Set one up once per environment with the root .env exported first, the same way admin is run:
 
@@ -368,8 +372,8 @@
   Admin actions through Squads
 
   How admin-gated commands sign, locally, through a Ledger, or by printing a base58 transaction for a Squads vault to import, is in
-  docs/ops/deploy.md ("Admin signing"). The fund commands themselves (withdraw-principal, return-principal, principal-out,
-  fund-jackpot, fund-yield, shutdown, emergency-crank, sweep-house) are in docs/ops/funds.md.
+  docs/ops/deploy.md ("Admin signing"). The fund commands themselves (fund-jackpot, shutdown, emergency-crank, sweep-house)
+  are in docs/ops/funds.md.
 
   One gotcha that lives here because it is not really about signing: set-operator rotates `Pool.operator` but leaves the House
   Player's own `owner` on the retired key, so a Prize the House wins still pays into that key's USDC associated token account. Keep
@@ -395,5 +399,6 @@
   `LAUNCH_AT` (apps/backend/.env) still holds the Operator's first `begin_epoch` back until that time, but the Game pause
   and Jackpot pause above cover a deposit-only week now; leave it unset.
 
-  Base yield is credited per ended Epoch, so a week with no Epoch earns none. If the beta promises yield for that week,
-  fund it as a manual grant.
+  Depositors' yield accrues second by second from what the venue pays, with or without an Epoch, so a deposit-only week
+  earns it. The prize share reaches the jackpot vault at the operator's pre-end harvest, which only runs while an Epoch is
+  running. Nothing needs funding by hand.

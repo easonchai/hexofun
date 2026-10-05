@@ -1,7 +1,7 @@
 // One-off admin CLI: set-params, pause, unpause, pause-game, pause-jackpot,
-// start-game, start-jackpot, fund-jackpot, fund-yield,
-// grant-tickets, withdraw-principal, set-operator, propose-admin,
-// accept-admin, create-invite, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
+// start-game, start-jackpot, fund-jackpot, grant-tickets, set-operator,
+// propose-admin, accept-admin, create-invite, shutdown, emergency-crank,
+// sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
 // ChainService and the same full .env the backend itself runs on, instead of
@@ -23,10 +23,8 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaClient } from "@prisma/client";
 import {
   createAssociatedTokenAccountIdempotentInstruction,
-  createTransferCheckedInstruction,
   getAccount,
   getAssociatedTokenAddressSync,
-  getMint,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
@@ -37,7 +35,6 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 
-import { principalOut } from "../api/api.service";
 import { generateInviteCode } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
 import { rpcStatus, withRpcFallback } from "../chain/rpc-fallback";
@@ -51,8 +48,6 @@ import {
 } from "../operator/chain-state";
 import { randomnessAddress } from "../operator/vrf";
 import {
-  atomicUsdc,
-  checkRegistrationWindow,
   parseAdminCommand,
   type AdminCommand,
   type SetParamsInput,
@@ -96,18 +91,7 @@ function method(chain: ChainService, name: string, ...args: unknown[]): MethodBu
   return factory(...args);
 }
 
-/**
- * `PoolState` (operator/chain-state.ts) is scoped to what the tick needs,
- * so `principal-out`'s two other inputs are decoded a second time off the
- * same already-fetched bytes, rather than widening a type built for a
- * different job (and every operator test fixture along with it).
- */
-interface AdminPoolState extends PoolState {
-  readonly pendingWithdrawals: bigint;
-  readonly yieldBudget: bigint;
-}
-
-async function readPool(chain: ChainService): Promise<AdminPoolState> {
+async function readPool(chain: ChainService): Promise<PoolState> {
   const address = chain.poolAddress();
   const info = await chain.connection.getAccountInfo(address);
   if (!info) {
@@ -115,39 +99,7 @@ async function readPool(chain: ChainService): Promise<AdminPoolState> {
       `pool ${address.toBase58()} not found on this cluster; has bootstrap run?`,
     );
   }
-  const pool = decodePool(chain.program, address, info.data);
-  const raw = chain.program.coder.accounts.decode<{ pendingWithdrawals: BN; yieldBudget: BN }>(
-    "pool",
-    info.data,
-  );
-  return {
-    ...pool,
-    pendingWithdrawals: BigInt(raw.pendingWithdrawals.toString()),
-    yieldBudget: BigInt(raw.yieldBudget.toString()),
-  };
-}
-
-/** Reads the principal vault's live balance and logs `principal-out`'s four
- *  inputs and result under `label`. Shared by `principal-out`,
- *  `return-principal` (before and after) and `emergency-crank` (on stop). */
-async function logPrincipalOut(
-  chain: ChainService,
-  pool: AdminPoolState,
-  label: string,
-): Promise<bigint> {
-  const vault = chain.principalVaultAddress(pool.address);
-  const { amount } = await getAccount(chain.connection, vault);
-  const out = principalOut({
-    totalPrincipal: pool.totalPrincipal,
-    pendingWithdrawals: pool.pendingWithdrawals,
-    yieldBudget: pool.yieldBudget,
-    vaultAmount: amount,
-  });
-  log(
-    `${label}: total_principal=${pool.totalPrincipal} pending_withdrawals=${pool.pendingWithdrawals} ` +
-      `yield_budget=${pool.yieldBudget} vault=${amount} principal_out=${out}`,
-  );
-  return out;
+  return decodePool(chain.program, address, info.data);
 }
 
 /**
@@ -281,15 +233,6 @@ async function setParams(
   params: SetParamsInput,
   ledger?: AdminSigner,
 ): Promise<void> {
-  // args.ts already compared the window against --epoch-seconds when both
-  // were given; with only the window, the epoch it has to beat is the
-  // pool's, and the program would reject it with InvalidParameter.
-  if (params.registrationWindow !== undefined && params.epochSeconds === undefined) {
-    checkRegistrationWindow(
-      params.registrationWindow,
-      Number((await readPool(chain)).epochSeconds),
-    );
-  }
   const ix = await method(chain, "setParams", {
     epochSeconds: bnOrNull(params.epochSeconds),
     epochAnchor: bnOrNull(params.epochAnchor),
@@ -300,7 +243,6 @@ async function setParams(
     houseCutBps: params.houseCutBps === undefined ? null : params.houseCutBps,
     minJackpot:
       params.minJackpot === undefined ? null : new BN(params.minJackpot.toString()),
-    registrationWindow: bnOrNull(params.registrationWindow),
     payoutTimeout: bnOrNull(params.payoutTimeout),
     baseRateBps: params.baseRateBps ?? null,
     ticketsPerUsdc: params.ticketsPerUsdc ?? null,
@@ -340,28 +282,6 @@ async function fundJackpot(chain: ChainService, amount: bigint): Promise<void> {
 }
 
 /**
- * Tops up `Pool.yield_budget` with real USDC, same shape as `fundJackpot`
- * (permissionless, signs locally with whatever key is loaded) but into
- * `principal_vault` instead of the jackpot vault.
- */
-async function fundYield(chain: ChainService, amount: bigint): Promise<void> {
-  const pool = await readPool(chain);
-  const source = getAssociatedTokenAddressSync(pool.acceptedMint, chain.keypair.publicKey);
-  const ix = await method(chain, "fundYield", new BN(amount.toString()))
-    .accountsPartial({
-      sourceAuthority: chain.keypair.publicKey,
-      pool: pool.address,
-      acceptedMint: pool.acceptedMint,
-      source,
-      principalVault: chain.principalVaultAddress(pool.address),
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .instruction();
-  log(`signature ${await chain.send([ix])}`);
-  log(`yield budget funded with ${amount} atomic units from ${source.toBase58()}`);
-}
-
-/**
  * The admin path of `grant_tickets`: uncapped, for the rare manual fix. The
  * referral job (docs/plan/hexo-referrals ticket 08) is the only intended
  * caller of the operator path, which signs with the operator key directly
@@ -374,11 +294,13 @@ async function grantTickets(
   amount: bigint,
   ledger?: AdminSigner,
 ): Promise<void> {
+  const pool = await readPool(chain);
   const ix = await method(chain, "grantTickets", new BN(amount.toString()))
     .accountsPartial({
       signer: mode.signer,
-      pool: chain.poolAddress(),
+      pool: pool.address,
       player: chain.playerAddress(owner),
+      weightTree: pool.weightTree,
     })
     .instruction();
   await submit(
@@ -388,103 +310,6 @@ async function grantTickets(
     `grant ${amount} tickets to ${owner.toBase58()} (admin path, uncapped)`,
     ledger,
   );
-}
-
-/**
- * Moves principal out of the vault to the admin's associated token account,
- * which the program checks by address. The amount is scaled by the mint's
- * own decimals rather than an assumed six, because this is the one command
- * that moves depositors' money.
- */
-async function withdrawPrincipal(
-  chain: ChainService,
-  mode: AdminMode,
-  amount: string,
-  ledger?: AdminSigner,
-): Promise<void> {
-  const pool = await readPool(chain);
-  const { decimals } = await getMint(chain.connection, pool.acceptedMint);
-  const atomic = atomicUsdc(amount, decimals);
-  // Off-curve is allowed on purpose: a Squads vault is a PDA, and its ATA
-  // derives the same way.
-  const adminToken = getAssociatedTokenAddressSync(pool.acceptedMint, mode.signer, true);
-
-  const instructions: TransactionInstruction[] = [];
-  if ((await chain.connection.getAccountInfo(adminToken)) === null) {
-    instructions.push(
-      createAssociatedTokenAccountIdempotentInstruction(
-        mode.signer,
-        adminToken,
-        mode.signer,
-        pool.acceptedMint,
-      ),
-    );
-  }
-  instructions.push(
-    await method(chain, "adminWithdraw", new BN(atomic.toString()))
-      .accountsPartial({
-        admin: mode.signer,
-        pool: pool.address,
-        acceptedMint: pool.acceptedMint,
-        adminToken,
-        principalVault: chain.principalVaultAddress(pool.address),
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .instruction(),
-  );
-  await submit(
-    chain,
-    mode,
-    instructions,
-    `withdraw ${amount} USDC (${atomic} atomic) of principal to ${adminToken.toBase58()}`,
-    ledger,
-  );
-}
-
-/** Read-only: prints the same figure `/status` reports, and its inputs. */
-async function principalOutCommand(chain: ChainService): Promise<void> {
-  const pool = await readPool(chain);
-  await logPrincipalOut(chain, pool, "principal out");
-}
-
-/**
- * Plain SPL transfer from the admin's own ATA into the principal vault
- * (spec.md "Out of Scope": no on-chain `admin_return`, return is a transfer
- * plus this figure). Prints `principal-out` before, and once a local send
- * has actually landed, after; a multisig print has nothing to re-read yet.
- */
-async function returnPrincipal(
-  chain: ChainService,
-  mode: AdminMode,
-  amount: string,
-  ledger?: AdminSigner,
-): Promise<void> {
-  const pool = await readPool(chain);
-  await logPrincipalOut(chain, pool, "before");
-  const { decimals } = await getMint(chain.connection, pool.acceptedMint);
-  const atomic = atomicUsdc(amount, decimals);
-  // Off-curve is allowed on purpose, same reason as withdraw-principal's own
-  // adminToken: a Squads vault is a PDA, and its ATA derives the same way.
-  const adminToken = getAssociatedTokenAddressSync(pool.acceptedMint, mode.signer, true);
-  const principalVault = chain.principalVaultAddress(pool.address);
-  const ix = createTransferCheckedInstruction(
-    adminToken,
-    pool.acceptedMint,
-    principalVault,
-    mode.signer,
-    atomic,
-    decimals,
-    [],
-    TOKEN_PROGRAM_ID,
-  );
-  await submit(
-    chain,
-    mode,
-    [ix],
-    `return ${amount} USDC (${atomic} atomic) of principal from ${adminToken.toBase58()} to the principal vault`,
-    ledger,
-  );
-  if (!mode.multisig) await logPrincipalOut(chain, pool, "after");
 }
 
 /**
@@ -585,10 +410,15 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
           .accountsPartial({
             pool: pool.address,
             player: player.address,
+            weightTree: pool.weightTree,
             owner: player.owner,
             acceptedMint: pool.acceptedMint,
             ownerToken,
             principalVault,
+            klendProgram: pool.klendProgram,
+            klendMarket: pool.klendMarket,
+            klendReserve: pool.klendReserve,
+            klendCtoken: pool.klendCtoken,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
           .instruction(),
@@ -603,7 +433,8 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
       if ((cause instanceof Error ? cause.message : "") !== "InsufficientVault") throw cause;
       const skipped = players.length - paid;
       log(`insufficient vault: stopped before this batch of ${batch.length}; ${skipped} player(s) still owed`);
-      await logPrincipalOut(chain, pool, "principal out");
+      const { amount } = await getAccount(chain.connection, principalVault);
+      log(`principal vault holds ${amount}; recall the venue position if it is not all home`);
       log(`emergency-crank done: paid ${paid}, skipped ${skipped}`);
       return;
     }
@@ -612,7 +443,7 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
 }
 
 /** Admin-only, only valid once the pool is shut down (spec.md "sweep_house"):
- *  moves the whole jackpot and any unspent yield budget to treasury. */
+ *  moves the jackpot vault's unreserved balance to treasury. */
 async function sweepHouse(
   chain: ChainService,
   mode: AdminMode,
@@ -625,7 +456,6 @@ async function sweepHouse(
       pool: pool.address,
       acceptedMint: pool.acceptedMint,
       jackpotVault: chain.jackpotVaultAddress(pool.address),
-      principalVault: chain.principalVaultAddress(pool.address),
       treasury: pool.treasury,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
@@ -634,7 +464,7 @@ async function sweepHouse(
     chain,
     mode,
     [ix],
-    `sweep the jackpot and any unspent yield budget to treasury ${pool.treasury.toBase58()}`,
+    `sweep the unreserved jackpot to treasury ${pool.treasury.toBase58()}`,
     ledger,
   );
 }
@@ -762,12 +592,8 @@ export async function run(
       return setParams(chain, mode, command.params, ledger);
     case "fund-jackpot":
       return fundJackpot(chain, command.amount);
-    case "fund-yield":
-      return fundYield(chain, command.amount);
     case "grant-tickets":
       return grantTickets(chain, mode, command.owner, command.amount, ledger);
-    case "withdraw-principal":
-      return withdrawPrincipal(chain, mode, command.amount, ledger);
     case "set-operator": {
       const ix = await method(chain, "setOperator", command.key)
         .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
@@ -806,10 +632,6 @@ export async function run(
         ledger,
       );
     }
-    case "principal-out":
-      return principalOutCommand(chain);
-    case "return-principal":
-      return returnPrincipal(chain, mode, command.amount, ledger);
     case "shutdown":
       return shutdownCommand(chain, mode, command.confirm, ledger);
     case "emergency-crank":

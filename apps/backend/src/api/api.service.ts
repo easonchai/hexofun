@@ -293,8 +293,10 @@ export class ApiService {
     this.operatorSolWarn = config.get("OPERATOR_SOL_WARN", { infer: true });
     const launchAt = config.get("LAUNCH_AT", { infer: true });
     this.launchAt = typeof launchAt === "string" && launchAt.length > 0 ? launchAt : null;
+    // Same rule as `SparringService`: a keypair alone does not start it, so a
+    // service that is off has no SOL balance to alert on.
     const sparringSecret = config.get("SPARRING_KEYPAIR", { infer: true });
-    this.sparringPubkey = sparringSecret
+    this.sparringPubkey = sparringSecret && config.get("SPARRING_ENABLED", { infer: true })
       ? Keypair.fromSecretKey(bs58.decode(sparringSecret)).publicKey
       : null;
   }

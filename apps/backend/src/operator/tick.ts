@@ -1,8 +1,10 @@
-// Spec §3.4: the seven steps, in order, at most one transaction per tick,
-// plus 6b (paying out the withdrawals whose epoch has ended). Round steps
-// (1-2) run before the Epoch steps (3+) so a Round can never straddle an
-// Epoch boundary; `begin_epoch` (3) waits for both the sweep and the previous
-// Epoch to be settled.
+// Spec §3.4: the steps, in order, at most one transaction per tick. Step 6a
+// runs the venue cranks (deploy, recall, harvest) and 6b pays out the
+// withdrawals whose epoch has ended. Round steps (1-2) run before the Epoch
+// steps (3+) so a Round can never straddle an Epoch boundary; `begin_epoch`
+// (3) waits for both the sweep and the previous Epoch to be settled. The
+// epoch goes `begin_epoch`, `request_draw` (4), `draw` (5), `payout` (6)
+// (yield-claimer ticket 13: no registration step any more).
 //
 // Everything the steps touch arrives in the context, so a test drives them
 // with a fabricated chain state and a recording `send`, and the service is
@@ -17,6 +19,17 @@ import {
   type RoundState,
 } from "./chain-state";
 import type { OperatorInstructions } from "./instructions";
+import {
+  decideVenue,
+  EMPTY_VENUE_STATE,
+  hasVenue,
+  nextHarvestAt,
+  venueFailed,
+  venueSucceeded,
+  VENUE_EXPECTED_ERRORS,
+  type VenueCrank,
+  type VenueState,
+} from "./venue";
 
 /** Instructions per transaction for the two batched steps (spec §3.4). */
 export const BATCH_SIZE = 8;
@@ -119,8 +132,8 @@ export const DRAWN_UNPAID_ALERT_SECONDS = 300n;
 
 /**
  * Ticket 09: slack layered onto `epochNoProgress`'s deadline below, covering
- * RPC and indexer lag beyond the epoch's own registration window and VRF
- * timeout. Fixed, like `DRAWN_UNPAID_ALERT_SECONDS` above.
+ * RPC and indexer lag beyond the epoch's own VRF timeout. Fixed, like
+ * `DRAWN_UNPAID_ALERT_SECONDS` above.
  */
 export const NO_PROGRESS_SLACK_SECONDS = 300n;
 
@@ -128,17 +141,17 @@ export const NO_PROGRESS_SLACK_SECONDS = 300n;
  * Ticket 09: whether `epoch` (the previous epoch, still draining through its
  * lifecycle) has missed the deadline by which it should have reached a
  * terminal status (Paid or RolledOver). The void/rollover paths in
- * `decide()` already self-heal a stuck Registering, Drawing or Drawn epoch
- * on their own timeouts; this is the backstop for whatever a timeout does
- * not cover, so it does not need to know which phase is actually stuck.
+ * `decide()` already self-heal a stuck Drawing or Drawn epoch on their own
+ * timeouts; this is the backstop for whatever a timeout does not cover (an
+ * Ended epoch whose `request_draw` keeps failing, most often), so it does not
+ * need to know which phase is actually stuck.
  */
 export function epochNoProgress(pool: PoolState, epoch: EpochState | null, now: bigint): boolean {
   if (epoch === null) return false;
   if (epoch.status === EPOCH_STATUS.PAID || epoch.status === EPOCH_STATUS.ROLLED_OVER) {
     return false;
   }
-  const expectedDoneBy =
-    epoch.endsAt + pool.registrationWindow + pool.vrfTimeout + NO_PROGRESS_SLACK_SECONDS;
+  const expectedDoneBy = epoch.endsAt + pool.vrfTimeout + NO_PROGRESS_SLACK_SECONDS;
   return now > expectedDoneBy;
 }
 
@@ -177,16 +190,6 @@ const EMPTY_WITHDRAW_STATE = (epochId: bigint): WithdrawState => ({
   skipped: new Set(),
 });
 
-/**
- * What step 4 remembers about the last tick's `playersToRegister` check, so
- * it can tell "empty again" from "empty for the first time". The service
- * persists this across ticks; the pure function only reads and returns it.
- */
-export interface RegisterCheck {
-  readonly epochId: bigint;
-  readonly empty: boolean;
-}
-
 export interface TickContext {
   /** Chain clock, not wall time: every deadline below is a chain timestamp. */
   readonly now: bigint;
@@ -199,19 +202,10 @@ export interface TickContext {
    *  (open or already terminal). Null when none has ever been created. */
   readonly lastRound: RoundState | null;
   readonly ix: OperatorInstructions;
-  /** Null before the first tick has ever checked. */
-  readonly lastRegisterCheck: RegisterCheck | null;
   /** Ticket 06: null before any withdrawal has ever failed. */
   readonly lastWithdrawState: WithdrawState | null;
-  /** Ticket 07: the Indexer cursor's own staleness, straight off its row:
-   *  seconds since it last advanced (null before any sync), and the
-   *  wall-clock instant it last advanced (null likewise). */
-  readonly indexerCursor: { readonly ageSeconds: number | null; readonly updatedAt: bigint | null };
-  /** Ticket 07: `close_registration` is withheld unless the cursor's age is
-   *  under this many seconds *and* it last advanced at or after the Epoch's
-   *  `endsAt` — otherwise a depositor the Indexer has not caught up with yet
-   *  could lose the day's Draw and Base yield. Configurable, sensible default. */
-  readonly indexerFreshThresholdSeconds: bigint;
+  /** Ticket 13: what the venue cranks remember, null before the first one ran. */
+  readonly lastVenueState: VenueState | null;
   /** Ticket 12: how many times in a row each `action:target` key has hit an
    *  expected error. Empty before anything has repeated. */
   readonly lastExpectedErrors: ReadonlyMap<string, number>;
@@ -232,7 +226,6 @@ export interface TickContext {
   duePendingWithdrawals(
     currentEpochId: bigint,
   ): Promise<{ owner: string; amount: bigint }[]>;
-  playersToRegister(epochId: bigint): Promise<string[]>;
   /**
    * Every qualifying referrer's daily bonus for `epochId` not yet sent
    * (docs/plan/hexo-referrals ticket 08), computed and recorded before it is
@@ -267,18 +260,12 @@ export interface TickContext {
   /** A Round `close_round` was just sent for; keep it out of later
    *  `roundsToClose` results until the indexer mirrors `RoundClosed`. */
   forgetRound(id: bigint): void;
-  /** Ticket 12: owners a `register` batch was just confirmed for; keep them
-   *  out of later `playersToRegister` results for the rest of the epoch, so
-   *  a zero-weight owner (a no-op on chain) is not resent forever and a
-   *  Read-model lag cannot resend a batch that already landed. */
-  forgetRegistered(owners: readonly string[]): Promise<void>;
-  /** Owner of the Player whose registered interval contains `target`, from
-   *  the Read model. Null on a miss, which step 6 falls back to `winnerOnChain` for. */
-  winner(epochId: bigint, target: bigint): Promise<string | null>;
-  /** Ticket 12: same lookup, scanning Player accounts on chain instead of the
-   *  Read model. Only asked when `winner` misses, so a mirror gap cannot cost
-   *  a winner their Prize. */
-  winnerOnChain(epochId: bigint, target: bigint): Promise<string | null>;
+  /**
+   * Owner of the Player whose leaf in the Weight tree holds the drawn epoch's
+   * target, read from the tree and the Player accounts on chain (ticket 13: no
+   * Read model table holds Weight ranges any more). Null when none does yet.
+   */
+  winner(epoch: EpochState): Promise<string | null>;
   send(instructions: TransactionInstruction[]): Promise<string>;
   /** Something an operator should read but that is not a failed tick: so far
    *  only a payout that would not land, which step 6 retries. */
@@ -288,11 +275,9 @@ export interface TickContext {
 export interface TickOutcome {
   /** Instruction sent this tick, named as in the program, or null. */
   readonly action: string | null;
-  /** Registration progress, while step 4 is cranking. */
-  readonly progress?: { readonly count: number; readonly total: number };
-  /** Present whenever step 4 checked `playersToRegister`, for the service to
-   *  remember as next tick's `lastRegisterCheck`. */
-  readonly registerCheck?: RegisterCheck;
+  /** Ticket 13: the venue cranks' updated memory, present only when a crank
+   *  was sent, failed or escalated this tick. */
+  readonly venueState?: VenueState;
   /**
    * How much the principal vault was short of everything step 6b owed, 0
    * when it covered them all. Present only on a tick that reached step 6b,
@@ -312,9 +297,6 @@ export interface TickOutcome {
   /** Ticket 12: the updated expected-error repeat counts, present only when
    *  a step this tick recorded, cleared or escalated one. */
   readonly expectedErrors?: ReadonlyMap<string, number>;
-  /** Ticket 07: `close_registration` was withheld this tick because the
-   *  Indexer's Read model is not fresh enough to trust yet. */
-  readonly indexerStale?: boolean;
   /** Ticket 09: whether the previous epoch has missed its expected deadline
    *  to reach a terminal status. Present on every tick. */
   readonly epochNoProgress?: boolean;
@@ -340,43 +322,12 @@ type Decision = Omit<TickOutcome, "nextWakeAt">;
 const NOTHING: Decision = { action: null };
 
 /**
- * The instant `close_registration` starts being accepted. The program
- * measures the window from the later of the epoch's end and the moment
- * `begin_epoch` actually opened registration, so an operator that ran late
- * still owes the full window from when it ran.
- */
-function registrationClosesAt(pool: PoolState, epoch: EpochState): bigint {
-  const opened =
-    epoch.registrationOpenedAt > epoch.endsAt
-      ? epoch.registrationOpenedAt
-      : epoch.endsAt;
-  return opened + pool.registrationWindow;
-}
-
-/**
- * Ticket 07: whether the Indexer's Read model is fresh enough to trust for
- * `close_registration` — young enough (`ageSeconds` under the threshold, and
- * not "never synced") *and* caught up: its cursor last advanced at or after
- * the Epoch's own `endsAt`. Both have to hold, so a cursor that is ticking
- * along nicely but is still replaying yesterday's backlog does not pass.
- */
-export function indexerFreshForClose(
-  cursor: { readonly ageSeconds: number | null; readonly updatedAt: bigint | null },
-  thresholdSeconds: bigint,
-  epoch: EpochState,
-): boolean {
-  if (cursor.ageSeconds === null || cursor.updatedAt === null) return false;
-  if (cursor.ageSeconds > Number(thresholdSeconds)) return false;
-  return cursor.updatedAt >= epoch.endsAt;
-}
-
-/**
  * The next chain timestamp at which `decide` could return something
  * different, given the same ctx it just ran on. Pure: everything it reads
  * already lives on `ctx`, so it never touches the clock or the network.
  *
  * Acting this tick (`acted`) always makes that "now": a batched step
- * (register, the settle sweep) may have more left to do, and the state that
+ * (the settle sweep, the withdrawal queue) may have more left to do, and the state that
  * triggered the action is still the state on `ctx`, so recomputing off it
  * would otherwise just repeat the same boundary that already fired.
  */
@@ -395,8 +346,11 @@ function nextWakeAt(ctx: TickContext, acted: boolean): bigint {
     candidates.push(openRound.requestedAt + pool.vrfTimeout);
   }
   if (currentEpoch) candidates.push(currentEpoch.endsAt);
-  if (previousEpoch?.status === EPOCH_STATUS.REGISTERING) {
-    candidates.push(registrationClosesAt(pool, previousEpoch));
+  // Ticket 13: the pre-end harvest window opens `HARVEST_LEAD_SECONDS` before
+  // the epoch ends. Dropped by the `>= now` filter once it has opened.
+  if (hasVenue(pool)) {
+    const harvestAt = nextHarvestAt(currentEpoch, ctx.lastVenueState ?? EMPTY_VENUE_STATE);
+    if (harvestAt !== null) candidates.push(harvestAt);
   }
   if (previousEpoch?.status === EPOCH_STATUS.DRAWING) {
     candidates.push(previousEpoch.requestedAt + pool.vrfTimeout);
@@ -453,6 +407,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
   let expectedErrors = ctx.lastExpectedErrors;
   let expectedErrorsChanged = false;
   let withdrawStateOut: WithdrawState | undefined;
+  // Ticket 13: the venue cranks' memory, folded into every return the same way.
+  let venueState = ctx.lastVenueState ?? EMPTY_VENUE_STATE;
+  let venueChanged = false;
   // Ticket 09: computed once per tick, off the same ctx every branch below
   // reads, so every return (via `finish`) carries the same answer regardless
   // of which step acted.
@@ -465,6 +422,7 @@ async function decide(ctx: TickContext): Promise<Decision> {
     ...(stepError !== undefined ? { stepError } : {}),
     ...(expectedErrorsChanged ? { expectedErrors } : {}),
     ...(withdrawStateOut !== undefined ? { withdrawState: withdrawStateOut } : {}),
+    ...(venueChanged ? { venueState } : {}),
   });
 
   /**
@@ -668,83 +626,20 @@ async function decide(ctx: TickContext): Promise<Decision> {
     }
   }
 
-  // 4. The ended epoch is taking registrations: crank them, then fund the
-  // jackpot and close once the list has come back empty on two consecutive
-  // ticks for this Epoch, so a player who registered right before `ends_at`
-  // gets one more indexer sync window before being counted out.
-  // `close_registration` is refused in shutdown, and `pool.currentEpochId`
-  // never advances once `begin_epoch` has stopped, so this whole step
-  // stops too rather than spending forever on a registration that can
-  // never close (ops-and-envs ticket 02).
-  if (!pool.shutdown && previousEpoch?.status === EPOCH_STATUS.REGISTERING) {
-    const owners = await ctx.playersToRegister(previousEpoch.epochId);
-    if (owners.length > 0) {
-      const batch = owners
-        .slice(0, BATCH_SIZE)
-        .map((owner) => new PublicKey(owner));
-      await ctx.send(await ctx.ix.register(pool, previousEpoch.epochId, batch));
-      // Ticket 12: dropped for the rest of the epoch once a send for them is
-      // confirmed, whether or not it actually registered anything — a
-      // zero-weight owner's `register` is a no-op on chain and would
-      // otherwise come back from `playersToRegister` forever.
-      await ctx.forgetRegistered(owners.slice(0, BATCH_SIZE));
-      return finish({
-        action: "register",
-        progress: {
-          count: previousEpoch.registeredCount,
-          total: previousEpoch.registeredCount + owners.length,
-        },
-        registerCheck: { epochId: previousEpoch.epochId, empty: false },
-      });
-    }
-  }
-
-  // 4b. Close registration. Refused while the jackpot is paused
-  // (game-jackpot-pause ticket 02), but `register` above is not, so weight
-  // keeps being recorded. The tick falls through instead of returning here,
-  // so withdrawals and rounds are not held for as long as the pause lasts.
+  // 4. The ended epoch goes to the draw. `request_draw` snapshots the Weight
+  // tree's total and the jackpot vault, so it sends the epoch straight to
+  // Drawing, or rolls it over when it holds no Weight or a prize under
+  // `min_jackpot`. Refused in shutdown and while the jackpot is paused, and
+  // the tick falls through in both so withdrawals and rounds are not held.
+  // `begin_epoch` and `rollover_epoch` are refused too, so an Ended epoch
+  // waits out the pause the same way it always did.
   if (
     !pool.shutdown &&
     !pool.jackpotPaused &&
-    previousEpoch?.status === EPOCH_STATUS.REGISTERING
+    previousEpoch?.status === EPOCH_STATUS.ENDED
   ) {
-    const emptyLastTick =
-      ctx.lastRegisterCheck?.epochId === previousEpoch.epochId &&
-      ctx.lastRegisterCheck.empty;
-    if (!emptyLastTick) {
-      return finish({
-        action: null,
-        registerCheck: { epochId: previousEpoch.epochId, empty: true },
-      });
-    }
-
-    // The program refuses to close before this instant, so that everyone who
-    // earned weight in the epoch has had the window to register.
-    if (now < registrationClosesAt(pool, previousEpoch)) {
-      return finish({
-        action: null,
-        registerCheck: { epochId: previousEpoch.epochId, empty: true },
-      });
-    }
-
-    // Ticket 07: never close on a Read model that has not caught up — a
-    // depositor the Indexer has not seen yet would silently lose the day's
-    // Draw and Base yield.
-    if (!indexerFreshForClose(ctx.indexerCursor, ctx.indexerFreshThresholdSeconds, previousEpoch)) {
-      ctx.warn(
-        `close_registration for epoch ${previousEpoch.epochId} withheld: the indexer cursor is stale`,
-      );
-      return finish({
-        action: null,
-        registerCheck: { epochId: previousEpoch.epochId, empty: true },
-        indexerStale: true,
-      });
-    }
-
-    // The jackpot was funded at the start of the epoch (step 6b), so closing
-    // snapshots whatever the vault holds now.
-    await ctx.send(await ctx.ix.closeRegistration(pool, previousEpoch.epochId));
-    return finish({ action: "close_registration", indexerStale: false });
+    await ctx.send(await ctx.ix.requestDraw(pool, previousEpoch.epochId));
+    return finish({ action: "request_draw" });
   }
 
   // 5. Waiting on the draw's randomness. `draw` is refused in shutdown
@@ -761,19 +656,15 @@ async function decide(ctx: TickContext): Promise<Decision> {
     }
   }
 
-  // 6. Drawn: pay whoever owns the interval the target landed in. A winner
+  // 6. Drawn: pay whoever owns the leaf the target landed in. A winner
   // whose token account is frozen or closed cannot be paid at all, so past
   // `payout_timeout` the epoch rolls over instead and the prize stays in the
   // vault for the next draw rather than stranding this epoch forever. Ticket
-  // 12: the Read model's miss falls back to an on-chain scan before a
-  // Payout Rollover is ever considered, and a human (non-House) winner is
-  // never rolled over until the drawn-unpaid condition has had
-  // `DRAWN_UNPAID_ALERT_SECONDS` to page someone, regardless of how short
-  // `payout_timeout` is set.
+  // 12: a human (non-House) winner is never rolled over until the
+  // drawn-unpaid condition has had `DRAWN_UNPAID_ALERT_SECONDS` to page
+  // someone, regardless of how short `payout_timeout` is set.
   if (previousEpoch?.status === EPOCH_STATUS.DRAWN) {
-    const winner =
-      (await ctx.winner(previousEpoch.epochId, previousEpoch.target)) ??
-      (await ctx.winnerOnChain(previousEpoch.epochId, previousEpoch.target));
+    const winner = await ctx.winner(previousEpoch);
     const isHouse = winner !== null && winner === pool.house.toBase58();
     const alertHasFired = now > previousEpoch.drawnAt + DRAWN_UNPAID_ALERT_SECONDS;
     const timedOut =
@@ -798,16 +689,66 @@ async function decide(ctx: TickContext): Promise<Decision> {
       return finish({ action: "rollover_epoch" });
     }
     // Retried next tick rather than treated as an error: either the payout
-    // will start landing, or no row covers the target yet because the
-    // indexer has not caught up with the registrations.
+    // will start landing, or no leaf holds the target yet.
+  }
+
+  // 6a. Venue cranks (ticket 13): harvest inside the last minutes of the
+  // epoch, recall when free idle is under the floor, deploy what sits above
+  // the target. All three are permissionless, so a failure is recorded and
+  // cooled down but never throws: a failed harvest does not block the draw,
+  // and nothing here holds up the withdrawals or rounds below it. The program
+  // syncs and refreshes the klend reserve itself.
+  /** Sends one crank. True when a transaction landed. */
+  async function sendVenue(crank: VenueCrank): Promise<boolean> {
+    try {
+      await ctx.send(
+        crank.kind === "deploy"
+          ? await ctx.ix.deployToVenue(pool, crank.amount)
+          : crank.kind === "recall"
+            ? await ctx.ix.recall(pool, crank.amount)
+            : await ctx.ix.harvest(pool),
+      );
+      venueState = venueSucceeded(venueState, crank.kind, currentEpoch?.epochId ?? null);
+      venueChanged = true;
+      return true;
+    } catch (cause) {
+      const message = errorMessage(cause);
+      venueChanged = true;
+      // Nothing was owed: as good as harvested for this epoch.
+      if (crank.kind === "harvest" && message === "NothingToHarvest") {
+        venueState = venueSucceeded(venueState, "harvest", currentEpoch?.epochId ?? null);
+        return false;
+      }
+      venueState = venueFailed(venueState, crank.kind, now);
+      if (VENUE_EXPECTED_ERRORS.has(message)) {
+        ctx.warn(`${crank.kind} refused, retrying in a while: ${message}`);
+      } else {
+        stepError = stepError ?? `${crank.kind} failed: ${message}`;
+      }
+      return false;
+    }
+  }
+
+  if (hasVenue(pool)) {
+    const crank = decideVenue({
+      pool,
+      vaultBalance: await ctx.principalVaultBalance(),
+      now,
+      currentEpoch,
+      state: venueState,
+    });
+    if (crank && (await sendVenue(crank))) {
+      return finish({ action: crank.kind === "deploy" ? "deploy_to_venue" : crank.kind });
+    }
   }
 
   // 6b. Pay out the withdrawals whose epoch has ended. Permissionless on the
   // program side, so the operator only pays the fee; it runs behind every
   // step above, which is what keeps a late return from the yield venue from
   // delaying a round, a draw or a payout. A vault too short to cover the
-  // next batch reports the gap and waits for the admin to bring principal
-  // back, retrying on the following tick.
+  // next batch has already tried a recall in 6a (a vault under what is queued
+  // is under the idle floor); when that cannot cover it either, it reports the
+  // gap and waits for USDC to come back, retrying on the following tick.
   const withdrawStateIn =
     ctx.lastWithdrawState?.epochId === pool.currentEpochId
       ? ctx.lastWithdrawState
@@ -919,11 +860,11 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // `RoundClosed` may not have landed yet either, so `roundsToClose` can
   // still hand back an id whose account is already gone on chain.
   "AccountNotInitialized",
-  "AlreadyRegistered",
+  // `request_draw` resent for an epoch a previous tick already sent to the draw.
+  "EpochNotAwaitingDraw",
   "EpochNotDrawing",
   "EpochNotDrawn",
   "EpochNotEnded",
-  "EpochNotRegistering",
   // A pending withdrawal the Player mirror still shows: either a depositor
   // cranked their own payout first (the UI offers that), or a second
   // request re-stamped `pending_epoch` to the epoch now running.

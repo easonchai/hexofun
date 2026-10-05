@@ -104,8 +104,8 @@ sends the transaction.
 The live-yield rewrite removes `admin_withdraw` and `fund_yield` (ADR 0017) and `register` and
 `close_registration` (ADR 0018), so they are gone from this table. Instant withdraw, deploy,
 recall, Harvest, `cover_deficit` and the new Admin setters join it as their tickets in
-`docs/plan/yield-claimer/` land. Until then the fund flow, epoch lifecycle and backend jobs
-below still draw the program as deployed today.
+`docs/plan/yield-claimer/` land. The epoch lifecycle and backend jobs below follow ticket 13;
+the fund flow still draws the pre-rewrite program until the doc ticket redraws it.
 
 ## Fund flow
 
@@ -146,9 +146,10 @@ upgrade that carried the fix).
 ```mermaid
 stateDiagram-v2
     [*] --> Open
-    Open --> Registering: begin_epoch opens the next epoch
-    Registering --> Drawing: close_registration
-    Registering --> RolledOver: close_registration, jackpot under min_jackpot
+    Open --> Ended: begin_epoch opens the next epoch
+    Ended --> Drawing: request_draw
+    Ended --> RolledOver: request_draw, no Weight or jackpot under min_jackpot
+    Ended --> RolledOver: rollover_epoch, nobody sent it to the draw
     Drawing --> Drawn: draw, VRF fulfilled
     Drawing --> RolledOver: rollover_epoch, vrf_timeout elapsed
     Drawn --> Paid: payout
@@ -190,17 +191,22 @@ step:
 3. Close a terminal `Round` once nothing settled on it is still owed (`close_round`).
 4. `begin_epoch`, once the round and sweep steps above are clear.
 5. Grant the daily referral bonus, once per epoch.
-6. Register the ended epoch's players and credit Base yield.
-7. Request or await the epoch's draw randomness.
-8. `payout` the winner.
-9. Pay out matured withdrawal requests (`process_withdraw`), batched.
-10. Open the next `Round`, if a whole one still fits before the epoch ends.
+6. `request_draw` for the epoch that just ended, which snapshots the Weight tree and the jackpot
+   vault and asks for randomness (or rolls the epoch over).
+7. Await the draw's randomness, then `draw`.
+8. `payout` the winner, found by reading the Weight tree and the Player accounts.
+9. Venue cranks: `harvest` once per epoch in its last 10 minutes, `recall` when free idle is under
+   the floor, `deploy_to_venue` when it is above the target. A failed crank is cooled down for 10
+   minutes and never holds anything else up.
+10. Pay out matured withdrawal requests (`process_withdraw`), batched.
+11. Open the next `Round`, if a whole one still fits before the epoch ends.
 
-Steps 4 through 7 and 10 stop once `pool.shutdown` is true, mirroring which instructions the
-program itself refuses (`begin_epoch`, `close_registration`, `draw`, `create_round`). Steps 1
-through 3, 8 and 9 keep running: settling, closing and sweeping an already-open `Round`,
-`payout` of an epoch already `Drawn`, and matured withdrawals are all still allowed post-shutdown
-(`docs/ops/funds.md` covers what to do about the ones that were not). Every operator transaction
+Steps 4 through 7 and 11 stop once `pool.shutdown` is true, mirroring which instructions the
+program itself refuses (`begin_epoch`, `request_draw`, `draw`, `create_round`); deploy stops too,
+while recall and harvest keep running. Steps 1 through 3, 8 and 10 keep running: settling,
+closing and sweeping an already-open `Round`, `payout` of an epoch already `Drawn`, and matured
+withdrawals are all still allowed post-shutdown (`docs/ops/funds.md` covers what to do about the
+ones that were not). Every operator transaction
 carries a priority fee: the 75th percentile of `getRecentPrioritizationFees` over the
 transaction's writable accounts, capped at `PRIORITY_FEE_MAX_MICROLAMPORTS` (default 50,000).
 

@@ -1247,14 +1247,6 @@ describe("operator queries", () => {
     });
   });
 
-  it("returns only unregistered players with a non-zero weight", async () => {
-    expect((await indexer.playersToRegister(5n)).sort()).toEqual([ALICE, DAVE].sort());
-  });
-
-  it("returns nothing for an epoch it has never seen", async () => {
-    expect(await indexer.playersToRegister(99n)).toEqual([]);
-  });
-
   it("finds the round the operator may still act on", async () => {
     await prisma.round.createMany({
       data: [

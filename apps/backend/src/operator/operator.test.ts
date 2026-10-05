@@ -33,6 +33,7 @@ import { OperatorInstructions } from "./instructions";
 import {
   DRAWN_UNPAID_ALERT_SECONDS,
   EXPECTED_ERROR_REPEAT_LIMIT,
+  EXPECTED_ERRORS,
   msUntilWake,
   runTick,
   SAFETY_INTERVAL_SECONDS,
@@ -41,12 +42,14 @@ import {
   type TickContext,
   type WithdrawState,
 } from "./tick";
+import { HARVEST_LEAD_SECONDS, VENUE_RETRY_SECONDS } from "./venue";
 import { isFulfilled, keccak256, randomnessAddress, vrfSeed } from "./vrf";
 
 const AUTHORITY = Keypair.generate().publicKey;
 const MINT = Keypair.generate().publicKey;
 const PROGRAM_ID = new PublicKey("LFk9ba6QXuM9oYRRNGGPxMGzfo13X3DAr8ghSPz72C6");
 const POOL = poolAddress(PROGRAM_ID, 1n);
+const WEIGHT_TREE = Keypair.generate().publicKey;
 
 // No RPC is reached: every account is passed explicitly, so Anchor never has
 // to resolve one.
@@ -95,9 +98,6 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   roundSeconds: 60n,
   closeBuffer: 0n,
   vrfTimeout: 120n,
-  // No wait by default, so every test that is not about the window keeps the
-  // timing it had before the window existed.
-  registrationWindow: 0n,
   payoutTimeout: 86_400n,
   paused: false,
   currentEpochId: 2n,
@@ -107,6 +107,22 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   shutdown: false,
   gamePaused: false,
   jackpotPaused: false,
+  weightTree: WEIGHT_TREE,
+  // Unpinned by default (`Pubkey::default()`), so the venue cranks stay quiet
+  // in every test that is not about them; `venuePool` below pins klend.
+  klendProgram: PublicKey.default,
+  klendMarket: PublicKey.default,
+  klendReserve: PublicKey.default,
+  klendCtoken: PublicKey.default,
+  pendingWithdrawals: 0n,
+  venueValue: 0n,
+  feeOwed: 0n,
+  prizeOwed: 0n,
+  idleFloorBps: 500,
+  idleTargetBps: 1_000,
+  minVenueMove: 100_000_000n,
+  deployPaused: false,
+  impaired: false,
   ...over,
 });
 
@@ -115,24 +131,23 @@ const epoch = (over: Partial<EpochState> = {}): EpochState => ({
   startsAt: NOW - 100n,
   endsAt: NOW + 86_300n,
   status: EPOCH_STATUS.OPEN,
-  registeredCount: 0,
   jackpotAmount: 0n,
   vrfSeed: new Uint8Array(32).fill(3),
   requestedAt: 0n,
   target: 0n,
   drawnAt: 0n,
-  registrationOpenedAt: 0n,
+  endedAt: 0n,
   ...over,
 });
 
-/** The epoch that has ended and is taking registrations, which is what
- *  `previousEpoch` holds for steps 4 and 5. Its `endsAt` is behind `now`:
+/** The epoch that has ended and waits for `request_draw`, which is what
+ *  `previousEpoch` holds for step 4. Its `endsAt` is behind `now`:
  *  `begin_epoch` is what moves an epoch into this status, and it will not
  *  run before the epoch has ended. */
-const registering = (over: Partial<EpochState> = {}): EpochState =>
+const ended = (over: Partial<EpochState> = {}): EpochState =>
   epoch({
     epochId: 1n,
-    status: EPOCH_STATUS.REGISTERING,
+    status: EPOCH_STATUS.ENDED,
     endsAt: NOW - 100n,
     ...over,
   });
@@ -151,14 +166,12 @@ interface Recorder {
   sent: TransactionInstruction[][];
   warned: string[];
   markedSent: { epochId: bigint; referrers: string[]; txSig: string }[];
-  forgottenRegistered: string[][];
 }
 
 function context(over: Partial<TickContext> = {}): Recorder {
   const sent: TransactionInstruction[][] = [];
   const warned: string[] = [];
   const markedSent: { epochId: bigint; referrers: string[]; txSig: string }[] = [];
-  const forgottenRegistered: string[][] = [];
   const ctx: TickContext = {
     now: NOW,
     pool: pool(),
@@ -171,12 +184,8 @@ function context(over: Partial<TickContext> = {}): Recorder {
     // previous round", which never delays opening the next one.
     lastRound: null,
     ix: instructions,
-    lastRegisterCheck: null,
     lastWithdrawState: null,
-    // Fresh and caught up by default, so step 4's close_registration gate
-    // stays quiet in every test that is not about it.
-    indexerCursor: { ageSeconds: 0, updatedAt: NOW },
-    indexerFreshThresholdSeconds: 60n,
+    lastVenueState: null,
     lastExpectedErrors: new Map(),
     // Unconfigured by default (ticket 05): begin_epoch is never withheld in
     // any test that is not about the launch window.
@@ -185,17 +194,12 @@ function context(over: Partial<TickContext> = {}): Recorder {
     principalVaultBalance: async () => 0n,
     // Empty by default so step 6b stays quiet in every test that is not about it.
     duePendingWithdrawals: async () => [],
-    playersToRegister: async () => [],
-    forgetRegistered: async (owners) => {
-      forgottenRegistered.push([...owners]);
-    },
     unsettledPositions: async () => [],
     forgetPositions: async () => {},
     // Empty by default so step 2c stays quiet in every test that is not about it.
     roundsToClose: async () => [],
     forgetRound: () => {},
     winner: async () => null,
-    winnerOnChain: async () => null,
     // Empty by default so step 3b stays quiet in every test that is not about it.
     referralGrantsDue: async () => [],
     markReferralGrantsSent: async (epochId, referrers, txSig) => {
@@ -208,8 +212,11 @@ function context(over: Partial<TickContext> = {}): Recorder {
     warn: (message) => warned.push(message),
     ...over,
   };
-  return { ctx, sent, warned, markedSent, forgottenRegistered };
+  return { ctx, sent, warned, markedSent };
 }
+
+const keysOfIx = (ixs: readonly TransactionInstruction[]): string[] =>
+  (ixs[0]?.keys ?? []).map((key) => key.pubkey.toBase58());
 
 /** Runs one tick and returns the labels of the single transaction it sent. */
 async function tickLabels(over: Partial<TickContext> = {}): Promise<{
@@ -545,17 +552,15 @@ describe("runTick", () => {
     expect(result.labels).toEqual(["begin_epoch"]);
   });
 
-  it("3. does not begin the epoch while the previous epoch is still registering", async () => {
-    const owner = Keypair.generate().publicKey.toBase58();
+  it("3. does not begin the epoch while the previous epoch has not been sent to the draw", async () => {
     const result = await tickLabels({
       pool: pool({ openRoundId: 0n }),
       currentEpoch: epoch({ endsAt: NOW }),
       openRound: null,
-      previousEpoch: registering(),
-      playersToRegister: async () => [owner],
+      previousEpoch: ended(),
     });
     expect(result.action).not.toBe("begin_epoch");
-    expect(result.labels).toEqual(["register"]);
+    expect(result.labels).toEqual(["request_draw"]);
   });
 
   // --- 3 (ticket 05): LAUNCH_AT holds back only the Pool's very first
@@ -715,218 +720,34 @@ describe("runTick", () => {
     expect(result.action).toBeNull();
   });
 
-  // --- 4. Register / close registration. Closing waits for two consecutive
-  // empty ticks (spec §3.4, ticket 04) so an indexer that has not caught up
-  // with a last-second deposit gets one more chance.
+  // --- 4. request_draw: the ended epoch goes to the draw straight away. There
+  // is no registration, no indexer wait and no window (ticket 13).
 
-  it("4. registers up to eight players per transaction", async () => {
-    const owners = Array.from({ length: 10 }, () =>
-      Keypair.generate().publicKey.toBase58(),
-    );
-    const { ctx, sent } = context({
-      previousEpoch: registering({ registeredCount: 2 }),
-      playersToRegister: async () => owners,
-    });
+  it("4. sends an ended epoch to the draw, with the Weight tree", async () => {
+    const { ctx, sent } = context({ previousEpoch: ended() });
     const outcome = await runTick(ctx);
 
     expect(sent).toHaveLength(1);
-    expect((sent[0] ?? []).map(label)).toEqual(Array(8).fill("register"));
-    expect(outcome.progress).toEqual({ count: 2, total: 12 });
-    expect(outcome.registerCheck).toEqual({ epochId: 1n, empty: false });
-    // Acted this tick: a further batch may still be waiting, so look again
-    // immediately rather than on the running epoch's own, far-off end.
+    expect((sent[0] ?? []).map(label)).toEqual(["request_draw"]);
+    expect(outcome.action).toBe("request_draw");
+    expect(keysOfIx(sent[0] ?? [])).toContain(WEIGHT_TREE.toBase58());
+    // Acted this tick, so look again straight away.
     expect(outcome.nextWakeAt).toBe(NOW);
   });
 
-  it("4. waits for a second empty tick before closing registration", async () => {
-    const { ctx, sent } = context({
-      previousEpoch: registering(),
-    });
-    const outcome = await runTick(ctx);
-    expect(sent).toHaveLength(0);
-    expect(outcome.action).toBeNull();
-    expect(outcome.registerCheck).toEqual({ epochId: 1n, empty: true });
-  });
-
-  it("4. closes registration on the second consecutive empty tick, without funding", async () => {
-    const result = await tickLabels({
-      previousEpoch: registering(),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-    });
-    expect(result.labels).toEqual(["close_registration"]);
-    expect(result.action).toBe("close_registration");
-  });
-
-  it("4. list empty, then non-empty, then empty: only the second empty tick closes", async () => {
-    const owner = Keypair.generate().publicKey.toBase58();
-    const previousEpoch = registering();
-
-    // Tick 1: nobody left, for the first time. Waits.
-    const tick1 = context({ previousEpoch, playersToRegister: async () => [] });
-    const outcome1 = await runTick(tick1.ctx);
-    expect(outcome1.action).toBeNull();
-    expect(outcome1.registerCheck).toEqual({ epochId: 1n, empty: true });
-
-    // Tick 2: a late registrant shows up. Registers, and the flag resets.
-    const tick2 = context({
-      previousEpoch,
-      lastRegisterCheck: outcome1.registerCheck ?? null,
-      playersToRegister: async () => [owner],
-    });
-    const outcome2 = await runTick(tick2.ctx);
-    expect(outcome2.action).toBe("register");
-    expect(outcome2.registerCheck).toEqual({ epochId: 1n, empty: false });
-
-    // Tick 3: empty again, but this is the first empty tick since the reset,
-    // so it waits rather than closing.
-    const tick3 = context({
-      previousEpoch,
-      lastRegisterCheck: outcome2.registerCheck ?? null,
-      playersToRegister: async () => [],
-    });
-    const outcome3 = await runTick(tick3.ctx);
-    expect(tick3.sent).toHaveLength(0);
-    expect(outcome3.action).toBeNull();
-    expect(outcome3.registerCheck).toEqual({ epochId: 1n, empty: true });
-  });
-
-  it("4. waits out the registration window before closing", async () => {
-    // Paused with no Round, so the window is the nearest deadline.
-    const { ctx, sent } = context({
-      pool: pool({ registrationWindow: 50n, openRoundId: 0n, paused: true }),
-      openRound: null,
-      previousEpoch: registering({ endsAt: NOW - 10n }),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-    });
-    const outcome = await runTick(ctx);
-    expect(sent).toHaveLength(0);
-    expect(outcome.action).toBeNull();
-    // The flag survives, so the tick that finds the window shut closes right
-    // away instead of starting the two-empty-tick count again.
-    expect(outcome.registerCheck).toEqual({ epochId: 1n, empty: true });
-    // endsAt + registrationWindow, the instant the program starts accepting.
-    expect(outcome.nextWakeAt).toBe(NOW + 40n);
-  });
-
-  it("4. closes the moment the registration window has passed", async () => {
-    const result = await tickLabels({
-      pool: pool({ registrationWindow: 300n }),
-      previousEpoch: registering({ endsAt: NOW - 300n }),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-    });
-    expect(result.labels).toEqual(["close_registration"]);
-  });
-
-  // --- 4. (ticket 07) close_registration is withheld on a stale Read model.
-
-  it("4. (ticket 07) withholds close_registration on a stale cursor and emits the wait reason", async () => {
-    const { ctx, sent, warned } = context({
-      previousEpoch: registering(),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-      // Fresh in age, but never actually synced past the epoch's own end.
-      indexerCursor: { ageSeconds: 5, updatedAt: NOW - 200n },
-    });
-    const outcome = await runTick(ctx);
-    expect(sent).toHaveLength(0);
-    expect(outcome.action).toBeNull();
-    expect(outcome.indexerStale).toBe(true);
-    expect(warned).toHaveLength(1);
-  });
-
-  it("4. (ticket 07) a cursor younger than the threshold but behind the epoch's end still withholds", async () => {
-    const { ctx, sent } = context({
-      previousEpoch: registering({ endsAt: NOW - 100n }),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-      indexerFreshThresholdSeconds: 60n,
-      // Age is well under the 60 s threshold...
-      indexerCursor: { ageSeconds: 10, updatedAt: NOW - 150n },
-    });
-    const outcome = await runTick(ctx);
-    expect(sent).toHaveLength(0);
-    expect(outcome.indexerStale).toBe(true);
-  });
-
-  it("4. (ticket 07) a fresh, caught-up cursor closes registration as today", async () => {
-    const result = await tickLabels({
-      previousEpoch: registering(),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-      indexerCursor: { ageSeconds: 1, updatedAt: NOW },
-    });
-    expect(result.labels).toEqual(["close_registration"]);
-  });
-
-  // --- 4. (ticket 12) a confirmed register batch is not resent.
-
-  it("4. (ticket 12) forgets the owners a register batch was just confirmed for", async () => {
-    const owner = Keypair.generate().publicKey.toBase58();
-    const { ctx, forgottenRegistered } = context({
-      previousEpoch: registering({ registeredCount: 2 }),
-      playersToRegister: async () => [owner],
-    });
-    await runTick(ctx);
-    expect(forgottenRegistered).toEqual([[owner]]);
-  });
-
-  it("4. a late begin_epoch owes the window from when registration opened", async () => {
-    // The program anchors the window on `registrationOpenedAt` when that is
-    // later than `endsAt`, so the tick has to wait for the same instant or
-    // it burns a transaction on RegistrationWindowOpen every time.
-    const { ctx, sent } = context({
-      pool: pool({ registrationWindow: 50n, openRoundId: 0n, paused: true }),
-      openRound: null,
-      previousEpoch: registering({ registrationOpenedAt: NOW - 10n }),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-    });
-    const outcome = await runTick(ctx);
-
-    expect(sent).toHaveLength(0);
-    expect(outcome.action).toBeNull();
-    expect(outcome.nextWakeAt).toBe(NOW + 40n);
-  });
-
-  it("4. an empty-tick flag from a different epoch does not close registration", async () => {
-    const { ctx, sent } = context({
-      previousEpoch: registering(),
-      lastRegisterCheck: { epochId: 0n, empty: true },
-    });
-    const outcome = await runTick(ctx);
-    expect(sent).toHaveLength(0);
-    expect(outcome.action).toBeNull();
-    expect(outcome.registerCheck).toEqual({ epochId: 1n, empty: true });
-  });
-
-  it("4. stops registering once the pool is shut down: close_registration is refused", async () => {
-    const result = await tickLabels({
-      pool: pool({ shutdown: true }),
-      previousEpoch: registering(),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-      playersToRegister: () => {
-        throw new Error("must not be asked while shut down");
-      },
-    });
+  it("4. waits while the pool is shut down: request_draw is refused", async () => {
+    const result = await tickLabels({ pool: pool({ shutdown: true }), previousEpoch: ended() });
     expect(result.action).toBeNull();
   });
 
-  // game-jackpot-pause ticket 02: close_registration is refused under
-  // jackpot pause, register is not.
-  it("4. does not close registration while the jackpot is paused", async () => {
-    const result = await tickLabels({
-      pool: pool({ jackpotPaused: true }),
-      previousEpoch: registering(),
-      lastRegisterCheck: { epochId: 1n, empty: true },
-    });
+  it("4. waits while the jackpot is paused", async () => {
+    const result = await tickLabels({ pool: pool({ jackpotPaused: true }), previousEpoch: ended() });
     expect(result.transactions).toBe(0);
     expect(result.action).toBeNull();
   });
 
-  it("4. still registers players while the jackpot is paused", async () => {
-    const owner = Keypair.generate().publicKey.toBase58();
-    const result = await tickLabels({
-      pool: pool({ jackpotPaused: true }),
-      previousEpoch: registering(),
-      playersToRegister: async () => [owner],
-    });
-    expect(result.labels).toEqual(["register"]);
+  it("4. a request_draw that lost a race is an expected error, not a failure", () => {
+    expect(EXPECTED_ERRORS.has("EpochNotAwaitingDraw")).toBe(true);
   });
 
   // --- 5. Draw or rollover.
@@ -1003,8 +824,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 10n,
       }),
-      winner: async (epochId, target) =>
-        epochId === 1n && target === 42n ? winner : null,
+      winner: async (drawn) => (drawn.epochId === 1n && drawn.target === 42n ? winner : null),
     });
     // No winner token account any more (ticket 02): the prize goes into
     // principal_vault instead, so payout is the whole transaction.
@@ -1159,23 +979,7 @@ describe("runTick", () => {
     expect(outcome.action).toBe("rollover_epoch");
   });
 
-  it("6. (ticket 12) falls back to an on-chain scan when the Read model misses, and still pays", async () => {
-    const winner = Keypair.generate().publicKey.toBase58();
-    const result = await tickLabels({
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 10n,
-      }),
-      winner: async () => null,
-      winnerOnChain: async (epochId, target) =>
-        epochId === 1n && target === 42n ? winner : null,
-    });
-    expect(result.labels).toEqual(["payout"]);
-  });
-
-  it("6. waits when no registered interval covers the target yet", async () => {
+  it("6. waits when no leaf holds the target yet", async () => {
     const result = await tickLabels({
       previousEpoch: epoch({
         epochId: 1n,
@@ -1509,19 +1313,19 @@ describe("runTick", () => {
     expect(outcome.drawnUnpaid).toBe(false);
   });
 
-  it("epochNoProgress fires once a registering epoch outlives its window plus the slack", async () => {
+  it("epochNoProgress fires once an ended epoch outlives the VRF timeout plus the slack", async () => {
     const { ctx } = context({
-      pool: pool({ registrationWindow: 60n, vrfTimeout: 120n }),
-      previousEpoch: registering({ endsAt: NOW - (60n + 120n + 300n + 1n) }),
+      pool: pool({ vrfTimeout: 120n }),
+      previousEpoch: ended({ endsAt: NOW - (120n + 300n + 1n) }),
     });
     const outcome = await runTick(ctx);
     expect(outcome.epochNoProgress).toBe(true);
   });
 
-  it("epochNoProgress stays false for a registering epoch still inside its window", async () => {
+  it("epochNoProgress stays false for an ended epoch still inside that deadline", async () => {
     const { ctx } = context({
-      pool: pool({ registrationWindow: 60n, vrfTimeout: 120n }),
-      previousEpoch: registering({ endsAt: NOW - (60n + 120n + 300n - 1n) }),
+      pool: pool({ vrfTimeout: 120n }),
+      previousEpoch: ended({ endsAt: NOW - (120n + 300n - 1n) }),
     });
     const outcome = await runTick(ctx);
     expect(outcome.epochNoProgress).toBe(false);
@@ -1561,6 +1365,322 @@ describe("runTick", () => {
     });
     const outcome = await runTick(ctx);
     expect(outcome.drawnUnpaid).toBe(false);
+  });
+});
+
+describe("venue cranks (ticket 13)", () => {
+  const KLEND = new PublicKey("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+  const MARKET = new PublicKey("7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF");
+  const RESERVE = new PublicKey("D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59");
+  const USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+  // The three accounts klend.rs wants after the pinned four, as the mainnet
+  // USDC reserve has them (tests/fork/klend.fork.ts).
+  const LMA = PublicKey.findProgramAddressSync([Buffer.from("lma"), MARKET.toBuffer()], KLEND)[0];
+  const LIQ_SUPPLY = new PublicKey("Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6");
+  const CMINT = new PublicKey("B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D");
+  const SYSVAR_IX = "Sysvar1nstructions1111111111111111111111111";
+  const CTOKEN = Keypair.generate().publicKey;
+  const U = 1_000_000n;
+
+  // No round and no epoch end in sight, so the venue step is the only thing
+  // the tick has to do.
+  const venuePool = (over: Partial<PoolState> = {}): PoolState =>
+    pool({
+      acceptedMint: USDC,
+      klendProgram: KLEND,
+      klendMarket: MARKET,
+      klendReserve: RESERVE,
+      klendCtoken: CTOKEN,
+      openRoundId: 0n,
+      paused: true,
+      ...over,
+    });
+
+  const venueTick = (vault: bigint, over: Partial<TickContext> = {}) =>
+    context({
+      pool: venuePool(),
+      openRound: null,
+      principalVaultBalance: async () => vault,
+      ...over,
+    });
+
+  /** The decoded amount of the single instruction a tick sent. */
+  const amountSent = (sent: TransactionInstruction[][]): string => {
+    const decoded = coder.decode((sent[0]?.[0] as TransactionInstruction).data);
+    return (decoded?.data as { amount: { toString(): string } }).amount.toString();
+  };
+
+  it("deploys the excess above the idle target without being asked", async () => {
+    // 10,000 free idle, target 10% of it: 9,000 may go.
+    const { ctx, sent } = venueTick(10_000n * U);
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("deploy_to_venue");
+    expect((sent[0] ?? []).map(label)).toEqual(["deploy_to_venue"]);
+    expect(amountSent(sent)).toBe((9_000n * U).toString());
+  });
+
+  it("passes the pinned klend accounts and the three the venue backing needs", async () => {
+    const { ctx, sent } = venueTick(10_000n * U);
+    await runTick(ctx);
+    const keys = (sent[0]?.[0]?.keys ?? []).map((key) => key.pubkey.toBase58());
+
+    for (const pinned of [KLEND, MARKET, RESERVE, CTOKEN]) expect(keys).toContain(pinned.toBase58());
+    // klend.rs documents the order: market authority, supply vault, cToken
+    // mint, instructions sysvar; the program checks each against the reserve.
+    expect(keys.slice(-4)).toEqual([LMA, LIQ_SUPPLY, CMINT].map((k) => k.toBase58()).concat(SYSVAR_IX));
+  });
+
+  it("takes no extra accounts under a test-venue build, which pins this program as klend", async () => {
+    const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ klendProgram: PROGRAM_ID }) });
+    await runTick(ctx);
+    expect(sent[0]?.[0]?.keys.map((key) => key.pubkey.toBase58())).not.toContain(SYSVAR_IX);
+  });
+
+  it("never deploys under the minimum size", async () => {
+    // 110 free idle, target 11: only 99 is above it, under the 100 minimum.
+    const { ctx, sent } = venueTick(110n * U);
+    expect((await runTick(ctx)).action).toBeNull();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("counts the venue position and the queued withdrawals when sizing the target", async () => {
+    // Free idle 4,000 (5,000 less 1,000 queued), venue 6,000: total 10,000,
+    // target 1,000, so 3,000 is the excess.
+    const { ctx, sent } = venueTick(5_000n * U, {
+      pool: venuePool({ pendingWithdrawals: 1_000n * U, venueValue: 6_000n * U }),
+    });
+    await runTick(ctx);
+    expect(amountSent(sent)).toBe((3_000n * U).toString());
+  });
+
+  it("recalls up to the target when free idle is under the floor", async () => {
+    // Free idle 100, venue 9,900: total 10,000, floor 500, target 1,000.
+    const { ctx, sent } = venueTick(100n * U, { pool: venuePool({ venueValue: 9_900n * U }) });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("recall");
+    expect((sent[0] ?? []).map(label)).toEqual(["recall"]);
+    expect(amountSent(sent)).toBe((900n * U).toString());
+  });
+
+  it("does not recall between the floor and the target", async () => {
+    const { ctx, sent } = venueTick(700n * U, { pool: venuePool({ venueValue: 9_300n * U }) });
+    expect((await runTick(ctx)).action).toBeNull();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("recalls exactly the gap when a small queued withdrawal is all that is short", async () => {
+    // 40 in the vault against 50 queued: the gap is 10. Bringing free idle up
+    // to the target would be 49, under the 100 minimum, and that is when the
+    // program takes the exact gap instead.
+    const { ctx, sent } = venueTick(40n * U, {
+      pool: venuePool({ pendingWithdrawals: 50n * U, venueValue: 400n * U }),
+    });
+    await runTick(ctx);
+    expect(sent[0]?.map(label)).toEqual(["recall"]);
+    expect(amountSent(sent)).toBe((10n * U).toString());
+  });
+
+  it("never recalls more than the venue holds", async () => {
+    const { ctx, sent } = venueTick(0n, {
+      pool: venuePool({ pendingWithdrawals: 500n * U, venueValue: 300n * U }),
+    });
+    await runTick(ctx);
+    // Free idle is -500: wanting the target and the gap, it settles for the
+    // whole position, which is over the minimum.
+    expect(amountSent(sent)).toBe((300n * U).toString());
+  });
+
+  it("does not deploy while deploy is paused, the venue is impaired or the pool is shut down", async () => {
+    for (const over of [{ deployPaused: true }, { impaired: true }, { shutdown: true }]) {
+      const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool(over) });
+      expect((await runTick(ctx)).action).toBeNull();
+      expect(sent).toHaveLength(0);
+    }
+  });
+
+  it("still recalls while impaired: a haircut is not a reason to leave Pending stuck", async () => {
+    const { ctx, sent } = venueTick(100n * U, {
+      pool: venuePool({ impaired: true, venueValue: 9_900n * U }),
+    });
+    await runTick(ctx);
+    expect(sent[0]?.map(label)).toEqual(["recall"]);
+  });
+
+  it("does nothing on a pool whose klend addresses are not pinned yet", async () => {
+    const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ klendProgram: PublicKey.default }) });
+    expect((await runTick(ctx)).action).toBeNull();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("does not retry a refused crank in a tight loop", async () => {
+    const refused = venueTick(10_000n * U, {
+      send: async () => {
+        throw new Error("DeployExceedsIdle");
+      },
+    });
+    const first = await runTick(refused.ctx);
+    // Expected refusals warn; they are not a tick error.
+    expect(first.stepError).toBeUndefined();
+    expect(refused.warned).toHaveLength(1);
+    expect(first.venueState?.failedAt.deploy).toBe(NOW);
+
+    const soon = venueTick(10_000n * U, { lastVenueState: first.venueState ?? null, now: NOW + 30n });
+    expect((await runTick(soon.ctx)).action).toBeNull();
+    expect(soon.sent).toHaveLength(0);
+
+    const later = venueTick(10_000n * U, {
+      lastVenueState: first.venueState ?? null,
+      now: NOW + VENUE_RETRY_SECONDS,
+    });
+    expect((await runTick(later.ctx)).action).toBe("deploy_to_venue");
+  });
+
+  it("records an unexpected crank failure as a tick error and carries on", async () => {
+    const { ctx } = venueTick(10_000n * U, {
+      send: async () => {
+        throw new Error("blockhash expired");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toBe("deploy failed: blockhash expired");
+    expect(outcome.action).toBeNull();
+  });
+
+  // --- harvest: once per epoch, in the last HARVEST_LEAD_SECONDS before it ends.
+
+  const harvestPool = (over: Partial<PoolState> = {}): PoolState =>
+    venuePool({ venueValue: 9_000n * U, paused: false, ...over });
+  const endingIn = (seconds: bigint) => epoch({ endsAt: NOW + seconds });
+
+  it("harvests inside the window before the epoch ends, and only once", async () => {
+    const first = context({
+      pool: harvestPool(),
+      openRound: null,
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+    });
+    const outcome = await runTick(first.ctx);
+    expect(outcome.action).toBe("harvest");
+    expect((first.sent[0] ?? []).map(label)).toEqual(["harvest"]);
+    expect(keysOfIx(first.sent[0] ?? [])).toContain(first.ctx.pool.treasury.toBase58());
+    expect(outcome.venueState?.harvestedEpoch).toBe(2n);
+
+    // Next tick: the epoch is marked, so nothing more goes out.
+    const again = context({
+      pool: harvestPool(),
+      openRound: null,
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+      lastVenueState: outcome.venueState ?? null,
+    });
+    expect((await runTick(again.ctx)).action).not.toBe("harvest");
+  });
+
+  it("does not harvest before the window, or while impaired", async () => {
+    for (const [pool_, epoch_] of [
+      [harvestPool(), endingIn(HARVEST_LEAD_SECONDS + 1n)],
+      [harvestPool({ impaired: true }), endingIn(10n)],
+    ] as const) {
+      const { ctx } = context({
+        pool: pool_,
+        openRound: null,
+        currentEpoch: epoch_,
+        principalVaultBalance: async () => 1_000n * U,
+      });
+      expect((await runTick(ctx)).action).not.toBe("harvest");
+    }
+  });
+
+  it("wakes when the harvest window opens", async () => {
+    const { ctx } = context({
+      pool: harvestPool({ paused: true }),
+      openRound: null,
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS + 50n),
+      principalVaultBalance: async () => 1_000n * U,
+    });
+    expect((await runTick(ctx)).nextWakeAt).toBe(NOW + 50n);
+  });
+
+  it("a failed harvest does not block the rest of the tick", async () => {
+    const { ctx, sent } = context({
+      pool: harvestPool(),
+      openRound: null,
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+      send: async (ixs) => {
+        if (ixs.some((ix) => label(ix) === "harvest")) throw new Error("ReserveStale");
+        sent.push(ixs);
+        return "signature";
+      },
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.stepError).toBe("harvest failed: ReserveStale");
+    expect(outcome.action).toBe("create_round");
+    expect(outcome.venueState?.failedAt.harvest).toBe(NOW);
+    expect(outcome.venueState?.harvestedEpoch).toBeNull();
+  });
+
+  it("NothingToHarvest counts as harvested for the epoch", async () => {
+    const { ctx } = context({
+      pool: harvestPool(),
+      openRound: null,
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+      send: async (ixs) => {
+        if (ixs.some((ix) => label(ix) === "harvest")) throw new Error("NothingToHarvest");
+        return "signature";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toBeUndefined();
+    expect(outcome.venueState?.harvestedEpoch).toBe(2n);
+  });
+
+  // --- Pending withdrawals the vault cannot cover: recall first, then push.
+
+  it("recalls before pushing a matured withdrawal the vault cannot cover", async () => {
+    const due = [{ owner: Keypair.generate().publicKey.toBase58(), amount: 500n * U }];
+    const { ctx, sent } = venueTick(100n * U, {
+      pool: venuePool({ pendingWithdrawals: 500n * U, venueValue: 9_900n * U }),
+      duePendingWithdrawals: async () => due,
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("recall");
+    expect(sent).toHaveLength(1);
+    expect((sent[0] ?? []).map(label)).toEqual(["recall"]);
+  });
+
+  it("pushes the withdrawal once the vault covers it", async () => {
+    const due = [{ owner: Keypair.generate().publicKey.toBase58(), amount: 500n * U }];
+    const { ctx, sent } = venueTick(1_500n * U, {
+      pool: venuePool({ pendingWithdrawals: 500n * U, venueValue: 8_500n * U }),
+      duePendingWithdrawals: async () => due,
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("process_withdraw");
+    expect((sent[0] ?? []).map(label)).toContain("process_withdraw");
+  });
+
+  it("falls through to the push, and its shortfall report, when the recall is refused", async () => {
+    const due = [{ owner: Keypair.generate().publicKey.toBase58(), amount: 500n * U }];
+    const { ctx } = venueTick(100n * U, {
+      pool: venuePool({ pendingWithdrawals: 500n * U, venueValue: 9_900n * U }),
+      duePendingWithdrawals: async () => due,
+      send: async (ixs) => {
+        if (ixs.some((ix) => label(ix) === "recall")) throw new Error("VenueIlliquid");
+        throw new Error("InsufficientVaultLiquidity");
+      },
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBeNull();
+    expect(outcome.withdrawShortfall).toBe(400n * U);
+    expect(outcome.venueState?.failedAt.recall).toBe(NOW);
   });
 });
 
