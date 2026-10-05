@@ -667,7 +667,7 @@
       }
 
       /* "Save your money. Play your luck." + SHARE ON X, 14px, under the form.
-         The span is the error slot; the link hides once joined. */
+         The span is the error slot. */
       .form-note {
         display: flex;
         flex-wrap: wrap;
@@ -697,47 +697,523 @@
         border-radius: 2px;
       }
 
-      .form.is-done {
-        display: none;
-      }
-
-      .form-done {
-        display: none;
-        max-width: 623px;
-      }
-
-      .form-done.is-done {
-        display: block;
-        animation: popIn 380ms cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
-      }
-
-      /* Joined: the form row becomes the "on the list" pill + Share on X. */
-      .done-row {
-        display: flex;
-        gap: 16px;
-      }
-
-      .done-line {
-        flex: 1;
-        min-width: 0;
-        margin: 0;
-        height: 44px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        border: 1px solid var(--lime);
-        border-radius: 8px;
-        background: var(--moss);
-        color: var(--lime);
-        font-size: 12px;
-        letter-spacing: 0.075em;
+      /* "Join the waitlist" is wider than the fixed 186px button. */
+      .btn[data-login] {
+        width: auto;
+        flex: none;
+        padding: 0 28px;
         white-space: nowrap;
       }
 
-      .btn-share {
-        width: 208px;
-        flex: 0 0 208px;
+      /* ---------------------------- signed in --------------------------- */
+      /* The dashboard replaces the whole page below the nav. */
+      body.signed-in > :is(section, footer),
+      body.signed-in .nav-links,
+      body.signed-in .nav-cta {
+        display: none;
+      }
+
+      /* Account pill + dropdown, after the app's wallet menu. */
+      .acct {
+        position: relative;
+        margin-left: auto;
+      }
+
+      .acct-pill {
+        font-family: var(--display);
+        font-size: 11.5px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--navy-800);
+        background: var(--lime);
+        border: 0;
+        border-radius: 24px;
+        padding: 10px 24px;
+        max-width: 60vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: filter var(--quick) var(--ease);
+      }
+
+      .acct-pill:hover {
+        filter: brightness(0.92);
+      }
+
+      .acct-menu {
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        width: 220px;
+        padding: 6px;
+        background: var(--navy-800);
+        border: 1px solid var(--line-2);
+        border-radius: 16px;
+        box-shadow: 0 12px 32px rgba(8, 17, 32, 0.6);
+        animation: popIn 200ms var(--ease) both;
+      }
+
+      .acct-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 10px;
+        background: none;
+        color: #ff8a6a;
+        font: 600 13px var(--mono);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .acct-item:hover,
+      .acct-item:focus-visible {
+        background: rgba(255, 65, 54, 0.12);
+      }
+
+      .dash-in {
+        max-width: calc(1053px + 2 * var(--pad));
+        padding-top: 56px;
+        padding-bottom: 96px;
+        display: flex;
+        flex-direction: column;
+        gap: 36px;
+      }
+
+      .dash-eyebrow,
+      .dash .lbl {
+        margin: 0;
+        font-family: var(--mono);
+        font-weight: 600;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.6);
+      }
+
+      .dash-eyebrow {
+        font-size: 11.5px;
+        letter-spacing: 0.167em;
+        color: var(--ink-75);
+      }
+
+      .dash-title h1 {
+        margin: 22px 0 0;
+        font-family: var(--display);
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: clamp(32px, 6vw, 61px);
+        line-height: 0.96;
+        letter-spacing: 0.0175em;
+        color: #fff;
+      }
+
+      .dash .hl,
+      .dash .lime {
+        color: var(--lime);
+      }
+
+      .dash-sub {
+        margin: 14px 0 0;
+        font-size: 19px;
+        line-height: 1.575;
+        color: var(--ink-75);
+      }
+
+      .dash-msg {
+        margin: 8px 0 0;
+        font-size: 13px;
+        color: var(--lime);
+      }
+
+      .dash-msg:empty {
+        display: none;
+      }
+
+      .card {
+        padding: 24px;
+        background: var(--slate);
+        border: 1px solid rgba(182, 255, 59, 0.18);
+        border-radius: 12px;
+      }
+
+      .card-h {
+        margin: 0 0 20px;
+        font-family: var(--display);
+        font-size: 16px;
+        line-height: 20px;
+        letter-spacing: 0.11em;
+        text-transform: none;
+        color: var(--lime);
+      }
+
+      /* Figma 587:23280: borderless, link field and buttons side by side. */
+      .card-ref {
+        padding: 18px 15px 16px;
+        border: 0;
+        border-radius: 14px;
+      }
+
+      .card-ref .card-h {
+        margin-bottom: 18px;
+      }
+
+      .ref-row {
+        display: flex;
+        gap: 12px;
+      }
+
+      .ref-link {
+        flex: 1;
+        min-width: 0;
+        height: 44px;
+        padding: 0 17px;
+        line-height: 44px;
+        background: var(--navy-800);
+        border-radius: 8px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 16px;
+        color: var(--ink);
+        user-select: all;
+      }
+
+      .ref-row .btn {
+        flex-basis: 182px;
+        text-decoration: none;
+      }
+
+      /* Until X is connected: the field holds the hint, the buttons go. */
+      .card-ref.locked .ref-link {
+        color: var(--ink-3);
+        user-select: none;
+      }
+
+      .card-ref.locked .btn {
+        display: none;
+      }
+
+      .tiles {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 20px;
+      }
+
+      .tile {
+        padding: 17px;
+        min-height: 105px;
+        background: var(--navy-800);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+      }
+
+      .dash .lbl {
+        font-size: 9px;
+        line-height: 9px;
+        letter-spacing: 0.16em;
+      }
+
+      .big,
+      .mid {
+        margin: 10px 0 0;
+        font-family: var(--display);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: -0.01em;
+        color: #fff;
+      }
+
+      .big {
+        font-size: 52px;
+        line-height: 52px;
+      }
+
+      .mid {
+        margin-top: 14px;
+        font-size: 32px;
+        line-height: 36px;
+      }
+
+      .dash .lime {
+        color: var(--lime);
+      }
+
+      .tile-sub {
+        margin: 4px 0 0;
+        font-size: 9px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--lime);
+      }
+
+      .board-h {
+        margin-top: 20px !important;
+      }
+
+      .board {
+        list-style: none;
+        margin: 8px 0 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .board li {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 28.6px;
+        padding: 0 11px;
+        background: var(--navy-800);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 6px;
+        font-size: 11px;
+      }
+
+      .board li.me {
+        background: var(--moss);
+      }
+
+      .board .r {
+        width: 28px;
+        font-weight: 700;
+        color: var(--lime);
+      }
+
+      .board .n {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: rgba(255, 255, 255, 0.6);
+      }
+
+      .board .p,
+      .q-pts {
+        text-transform: uppercase;
+      }
+
+      .board .p {
+        font-weight: 600;
+        color: #fff;
+      }
+
+      .quests {
+        margin-top: 12px;
+      }
+
+      .quests-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+      }
+
+      .quests-head h2 {
+        margin: 0;
+        font-size: 24px;
+        letter-spacing: 0.07em;
+        text-transform: none;
+        color: #fff;
+      }
+
+      .dash .quests-head .lbl {
+        color: rgba(255, 255, 255, 0.3);
+        letter-spacing: 0.12em;
+      }
+
+      .quest-list {
+        list-style: none;
+        margin: 14px 0 0;
+        padding: 0;
+      }
+
+      .quest {
+        display: grid;
+        grid-template-columns: 44px 1fr auto 165px;
+        align-items: center;
+        column-gap: 0;
+        min-height: 84px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+      }
+
+      .q-no {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        color: rgba(255, 255, 255, 0.3);
+      }
+
+      .q-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: #fff;
+      }
+
+      .q-sub {
+        margin: 6px 0 0;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      .q-sub:empty {
+        display: none;
+      }
+
+      /* InfoTip, matching apps/web/src/styles.css. The bubble anchors to the
+         quest row so it spans the row instead of running off a phone screen. */
+      .quest:has(.info-tip) {
+        position: relative;
+      }
+
+      /* inline-flex keeps the last word and icon on one line and centres the
+         icon on the text's line box, not on its baseline. */
+      .q-tail {
+        display: inline-flex;
+        align-items: center;
+      }
+
+      .info-tip {
+        display: inline-flex;
+        margin-left: 8px;
+      }
+
+      .info-tip-trigger {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        padding: 0;
+        border: none;
+        background: none;
+        color: rgba(255, 255, 255, 0.75);
+        cursor: pointer;
+      }
+
+      .info-tip-trigger:hover,
+      .info-tip-trigger:focus-visible {
+        color: var(--lime);
+      }
+
+      .info-tip-bubble {
+        position: absolute;
+        z-index: 60;
+        top: calc(100% - 10px);
+        left: 0;
+        width: min(414px, 100%);
+        padding: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.55);
+        border-radius: 8px;
+        background: rgba(14, 27, 43, 0.9);
+        font-family: var(--mono);
+        font-size: 14px;
+        font-weight: 400;
+        line-height: 16px;
+        letter-spacing: 0.36px;
+        text-transform: none;
+        white-space: normal;
+        color: #fff;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s ease;
+      }
+
+      .info-tip-bubble.open {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .q-form {
+        flex-direction: column;
+        gap: 0;
+        margin-top: 8px;
+      }
+
+      /* Column so the hint sits under the field. flex: 1 would be a 0 height
+         basis in a column, same as the mobile .form input. */
+      .q-form input {
+        flex: none;
+        height: 32px;
+        padding: 0 12px;
+        font-size: 12px;
+      }
+
+      .q-form input[aria-invalid="true"] {
+        border-color: #ff8a6a;
+      }
+
+      .qbtn[form]:disabled {
+        cursor: not-allowed;
+      }
+
+      .q-pts {
+        padding: 0 34px 0 16px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-align: right;
+        white-space: nowrap;
+        color: var(--lime);
+      }
+
+      .quest.locked .q-title {
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      .quest.locked .q-pts {
+        color: rgba(255, 255, 255, 0.3);
+      }
+
+      /* Quest button: GO / CLAIM / SHARE (lime), COMPLETED, LOCKED. */
+      .qbtn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 165px;
+        height: 32px;
+        border-radius: 8px;
+        border: 1px solid var(--lime);
+        background: var(--lime);
+        color: #07101c;
+        font: 700 12px var(--display);
+        letter-spacing: 0.075em;
+        text-transform: uppercase;
+        cursor: pointer;
+        transition:
+          transform var(--quick) var(--ease),
+          box-shadow var(--std) var(--ease);
+      }
+
+      .qbtn:not(:disabled):hover {
+        transform: translateY(-1px);
+        box-shadow: 0 8px 20px -10px var(--glow);
+      }
+
+      .qbtn.done {
+        background: var(--moss);
+        color: var(--lime);
+        cursor: default;
+      }
+
+      .qbtn.locked {
+        background: rgba(54, 62, 75, 0.75);
+        border-color: rgba(255, 255, 255, 0.3);
+        color: rgba(255, 255, 255, 0.75);
+        cursor: default;
+      }
+
+      .qbtn:disabled:not(.done, .locked) {
+        opacity: 0.6;
+        cursor: progress;
       }
 
       @keyframes popIn {
@@ -749,100 +1225,6 @@
           opacity: 1;
           transform: none;
         }
-      }
-
-      html:has(.share-modal[open]) {
-        overflow: hidden;
-      }
-
-      .share-modal {
-        width: min(480px, calc(100vw - 32px));
-        margin: auto;
-        padding: 84px 36px 40px;
-        border: 1px solid rgba(182, 255, 59, 0.18);
-        border-radius: 16px;
-        background: #0e1b2b;
-        color: #fff;
-        text-align: center;
-        box-shadow: 0 4px 10px #4a5d48;
-      }
-
-      .share-modal[open] {
-        animation: popIn 380ms cubic-bezier(0.175, 0.885, 0.32, 1.275) both;
-      }
-
-      .share-modal::backdrop {
-        background: rgba(0, 0, 0, 0.75);
-        backdrop-filter: blur(3px);
-      }
-
-      .share-close {
-        position: absolute;
-        top: 18px;
-        right: 15px;
-        width: 32px;
-        height: 32px;
-        font-family: system-ui, sans-serif;
-        font-size: 20px;
-        line-height: 1;
-        letter-spacing: -0.45px;
-        color: rgba(255, 255, 255, 0.3);
-        background: none;
-        border: 0;
-        cursor: pointer;
-        transition: color var(--std) var(--ease);
-      }
-
-      .share-coin {
-        display: block;
-        width: 188px;
-        height: 188px;
-        margin: 0 auto;
-      }
-
-      .share-modal h2 {
-        margin-top: 26px;
-        font-size: 26px;
-        line-height: 1.5;
-        letter-spacing: 0.06em;
-        text-transform: none;
-        color: var(--lime);
-      }
-
-      .share-modal p {
-        max-width: 332px;
-        margin: 6px auto 0;
-        font-size: 14px;
-        line-height: 1.5;
-        color: #fff;
-      }
-
-      .share-modal .btn-share {
-        width: 100%;
-        margin-top: 32px;
-        gap: 8px;
-        text-transform: none;
-        color: #07101c;
-      }
-
-      .share-later {
-        margin-top: 3px;
-        padding: 4px 8px;
-        font-family: var(--mono);
-        font-size: 14px;
-        line-height: 21px;
-        text-decoration: underline;
-        text-underline-offset: 3px;
-        color: rgba(255, 255, 255, 0.55);
-        background: none;
-        border: 0;
-        cursor: pointer;
-        transition: color var(--std) var(--ease);
-      }
-
-      .share-close:hover,
-      .share-later:hover {
-        color: #fff;
       }
 
       .form-err {
@@ -1562,24 +1944,80 @@
         .nav-links {
           display: none;
         }
-        .form,
-        .done-row {
+        .form {
           flex-direction: column;
         }
         /* flex: 1 sets a 0 basis, which is the height in a column. */
-        .form input,
-        .done-line {
+        .form input {
           flex: none;
         }
-        .share-modal {
-          padding: 64px 20px 28px;
+        .dash-in {
+          padding-top: 32px;
+          gap: 28px;
         }
-        .share-coin {
-          width: 140px;
-          height: 140px;
+        .card {
+          padding: 16px 12px 12px;
         }
-        .share-modal h2 {
+        .ref-row {
+          flex-wrap: wrap;
+        }
+        .ref-link {
+          flex-basis: 100%;
+          font-size: 13px;
+        }
+        .ref-row .btn {
+          flex: 1 1 0;
+          width: auto;
+        }
+        .tiles {
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
+        .tile-rank {
+          grid-column: 1 / -1;
+        }
+        .mid {
           font-size: 20px;
+          line-height: 24px;
+        }
+        /* Points move under the title; the number stays in its column. The
+           number and button line up with the title's first line, so a tall
+           row (sub line, link field) doesn't push them down. The title's
+           padding centres that line on the 28px button. */
+        .quest {
+          grid-template-columns: 24px 1fr 104px;
+          column-gap: 12px;
+          align-items: start;
+          min-height: 65px;
+          padding: 12px 0;
+        }
+        .q-title {
+          padding-top: 6px;
+          font-size: 12px;
+          line-height: 16px;
+        }
+        .q-pts {
+          grid-column: 2;
+          grid-row: 2;
+          padding: 4px 0 0;
+          text-align: left;
+          font-size: 9px;
+        }
+        .q-no {
+          grid-column: 1;
+          grid-row: 1;
+          line-height: 28px;
+        }
+        .q-body {
+          grid-column: 2;
+          grid-row: 1;
+        }
+        .qbtn {
+          grid-column: 3;
+          grid-row: 1 / span 2;
+          width: 104px;
+          height: 28px;
+          font-size: 10px;
         }
         .btn {
           width: 100%;
@@ -1641,8 +2079,7 @@
         }
         .ruler .now,
         .stage-svg .core,
-        .btn::before,
-        .share-modal[open] {
+        .btn::before {
           animation: none;
           transition: none;
         }
@@ -1712,9 +2149,86 @@
           <a href="#draw">The draw</a>
           <a href="#rules">The rules</a>
         </div>
-        <button class="nav-cta" data-scroll="#top">Join the waitlist</button>
+        <button class="nav-cta" data-nav-login>Join the waitlist</button>
+        <span class="acct" data-acct hidden>
+          <button
+            type="button"
+            class="acct-pill"
+            aria-haspopup="menu"
+            aria-expanded="false"
+            data-acct-pill
+          ></button>
+          <div class="acct-menu" role="menu" hidden data-acct-menu>
+            <button type="button" role="menuitem" class="acct-item" data-disconnect>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M2.5 2.5v11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+                <path
+                  d="M6 8h8M11 5l3 3-3 3"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              Disconnect
+            </button>
+          </div>
+        </span>
       </div>
     </nav>
+
+    <!-- ---------------------------- dashboard ---------------------------
+         Signed in only. body.signed-in hides every landing section and shows
+         this; the JS below fills it from /api/me and /api/leaderboard. -->
+    <main class="dash" hidden data-dash>
+      <div class="wrap dash-in">
+        <header class="dash-title">
+          <p class="dash-eyebrow">Prize-linked savings on Solana</p>
+          <h1>Boost your <span class="hl">rank</span></h1>
+          <p class="dash-sub">Rank higher for a better chance at early access.</p>
+          <p class="dash-msg" role="status" data-x-msg></p>
+        </header>
+
+        <section class="card card-ref" aria-labelledby="ref-h">
+          <h2 class="card-h" id="ref-h">Referral link</h2>
+          <div class="ref-row">
+            <span class="ref-link" data-ref-link></span>
+            <button type="button" class="btn" data-copy><span>Copy</span></button>
+            <a class="btn" target="_blank" rel="noopener" data-share-x><span>Share on X</span></a>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="ladder-h">
+          <h2 class="card-h" id="ladder-h">Waitlist ladder</h2>
+          <div class="tiles">
+            <div class="tile tile-rank">
+              <p class="lbl">Your rank</p>
+              <p class="big lime" data-rank></p>
+            </div>
+            <div class="tile">
+              <p class="lbl">Your points</p>
+              <p class="mid" data-points></p>
+              <p class="tile-sub" data-next></p>
+            </div>
+            <div class="tile">
+              <p class="lbl">Quests</p>
+              <p class="mid" data-quest-count></p>
+              <p class="tile-sub" data-quest-left></p>
+            </div>
+          </div>
+          <p class="lbl board-h">Top ladder</p>
+          <ol class="board" data-board></ol>
+        </section>
+
+        <section class="quests" aria-labelledby="quests-h">
+          <div class="quests-head">
+            <h2 id="quests-h">Quests</h2>
+            <span class="lbl" data-available></span>
+          </div>
+          <ol class="quest-list" data-quests></ol>
+        </section>
+      </div>
+    </main>
 
     <!-- ------------------------------ hero ------------------------------ -->
     <section class="hero" id="top">
@@ -1743,47 +2257,8 @@
 
         <div class="hero-copy">
           <form class="form rv" style="--d: 220ms" data-waitlist novalidate>
-            <input
-              type="email"
-              name="email"
-              placeholder="you@email.com"
-              aria-label="Email address"
-              required
-            />
-            <button class="btn" type="submit">
-              <span>Join now</span>
-            </button>
+            <button type="button" class="btn" data-login><span>Join the waitlist</span></button>
           </form>
-          <div class="form-done" role="status">
-            <div class="done-row">
-              <p class="done-line">
-                You're on the list
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M3 8.5l3.2 3.2L13 5"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-              </p>
-              <a
-                class="btn btn-share"
-                href="https://x.com/intent/post"
-                target="_blank"
-                rel="noopener"
-                data-share
-                ><span>Share on X</span></a
-              >
-            </div>
-          </div>
 
           <p class="form-note rv" style="--d: 280ms">
             <span data-note>Save your money. Play your luck.</span>
@@ -2061,47 +2536,8 @@
         </div>
         <div class="R rv" style="--d: 90ms">
           <form class="form" data-waitlist novalidate>
-            <input
-              type="email"
-              name="email"
-              placeholder="you@email.com"
-              aria-label="Email address"
-              required
-            />
-            <button class="btn" type="submit">
-              <span>Join now</span>
-            </button>
+            <button type="button" class="btn" data-login><span>Join the waitlist</span></button>
           </form>
-          <div class="form-done" role="status">
-            <div class="done-row">
-              <p class="done-line">
-                You're on the list
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  aria-hidden="true"
-                >
-                  <path
-                    d="M3 8.5l3.2 3.2L13 5"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-              </p>
-              <a
-                class="btn btn-share"
-                href="https://x.com/intent/post"
-                target="_blank"
-                rel="noopener"
-                data-share
-                ><span>Share on X</span></a
-              >
-            </div>
-          </div>
           <p class="form-note" style="margin-top: 8px">
             <span data-note>Save your money. Play your luck.</span>
           </p>
@@ -2181,45 +2617,6 @@
       </div>
     </footer>
 
-    <!-- method="dialog": each button closes the modal with its value as the
-         returnValue, no click handlers needed. -->
-    <dialog class="share-modal" aria-labelledby="share-modal-title">
-      <form method="dialog">
-        <button class="share-close" value="close" aria-label="Close">
-          ×
-        </button>
-        <img
-          class="share-coin"
-          src="/check-coin.webp"
-          width="188"
-          height="188"
-          alt=""
-        />
-        <h2 id="share-modal-title">You're on the list</h2>
-        <p>Share on X to increase your chances of moving up the waitlist.</p>
-        <a
-          class="btn btn-share"
-          href="https://x.com/intent/post"
-          target="_blank"
-          rel="noopener"
-          data-share
-          autofocus
-          ><span>Share on</span
-          ><svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="currentColor"
-            role="img"
-            aria-label="X"
-          >
-            <path
-              d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
-            /></svg
-        ></a>
-        <button class="share-later" value="later">Maybe Later</button>
-      </form>
-    </dialog>
 
     <script>
       const REDUCED = window.matchMedia(
@@ -2715,7 +3112,8 @@
       })();
 
       // ----------------------------- waitlist ------------------------------
-      // One route: commit the email and hand back its id.
+      // Privy email login commits the signup and sets the session cookie.
+      // The page learns who it is from /api/me.
 
       const UTM = (() => {
         const q = new URLSearchParams(location.search);
@@ -2750,20 +3148,27 @@
       // visits down by code, joined or not.
       if (REF) posthog.register({ ref: REF });
 
-      async function post(body) {
-        const r = await fetch("/api/waitlist", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+      // Rejects with the server's message; `status` and `data` ride along.
+      async function api(url, body) {
+        const r = await fetch(url, {
+          method: body ? "POST" : "GET",
+          headers: body ? { "Content-Type": "application/json" } : {},
+          body: body ? JSON.stringify(body) : undefined,
         });
         const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data.error || "Request failed");
+        if (!r.ok) {
+          throw Object.assign(new Error(data.error || "Request failed"), {
+            status: r.status,
+            data,
+          });
+        }
         return data;
       }
 
-      // One joined state for the whole page, kept in localStorage so a return
-      // visit lands on the share button with the same code. { id, code }
-      const JOINED_KEY = "hexo.waitlist";
+      // Render cache for the last /api/me body, so a return visit doesn't
+      // flash the sign-in button. Never sent as identity: the cookie is.
+      // Versioned key, so a cached body from an older page shape is ignored.
+      const JOINED_KEY = "hexo.member.v2";
       const readJoined = () => {
         try {
           return JSON.parse(localStorage.getItem(JOINED_KEY)) || null;
@@ -2771,10 +3176,20 @@
           return null;
         }
       };
+      // Every member write also identifies, so a cookie session restored on a
+      // fresh browser and a claim's new points both reach the person in PostHog.
       const writeJoined = (state) => {
         try {
           localStorage.setItem(JOINED_KEY, JSON.stringify(state));
         } catch {}
+        if (state)
+          window.posthog?.identify(state.id, {
+            points: state.points,
+            rank: state.rank,
+            referrals: state.referrals,
+            x_connected: !!state.x_handle,
+            quests_done: state.quests?.filter((q) => q.done).length ?? 0,
+          });
       };
       const renderers = [];
       const renderJoined = () => {
@@ -2782,25 +3197,14 @@
         renderers.forEach((r) => r(s));
       };
 
+      // One entry per form, keyed by where it sits on the page.
+      const forms = {};
+
       document.querySelectorAll("form[data-waitlist]").forEach((form) => {
         const scope = form.parentElement;
         const where = form.closest("#top") ? "hero" : "closing";
         const note = scope.querySelector("[data-note]");
         const noteDefault = note.textContent;
-        const done = scope.querySelector(".form-done");
-        const submit = form.querySelector("button[type=submit]");
-
-        form.querySelector("input").addEventListener(
-          "input",
-          () => window.posthog?.capture("waitlist_started", { where }),
-          { once: true },
-        );
-
-        renderers.push((s) => {
-          scope.classList.toggle("joined", !!s);
-          form.classList.toggle("is-done", !!s);
-          done.classList.toggle("is-done", !!s);
-        });
 
         const fail = (msg) => {
           note.textContent = msg;
@@ -2809,117 +3213,463 @@
           void form.offsetWidth;
           form.classList.add("shake");
         };
-
-        form.addEventListener("submit", async (e) => {
-          e.preventDefault();
-          const input = form.querySelector("input");
-          const email = input.value.trim();
-          if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-            input.focus();
-            return fail("That email doesn't look right.");
-          }
-          note.classList.remove("form-err");
-          submit.disabled = true;
-          let signup;
-          try {
-            signup = await post({
-              email,
-              ref: REF,
-              referrer: document.referrer || null,
-              utm: UTM,
-            });
-          } catch (err) {
-            submit.disabled = false;
-            posthog.capture("waitlist_failed", {
-              where,
-              reason: String(err.message),
-            });
-            return fail("Couldn't reach the list. Try again in a moment.");
-          }
-          posthog.capture("waitlist_submitted", {
-            where,
-            has_utm: !!UTM,
-            referred: !!REF,
-          });
-          posthog.identify(signup.id, { email });
-          writeJoined({ id: signup.id, code: signup.code });
-          renderJoined();
+        const reset = () => {
           note.textContent = noteDefault;
-          openShareModal();
-        });
-
+          note.classList.remove("form-err");
+        };
+        forms[where] = { fail, reset };
+        form
+          .querySelector("[data-login]")
+          .addEventListener("click", () => join(where));
       });
 
+      // The Privy bundle is big, so it loads only for a signed-out visitor,
+      // in the background once /api/me says so, or on the first click.
+      let privy;
+      const loadPrivy = () => (privy ??= import("/privy/privy.js"));
+
+      function join(where) {
+        forms[where]?.reset();
+        window.posthog?.capture("waitlist_started", { where });
+        return finish(where, loadPrivy().then((p) => p.login()));
+      }
+
+      // Trades a Privy identity token for our session and switches the page
+      // over. Also the landing for a sign-in that started before a reload,
+      // like Google's redirect, where `where` is "return".
+      async function finish(where, idTokenPromise) {
+        let member;
+        try {
+          const idToken = await idTokenPromise;
+          member = await api("/api/auth/privy", {
+            idToken,
+            ref: REF,
+            referrer: document.referrer || null,
+            utm: UTM,
+          });
+        } catch (err) {
+          // Closing the modal is not a failure worth a red line.
+          if (err.code === "exited_auth_flow") return;
+          posthog.capture("waitlist_failed", {
+            where,
+            reason: String(err.message),
+          });
+          return (forms[where] ?? forms.hero)?.fail(
+            "Couldn't sign you in. Try again in a moment.",
+          );
+        }
+        posthog.capture("waitlist_submitted", {
+          where,
+          has_utm: !!UTM,
+          referred: !!REF,
+          method: "privy",
+        });
+        writeJoined(member);
+        renderJoined();
+      }
+
+      // Session check. 401 is the normal signed-out answer; anything else
+      // leaves the cached state as it was.
+      (async () => {
+        try {
+          writeJoined(await api("/api/me"));
+        } catch (err) {
+          if (err.status !== 401) {
+            Object.values(forms).forEach((f) =>
+              f.fail("Couldn't reach the list. Reload in a moment."),
+            );
+            return;
+          }
+          writeJoined(null);
+          // A Privy sign-in with no login() waiting, e.g. back from Google.
+          loadPrivy()
+            .then((p) => p.signedIn((t) => finish("return", t)))
+            .catch(() => (privy = undefined));
+        }
+        renderJoined();
+      })();
+
+      // ----------------------------- connect x -----------------------------
+      // Connect X is the first quest, a plain link to /api/x/start. The round
+      // trip lands back here with ?x=<outcome>, read once, shown as one line
+      // on the dashboard, then dropped from the URL so a reload does not
+      // repeat it.
+      const X_COPY = {
+        connected: "X connected.",
+        denied: "You cancelled on X. Connect any time.",
+        taken: "That X account is already linked to another signup.",
+        error: "Couldn't connect X. Try again.",
+      };
+      const dashMsg = document.querySelector("[data-x-msg]");
+      (() => {
+        const q = new URLSearchParams(location.search);
+        const x = q.get("x");
+        if (!x) return;
+        q.delete("x");
+        const rest = q.toString();
+        history.replaceState(
+          null,
+          "",
+          location.pathname + (rest ? "?" + rest : "") + location.hash,
+        );
+        if (!X_COPY[x]) return;
+        dashMsg.textContent = X_COPY[x];
+        if (x === "connected") window.posthog?.capture("x_connected");
+        else window.posthog?.capture("x_connect_failed", { reason: x });
+      })();
+
       // ----------------------------- share on x ----------------------------
-      // Share buttons only exist inside the joined state, so a code is always
-      // there when one is clicked.
+      // /r/<code> unfurls with the sharer's card. `v` (a timestamp) only
+      // busts X's per-URL cache, so each new share gets a current image.
       const shareUrl = (code) =>
         "https://x.com/intent/post?text=" +
         encodeURIComponent(
           "Just signed up for @hexofun\n\n" +
             "Use my link to increase your chances of getting early access\n\n" +
-            `https://hexofun.lol/?ref=${code}`,
+            `${location.origin}/r/${code}?v=${Date.now()}`,
         );
-      const shareModal = document.querySelector(".share-modal");
-      document.querySelectorAll("[data-share]").forEach((a) => {
-        renderers.push((s) => {
-          if (s?.code) a.href = shareUrl(s.code);
-        });
-        a.addEventListener("click", () => {
-          window.posthog?.capture("waitlist_shared", {
-            where: a.closest("dialog")
-              ? "modal"
-              : a.closest("#top")
-                ? "hero"
-                : "closing",
-            joined: !!readJoined(),
-          });
-          if (a.closest("dialog")) shareModal.close("shared");
-        });
+      // Click handler for both Share links. Restamps `v` at click time, so a
+      // second share from the same render is still a URL X has not cached.
+      const share = (e) => {
+        e.currentTarget.href = shareUrl(readJoined().code);
+        window.posthog?.capture("waitlist_shared");
+      };
+      // The link friends get; Copy puts this on the clipboard. /r/<code> so
+      // a pasted link unfurls with the sharer's card too. Both links use the
+      // current host, so preview deploys share themselves.
+      const refLink = (code) => `${location.origin}/r/${code}`;
+
+      // ----------------------------- dashboard -----------------------------
+      // Signed in, the page is only the nav and this. Built with textContent
+      // throughout: names on the board come from other people.
+      const dash = document.querySelector("[data-dash]");
+      const $ = (sel) => dash.querySelector(sel);
+      const el = (tag, cls, text) => {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+      };
+      const CLAIM_DELAY = 10_000;
+      // Quest id -> when its CLAIM unlocks. Client-only on purpose: honor
+      // quests aren't checked, the delay only nudges people to do the thing.
+      const claimAt = {};
+
+      renderers.push((s) => {
+        document.body.classList.toggle("signed-in", !!s);
+        dash.hidden = !s;
+        if (s) renderDash(s);
       });
 
-      // ----------------------------- share modal ---------------------------
-      // Opens once, right after a fresh submit. A return visit already lands
-      // on the joined state, so it never re-prompts.
-      function openShareModal() {
-        if (!shareModal?.showModal) return;
-        shareModal.showModal();
-        window.posthog?.capture("share_modal_opened");
+      function renderDash(s) {
+        // The server holds the code back until X is connected.
+        $(".card-ref").classList.toggle("locked", !s.code);
+        $("[data-ref-link]").textContent = s.code
+          ? refLink(s.code)
+          : "Connect X to unlock your referral link";
+        if (s.code) $("[data-share-x]").href = shareUrl(s.code);
+        $("[data-rank]").textContent = `#${s.rank}`;
+        $("[data-points]").textContent = `${s.points} pts`;
+        $("[data-next]").textContent =
+          s.next_gap == null ? "Top of the ladder" : `Next rank · ${s.next_gap} pts`;
+        const done = s.quests.filter((q) => q.done).length;
+        const left = s.quests.length - done;
+        $("[data-quest-count]").textContent = `${done}/${s.quests.length}`;
+        $("[data-quest-left]").textContent = left ? `${left} remaining` : "All done";
+        renderQuests(s);
+        renderBoard(s);
       }
-      // A backdrop click targets the dialog itself but lands outside its box.
-      shareModal?.addEventListener("click", (e) => {
-        const r = shareModal.getBoundingClientRect();
-        const outside =
-          e.clientX < r.left ||
-          e.clientX > r.right ||
-          e.clientY < r.top ||
-          e.clientY > r.bottom;
-        if (e.target === shareModal && outside) shareModal.close("backdrop");
+
+      function questRows(s) {
+        const now = Date.now();
+        const rows = s.quests.map((q) => ({
+          q,
+          title: q.title,
+          pts: `+${q.points} pts`,
+          state: q.done
+            ? "done"
+            : q.locked
+              ? "locked"
+              : q.check === "honor" && claimAt[q.id] <= now
+                ? "claim"
+                : "go",
+        }));
+        if (s.referred) {
+          rows.push({
+            title: "Joined via a referral link",
+            pts: `+${s.rates.referred} pts`,
+            state: "done",
+          });
+        }
+        // Verified = X plus the follow quest. Until then, referral awards
+        // wait and land all at once.
+        const verified = s.quests.every((q) => q.id === "x_like_repost" || q.done);
+        rows.push({
+          title: "Each verified referral",
+          tip: "Verified referrals are referrals who have connected their X and followed @hexofun on X.",
+          pts: `+${s.rates.referral} pts each`,
+          sub:
+            `${s.verified} verified` +
+            (!verified && s.verified ? " · connect X and follow to collect" : ""),
+          state: s.code ? "share" : "locked",
+        });
+        // Completed rows sink to the bottom so open quests stay on top.
+        return [
+          ...rows.filter((r) => r.state !== "done"),
+          ...rows.filter((r) => r.state === "done"),
+        ];
+      }
+
+      function questButton(row, s) {
+        const { q, state } = row;
+        if (state === "done" || state === "locked") {
+          const b = el("button", `qbtn ${state}`, state === "done" ? "Completed" : "Locked");
+          b.disabled = true;
+          return b;
+        }
+        if (state === "share") {
+          const a = el("a", "qbtn", "Share");
+          Object.assign(a, { href: shareUrl(s.code), target: "_blank", rel: "noopener" });
+          a.addEventListener("click", share);
+          return a;
+        }
+        if (q.check === "oauth") {
+          const a = el("a", "qbtn", "Go");
+          a.href = q.url;
+          a.addEventListener("click", () => window.posthog?.capture("x_connect_started"));
+          return a;
+        }
+        const b = el("button", "qbtn", state === "claim" ? "Claim" : "Go");
+        b.type = "button";
+        // A proof quest's Claim submits the link form under its title, and
+        // stays off until the field has something in it.
+        if (state === "claim" && q.proof) {
+          Object.assign(b, { type: "submit", disabled: true });
+          b.setAttribute("form", `proof-${q.id}`);
+          return b;
+        }
+        b.addEventListener("click", () => {
+          if (state === "claim") return claim(q, b);
+          window.open(q.url, "_blank", "noopener");
+          window.posthog?.capture("quest_go", { quest: q.id });
+          // A proof quest has the link field as its own gate, so no delay.
+          const delay = q.proof ? 0 : CLAIM_DELAY;
+          claimAt[q.id] = Date.now() + delay;
+          // A timer can fire a millisecond early, which would leave "Go" up.
+          setTimeout(renderJoined, delay + 50);
+        });
+        return b;
+      }
+
+      // `bad` runs instead of a re-render when the server rejects the link.
+      async function claim(q, b, url, bad) {
+        b.disabled = true;
+        try {
+          const member = await api("/api/quests/claim", { id: q.id, url });
+          window.posthog?.capture("quest_claimed", { quest: q.id });
+          writeJoined(member);
+        } catch (err) {
+          window.posthog?.capture("quest_claim_failed", { quest: q.id, status: err.status });
+          if (err.status === 400 && bad) {
+            b.disabled = false;
+            return bad();
+          }
+          if (err.status === 401) writeJoined(null);
+          else dashMsg.textContent = "Couldn't claim that. Try again.";
+        }
+        renderJoined();
+      }
+
+      // The waitlist email field, shrunk to fit a quest row. A bad link
+      // shakes the field and keeps the text so the person can fix it.
+      function proofForm(q) {
+        const form = el("form", "form q-form");
+        Object.assign(form, { id: `proof-${q.id}`, noValidate: true });
+        const input = el("input");
+        Object.assign(input, {
+          type: "url",
+          name: "url",
+          placeholder: "x.com/you/status/…",
+          required: true,
+        });
+        input.setAttribute("aria-label", "Link to your post on X");
+        const hint = el("p", "q-sub form-err", "Paste a post link: x.com/you/status/123");
+        Object.assign(hint, { id: `${form.id}-hint`, hidden: true });
+        input.setAttribute("aria-describedby", hint.id);
+        form.append(input, hint);
+        const button = () => dash.querySelector(`button[form="${form.id}"]`);
+        input.addEventListener("input", () => {
+          input.removeAttribute("aria-invalid");
+          hint.hidden = true;
+          button().disabled = !input.value.trim();
+        });
+        form.addEventListener("submit", (e) => {
+          e.preventDefault();
+          if (!input.value.trim()) return;
+          claim(q, button(), input.value, () => {
+            input.setAttribute("aria-invalid", "true");
+            hint.hidden = false;
+            form.classList.remove("shake");
+            void form.offsetWidth;
+            form.classList.add("shake");
+          });
+        });
+        return form;
+      }
+
+      // Port of the web app's InfoTip (apps/web/src/InfoTip.tsx): opens on
+      // hover, focus or tap; closes on Esc, blur or an outside tap.
+      function infoTip(id, text) {
+        const root = el("span", "info-tip");
+        const btn = el("button", "info-tip-trigger");
+        Object.assign(btn, { type: "button", innerHTML: INFO_GLYPH });
+        btn.setAttribute("aria-label", "More info");
+        btn.setAttribute("aria-describedby", id);
+        const bubble = el("span", "info-tip-bubble", text);
+        Object.assign(bubble, { id, role: "tooltip" });
+        const set = (open) => bubble.classList.toggle("open", open);
+        btn.addEventListener("mouseenter", () => set(true));
+        btn.addEventListener("mouseleave", () => set(false));
+        btn.addEventListener("focus", () => set(true));
+        btn.addEventListener("blur", () => set(false));
+        btn.addEventListener("click", () => set(true));
+        root.append(btn, bubble);
+        return root;
+      }
+      const INFO_GLYPH =
+        '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.75" stroke="currentColor" stroke-width="1.1" fill="none"/><circle cx="8" cy="4.9" r="0.9" fill="currentColor"/><rect x="7.25" y="7" width="1.5" height="5" rx="0.75" fill="currentColor"/></svg>';
+      const closeTips = (except) =>
+        dash.querySelectorAll(".info-tip-bubble.open").forEach((b) => {
+          if (!except?.contains(b)) b.classList.remove("open");
+        });
+      document.addEventListener("pointerdown", (e) => closeTips(e.target.closest?.(".info-tip")));
+      document.addEventListener("keydown", (e) => e.key === "Escape" && closeTips());
+
+      function renderQuests(s) {
+        const rows = questRows(s);
+        const list = $("[data-quests]");
+        list.replaceChildren(
+          ...rows.map((row, i) => {
+            const li = el("li", "quest" + (row.state === "locked" ? " locked" : ""));
+            const body = el("div", "q-body");
+            const title = el("p", "q-title", row.title);
+            if (row.tip) {
+              // Glue the icon to the last word so it never wraps onto a line alone.
+              const cut = row.title.lastIndexOf(" ") + 1;
+              const tail = el("span", "q-tail", row.title.slice(cut));
+              tail.append(infoTip(`quest-tip-${i}`, row.tip));
+              title.replaceChildren(row.title.slice(0, cut), tail);
+            }
+            body.append(title, el("p", "q-sub", row.sub ?? ""));
+            if (row.state === "claim" && row.q.proof) body.append(proofForm(row.q));
+            li.append(
+              el("span", "q-no", String(i + 1).padStart(2, "0")),
+              body,
+              el("span", "q-pts", row.pts),
+              questButton(row, s),
+            );
+            return li;
+          }),
+        );
+        const open = rows.filter((r) => ["go", "claim", "share"].includes(r.state)).length;
+        $("[data-available]").textContent = `${String(open).padStart(2, "0")} available`;
+      }
+
+      // Top five from the public board, plus your own row when you're below
+      // it. The board is CDN-cached for 30s, so it can trail /api/me slightly.
+      async function renderBoard(s) {
+        let rows;
+        try {
+          rows = (await api("/api/leaderboard")).slice(0, 5);
+        } catch {
+          rows = [];
+        }
+        if (!rows.some((r) => r.rank === s.rank)) {
+          rows.push({ rank: s.rank, name: s.name, points: s.points });
+        }
+        $("[data-board]").replaceChildren(
+          ...rows.map((r) => {
+            const li = el("li", r.rank === s.rank ? "me" : "");
+            li.append(
+              el("span", "r", `#${r.rank}`),
+              el("span", "n", r.name),
+              el("span", "p", `${r.points} pts`),
+            );
+            return li;
+          }),
+        );
+      }
+
+      $("[data-share-x]").addEventListener("click", share);
+
+      $("[data-copy]").addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const label = btn.querySelector("span");
+        try {
+          // Shown clean, copied with a fresh `v`: Telegram, Discord and X
+          // cache unfurls per URL, so each copy gets a current card.
+          await navigator.clipboard.writeText(
+            `${refLink(readJoined().code)}?v=${Date.now()}`,
+          );
+          label.textContent = "Copied";
+          window.posthog?.capture("referral_copied");
+        } catch {
+          // No clipboard permission: select the link so a manual copy works.
+          getSelection().selectAllChildren($("[data-ref-link]"));
+          label.textContent = "Select + copy";
+        }
+        setTimeout(() => (label.textContent = "Copy"), 1600);
       });
-      shareModal?.addEventListener("close", () =>
-        window.posthog?.capture("share_modal_closed", {
-          via: shareModal.returnValue || "dismiss",
-        }),
-      );
+
+      // ------------------------------ account ------------------------------
+      // The pill replaces the nav CTA once signed in. Its menu has one item.
+      // Closes on outside click and Escape, like the app's wallet menu.
+      const acct = document.querySelector("[data-acct]");
+      const pill = acct.querySelector("[data-acct-pill]");
+      const menu = acct.querySelector("[data-acct-menu]");
+      const setMenu = (open) => {
+        menu.hidden = !open;
+        pill.setAttribute("aria-expanded", String(open));
+      };
+      renderers.push((s) => {
+        acct.hidden = !s;
+        pill.textContent = s?.name ?? "";
+        if (!s) setMenu(false);
+      });
+      pill.addEventListener("click", () => {
+        setMenu(menu.hidden);
+        // Disconnect needs Privy; start fetching it while the menu is open.
+        loadPrivy().catch(() => (privy = undefined));
+      });
+      document.addEventListener("pointerdown", (e) => {
+        if (!acct.contains(e.target)) setMenu(false);
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") setMenu(false);
+      });
+      acct.querySelector("[data-disconnect]").addEventListener("click", async () => {
+        setMenu(false);
+        // Privy first, so the next Join opens the email modal instead of
+        // silently reusing this session. The cookie goes either way.
+        try {
+          await (await loadPrivy()).logout();
+        } catch (err) {
+          console.warn("privy logout failed", err);
+        }
+        await fetch("/api/logout", { method: "POST" }).catch(() => {});
+        writeJoined(null);
+        window.posthog?.capture("signed_out");
+        window.posthog?.reset();
+        location.replace("/");
+      });
 
       // ----------------------------- nav cta -------------------------------
-      document.querySelectorAll("[data-scroll]").forEach((btn) => {
-        const label = btn.textContent;
-        renderers.push((s) => {
-          btn.disabled = !!s;
-          btn.textContent = s ? "You're on the list" : label;
-        });
+      document.querySelectorAll("[data-nav-login]").forEach((btn) =>
         btn.addEventListener("click", () => {
           window.posthog?.capture("waitlist_cta_clicked");
-          document
-            .querySelector(btn.dataset.scroll)
-            .scrollIntoView({ behavior: "smooth" });
-          setTimeout(
-            () => document.querySelector("form[data-waitlist] input").focus(),
-            420,
-          );
-        });
-      });
+          join("nav");
+        }),
+      );
 
       // --------------------------- section views ---------------------------
       const sectionIo = new IntersectionObserver(

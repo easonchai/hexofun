@@ -3,8 +3,22 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "HEXO.fun marketing site. Static HTML plus one serverless route; no bundler.",
+  "description": "HEXO.fun marketing site. Static HTML plus serverless routes; esbuild bundles only the Privy login island.",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test",
+    "dev": "node dev.js"
+  },
   "dependencies": {
-    "@neondatabase/serverless": "1.0.2"
+    "@neondatabase/serverless": "1.0.2",
+    "@privy-io/react-auth": "3.39.0",
+    "@resvg/resvg-wasm": "2.6.2",
+    "jose": "6.2.12",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "satori": "0.18.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

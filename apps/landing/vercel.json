@@ -1,0 +1,4 @@
+{
+  "outputDirectory": ".",
+  "rewrites": [{ "source": "/r/:code", "destination": "/api/r?code=:code" }]
+}

@@ -22,6 +22,10 @@ process.env.CORS_ORIGIN ??= "http://localhost:5173";
 process.env.POOL_ID = "1";
 process.env.PROGRAM_ID = "LFk9ba6QXuM9oYRRNGGPxMGzfo13X3DAr8ghSPz72C6";
 process.env.CLUSTER = "devnet";
+// Same reason: a devnet .env sourced into the shell sets these to 0 and 300,
+// which breaks the faucet 429 and referral "holding" assertions.
+process.env.FAUCET_INTERVAL_SECONDS = "3600";
+process.env.REFERRAL_QUALIFY_SECONDS = "604800";
 // Beta-launch-fixes ticket 05: a harmless default so any suite that flips a
 // seeded Pool's currentEpochId to 0 sees `/state`/`/status` carry a launch
 // time, without every other suite (whose Pool already has an Epoch) noticing.
