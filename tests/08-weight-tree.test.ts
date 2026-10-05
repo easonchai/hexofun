@@ -1,7 +1,7 @@
-// Fenwick weight tree (yield-claimer ticket 08, ADR 0018): a Player's leaf
-// grows with their first deposit, every Ticket change keeps the tree equal to
-// an eager model of the old `touch` and `register`, a deposit in the gap
-// between two epochs does not count backwards, and the draw's target lands in
+// Fenwick weight tree (yield-claimer tickets 08 and 19, ADR 0018): a Player's
+// leaf grows with their first deposit, every Ticket change keeps the tree equal
+// to an eager count of each Player's Tickets, a deposit counts the same at the
+// first second and at the last of an epoch, and the draw's target lands in
 // exactly one leaf. The last test measures compute at 16,384 nodes.
 //
 // Epochs here run a few tens of seconds so a test can live through two or
@@ -18,7 +18,7 @@ import {
   fetchTree,
   findEvent,
   fulfillRandomness,
-  leafWeights,
+  leafTickets,
   onChainNowSeconds,
   playerPda,
   positionPda,
@@ -34,10 +34,9 @@ import {
   sleepUntilOnChain,
   testNonce,
   txInfo,
-  unbiasedU128,
   unbiasedU64,
   vrfSeed,
-  weightOf,
+  ticketsOf,
   type PoolCtx,
   type TreeClock,
 } from "./helpers/hx.js";
@@ -259,60 +258,43 @@ const fetchPlayer = (pool: PoolCtx, owner: PublicKey) =>
   program.account.player.fetch(playerPda(pool.pool, owner));
 const big = (n: { toString(): string }): bigint => BigInt(n.toString());
 
-// --- The eager model: today's `touch` and `register`, line by line ------------
+// --- The eager model: what `touch` leaves each Player holding ----------------
 //
-// A copy of the model ticket 02's property test used in Rust, kept here so the
-// program's instructions are held to the same numbers. Time comes from each
-// transaction's own block time.
-
-const elapsed = (from: bigint, to: bigint): bigint => (to > from ? to - from : 0n);
-const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
+// A copy of the model the Rust property test uses, kept here so the program's
+// instructions are held to the same numbers.
 
 class Eager {
   principal = 0n;
   entries = 0n;
-  weightAcc = 0n;
-  lastUpdate: bigint;
   epochId: bigint;
-  frozenWeight = 0n;
+  frozenTickets = 0n;
   frozenEpoch = 0n;
   /** The epoch the Player was created in. Earlier epochs read zero. */
   created: bigint;
 
-  constructor(clock: TreeClock, now: bigint) {
-    this.lastUpdate = now;
+  constructor(clock: TreeClock) {
     this.epochId = clock.current;
     this.created = clock.current;
   }
 
-  touch(c: TreeClock, now: bigint): void {
-    if (this.epochId >= c.current) {
-      const until = c.current === 0n ? now : min(now, c.curEnd);
-      this.weightAcc += this.entries * elapsed(this.lastUpdate, until);
-      this.lastUpdate = now;
-      return;
-    }
+  touch(c: TreeClock): void {
+    if (this.epochId >= c.current) return;
     const previous = c.current - 1n;
-    this.frozenWeight =
-      this.epochId === previous
-        ? this.weightAcc + this.entries * elapsed(this.lastUpdate, c.prevEnd)
-        : this.principal * elapsed(c.prevStart, c.prevEnd);
+    this.frozenTickets = this.epochId === previous ? this.entries : this.principal;
     this.frozenEpoch = previous;
     this.entries = this.principal;
-    this.weightAcc = this.principal * elapsed(c.curStart, min(now, c.curEnd));
-    this.lastUpdate = now;
     this.epochId = c.current;
   }
 
-  weight(e: bigint, c: TreeClock): bigint {
-    const [start, end] = e === c.current ? [c.curStart, c.curEnd] : [c.prevStart, c.prevEnd];
+  /** Tickets held at the end of epoch `e`. */
+  tickets(e: bigint): bigint {
     if (this.created > e) return 0n;
-    if (this.epochId === e) return this.weightAcc + this.entries * elapsed(this.lastUpdate, end);
+    if (this.epochId === e) return this.entries;
     if (this.epochId > e) {
-      expect(this.frozenEpoch, "register would refuse this read").toBe(e);
-      return this.frozenWeight;
+      expect(this.frozenEpoch, "the tree would refuse this read").toBe(e);
+      return this.frozenTickets;
     }
-    return this.principal * elapsed(start, end);
+    return this.principal;
   }
 }
 
@@ -335,7 +317,7 @@ describe("weight tree", () => {
       const treeAfter = await fetchTree(pool);
       const infoAfter = await connection.getAccountInfo(pool.weightTree);
       expect(treeAfter.nodes.length).toBe(2);
-      expect(treeAfter.dataLen).toBe(treeBefore.dataLen + 72);
+      expect(treeAfter.dataLen).toBe(treeBefore.dataLen + 56);
       expect((await fetchPlayer(pool, a.keypair.publicKey)).leafIndex).toBe(2);
 
       // The tree account stays rent exempt at its new size, and the depositor
@@ -388,10 +370,16 @@ describe("weight tree", () => {
 
       const model = new Map<Name, Eager>();
       const clock = async (): Promise<TreeClock> => (await fetchTree(pool)).clock;
-      model.set("house", new Eager(await clock(), 0n));
-      const join = async (name: Name, now: bigint) => {
-        if (!model.has(name)) model.set(name, new Eager(await clock(), now));
+      model.set("house", new Eager(await clock()));
+      const join = async (name: Name) => {
+        if (!model.has(name)) model.set(name, new Eager(await clock()));
         return model.get(name) as Eager;
+      };
+      /** The Player's own `touch`, which every instruction runs first. */
+      const touched = async (name: Name) => {
+        const m = model.get(name) as Eager;
+        m.touch(await clock());
+        return m;
       };
 
       /** The tree against the model, for every Player, in each readable epoch. */
@@ -402,23 +390,27 @@ describe("weight tree", () => {
         const c = tree.clock;
         for (const e of c.current > 0n ? [c.current, c.current - 1n] : [c.current]) {
           if (e === 0n) continue;
-          const weights = leafWeights(tree, e);
+          const held = leafTickets(tree, e);
+          let sum = 0n;
           for (const name of names) {
             const eager = model.get(name);
             if (!eager) continue;
             if (!leaves.has(name)) leaves.set(name, (await fetchPlayer(pool, owners[name])).leafIndex);
             const leaf = leaves.get(name) as number;
-            expect(weights[leaf - 1], `${label}: ${name} in epoch ${e}`).toBe(eager.weight(e, c));
+            expect(held[leaf - 1], `${label}: ${name} in epoch ${e}`).toBe(eager.tickets(e));
+            sum += eager.tickets(e);
             checks += 1;
           }
+          // The root is the sum of every Player's Tickets.
+          expect(held.reduce((x, y) => x + y, 0n), `${label}: root of epoch ${e}`).toBe(sum);
         }
       };
 
       // Epoch 0: `a` deposits before the first epoch begins.
-      let t = (await txInfo(await deposit(pool, wallets.a, 5_000_000n))).time;
-      (await join("a", t)).touch(await clock(), t);
-      model.get("a")!.principal += 5_000_000n;
-      model.get("a")!.entries += 5_000_000n;
+      await deposit(pool, wallets.a, 5_000_000n);
+      const ma0 = await join("a");
+      ma0.principal += 5_000_000n;
+      ma0.entries += 5_000_000n;
       await check("a deposits before epoch 1");
 
       await beginEpoch(pool, 0n); // epoch 1
@@ -426,64 +418,50 @@ describe("weight tree", () => {
 
       // Epoch 1: first deposits, bought and granted Tickets.
       for (const [name, amount] of [["b", 4_000_000n], ["c", 3_000_000n]] as const) {
-        t = (await txInfo(await deposit(pool, wallets[name], amount))).time;
-        const m = await join(name, t);
-        m.touch(await clock(), t);
+        await deposit(pool, wallets[name], amount);
+        const m = await join(name);
+        m.touch(await clock());
         m.principal += amount;
         m.entries += amount;
         await check(`${name} deposits`);
       }
-      t = (await txInfo(await buyTickets(pool, wallets.b, 1_000_000n))).time;
-      model.get("b")!.touch(await clock(), t);
-      model.get("b")!.entries += 1_000_000n * BigInt(pool.ticketsPerUsdc);
+      await buyTickets(pool, wallets.b, 1_000_000n);
+      (await touched("b")).entries += 1_000_000n * BigInt(pool.ticketsPerUsdc);
       await check("b buys tickets");
 
-      t = (await txInfo(await grantTickets(pool, owners.a, 2_000_000n))).time;
-      model.get("a")!.touch(await clock(), t);
-      model.get("a")!.entries += 2_000_000n;
+      await grantTickets(pool, owners.a, 2_000_000n);
+      (await touched("a")).entries += 2_000_000n;
       await check("a is granted tickets");
 
       // A round: three stakes, tile 0 wins, so `a` collects from the pot and
       // the House takes its cut.
-      const roundEnd = await createRound(pool, 1n, 1n, 6);
+      await createRound(pool, 1n, 1n, 6);
       const stakes = [
         ["a", 0n, 1_000_000n],
         ["b", 1n, 500_000n],
         ["c", 2n, 250_000n],
       ] as const;
       for (const [name, tile, stake] of stakes) {
-        t = (await txInfo(await buyPosition(pool, wallets[name], 1n, 1n << tile, stake))).time;
-        const m = model.get(name)!;
-        m.touch(await clock(), t);
-        const c = await clock();
-        // The pre-credit runs to the round's end, never past the epoch's.
-        m.weightAcc += stake * elapsed(t, min(BigInt(roundEnd), c.curEnd));
-        m.entries -= stake;
+        await buyPosition(pool, wallets[name], 1n, 1n << tile, stake);
+        (await touched(name)).entries -= stake;
         await check(`${name} buys a position`);
       }
       const seed = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
-      const settleSig = await settleRound(pool, 1n, await fulfillRandomness(seed, randomnessFor(0)));
-      t = (await txInfo(settleSig)).time;
+      await settleRound(pool, 1n, await fulfillRandomness(seed, randomnessFor(0)));
       const round = await program.account.round.fetch(roundPda(pool.pool, 1n));
       expect(round.status).toBe(2); // Settled
-      const house = model.get("house")!;
-      house.touch(await clock(), t);
-      house.entries += big(round.houseCut);
+      (await touched("house")).entries += big(round.houseCut);
       await check("the round settles");
 
       for (const name of ["a", "b", "c"] as const) {
         const sig = await settlePosition(pool, 1n, owners[name]);
-        t = (await txInfo(sig)).time;
         const reward = big((await findEvent<{ reward: BN }>(sig, "positionSettled"))!.reward);
-        const m = model.get(name)!;
-        m.touch(await clock(), t);
-        m.entries += reward;
+        (await touched(name)).entries += reward;
         await check(`${name} settles a position`);
       }
 
-      t = (await txInfo(await requestWithdraw(pool, wallets.c, 1_000_000n))).time;
-      const mc = model.get("c")!;
-      mc.touch(await clock(), t);
+      await requestWithdraw(pool, wallets.c, 1_000_000n);
+      const mc = await touched("c");
       mc.principal -= 1_000_000n;
       mc.entries = mc.entries > 1_000_000n ? mc.entries - 1_000_000n : 0n;
       await check("c requests a withdrawal");
@@ -492,29 +470,25 @@ describe("weight tree", () => {
       await retryUntilOk(() => beginEpoch(pool, 1n));
       await check("epoch 2 begins");
 
-      t = (await txInfo(await deposit(pool, wallets.a, 1_000_000n))).time;
-      const ma = model.get("a")!;
-      ma.touch(await clock(), t);
+      await deposit(pool, wallets.a, 1_000_000n);
+      const ma = await touched("a");
       ma.principal += 1_000_000n;
       ma.entries += 1_000_000n;
       await check("a deposits in epoch 2");
 
-      t = (await txInfo(await requestWithdraw(pool, wallets.b, 2_000_000n))).time;
-      const mb = model.get("b")!;
-      mb.touch(await clock(), t);
+      await requestWithdraw(pool, wallets.b, 2_000_000n);
+      const mb = await touched("b");
       mb.principal -= 2_000_000n;
       mb.entries = mb.entries > 2_000_000n ? mb.entries - 2_000_000n : 0n;
       await check("b requests a withdrawal in epoch 2");
 
       // Epoch 3: epoch 1 is gone, epoch 2 is the previous one, and `c`, idle
-      // all of epoch 2, still weighs principal x length there.
+      // all of epoch 2, still holds its Principal there.
       await retryUntilOk(() => beginEpoch(pool, 2n));
       await check("epoch 3 begins");
 
-      t = (await txInfo(await grantTickets(pool, owners.c, 500_000n))).time;
-      const mc2 = model.get("c")!;
-      mc2.touch(await clock(), t);
-      mc2.entries += 500_000n;
+      await grantTickets(pool, owners.c, 500_000n);
+      (await touched("c")).entries += 500_000n;
       await check("c is granted tickets in epoch 3");
 
       expect(checks).toBeGreaterThan(80);
@@ -523,38 +497,40 @@ describe("weight tree", () => {
   );
 
   it(
-    "a deposit after epoch_end and before begin_epoch has zero Weight in the ended epoch and full Weight from the next one's start",
+    "a deposit at the first second and one at the last second of an epoch show the same Tickets, and the ended epoch's root is the sum of every Player's",
     async () => {
-      const pool = await setupPool({ epochSeconds: 8 });
-      const a = await pool.fundedWallet(10_000_000n);
-      const b = await pool.fundedWallet(10_000_000n);
+      const pool = await setupPool({ epochSeconds: 12 });
+      const early = await pool.fundedWallet(10_000_000n);
+      const late = await pool.fundedWallet(10_000_000n);
+      const gap = await pool.fundedWallet(10_000_000n);
       const funder = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n);
-      await deposit(pool, a, 4_000_000n);
+      await deposit(pool, early, 4_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
 
       const epoch1 = await fetchEpoch(pool, 1n);
       const endsAt = Number(epoch1.endsAt.toString());
-      await sleepUntilOnChain(endsAt + 1);
+      await sleepUntilOnChain(endsAt - 1);
+      await deposit(pool, late, 4_000_000n);
+      const tickets = async (w: Wallet, e: bigint) => ticketsOf(pool, w.keypair.publicKey, e);
+      expect(await tickets(late, 1n)).toBe(4_000_000n);
+      expect(await tickets(late, 1n)).toBe(await tickets(early, 1n));
 
-      // Epoch 1 has ended and nobody has called begin_epoch yet.
-      const weightA = await weightOf(pool, a.keypair.publicKey, 1n);
-      await deposit(pool, b, 5_000_000n);
-      expect(await weightOf(pool, b.keypair.publicKey, 1n)).toBe(0n);
-      expect(await weightOf(pool, a.keypair.publicKey, 1n)).toBe(weightA);
+      // Epoch 1 has ended and nobody has called begin_epoch yet. A change in
+      // that gap lands in the epoch still current, which is epoch 1.
+      await sleepUntilOnChain(endsAt + 1);
+      await deposit(pool, gap, 5_000_000n);
+      expect(await tickets(gap, 1n)).toBe(5_000_000n);
 
       await beginEpoch(pool, 1n);
-      const epoch2 = await fetchEpoch(pool, 2n);
-      const len2 = big(epoch2.endsAt) - big(epoch2.startsAt);
+      // Epoch 2 holds every Principal in full, deposited early or late.
+      expect(await tickets(early, 2n)).toBe(4_000_000n);
+      expect(await tickets(late, 2n)).toBe(4_000_000n);
+      expect(await tickets(gap, 2n)).toBe(5_000_000n);
 
-      // Still nothing in the ended epoch, and the whole of epoch 2 in the new one.
-      expect(await weightOf(pool, b.keypair.publicKey, 1n)).toBe(0n);
-      expect(await weightOf(pool, b.keypair.publicKey, 2n)).toBe(5_000_000n * len2);
-      expect(await weightOf(pool, a.keypair.publicKey, 2n)).toBe(4_000_000n * len2);
-
-      // The draw for epoch 1 sees only what was there when it ended.
+      // The draw for epoch 1 snapshots what was there when it ended.
       await requestDrawMethod(pool, 1n).rpc();
-      expect(big((await fetchEpoch(pool, 1n)).registeredWeight)).toBe(weightA);
+      expect(big((await fetchEpoch(pool, 1n)).registeredWeight)).toBe(13_000_000n);
     },
     TIMEOUT,
   );
@@ -579,18 +555,19 @@ describe("weight tree", () => {
 
       const drawing = await fetchEpoch(pool, 1n);
       const tree = await fetchTree(pool);
-      const weights = leafWeights(tree, 1n);
-      const root = weights.reduce((s, w) => s + w, 0n);
+      const held = leafTickets(tree, 1n);
+      const root = held.reduce((s, t) => s + t, 0n);
+      expect(root).toBe(6_000_000n);
       expect(big(drawing.registeredWeight)).toBe(root);
 
       // Aim the randomness at the middle player's range.
-      const start = (weights[0] as bigint) + (weights[1] as bigint); // after the House and player 0
-      const end = start + (weights[2] as bigint);
+      const start = (held[0] as bigint) + (held[1] as bigint); // after the House and player 0
+      const end = start + (held[2] as bigint);
       const randomness = randomnessForTarget(root, start, end);
       await draw(pool, 1n, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed), randomness));
 
       const drawn = await fetchEpoch(pool, 1n);
-      expect(big(drawn.target)).toBe(unbiasedU128(randomness, root));
+      expect(big(drawn.target)).toBe(unbiasedU64(randomness, root));
       expect(big(drawn.target) >= start && big(drawn.target) < end).toBe(true);
 
       // The first and the third players' ranges do not hold the target.
@@ -663,7 +640,7 @@ describe("compute at 16,384 nodes", () => {
       await deposit(pool, a, 10_000_000n);
       await deposit(pool, a2, 10_000_000n);
 
-      // Fill with zero-Weight leaves, 142 to a transaction, until one short of
+      // Fill with zero-Ticket leaves, 142 to a transaction, until one short of
       // the target: House, a, a2 and these make 16,383, so b's first deposit
       // appends leaf 16,384, the append with the longest path.
       let nodes = (await fetchTree(pool)).nodes.length;

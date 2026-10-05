@@ -1199,21 +1199,21 @@ describe("live account refresh", () => {
 // ------------------------------------------------ live yield (ticket 14)
 
 /** A Weight tree account holding `nodes`, the layout weight_tree.rs reads:
- *  a 56-byte header with the node count at byte 16, then 72-byte nodes. A
- *  node is its `principal_sum` and two slots of stamp, base and a u128 weight.
+ *  a 56-byte header with the node count at byte 16, then 56-byte nodes. A
+ *  node is its `principal_sum` and two slots of stamp, base and a u64 Ticket count.
  *  Epoch 1 is odd, so it lives in the second slot. */
 function weightTreeAccount(
   nodes: { principalSum: bigint; slot: { base: bigint; weight: bigint } | null }[],
 ): Buffer {
-  const data = Buffer.alloc(56 + nodes.length * 72);
+  const data = Buffer.alloc(56 + nodes.length * 56);
   data.writeBigUInt64LE(BigInt(nodes.length), 16);
   nodes.forEach((node, i) => {
-    const at = 56 + i * 72;
+    const at = 56 + i * 56;
     data.writeBigUInt64LE(node.principalSum, at);
     if (node.slot === null) return;
-    data.writeBigUInt64LE(1n, at + 40);
-    data.writeBigUInt64LE(node.slot.base, at + 48);
-    data.writeBigUInt64LE(node.slot.weight, at + 56);
+    data.writeBigUInt64LE(1n, at + 32);
+    data.writeBigUInt64LE(node.slot.base, at + 40);
+    data.writeBigUInt64LE(node.slot.weight, at + 48);
   });
   return data;
 }

@@ -213,8 +213,8 @@ const CASES: Case[] = [
   },
   {
     name: "EpochDrawn",
-    fields: [u64(2n), u128(42n), u128(1n << 70n)],
-    data: { epochId: "2", target: "42", registeredWeight: "1180591620717411303424" },
+    fields: [u64(2n), u64(42n), u64(1n << 60n)],
+    data: { epochId: "2", target: "42", registeredWeight: "1152921504606846976" },
   },
   {
     name: "JackpotPaid",

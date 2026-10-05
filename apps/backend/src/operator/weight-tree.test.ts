@@ -8,12 +8,12 @@ import { EPOCH_STATUS, type EpochState } from "./chain-state";
 import { leafHoldingTarget, nodeCount, prefixWeights, readNodes } from "./weight-tree";
 
 const HEADER = 56;
-const NODE = 72;
+const NODE = 56;
 
 interface NodeSpec {
   principalSum: bigint;
   /** The slot written in epoch 1 (parity 1), or null for a node that sat idle. */
-  slot: { stamp: bigint; base: bigint; weight: bigint } | null;
+  slot: { stamp: bigint; base: bigint; tickets: bigint } | null;
 }
 
 function tree(nodes: NodeSpec[]): Buffer {
@@ -25,12 +25,11 @@ function tree(nodes: NodeSpec[]): Buffer {
     const at = HEADER + i * NODE;
     data.writeBigUInt64LE(node.principalSum, at);
     if (node.slot === null) return;
-    // Epoch 1 is odd, so it lives in the second slot, 32 bytes after the first.
-    const slotAt = at + 8 + 32;
+    // Epoch 1 is odd, so it lives in the second slot, 24 bytes after the first.
+    const slotAt = at + 8 + 24;
     data.writeBigUInt64LE(node.slot.stamp, slotAt);
     data.writeBigUInt64LE(node.slot.base, slotAt + 8);
-    data.writeBigUInt64LE(node.slot.weight & 0xffff_ffff_ffff_ffffn, slotAt + 16);
-    data.writeBigUInt64LE(node.slot.weight >> 64n, slotAt + 24);
+    data.writeBigUInt64LE(node.slot.tickets, slotAt + 16);
   });
   return data;
 }
@@ -49,13 +48,13 @@ const epoch = (target: bigint): EpochState => ({
 });
 
 describe("leafHoldingTarget", () => {
-  // Leaf weights 700, 20, 30. Leaf 1 sat idle at Principal 7 through the
-  // 100-second epoch, so the idle rule gives it 7 x 100. Fenwick nodes hold
-  // partial sums: node 2 is leaves 1 and 2, node 3 is leaf 3 alone.
+  // Leaf Tickets 7, 20, 30. Leaf 1 sat idle at Principal 7 through the epoch,
+  // so the idle rule gives it 7. Fenwick nodes hold partial sums: node 2 is
+  // leaves 1 and 2, node 3 is leaf 3 alone.
   const data = tree([
     { principalSum: 7n, slot: null },
-    { principalSum: 9n, slot: { stamp: 1n, base: 9n, weight: 720n } },
-    { principalSum: 3n, slot: { stamp: 1n, base: 3n, weight: 30n } },
+    { principalSum: 9n, slot: { stamp: 1n, base: 9n, tickets: 27n } },
+    { principalSum: 3n, slot: { stamp: 1n, base: 3n, tickets: 30n } },
   ]);
   const nodes = readNodes(data);
   const leafOf = (target: bigint) => leafHoldingTarget(nodes, epoch(target));
@@ -63,33 +62,34 @@ describe("leafHoldingTarget", () => {
   it("reads the node count and every node", () => {
     expect(nodes).toHaveLength(3);
     expect(nodes[0]?.principalSum).toBe(7n);
-    expect(nodes[1]?.slots[1].weight).toBe(720n);
+    expect(nodes[1]?.slots[1].tickets).toBe(27n);
   });
 
   it("finds the leaf whose range holds the target, ends included", () => {
     expect(leafOf(0n)).toBe(1);
-    expect(leafOf(699n)).toBe(1);
-    expect(leafOf(700n)).toBe(2);
-    expect(leafOf(719n)).toBe(2);
-    expect(leafOf(720n)).toBe(3);
-    expect(leafOf(749n)).toBe(3);
+    expect(leafOf(6n)).toBe(1);
+    expect(leafOf(7n)).toBe(2);
+    expect(leafOf(26n)).toBe(2);
+    expect(leafOf(27n)).toBe(3);
+    expect(leafOf(56n)).toBe(3);
   });
 
   it("finds no leaf at or past the total", () => {
-    expect(leafOf(750n)).toBeNull();
+    expect(leafOf(57n)).toBeNull();
   });
 
-  it("reads a Weight past 2^64, which the u128 slot allows", () => {
-    const big = tree([{ principalSum: 1n, slot: { stamp: 1n, base: 1n, weight: 1n << 70n } }]);
-    expect(leafHoldingTarget(readNodes(big), epoch((1n << 70n) - 1n))).toBe(1);
-    expect(leafHoldingTarget(readNodes(big), epoch(1n << 70n))).toBeNull();
+  it("reads a Ticket count up to the largest u64", () => {
+    const max = (1n << 64n) - 1n;
+    const big = tree([{ principalSum: 1n, slot: { stamp: 1n, base: 1n, tickets: max } }]);
+    expect(leafHoldingTarget(readNodes(big), epoch(max - 1n))).toBe(1);
+    expect(leafHoldingTarget(readNodes(big), epoch(max))).toBeNull();
   });
 
   // The read model's Player Weight is `prefix[i] - prefix[i - 1]` and the
   // root is the last entry (ticket 14).
   it("gives prefix sums, so a leaf is a difference and the root is the last entry", () => {
-    const prefix = prefixWeights(nodes, 1n, 100n);
-    expect(prefix).toEqual([0n, 700n, 720n, 750n]);
+    const prefix = prefixWeights(nodes, 1n);
+    expect(prefix).toEqual([0n, 7n, 27n, 57n]);
     expect((prefix[2] as bigint) - (prefix[1] as bigint)).toBe(20n);
   });
 

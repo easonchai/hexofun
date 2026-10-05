@@ -2,7 +2,7 @@
 //! (yield-claimer ticket 08).
 //!
 //! Real first deposits are one wallet and one transaction each, which makes a
-//! 16,384-leaf tree too slow to build in a test. This appends zero-Weight
+//! 16,384-leaf tree too slow to build in a test. This appends zero-Ticket
 //! leaves in bulk through the same `append_leaves` a deposit uses, so the
 //! compute of a deposit or a position can be measured against a tree of that
 //! size.

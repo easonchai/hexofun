@@ -5,14 +5,14 @@
 import type { EpochState } from "./chain-state";
 
 const TREE_HEADER = 56;
-const TREE_NODE = 72;
+const TREE_NODE = 56;
 /** `node_count` follows the discriminator, version, padding and node size. */
 const NODE_COUNT_AT = 16;
 
 interface Slot {
   readonly stamp: bigint;
   readonly base: bigint;
-  readonly weight: bigint;
+  readonly tickets: bigint;
 }
 
 interface Node {
@@ -24,8 +24,7 @@ function readSlot(data: Buffer, at: number): Slot {
   return {
     stamp: data.readBigUInt64LE(at),
     base: data.readBigUInt64LE(at + 8),
-    // u128, low half first.
-    weight: data.readBigUInt64LE(at + 16) | (data.readBigUInt64LE(at + 24) << 64n),
+    tickets: data.readBigUInt64LE(at + 16),
   };
 }
 
@@ -40,20 +39,19 @@ export function readNodes(data: Buffer): Node[] {
     const at = TREE_HEADER + i * TREE_NODE;
     nodes.push({
       principalSum: data.readBigUInt64LE(at),
-      slots: [readSlot(data, at + 8), readSlot(data, at + 40)],
+      slots: [readSlot(data, at + 8), readSlot(data, at + 32)],
     });
   }
   return nodes;
 }
 
-/** One node's Weight in epoch `e` of length `length`: its slot if stamped for
- *  `e`, else it sat idle through `e` at the Principal it had then. */
-function nodeWeight(node: Node, e: bigint, length: bigint): bigint {
+/** One node's Tickets in epoch `e`: its slot if stamped for `e`, else it sat
+ *  idle through `e` at the Principal it had then. */
+function nodeTickets(node: Node, e: bigint): bigint {
   const slot = node.slots[Number(e % 2n)] as Slot;
-  if (slot.stamp === e) return slot.weight;
+  if (slot.stamp === e) return slot.tickets;
   const next = node.slots[Number((e + 1n) % 2n)] as Slot;
-  const base = next.stamp === e + 1n ? next.base : node.principalSum;
-  return base * length;
+  return next.stamp === e + 1n ? next.base : node.principalSum;
 }
 
 /** The Fenwick tree's header: how many leaves it holds. */
@@ -63,15 +61,14 @@ export function nodeCount(data: Buffer): number {
 }
 
 /**
- * `prefix[i]` is the Weight of leaves 1..i in epoch `epochId` of `length`
- * seconds, `prefix[0]` is 0, and the last entry is the root. Leaf `i` is
- * `prefix[i] - prefix[i - 1]`.
+ * `prefix[i]` is the Tickets of leaves 1..i in epoch `epochId`, `prefix[0]` is
+ * 0, and the last entry is the root. Leaf `i` is `prefix[i] - prefix[i - 1]`.
  */
-export function prefixWeights(nodes: readonly Node[], epochId: bigint, length: bigint): bigint[] {
+export function prefixWeights(nodes: readonly Node[], epochId: bigint): bigint[] {
   const prefix: bigint[] = [0n];
   for (let i = 1; i <= nodes.length; i += 1) {
     const low = i & -i;
-    prefix.push((prefix[i - low] as bigint) + nodeWeight(nodes[i - 1] as Node, epochId, length));
+    prefix.push((prefix[i - low] as bigint) + nodeTickets(nodes[i - 1] as Node, epochId));
   }
   return prefix;
 }
@@ -85,8 +82,7 @@ export function prefixWeights(nodes: readonly Node[], epochId: bigint, length: b
  * if it ever shows up in a tick's timing.
  */
 export function leafHoldingTarget(nodes: readonly Node[], epoch: EpochState): number | null {
-  const length = epoch.endsAt > epoch.startsAt ? epoch.endsAt - epoch.startsAt : 0n;
-  const prefix = prefixWeights(nodes, epoch.epochId, length);
+  const prefix = prefixWeights(nodes, epoch.epochId);
   let start = 0n;
   for (let i = 1; i <= nodes.length; i += 1) {
     const end = prefix[i] as bigint;

@@ -1,4 +1,4 @@
-// Round lifecycle: pre-credit weight-neutrality, pro-rata settlement,
+// Round lifecycle: a stake leaves the draw and returns with its reward, pro-rata settlement,
 // forfeit-to-House, void-and-refund, and the buy_position guard rails (spec
 // §2.3 "Rounds", §2.4 invariant 5).
 //
@@ -15,7 +15,9 @@ import {
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
   epochPda,
+  fetchTree,
   fulfillRandomness,
+  leafTickets,
   playerPda,
   positionPda,
   program,
@@ -27,9 +29,8 @@ import {
   sleep,
   testNonce,
   findEvent,
-  txInfo,
   vrfSeed,
-  weightOf,
+  ticketsOf,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -735,46 +736,40 @@ describe("rounds", () => {
   );
 
   it(
-    "buying a position is weight-neutral: staking everything matches just holding until the round ends",
+    "a stake placed and settled inside one epoch leaves the draw where it was, plus the reward",
     async () => {
-      const pool = await setupPool({ roundSeconds: 20, closeBuffer: 2 });
+      const pool = await setupPool({ roundSeconds: 6, closeBuffer: 2 });
       await beginFirstEpoch(pool);
-      const staker = await pool.fundedWallet(10_000_000n);
+      const alice = await pool.fundedWallet(10_000_000n);
+      const bob = await pool.fundedWallet(10_000_000n);
       const holder = await pool.fundedWallet(10_000_000n);
-      // Both deposits in one transaction so both players deposit at the exact
-      // same on-chain instant -- comparing across two separately submitted
-      // transactions would add a real (if small) timing skew.
-      const depositIxs = await Promise.all(
-        [staker, holder].map((w) =>
-          program.methods
-            .deposit(new BN("5000000"))
-            .accountsPartial(depositAccounts(pool, w))
-            .instruction(),
-        ),
-      );
-      const depositSig = await provider.sendAndConfirm(new Transaction().add(...depositIxs), [
-        staker.keypair,
-        holder.keypair,
-      ]);
-      const depositTime = (await txInfo(depositSig)).time;
+      for (const w of [alice, bob, holder]) await deposit(pool, w, 5_000_000n);
+      const root = async () => (await leafTickets(await fetchTree(pool), 1n)).reduce((x, y) => x + y, 0n);
+      const tickets = (w: Wallet) => ticketsOf(pool, w.keypair.publicKey, 1n);
+      expect(await root()).toBe(15_000_000n);
 
-      const { round, endsAt } = await createRound(pool, 20, epochPda(pool.pool, 1n));
-      // Stakes everything immediately. The tree credited her Tickets up to the
-      // epoch's end when she deposited; the buy takes them back out and gives
-      // the same Weight back up to the round's end, as one net change.
-      await buyPosition(pool, staker, round, 1n << 0n, 5_000_000n);
+      const { round, endsAt } = await createRound(pool, 6, epochPda(pool.pool, 1n));
+      await buyPosition(pool, alice, round, 1n << 0n, 1_000_000n);
+      await buyPosition(pool, bob, round, 1n << 1n, 1_000_000n);
 
-      const epochEnd = BigInt((await program.account.epoch.fetch(epochPda(pool.pool, 1n))).endsAt.toString());
-      const holderWeight = await weightOf(pool, holder.keypair.publicKey, 1n);
-      const stakerWeight = await weightOf(pool, staker.keypair.publicKey, 1n);
+      // The stakes leave the tree at once, with nothing credited back for the
+      // seconds the round has left.
+      expect(await tickets(alice)).toBe(4_000_000n);
+      expect(await tickets(bob)).toBe(4_000_000n);
+      expect(await tickets(holder)).toBe(5_000_000n);
+      expect(await root()).toBe(13_000_000n);
 
-      // The holder is never touched again, so her Weight is her Tickets to the
-      // epoch's end. Since both players deposited at the same instant, the
-      // staker's is the same minus what the epoch would have earned after
-      // the round: nothing is lost while the stake is at risk.
-      expect(holderWeight).toBe(5_000_000n * (epochEnd - depositTime));
-      expect(stakerWeight).toBe(5_000_000n * (BigInt(endsAt) - depositTime));
-      expect(stakerWeight).toBe(holderWeight - 5_000_000n * (epochEnd - BigInt(endsAt)));
+      await playToSettlement(pool, round, endsAt, 0);
+      await settlePosition(pool, round, alice.keypair.publicKey);
+      await settlePosition(pool, round, bob.keypair.publicKey);
+
+      // Alice is back with her stake and the losers' pot less the 6% cut
+      // (1M + 0.94M), the House holds the cut, and the root is where it was.
+      expect(await tickets(alice)).toBe(5_940_000n);
+      expect(await tickets(bob)).toBe(4_000_000n);
+      expect(await tickets(holder)).toBe(5_000_000n);
+      expect(await ticketsOf(pool, pool.operator.publicKey, 1n)).toBe(60_000n);
+      expect(await root()).toBe(15_000_000n);
     },
     TIMEOUT,
   );
@@ -849,7 +844,7 @@ describe("rounds", () => {
   );
 
   it(
-    "a refund credits the tree for the rest of the epoch",
+    "a refund puts the stake back in the tree",
     async () => {
       const pool = await setupPool({
         roundSeconds: 4,
@@ -858,8 +853,7 @@ describe("rounds", () => {
       });
       await beginFirstEpoch(pool);
       const alice = await pool.fundedWallet(10_000_000n);
-      const depositSig = await deposit(pool, alice, 5_000_000n);
-      const depositTime = (await txInfo(depositSig)).time;
+      await deposit(pool, alice, 5_000_000n);
 
       const { round, endsAt } = await createRound(pool, 4, epochPda(pool.pool, 1n));
       await buyPosition(pool, alice, round, 1n << 0n, 1_000_000n);
@@ -871,17 +865,10 @@ describe("rounds", () => {
       await waitUntil(Number(requested.requestedAt.toString()) + 2);
       await voidRound(pool, round, seed);
 
-      const epochEnd = BigInt((await program.account.epoch.fetch(epochPda(pool.pool, 1n))).endsAt.toString());
-      const settleTime = (await txInfo(await settlePosition(pool, round, alice.keypair.publicKey))).time;
+      await settlePosition(pool, round, alice.keypair.publicKey);
 
-      // Deposit credited 5M to the epoch's end. The buy swapped 1M of that for
-      // the same 1M up to the round's end, and the refund gives the 1M back
-      // from the settle to the epoch's end. What the stake lost is the stretch
-      // between the round's end and the refund, nothing more.
-      const expected =
-        5_000_000n * (epochEnd - depositTime) -
-        1_000_000n * (BigInt(settleTime) - BigInt(endsAt));
-      expect(await weightOf(pool, alice.keypair.publicKey, 1n)).toBe(expected);
+      // The refund puts the stake back, so the tree holds her whole 5M again.
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 1n)).toBe(5_000_000n);
       const aliceAfter = await program.account.player.fetch(
         playerPda(pool.pool, alice.keypair.publicKey),
       );

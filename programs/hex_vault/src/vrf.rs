@@ -199,11 +199,6 @@ pub fn sample_u64(digest: &[u8; 32]) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().expect("fixed slice"))
 }
 
-/// u128 sample from the first 16 bytes of the digest (LE).
-pub fn sample_u128(digest: &[u8; 32]) -> u128 {
-    u128::from_le_bytes(digest[..16].try_into().expect("fixed slice"))
-}
-
 /// Unbiased mapping that can never strand a fulfilled draw: a tail sample
 /// (rejected for modulo-bias safety) is re-derived by hashing the digest
 /// with a counter, instead of reverting a settle that has no retry path.
@@ -219,28 +214,6 @@ pub fn unbiased_u64(randomness: &[u8; 64], range: u64) -> Result<u64> {
             sample_u64(&base)
         } else {
             sample_u64(&rederive(&base, counter))
-        };
-        if sample < limit {
-            return Ok(sample % range);
-        }
-        counter = counter
-            .checked_add(1)
-            .ok_or(HexVaultError::RandomnessRejection)?;
-    }
-}
-
-/// The u128 twin of [`unbiased_u64`], for selecting a point under an epoch's
-/// total Weight.
-pub fn unbiased_u128(randomness: &[u8; 64], range: u128) -> Result<u128> {
-    require!(range > 0, HexVaultError::RandomnessRejection);
-    let limit = u128::MAX - (u128::MAX % range);
-    let base = digest(randomness);
-    let mut counter: u8 = 0;
-    loop {
-        let sample = if counter == 0 {
-            sample_u128(&base)
-        } else {
-            sample_u128(&rederive(&base, counter))
         };
         if sample < limit {
             return Ok(sample % range);
@@ -342,20 +315,13 @@ mod tests {
         // sample. The naive mapping would revert forever, and a fulfilled VRF
         // account has no retry path.
         let big_u64 = (1u64 << 63) + 1;
-        let big_u128 = (1u128 << 127) + 1;
         let tail_u64 = (0u64..)
             .map(|n| randomness_with(n))
             .find(|r| sample_u64(&digest(r)) >= big_u64)
             .expect("a tail within a few tries");
-        let tail_u128 = (0u64..)
-            .map(|n| randomness_with(n))
-            .find(|r| sample_u128(&digest(r)) >= big_u128)
-            .expect("a tail within a few tries");
 
         assert!(unbiased_u64(&tail_u64, big_u64).expect("terminates") < big_u64);
-        assert!(unbiased_u128(&tail_u128, big_u128).expect("terminates") < big_u128);
         assert!(unbiased_u64(&tail_u64, 0).is_err());
-        assert!(unbiased_u128(&tail_u128, 0).is_err());
     }
 
     /// 64 bytes that differ per `n`, with nothing in common with `digest`.

@@ -96,9 +96,9 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         // Contiguous when the operator is merely late, so the schedule
         // holds. Once the operator has been down past a whole grid point,
         // `grid_floor(now)` overtakes the previous end and the dead gap is
-        // skipped: nobody accrued Weight in it (a Ticket change after
-        // `ends_at` credits zero), so nothing is lost, and the boundary stays
-        // on the grid instead of rerolling to `now`.
+        // skipped, so the boundary stays on the grid instead of rerolling to
+        // `now`. A Ticket change in the gap lands in the epoch still current,
+        // the ended one, since the tree holds counts and not time.
         previous_ends_at.max(grid_floor(pool.epoch_anchor, pool.epoch_seconds, now)?)
     };
 
@@ -166,7 +166,7 @@ pub fn fund_jackpot(ctx: Context<FundJackpot>, amount: u64) -> Result<()> {
 }
 
 /// Operator-only. Sends an Ended epoch to the draw: snapshots the prize,
-/// reads the Weight tree's total for that epoch, and requests randomness. The
+/// reads the Weight tree's Ticket total for that epoch, and requests randomness. The
 /// total and the prize are final by then, so nothing a Player does after this
 /// moves the draw (a change in the next epoch writes the other parity slot).
 ///
@@ -253,7 +253,7 @@ pub fn draw(ctx: Context<Draw>) -> Result<()> {
 
     let randomness = vrf::read_fulfilled(&ctx.accounts.randomness.to_account_info(), &epoch.vrf_seed)?;
 
-    epoch.target = vrf::unbiased_u128(&randomness, epoch.registered_weight)?;
+    epoch.target = vrf::unbiased_u64(&randomness, epoch.registered_weight)?;
     epoch.status = epoch_status::DRAWN;
     epoch.drawn_at = now;
 
@@ -266,7 +266,6 @@ pub fn draw(ctx: Context<Draw>) -> Result<()> {
 }
 
 pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
-    let now = utils::now()?;
     let a = &mut *ctx.accounts;
     let venue = Venue {
         program: &a.klend_program,
@@ -339,7 +338,7 @@ pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         // here on, never retroactively.
         touch(winner, pool);
         let owed = settle_before_growth(pool, winner)?;
-        let mut change = Change::new(pool, now);
+        let mut change = Change::default();
         change.settled(owed)?;
 
         token_interface::transfer_checked(

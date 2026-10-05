@@ -92,9 +92,9 @@ export const BALANCES_TTL_MS = 15_000;
  *  only need to be about right. */
 export const TREE_TTL_MS = 15_000;
 
-/** Most Players one tree holds: (10 MiB - 56-byte header) / 72-byte node, as
+/** Most Players one tree holds: (10 MiB - 56-byte header) / 56-byte node, as
  *  in weight_tree.rs. Past it deposits fail with `WeightTreeFull`. */
-export const TREE_CAPACITY = 145_634;
+export const TREE_CAPACITY = 187_244;
 
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
@@ -792,8 +792,8 @@ export class ApiService {
    * the tree's root. `epoch` is the current Epoch when the caller has it.
    *
    * ponytail: the whole tree account per call, cached for
-   * `TREE_TTL_MS`, parsed in memory. 72 bytes a Player, so a few thousand
-   * Players is a few hundred KB; read the leaf's O(log n) nodes with
+   * `TREE_TTL_MS`, parsed in memory. 56 bytes a Player, so a few thousand
+   * Players is a couple hundred KB; read the leaf's O(log n) nodes with
    * `dataSlice` once that matters.
    */
   private async weightsFor(
@@ -813,8 +813,7 @@ export class ApiService {
     }
     const data = await this.cachedTree(pool.weightTree);
     if (data === null) return weightsFrom(players, null);
-    const length = current.endsAt > current.startsAt ? current.endsAt - current.startsAt : 0n;
-    return weightsFrom(players, prefixWeights(readNodes(data), current.id, length));
+    return weightsFrom(players, prefixWeights(readNodes(data), current.id));
   }
 
   /** The tree account, or null when the read failed (logged), so Weight and

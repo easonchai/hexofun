@@ -2163,7 +2163,7 @@
     {
       "name": "request_draw",
       "docs": [
-        "Operator-only (ticket 08): snapshots the ended epoch's Weight total and",
+        "Operator-only (ticket 08): snapshots the ended epoch's Ticket total and",
         "its prize, then asks the VRF for the draw, or rolls the epoch over."
       ],
       "discriminator": [
@@ -4760,7 +4760,12 @@
           },
           {
             "name": "registered_weight",
-            "type": "u128"
+            "docs": [
+              "The Weight tree's root for this epoch, snapshotted by `request_draw`:",
+              "every Player's Tickets at the epoch's end. Named for the registration",
+              "it replaced."
+            ],
+            "type": "u64"
           },
           {
             "name": "registered_count",
@@ -4791,7 +4796,7 @@
             "docs": [
               "Point in `registered_weight` selected by the draw."
             ],
-            "type": "u128"
+            "type": "u64"
           },
           {
             "name": "winner",
@@ -4873,11 +4878,11 @@
           },
           {
             "name": "target",
-            "type": "u128"
+            "type": "u64"
           },
           {
             "name": "registered_weight",
-            "type": "u128"
+            "type": "u64"
           }
         ]
       }
@@ -5546,9 +5551,9 @@
           {
             "name": "current_epoch_ends_at",
             "docs": [
-              "End of the current epoch, copied from its `Epoch.ends_at`. `touch`",
-              "reads it instead of adding `epoch_seconds`, so changing that",
-              "parameter never moves an epoch that has already begun."
+              "End of the current epoch, copied from its `Epoch.ends_at`, so changing",
+              "`epoch_seconds` never moves an epoch that has already begun. Nothing in",
+              "the tree or `touch` reads it since ticket 19."
             ],
             "type": "i64"
           },
@@ -5563,8 +5568,7 @@
           {
             "name": "previous_epoch_ends_at",
             "docs": [
-              "End of the epoch before the current one, where `touch` freezes the",
-              "weight a player earned in it."
+              "End of the epoch before the current one."
             ],
             "type": "i64"
           },

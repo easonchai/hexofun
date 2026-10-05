@@ -7,9 +7,8 @@
 //! they act.
 //!
 //! The per-Player Weight accrual and the freeze that fed `register` were
-//! removed by the layout rewrite (yield-claimer ticket 04). Weight moves to
-//! the Fenwick tree in ticket 08, which credits it forward on every Ticket
-//! change instead.
+//! removed by the layout rewrite (yield-claimer ticket 04). The Fenwick tree
+//! keeps a Ticket count per epoch instead (tickets 08 and 19).
 
 use crate::state::{Player, Pool};
 

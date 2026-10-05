@@ -575,12 +575,12 @@ describe("roles", () => {
 
       const tree = await program.account.weightTree.fetch(pool.weightTree);
       expect(tree.version).toBe(1);
-      expect(tree.nodeSize).toBe(72);
+      expect(tree.nodeSize).toBe(56);
       // The House never deposits but can win, so create_pool gives it leaf 1.
       expect(tree.nodeCount.toString()).toBe("1");
       expect(tree.pool.toBase58()).toBe(pool.pool.toBase58());
       const info = await program.provider.connection.getAccountInfo(pool.weightTree);
-      expect(info?.data.length).toBe(WEIGHT_TREE_SPACE + 72);
+      expect(info?.data.length).toBe(WEIGHT_TREE_SPACE + 56);
       expect(info?.owner.toBase58()).toBe(program.programId.toBase58());
       expect((await program.account.player.fetch(pool.house)).leafIndex).toBe(1);
 
@@ -1116,7 +1116,7 @@ describe("create_pool guards", () => {
       await expect(attempt(0)).rejects.toThrow(/InvalidParameter/);
       // The account arrives header-sized and create_pool grows it by the
       // House's leaf, so one that already holds a node is refused.
-      await expect(attempt(86_400, WEIGHT_TREE_SPACE + 72)).rejects.toThrow(/InvalidParameter/);
+      await expect(attempt(86_400, WEIGHT_TREE_SPACE + 56)).rejects.toThrow(/InvalidParameter/);
       await attempt(86_400);
     },
     TIMEOUT,

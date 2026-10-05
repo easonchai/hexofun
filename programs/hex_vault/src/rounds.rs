@@ -132,22 +132,10 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     require!(player.entries >= total, HexVaultError::InsufficientEntries);
 
-    // Pre-credit the Weight this stake would have earned for the rest of the
-    // round before it leaves Tickets, so buying a position is Weight-neutral
-    // for the lottery draw (spec §2.3). The tree already credited the Tickets
-    // up to the epoch's end, so the two go in as one net change: minus
-    // `total × (epoch_end − now)` for the Tickets leaving, plus `total ×
-    // (round_end − now)` for the pre-credit. A round never outlasts its
-    // epoch (`create_round`), but the pre-credit is clamped to it anyway, for
-    // a round created before the first epoch began.
-    let credit_end = round.ends_at.min(pool.current_epoch_ends_at);
-    let remaining = u64::try_from(credit_end.saturating_sub(now)).unwrap_or(0);
-    let mut change = Change::new(pool, now);
-    change.weight(
-        i128::from(total)
-            .checked_mul(i128::from(remaining))
-            .ok_or(HexVaultError::ArithmeticOverflow)?,
-    )?;
+    // The stake leaves Tickets and the tree now and comes back with the reward
+    // at `settle_position`, so a stake placed and settled in one epoch leaves
+    // the draw where it was.
+    let mut change = Change::default();
     change.tickets(-i128::from(total))?;
     weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
 
@@ -292,7 +280,7 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
             .entries
             .checked_add(house_credit)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
-        let mut change = Change::new(pool, utils::now()?);
+        let mut change = Change::default();
         change.tickets(i128::from(house_credit))?;
         weight::apply(&ctx.accounts.weight_tree, pool, house, change)?;
     }
@@ -383,7 +371,7 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
             .entries
             .checked_add(credit)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
-        let mut change = Change::new(pool, utils::now()?);
+        let mut change = Change::default();
         change.tickets(i128::from(credit))?;
         weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
     }

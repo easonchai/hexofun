@@ -188,7 +188,7 @@ export async function fulfillRandomness(
 
 // --- The program's reduction of 64 randomness bytes (ADR 0019) --------------
 //
-// `vrf::unbiased_u64` and `unbiased_u128` hash all 64 bytes with SHA-256 and
+// `vrf::unbiased_u64` hashes all 64 bytes with SHA-256 and
 // sample the digest, so a test can no longer write the outcome into the first
 // bytes. It searches instead for randomness that reduces to the outcome it
 // wants. This mirrors `vrf.rs` line for line, tail re-derivation included.
@@ -218,19 +218,6 @@ export function unbiasedU64(randomness: Uint8Array, range: bigint): bigint {
   throw new Error("randomness rejected");
 }
 
-/** `vrf::unbiased_u128`. */
-export function unbiasedU128(randomness: Uint8Array, range: bigint): bigint {
-  const max = (1n << 128n) - 1n;
-  const limit = max - (max % range);
-  const base = sha256(randomness);
-  for (let counter = 0; counter < 256; counter += 1) {
-    const digest = counter === 0 ? base : rederive(base, counter);
-    const sample = leBig(digest.subarray(0, 16));
-    if (sample < limit) return sample % range;
-  }
-  throw new Error("randomness rejected");
-}
-
 function randomnessCandidate(n: number): Uint8Array {
   const bytes = new Uint8Array(64);
   new DataView(bytes.buffer).setBigUint64(0, BigInt(n), true);
@@ -254,7 +241,7 @@ export function randomnessFor(value: bigint | number, tiles = 36n): Uint8Array {
 export function randomnessForTarget(total: bigint, lo: bigint, hi: bigint): Uint8Array {
   for (let n = 0; n < 100_000; n += 1) {
     const candidate = randomnessCandidate(n);
-    const target = unbiasedU128(candidate, total);
+    const target = unbiasedU64(candidate, total);
     if (target >= lo && target < hi) return candidate;
   }
   throw new Error(`no randomness found for a target in [${lo}, ${hi})`);
@@ -864,19 +851,19 @@ export function setTreasuryAccountsMethod(
     .signers([admin]);
 }
 
-// --- Weight tree (yield-claimer ticket 08) -------------------------------------
+// --- Weight tree (yield-claimer tickets 08 and 19) ------------------------------
 //
 // A TypeScript port of the reads in `weight_tree.rs`: the same slot and idle
-// rules, so a test can ask what the tree says about a Player's Weight in the
+// rules, so a test can ask what the tree says about a Player's Tickets in the
 // current epoch or the one before it, and find the draw's winner.
 
 const TREE_HEADER = 56;
-const TREE_NODE = 72;
+const TREE_NODE = 56;
 
 export interface TreeSlot {
   stamp: bigint;
   base: bigint;
-  weight: bigint;
+  tickets: bigint;
 }
 export interface TreeNode {
   principalSum: bigint;
@@ -884,10 +871,6 @@ export interface TreeNode {
 }
 export interface TreeClock {
   current: bigint;
-  curStart: bigint;
-  curEnd: bigint;
-  prevStart: bigint;
-  prevEnd: bigint;
 }
 export interface TreeView {
   nodes: TreeNode[];
@@ -900,24 +883,12 @@ function parseSlot(data: Buffer, at: number): TreeSlot {
   return {
     stamp: data.readBigUInt64LE(at),
     base: data.readBigUInt64LE(at + 8),
-    weight: data.readBigUInt64LE(at + 16) | (data.readBigUInt64LE(at + 24) << 64n),
+    tickets: data.readBigUInt64LE(at + 16),
   };
 }
 
-export function treeClockOf(pool: {
-  currentEpochId: { toString(): string };
-  currentEpochStart: { toString(): string };
-  currentEpochEndsAt: { toString(): string };
-  previousEpochStart: { toString(): string };
-  previousEpochEndsAt: { toString(): string };
-}): TreeClock {
-  return {
-    current: big(pool.currentEpochId),
-    curStart: big(pool.currentEpochStart),
-    curEnd: big(pool.currentEpochEndsAt),
-    prevStart: big(pool.previousEpochStart),
-    prevEnd: big(pool.previousEpochEndsAt),
-  };
+export function treeClockOf(pool: { currentEpochId: { toString(): string } }): TreeClock {
+  return { current: big(pool.currentEpochId) };
 }
 
 export async function fetchTree(ctx: PoolCtx): Promise<TreeView> {
@@ -933,56 +904,49 @@ export async function fetchTree(ctx: PoolCtx): Promise<TreeView> {
     const at = TREE_HEADER + i * TREE_NODE;
     nodes.push({
       principalSum: data.readBigUInt64LE(at),
-      slots: [parseSlot(data, at + 8), parseSlot(data, at + 40)],
+      slots: [parseSlot(data, at + 8), parseSlot(data, at + 32)],
     });
   }
   return { nodes, clock: treeClockOf(pool), dataLen: data.length };
 }
 
-const elapsed = (from: bigint, to: bigint): bigint => (to > from ? to - from : 0n);
-
-function epochLength(clock: TreeClock, e: bigint): bigint {
-  if (e === clock.current) return elapsed(clock.curStart, clock.curEnd);
-  if (e + 1n === clock.current) return elapsed(clock.prevStart, clock.prevEnd);
-  throw new Error(`epoch ${e} is not readable at epoch ${clock.current}`);
-}
-
-/** One entry's Weight in epoch `e`, by the slot rule and then the idle rule. */
-function entryWeight(node: TreeNode, e: bigint, clock: TreeClock): bigint {
-  const len = epochLength(clock, e);
+/** One entry's Tickets in epoch `e`, by the slot rule and then the idle rule. */
+function entryTickets(node: TreeNode, e: bigint, clock: TreeClock): bigint {
+  if (e !== clock.current && e + 1n !== clock.current) {
+    throw new Error(`epoch ${e} is not readable at epoch ${clock.current}`);
+  }
   const slot = node.slots[Number(e % 2n)] as TreeSlot;
-  if (slot.stamp === e) return slot.weight;
+  if (slot.stamp === e) return slot.tickets;
   const next = node.slots[Number((e + 1n) % 2n)] as TreeSlot;
-  const base = next.stamp === e + 1n ? next.base : node.principalSum;
-  return base * len;
+  return next.stamp === e + 1n ? next.base : node.principalSum;
 }
 
-/** Every leaf's Weight in epoch `e`, leaf 1 first. */
-export function leafWeights(tree: TreeView, e: bigint): bigint[] {
+/** Every leaf's Tickets in epoch `e`, leaf 1 first. */
+export function leafTickets(tree: TreeView, e: bigint): bigint[] {
   const prefix = [0n];
   for (let i = 1; i <= tree.nodes.length; i += 1) {
     const low = i & -i;
-    prefix.push((prefix[i - low] as bigint) + entryWeight(tree.nodes[i - 1] as TreeNode, e, tree.clock));
+    prefix.push((prefix[i - low] as bigint) + entryTickets(tree.nodes[i - 1] as TreeNode, e, tree.clock));
   }
   return prefix.slice(1).map((p, i) => p - (prefix[i] as bigint));
 }
 
-/** The 1-based leaf whose range in `weights` holds `target`. */
-export function leafHolding(weights: bigint[], target: bigint): number {
+/** The 1-based leaf whose range in `tickets` holds `target`. */
+export function leafHolding(tickets: bigint[], target: bigint): number {
   let start = 0n;
-  for (let i = 0; i < weights.length; i += 1) {
-    const end = start + (weights[i] as bigint);
+  for (let i = 0; i < tickets.length; i += 1) {
+    const end = start + (tickets[i] as bigint);
     if (target >= start && target < end) return i + 1;
     start = end;
   }
   throw new Error(`no leaf holds ${target}`);
 }
 
-/** `owner`'s Weight in epoch `e` (the current epoch or the one before). */
-export async function weightOf(ctx: PoolCtx, owner: PublicKey, e: bigint): Promise<bigint> {
+/** `owner`'s Tickets in epoch `e` (the current epoch or the one before). */
+export async function ticketsOf(ctx: PoolCtx, owner: PublicKey, e: bigint): Promise<bigint> {
   const player = await program.account.player.fetch(playerPda(ctx.pool, owner));
   const tree = await fetchTree(ctx);
-  return leafWeights(tree, e)[player.leafIndex - 1] as bigint;
+  return leafTickets(tree, e)[player.leafIndex - 1] as bigint;
 }
 
 /** The owner of the leaf that holds epoch `e`'s drawn target. */
@@ -992,7 +956,7 @@ export async function drawnWinner(
   candidates: PublicKey[],
 ): Promise<PublicKey> {
   const epoch = await program.account.epoch.fetch(epochPda(ctx.pool, e));
-  const leaf = leafHolding(leafWeights(await fetchTree(ctx), e), big(epoch.target));
+  const leaf = leafHolding(leafTickets(await fetchTree(ctx), e), big(epoch.target));
   for (const owner of candidates) {
     const player = await program.account.player.fetch(playerPda(ctx.pool, owner));
     if (player.leafIndex === leaf) return owner;

@@ -212,7 +212,7 @@ Starts with `DEPLOY_PAUSED`.
 
 Starts with `WEIGHT_TREE_NEARLY_FULL`.
 
-1. `GET /status`'s `treeNodeCount` against `treeCapacity` (145,634 Players). Past the capacity
+1. `GET /status`'s `treeNodeCount` against `treeCapacity` (187,244 Players). Past the capacity
    deposits from a new wallet fail with `WeightTreeFull`. A second tree is out of scope for the
    current program, so this needs a design decision well before the last leaf is taken.
 

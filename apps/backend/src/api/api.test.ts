@@ -194,7 +194,7 @@ function tokenAccount(amount: bigint): AccountInfo<Buffer> {
  */
 function weightTreeData(): Buffer {
   const header = 56;
-  const nodeSize = 72;
+  const nodeSize = 56;
   const data = Buffer.alloc(header + 3 * nodeSize);
   data.writeUInt8(1, 8);
   data.writeBigUInt64LE(3n, 16);
@@ -202,7 +202,7 @@ function weightTreeData(): Buffer {
     const at = header + index * nodeSize;
     data.writeBigUInt64LE(principalSum, at);
     if (weight === null) return;
-    const slot = at + 8 + 32;
+    const slot = at + 8 + 24;
     data.writeBigUInt64LE(CURRENT_EPOCH, slot);
     data.writeBigUInt64LE(principalSum, slot + 8);
     data.writeBigUInt64LE(weight, slot + 16);
@@ -899,9 +899,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body.reserveFreeLiquidity).toBe(RESERVE_AVAILABLE.toString());
       expect(body.impaired).toBe(false);
       expect(body.deployPaused).toBe(false);
-      // Three leaves out of the 145,634 a tree holds.
+      // Three leaves out of the 187,244 a tree holds.
       expect(body.treeNodeCount).toBe("3");
-      expect(body.treeCapacity).toBe(145_634);
+      expect(body.treeCapacity).toBe(187_244);
       expect(body.treeUsedBps).toBe(0);
       assertNoLargeNumbers(body, "/status (live yield)");
     });

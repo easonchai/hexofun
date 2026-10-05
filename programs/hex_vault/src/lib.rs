@@ -233,7 +233,7 @@ pub mod hex_vault {
         epochs::fund_jackpot(ctx, amount)
     }
 
-    /// Operator-only (ticket 08): snapshots the ended epoch's Weight total and
+    /// Operator-only (ticket 08): snapshots the ended epoch's Ticket total and
     /// its prize, then asks the VRF for the draw, or rolls the epoch over.
     pub fn request_draw(ctx: Context<RequestDraw>, nonce: [u8; 32]) -> Result<()> {
         epochs::request_draw(ctx, nonce)

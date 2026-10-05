@@ -1,10 +1,10 @@
-// Epoch lifecycle: contiguous epochs, the Weight tree's per-Player Weight,
+// Epoch lifecycle: contiguous epochs, the Weight tree's per-Player Tickets,
 // request_draw, draw, payout to a player and to the House, rollover, and the
 // closing invariant sweep (spec §2.3 "Epochs", §2.4 invariants 1-2 and 7-8).
 //
 // Registration is gone (yield-claimer tickets 04 and 08): every Player is in
 // the draw through the Weight tree, which these tests read through
-// `weightOf` and `drawnWinner` in the helpers.
+// `ticketsOf` and `drawnWinner` in the helpers.
 //
 // Epochs here run a handful of seconds (via the `epochSeconds` override) so
 // tests sleep through them instead of a day. Each test airdrops, mints, and
@@ -22,7 +22,7 @@ import {
   fetchTree,
   findEvent,
   fulfillRandomness,
-  leafWeights,
+  leafTickets,
   onChainNowSeconds,
   playerPda,
   positionPda,
@@ -37,9 +37,8 @@ import {
   sleep,
   sleepUntilOnChain,
   testNonce,
-  txInfo,
   vrfSeed,
-  weightOf,
+  ticketsOf,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -234,15 +233,15 @@ async function requestDraw(
 }
 
 /** Draws `epochId` with randomness that lands the target in `owner`'s leaf, then
- *  returns the Epoch. Every Player holds Weight now, so a test that cares who wins
+ *  returns the Epoch. Every Player holds Tickets, so a test that cares who wins
  *  has to pick the randomness. */
 async function drawFor(pool: PoolCtx, epochId: bigint, owner: PublicKey) {
   const drawing = await fetchEpoch(pool, epochId);
   const player = await fetchPlayer(pool, owner);
-  const weights = leafWeights(await fetchTree(pool), epochId);
+  const held = leafTickets(await fetchTree(pool), epochId);
   const leaf = player.leafIndex;
-  const lo = weights.slice(0, leaf - 1).reduce((s, w) => s + w, 0n);
-  const hi = lo + (weights[leaf - 1] as bigint);
+  const lo = held.slice(0, leaf - 1).reduce((s, t) => s + t, 0n);
+  const hi = lo + (held[leaf - 1] as bigint);
   const randomness = randomnessForTarget(BigInt(drawing.registeredWeight.toString()), lo, hi);
   await draw(pool, epochId, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed), randomness));
   return fetchEpoch(pool, epochId);
@@ -446,7 +445,7 @@ async function fetchEpoch(pool: PoolCtx, epochId: bigint) {
 
 describe("epochs", () => {
   it(
-    "B depositing at half the epoch holds roughly half A's weight",
+    "B depositing at half the epoch holds the same Tickets as A",
     async () => {
       const pool = await setupPool({ epochSeconds: 12 });
       // Wallet setup (airdrop, mint, ATA) is real wall-clock work; done
@@ -459,40 +458,27 @@ describe("epochs", () => {
       const epoch1Open = await fetchEpoch(pool, 1n);
       // Polls the validator's actual on-chain clock for the midpoint
       // instead of comparing an on-chain deadline to `Date.now()`: the two
-      // clocks drift apart, so a wall-clock sleep landed both deposits in
-      // the same early sliver of the epoch rather than either side of its
-      // midpoint.
+      // clocks drift apart.
       const startsAtSec = Number(epoch1Open.startsAt.toString());
       const endsAtSec = Number(epoch1Open.endsAt.toString());
       const midpointSec = Math.floor((startsAtSec + endsAtSec) / 2);
 
-      const timeA = (await txInfo(await deposit(pool, a, 5_000_000n))).time;
+      await deposit(pool, a, 5_000_000n);
       await sleepUntilOnChain(midpointSec);
-      const timeB = (await txInfo(await deposit(pool, b, 5_000_000n))).time;
+      await deposit(pool, b, 5_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
 
-      const weightA = await weightOf(pool, a.keypair.publicKey, 1n);
-      const weightB = await weightOf(pool, b.keypair.publicKey, 1n);
-
-      // Exact recomputation from the deposit's own block time removes any
-      // dependence on hitting the sleep timings precisely: a deposit credits
-      // its Tickets for every second from then to the epoch's end at once.
-      const endsAt = BigInt(epoch1Open.endsAt.toString());
-      expect(weightA).toBe(5_000_000n * (endsAt - timeA));
-      expect(weightB).toBe(5_000_000n * (endsAt - timeB));
-
-      // And the human-readable check the ticket asks for: roughly 2:1,
-      // within a second of clock tolerance either way.
-      const ratio = Number(weightA) / Number(weightB);
-      expect(ratio).toBeGreaterThanOrEqual(1.4);
-      expect(ratio).toBeLessThan(2.7);
+      // The draw selects over Tickets held at the epoch's end, so the second
+      // a deposit lands in makes no difference.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(5_000_000n);
+      expect(await ticketsOf(pool, b.keypair.publicKey, 1n)).toBe(5_000_000n);
     },
     TIMEOUT,
   );
 
   it(
-    "a player idle through a whole epoch holds principal x epoch length",
+    "a player idle through a whole epoch holds their principal",
     async () => {
       const pool = await setupPool({ epochSeconds: 5 });
       await beginEpoch(pool, 0n); // epoch 1 open
@@ -503,62 +489,52 @@ describe("epochs", () => {
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, epoch 2 open
 
       // Player does nothing at all during epoch 2.
-      const epoch2 = await fetchEpoch(pool, 2n);
       await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch2 ended, epoch 3 open
 
-      const weight = await weightOf(pool, a.keypair.publicKey, 2n);
-
-      const epochLen = BigInt(epoch2.endsAt.toString()) - BigInt(epoch2.startsAt.toString());
-      expect(weight).toBe(4_000_000n * epochLen);
+      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(4_000_000n);
     },
     TIMEOUT,
   );
 
   it(
-    "a player acting in N+1 leaves the Weight epoch N ended with where it was, unaffected by a later deposit",
+    "a player acting in N+1 leaves the Tickets epoch N ended with where they were, unaffected by a later deposit",
     async () => {
       const pool = await setupPool({ epochSeconds: 5 });
       await beginEpoch(pool, 0n); // epoch 1 open
 
       const a = await pool.fundedWallet(10_000_000n);
-      const depositTime = (await txInfo(await deposit(pool, a, 3_000_000n))).time;
+      await deposit(pool, a, 3_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, epoch 2 open
-      const endsAt = BigInt((await fetchEpoch(pool, 1n)).endsAt.toString());
-      const before = await weightOf(pool, a.keypair.publicKey, 1n);
-      expect(before).toBe(3_000_000n * (endsAt - depositTime));
+      const before = await ticketsOf(pool, a.keypair.publicKey, 1n);
+      expect(before).toBe(3_000_000n);
 
       // Acting inside epoch 2, before anything draws for epoch 1.
       await deposit(pool, a, 1_000_000n);
-      expect(await weightOf(pool, a.keypair.publicKey, 1n)).toBe(before);
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(before);
 
       // A further deposit in epoch 2 does not move it either.
       await deposit(pool, a, 1_000_000n);
-      expect(await weightOf(pool, a.keypair.publicKey, 1n)).toBe(before);
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(before);
     },
     TIMEOUT,
   );
 
   it(
-    "a player who requests their whole balance mid-epoch keeps the weight they earned",
+    "a player who requests their whole balance mid-epoch leaves the epoch with no Tickets",
     async () => {
       const pool = await setupPool({ epochSeconds: 20 });
       const a = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n);
 
-      const depositTime = (await txInfo(await deposit(pool, a, 5_000_000n))).time;
-      await sleep(2_000);
-      const requestTime = (await txInfo(await requestWithdraw(pool, a, 5_000_000n))).time;
+      await deposit(pool, a, 5_000_000n);
+      await requestWithdraw(pool, a, 5_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
 
-      const weight = await weightOf(pool, a.keypair.publicKey, 1n);
-
-      // Tickets were 0 for the rest of the epoch, so no further weight
-      // accrues past the withdrawal: what was earned between the two
-      // transactions, exactly.
-      expect(weight).toBe(5_000_000n * (requestTime - depositTime));
-      expect(weight > 0n).toBe(true);
+      // The request took every Ticket out before the epoch ended, and the
+      // time held in between earns nothing.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(0n);
     },
     TIMEOUT,
   );
@@ -588,7 +564,7 @@ describe("epochs", () => {
   );
 
   it(
-    "request_draw with zero total weight rolls over and leaves the jackpot in the vault",
+    "request_draw with zero Tickets in total rolls over and leaves the jackpot in the vault",
     async () => {
       const pool = await setupPool({ epochSeconds: 4 });
       await beginEpoch(pool, 0n); // epoch 1 open
@@ -596,7 +572,7 @@ describe("epochs", () => {
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 5_000_000n);
 
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, nobody holds Weight
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, nobody holds Tickets
 
       await requestDraw(pool, 1n);
 
@@ -628,7 +604,7 @@ describe("epochs", () => {
       expect(epoch1.jackpotAmount.toString()).toBe("1999999");
       const event = await findEvent<{ epochId: BN; jackpotAmount: BN }>(sig, "epochRolledOver");
       expect(event?.epochId.toString()).toBe("1");
-      // Weight was not the reason: the epoch had a depositor.
+      // Tickets were not the reason: the epoch had a depositor.
       expect(BigInt(epoch1.registeredWeight.toString()) > 0n).toBe(true);
 
       // The prize stayed put, so one more unit clears the floor next epoch.
@@ -727,7 +703,7 @@ describe("epochs", () => {
       expect(epochAfterClose.status).toBe(epoch_status.DRAWING);
       // The snapshot is the tree's total for the epoch: `a` holds all of it.
       expect(epochAfterClose.registeredWeight.toString()).toBe(
-        (await weightOf(pool, a.keypair.publicKey, 1n)).toString(),
+        (await ticketsOf(pool, a.keypair.publicKey, 1n)).toString(),
       );
 
       const randomness = await fulfillRandomness(Uint8Array.from(epochAfterClose.vrfSeed));
@@ -830,11 +806,11 @@ describe("epochs", () => {
       const entriesSum = BigInt(playerA.entries.toString()) + BigInt(house.entries.toString());
       expect(entriesSum).toBe(BigInt(poolAfterForfeit.totalPrincipal.toString()));
 
-      // --- The House now holds forfeited Tickets, so it holds Weight in the
+      // --- The House now holds forfeited Tickets, so it holds them in the
       // tree too. Fund, request the draw, land the target in the House's leaf,
       // pay out, and check the split.
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      expect((await weightOf(pool, pool.operator.publicKey, 1n)) > 0n).toBe(true);
+      expect(await ticketsOf(pool, pool.operator.publicKey, 1n)).toBe(6_000_000n);
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
@@ -918,7 +894,7 @@ describe("epochs", () => {
     async () => {
       const pool = await setupPool({ epochSeconds: 6 });
       // Both deposit before the first epoch opens, so each holds the whole
-      // of epoch 1 and cannot come out at zero weight.
+      // of epoch 1 and cannot come out with zero Tickets.
       const a = await pool.fundedWallet(10_000_000n);
       const b = await pool.fundedWallet(10_000_000n);
       const funder = await pool.fundedWallet(10_000_000n);
@@ -1247,8 +1223,8 @@ describe("epochs", () => {
       const pool = await setupPool({ epochSeconds: 8, epochAnchor: anchor });
       const a = await pool.fundedWallet(10_000_000n);
 
-      // Deposited before the first epoch opens, so this player holds Entries
-      // for every second of the stub whatever length it turns out to be.
+      // Deposited before the first epoch opens, so this player holds its whole
+      // Principal as Tickets in epoch 1.
       await deposit(pool, a, 4_000_000n);
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
@@ -1266,10 +1242,8 @@ describe("epochs", () => {
       expect((await fetchEpoch(pool, 1n)).status).toBe(epoch_status.ENDED);
 
       // Epoch 1, skipped past and not orphaned, still runs its own draw and
-      // pays out: its Weight is the whole stub, and it stays readable while
-      // epoch 2 is current.
-      const stub = BigInt(epoch1.endsAt.toString()) - BigInt(epoch1.startsAt.toString());
-      expect(await weightOf(pool, a.keypair.publicKey, 1n)).toBe(4_000_000n * stub);
+      // pays out, and stays readable while epoch 2 is current.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(4_000_000n);
       await requestDraw(pool, 1n);
       await drawFor(pool, 1n, a.keypair.publicKey);
       await payout(pool, 1n, a.keypair.publicKey);
@@ -1286,7 +1260,7 @@ describe("epochs", () => {
       const a = await pool.fundedWallet(10_000_000n);
 
       await beginEpoch(pool, 0n);
-      const depositTime = (await txInfo(await deposit(pool, a, 5_000_000n))).time;
+      await deposit(pool, a, 5_000_000n);
 
       const epoch1 = await fetchEpoch(pool, 1n);
       const startsAt = BigInt(epoch1.startsAt.toString());
@@ -1294,11 +1268,9 @@ describe("epochs", () => {
       expect(endsAt).toBe(BigInt(anchor)); // the first grid point after bootstrap
       expect(Number(endsAt - startsAt)).toBeGreaterThan(0);
       expect(Number(endsAt - startsAt)).toBeLessThan(30);
-      // The deposit's Weight covers only the stub's own length, read from
-      // the Weight tree: never a full 30 second period.
-      const weight = await weightOf(pool, a.keypair.publicKey, 1n);
-      expect(weight).toBe(5_000_000n * (endsAt - depositTime));
-      expect(weight).toBeLessThan(5_000_000n * 30n);
+      // The stub is a full epoch for the draw: the deposit holds all of its
+      // Principal as Tickets, however short the stub is.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(5_000_000n);
     },
     TIMEOUT,
   );
@@ -1320,7 +1292,7 @@ describe("epochs", () => {
       const epoch2 = await fetchEpoch(pool, 2n);
       expect(Number(epoch2.endsAt) - Number(epoch2.startsAt)).toBe(8);
 
-      const depositTime = (await txInfo(await deposit(pool, a, 5_000_000n))).time;
+      await deposit(pool, a, 5_000_000n);
 
       await setParams(pool, 24); // the daily-to-weekly switch, scaled down
 
@@ -1330,11 +1302,8 @@ describe("epochs", () => {
       expect((Number(epoch3.endsAt) - anchor) % 24).toBe(0);
       expect(Number(epoch3.endsAt) - Number(epoch3.startsAt)).toBeLessThan(24);
 
-      // Epoch 2's Weight ends where its own Epoch account says it did, not
-      // 24s after it started.
-      expect(await weightOf(pool, a.keypair.publicKey, 2n)).toBe(
-        5_000_000n * (BigInt(epoch2.endsAt.toString()) - depositTime),
-      );
+      // Epoch 2 stays readable behind the short transition epoch.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(5_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 3n)); // epoch 4: the new cadence
       const epoch4 = await fetchEpoch(pool, 4n);
@@ -1461,7 +1430,7 @@ describe("epochs", () => {
       // yield-claimer ticket 11, ticket 02's note: the epoch boundary already
       // put the staked Tickets back (a stake lowers Tickets, never Principal),
       // so a refund after the rollover would count them twice. The Player
-      // loses nothing, and the tree's Weight for the new epoch must not move.
+      // loses nothing, and the tree's Tickets for the new epoch must not move.
       const pool = await setupPool({ epochSeconds: 20, roundSeconds: 6, closeBuffer: 1, vrfTimeout: 2 });
       const alice = await pool.fundedWallet(10_000_000n);
 
@@ -1491,7 +1460,7 @@ describe("epochs", () => {
       expect(voided.status).toBe(round_status.VOIDED);
       expect(voided.houseCut.toString()).toBe("0");
 
-      const weightBefore = await weightOf(pool, alice.keypair.publicKey, 2n);
+      const ticketsBefore = await ticketsOf(pool, alice.keypair.publicKey, 2n);
       const sig = await settlePosition(pool, 1n, alice.keypair.publicKey);
       const event = await findEvent<{ reward: BN; refund: BN }>(sig, "positionSettled");
       expect(event?.refund.toString()).toBe("0");
@@ -1499,7 +1468,7 @@ describe("epochs", () => {
 
       const player = await fetchPlayer(pool, alice.keypair.publicKey);
       expect(player.entries.toString()).toBe("5000000"); // back at Principal, once
-      expect(await weightOf(pool, alice.keypair.publicKey, 2n)).toBe(weightBefore);
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(ticketsBefore);
       expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
     },
     TIMEOUT,

@@ -30,14 +30,13 @@ import {
   roundPda,
   setupPool,
   setVenueRate,
-  sleep,
   stubVenueValue,
   testNonce,
   testSyncMethod,
   txInfo,
   vrfSeed,
   waitPastLastSync,
-  weightOf,
+  ticketsOf,
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
   type PoolCtx,
@@ -466,7 +465,7 @@ describe("instant withdraw", () => {
   );
 
   it(
-    "earns Weight only for the seconds held when a deposit and an instant exit fall inside one epoch",
+    "leaves no Tickets in the tree when a deposit and an instant exit fall inside one epoch",
     async () => {
       const ctx = await setupPool({ epochSeconds: 120 });
       const a = await ctx.fundedWallet(10n * USDC);
@@ -483,12 +482,10 @@ describe("instant withdraw", () => {
         .signers([ctx.operator])
         .rpc();
 
-      const t1 = (await txInfo(await deposit(ctx, a, 5n * USDC))).time;
-      await sleep(3_000);
-      const t2 = (await txInfo(await instantWithdraw(ctx, a, 5n * USDC))).time;
+      await deposit(ctx, a, 5n * USDC);
+      await instantWithdraw(ctx, a, 5n * USDC);
 
-      expect(t2 > t1).toBe(true);
-      expect(await weightOf(ctx, a.keypair.publicKey, 1n)).toBe(5n * USDC * (t2 - t1));
+      expect(await ticketsOf(ctx, a.keypair.publicKey, 1n)).toBe(0n);
       expect(big((await fetchPlayer(ctx, a)).principal)).toBe(0n);
     },
     TIMEOUT,

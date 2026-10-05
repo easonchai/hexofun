@@ -59,15 +59,14 @@ pub struct Pool {
     /// 0 before the first epoch.
     pub current_epoch_id: u64,
     pub current_epoch_start: i64,
-    /// End of the current epoch, copied from its `Epoch.ends_at`. `touch`
-    /// reads it instead of adding `epoch_seconds`, so changing that
-    /// parameter never moves an epoch that has already begun.
+    /// End of the current epoch, copied from its `Epoch.ends_at`, so changing
+    /// `epoch_seconds` never moves an epoch that has already begun. Nothing in
+    /// the tree or `touch` reads it since ticket 19.
     pub current_epoch_ends_at: i64,
     /// Start of the epoch before the current one. Usually that is
     /// `current_epoch_start` too, except when `begin_epoch` skipped a gap.
     pub previous_epoch_start: i64,
-    /// End of the epoch before the current one, where `touch` freezes the
-    /// weight a player earned in it.
+    /// End of the epoch before the current one.
     pub previous_epoch_ends_at: i64,
     pub next_round_id: u64,
     /// 0 when no round is Open or Requested.
@@ -191,14 +190,17 @@ pub struct Epoch {
     pub ends_at: i64,
     /// [`EpochStatus`]
     pub status: u8,
-    pub registered_weight: u128,
+    /// The Weight tree's root for this epoch, snapshotted by `request_draw`:
+    /// every Player's Tickets at the epoch's end. Named for the registration
+    /// it replaced.
+    pub registered_weight: u64,
     pub registered_count: u32,
     /// Jackpot vault balance snapshotted at the draw request.
     pub jackpot_amount: u64,
     pub vrf_seed: [u8; 32],
     pub requested_at: i64,
     /// Point in `registered_weight` selected by the draw.
-    pub target: u128,
+    pub target: u64,
     pub winner: Pubkey,
     pub bump: u8,
     /// When `draw` landed. 0 until then. `rollover_epoch` measures
@@ -321,9 +323,8 @@ pub struct Position {
 }
 
 /// Bytes per Weight tree node: `principal_sum` plus two epoch-parity slots
-/// of `stamp`, `base` and a `u128` weight stored as two `u64` halves, which
-/// keeps the node 8-aligned and 72 bytes on host and SBF alike (ticket 02).
-pub const WEIGHT_TREE_NODE_SIZE: u32 = 72;
+/// of `stamp`, `base` and a `u64` Ticket count, all 8-aligned (tickets 08, 19).
+pub const WEIGHT_TREE_NODE_SIZE: u32 = 56;
 
 /// Header of the pool's Fenwick weight tree (ADR 0018). The nodes follow it
 /// in the same account, `node_count` of them, `node_size` bytes each,
@@ -392,7 +393,7 @@ mod tests {
     #[test]
     fn account_sizes_are_pinned_to_their_literal_byte_counts() {
         assert_eq!(Pool::INIT_SPACE, 879);
-        assert_eq!(Epoch::INIT_SPACE, 223);
+        assert_eq!(Epoch::INIT_SPACE, 207);
         assert_eq!(Player::INIT_SPACE, 199);
         assert_eq!(Round::INIT_SPACE, 456);
         assert_eq!(Position::INIT_SPACE, 114);

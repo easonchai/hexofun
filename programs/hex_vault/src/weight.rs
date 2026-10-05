@@ -1,4 +1,4 @@
-//! The pool's Weight tree account (ADR 0018, yield-claimer ticket 08).
+//! The pool's Weight tree account (ADR 0018, yield-claimer tickets 08 and 19).
 //!
 //! `weight_tree.rs` is the pure Fenwick arithmetic on a slice of nodes. This
 //! module maps the pool's zero-copy account onto that slice and gives each
@@ -6,7 +6,7 @@
 //! Player's Principal and Tickets, [`apply`] to write it in one walk of the
 //! update path, and the draw's reads ([`root`], [`check_winner`]).
 //!
-//! The account is a 48-byte header and then `node_count` nodes of 72 bytes.
+//! The account is a 48-byte header and then `node_count` nodes of 56 bytes.
 //! The first deposit by a Player grows it by one node ([`append_leaves`]) and
 //! the depositor pays the rent for it. The House takes leaf 1 at `create_pool`.
 
@@ -33,33 +33,19 @@ fn err(e: TreeError) -> Error {
 pub fn clock(pool: &Pool) -> Clock {
     Clock {
         current: pool.current_epoch_id,
-        cur_start: pool.current_epoch_start,
-        cur_end: pool.current_epoch_ends_at,
-        prev_start: pool.previous_epoch_start,
-        prev_end: pool.previous_epoch_ends_at,
     }
 }
 
-/// What one instruction does to one Player's leaf. Every figure shares the
-/// instruction's `now`, so the changes are summed here and written in one
-/// walk of the update path by [`apply`], whatever order they happen in.
+/// What one instruction does to one Player's leaf: Principal and Tickets, each
+/// a signed sum. The changes are collected here and written in one walk of the
+/// update path by [`apply`], whatever order they happen in.
+#[derive(Default)]
 pub struct Change {
-    clock: Clock,
-    now: i64,
     d_principal: i128,
-    d_weight: i128,
+    d_tickets: i128,
 }
 
 impl Change {
-    pub fn new(pool: &Pool, now: i64) -> Self {
-        Change {
-            clock: clock(pool),
-            now,
-            d_principal: 0,
-            d_weight: 0,
-        }
-    }
-
     /// Principal added (positive) or removed.
     pub fn principal(&mut self, delta: i128) -> Result<()> {
         self.d_principal = self
@@ -69,17 +55,10 @@ impl Change {
         Ok(())
     }
 
-    /// Tickets added or removed. They earn Weight from now to the epoch's end
-    /// at once, which is zero once that end has passed.
+    /// Tickets added or removed.
     pub fn tickets(&mut self, delta: i128) -> Result<()> {
-        let credit = self.clock.forward(delta, self.now).map_err(err)?;
-        self.weight(credit)
-    }
-
-    /// Weight added or removed outright, for `buy_position`'s round pre-credit.
-    pub fn weight(&mut self, delta: i128) -> Result<()> {
-        self.d_weight = self
-            .d_weight
+        self.d_tickets = self
+            .d_tickets
             .checked_add(delta)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
         Ok(())
@@ -130,7 +109,7 @@ pub fn apply(
     player: &Player,
     change: Change,
 ) -> Result<()> {
-    if change.d_principal == 0 && change.d_weight == 0 {
+    if change.d_principal == 0 && change.d_tickets == 0 {
         return Ok(());
     }
     let info = tree_account.to_account_info();
@@ -140,15 +119,15 @@ pub fn apply(
         nodes,
         player.leaf_index as usize,
         change.d_principal,
-        change.d_weight,
+        change.d_tickets,
         &clock(pool),
     )
     .map_err(err)
 }
 
-/// Total Weight of every leaf in epoch `epoch_id`, which has to be the current
-/// epoch or the one before it.
-pub fn root(tree_account: &AccountLoader<WeightTree>, pool: &Pool, epoch_id: u64) -> Result<u128> {
+/// Total Tickets of every leaf in epoch `epoch_id`, which has to be the
+/// current epoch or the one before it.
+pub fn root(tree_account: &AccountLoader<WeightTree>, pool: &Pool, epoch_id: u64) -> Result<u64> {
     let info = tree_account.to_account_info();
     let data = info.try_borrow_data()?;
     let nodes = nodes_ref(&data)?;
@@ -162,7 +141,7 @@ pub fn check_winner(
     pool: &Pool,
     winner: &Player,
     epoch_id: u64,
-    target: u128,
+    target: u64,
 ) -> Result<()> {
     let info = tree_account.to_account_info();
     let data = info.try_borrow_data()?;
@@ -173,7 +152,7 @@ pub fn check_winner(
     Ok(())
 }
 
-/// Grows the tree by `count` zero-Weight leaves, `payer` paying the rent for
+/// Grows the tree by `count` zero-Ticket leaves, `payer` paying the rent for
 /// the bytes, and returns the first new leaf's 1-based index. Fails with
 /// `WeightTreeFull` before anything changes if the account would pass 10 MiB.
 pub fn append_leaves<'info>(

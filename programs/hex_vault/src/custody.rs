@@ -472,7 +472,6 @@ pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
 }
 
 pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Result<()> {
-    let now = utils::now()?;
     let a = &mut *ctx.accounts;
     let venue = Venue {
         program: &a.klend_program,
@@ -493,7 +492,7 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
     player.init_if_fresh(a.owner.key(), pool, ctx.bumps.player);
     touch(player, pool);
     let owed = settle_before_growth(pool, player)?;
-    let mut change = Change::new(pool, now);
+    let mut change = Change::default();
     change.settled(owed)?;
 
     require!(!player.is_house, HexVaultError::HouseCannotDeposit);
@@ -583,7 +582,7 @@ pub fn request_withdraw<'info>(
     touch(player, pool);
     // Yield earned so far joins Principal first, so it can be requested too.
     let owed = settle(pool, player)?;
-    let mut change = Change::new(pool, now);
+    let mut change = Change::default();
     change.settled(owed)?;
 
     // Invariant 3: a withdrawal is never blocked by `paused`.
@@ -735,7 +734,6 @@ pub fn instant_withdraw<'info>(
     ctx: Context<'info, InstantWithdraw<'info>>,
     amount: u64,
 ) -> Result<()> {
-    let now = utils::now()?;
     let a = &mut *ctx.accounts;
     let venue = Venue {
         program: &a.klend_program,
@@ -747,7 +745,7 @@ pub fn instant_withdraw<'info>(
     let (_, read) = venue::sync(&mut a.pool, &venue)?;
     touch(&mut a.player, &a.pool);
     let owed = settle(&mut a.pool, &mut a.player)?;
-    let mut change = Change::new(&a.pool, now);
+    let mut change = Change::default();
     change.settled(owed)?;
 
     require!(amount > 0, HexVaultError::ZeroAmount);
@@ -1293,7 +1291,6 @@ pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs
 /// "emergency_withdraw"). House is skipped: its principal is protocol money
 /// and leaves through `sweep_house` instead.
 pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) -> Result<()> {
-    let now = utils::now()?;
     let a = &mut *ctx.accounts;
     let venue = Venue {
         program: &a.klend_program,
@@ -1308,7 +1305,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
     touch(player, pool);
     // Yield earned so far is paid out with the Principal, in this call.
     let owed = settle(pool, player)?;
-    let mut change = Change::new(pool, now);
+    let mut change = Change::default();
     change.settled(owed)?;
 
     require!(pool.shutdown, HexVaultError::PoolNotShutDown);
@@ -1507,7 +1504,7 @@ pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         .entries
         .checked_add(tickets)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let mut change = Change::new(pool, utils::now()?);
+    let mut change = Change::default();
     change.tickets(i128::from(tickets))?;
     weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
 
@@ -1620,7 +1617,7 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
         .entries
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let mut change = Change::new(pool, utils::now()?);
+    let mut change = Change::default();
     change.tickets(i128::from(amount))?;
     weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
 

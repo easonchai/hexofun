@@ -786,7 +786,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * index point, at most one a minute, stamped with the pool's own sync time;
    * and the Weight tree's header and the root Weight of the current epoch.
    *
-   * ponytail: the tree read is the whole account, about 72 bytes a Player, so
+   * ponytail: the tree read is the whole account, about 56 bytes a Player, so
    * 10,000 Players is 720 KB per Pool change. Read the header and the
    * root's O(log n) nodes with `dataSlice` instead once that shows in the RPC
    * bill. A failed read leaves the last mirrored state and is logged, so a
@@ -811,8 +811,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       const info = await this.chain.connection.getAccountInfo(pool.weightTree);
       if (info === null) return;
       const epochId = BigInt(pool.currentEpochId.toString());
-      const length = BigInt(pool.currentEpochEndsAt.toString()) - BigInt(pool.currentEpochStart.toString());
-      const prefix = prefixWeights(readNodes(info.data), epochId, length > 0n ? length : 0n);
+      const prefix = prefixWeights(readNodes(info.data), epochId);
       const state = {
         nodeCount: BigInt(nodeCount(info.data)),
         epochId,

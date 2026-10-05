@@ -173,8 +173,8 @@ pub struct JackpotFunded {
 #[event]
 pub struct EpochDrawn {
     pub epoch_id: u64,
-    pub target: u128,
-    pub registered_weight: u128,
+    pub target: u64,
+    pub registered_weight: u64,
 }
 
 #[event]
