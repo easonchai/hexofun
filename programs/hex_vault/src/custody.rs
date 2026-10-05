@@ -23,6 +23,8 @@ use crate::events::{
     VenueDeployed, WithdrawRequested, Withdrawn,
     // yield-claimer ticket 07
     Harvested, TreasuryAccountsSet, VenueRecalled,
+    // yield-claimer ticket 09
+    InstantWithdrawn,
 };
 use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
 use crate::sync::{settle, settle_before_growth};
@@ -685,6 +687,134 @@ pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
         amount: pending,
         principal: player.principal,
         entries: player.entries,
+    });
+    Ok(())
+}
+
+/// Pays a withdrawal in the same transaction (yield-claimer ticket 09, ADR
+/// 0017). Signed by the Player's owner. Syncs and settles first, so the yield
+/// earned up to this second leaves with the Principal.
+///
+/// The Player must hold Tickets of at least `amount`. Without that rule a
+/// Player who lost Tickets in a round could withdraw and deposit again and get
+/// them back, and the pool's Tickets would grow without limit. Principal
+/// without Tickets leaves through `request_withdraw`.
+///
+/// Free idle is the vault balance minus Pending withdrawals, so USDC queued for
+/// a payout is never spent here. When free idle is short the gap is redeemed
+/// from the venue in this instruction. A venue that cannot cover the gap fails
+/// with `VenueIlliquid` before the redeem CPI, and nothing changes.
+///
+/// Allowed while paused. After Shutdown `emergency_withdraw` is the path.
+pub fn instant_withdraw<'info>(
+    ctx: Context<'info, InstantWithdraw<'info>>,
+    amount: u64,
+) -> Result<()> {
+    let now = utils::now()?;
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+    touch(&mut a.player, &a.pool);
+    let owed = settle(&mut a.pool, &mut a.player)?;
+    let mut change = Change::new(&a.pool, now);
+    change.settled(owed)?;
+
+    require!(amount > 0, HexVaultError::ZeroAmount);
+    require!(!a.pool.shutdown, HexVaultError::PoolShutDown);
+    // Ticket 10 replaces this with the haircut payout while impaired.
+    require!(!a.pool.impaired, HexVaultError::PoolImpaired);
+    require!(
+        a.player.principal >= amount,
+        HexVaultError::InsufficientPrincipal
+    );
+    require!(
+        a.player.entries >= amount,
+        HexVaultError::InsufficientTickets
+    );
+
+    // Saturating: a vault that holds less than is queued has no free idle, and
+    // the whole amount is the gap.
+    let free_idle = a
+        .principal_vault
+        .amount
+        .saturating_sub(a.pool.pending_withdrawals);
+    let gap = amount.saturating_sub(free_idle);
+    if gap > 0 {
+        // The venue's own value, not the booked one, as in `recall`. The
+        // backing also refuses a gap above the reserve's free liquidity before
+        // its CPI.
+        require!(gap <= read, HexVaultError::VenueIlliquid);
+        let before = a.principal_vault.amount;
+        let funds = Funds {
+            vault: &a.principal_vault,
+            mint: &a.accepted_mint,
+            token_program: &a.token_program,
+        };
+        venue::redeem(&a.pool, &venue, &funds, gap)?;
+        let after = venue::value(&a.pool, &venue)?;
+        let fall = read
+            .checked_sub(after)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        a.principal_vault.reload()?;
+        let received = a.principal_vault.amount.saturating_sub(before);
+        require!(received >= gap, HexVaultError::VenueShortReturn);
+        // Book the fall now so the redeem is not a loss at the next sync. What
+        // the value fell by beyond what arrived is rounding dust, charged to
+        // the fee owed and floored at zero, as in `recall`.
+        a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
+        a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(gap));
+    }
+
+    a.player.principal = a
+        .player
+        .principal
+        .checked_sub(amount)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    a.player.entries = a
+        .player
+        .entries
+        .checked_sub(amount)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    a.pool.total_principal = a
+        .pool
+        .total_principal
+        .checked_sub(amount)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    change.principal(-i128::from(amount))?;
+    change.tickets(-i128::from(amount))?;
+    weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
+
+    let pool_id_bytes = a.pool.pool_id.to_le_bytes();
+    let pool_bump = [a.pool.bump];
+    let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
+    token_interface::transfer_checked(
+        CpiContext::new_with_signer(
+            a.token_program.key(),
+            TransferChecked {
+                from: a.principal_vault.to_account_info(),
+                mint: a.accepted_mint.to_account_info(),
+                to: a.owner_token.to_account_info(),
+                authority: a.pool.to_account_info(),
+            },
+            &[signer_seeds],
+        ),
+        amount,
+        a.accepted_mint.decimals,
+    )?;
+
+    emit!(InstantWithdrawn {
+        owner: a.owner.key(),
+        amount,
+        redeemed: gap,
+        settled: owed,
+        principal: a.player.principal,
+        entries: a.player.entries,
     });
     Ok(())
 }
@@ -1747,6 +1877,66 @@ pub struct RequestWithdraw<'info> {
     /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
     #[account(mut)]
     pub klend_ctoken: UncheckedAccount<'info>,
+}
+
+/// Signed by the Player's owner, who is paid straight to `owner_token`. The
+/// venue accounts are for sync and the redeem; a backing's extras go in
+/// `remaining_accounts`.
+#[derive(Accounts)]
+pub struct InstantWithdraw<'info> {
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = weight_tree,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
+        bump = player.bump,
+    )]
+    pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(
+        mut,
+        token::mint = accepted_mint,
+        token::authority = owner,
+        token::token_program = token_program,
+    )]
+    pub owner_token: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL, pool.key().as_ref()],
+        bump = pool.principal_vault_bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
+
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]

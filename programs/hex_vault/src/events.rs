@@ -280,3 +280,17 @@ pub struct TreasuryAccountsSet {
     pub treasury: Pubkey,
     pub buyback_reserve: Pubkey,
 }
+
+/// `instant_withdraw` paid `amount` to the owner in the same transaction
+/// (yield-claimer ticket 09). `redeemed` is what it took from the venue to
+/// cover free idle, `settled` the yield that joined Principal first.
+/// `principal` and `entries` are the Player's balances afterwards.
+#[event]
+pub struct InstantWithdrawn {
+    pub owner: Pubkey,
+    pub amount: u64,
+    pub redeemed: u64,
+    pub settled: u64,
+    pub principal: u64,
+    pub entries: u64,
+}

@@ -200,4 +200,8 @@ pub enum HexVaultError {
     ReserveUnreadable,
     #[msg("a klend account does not match the reserve it belongs to")]
     KlendAccountMismatch,
+
+    // Instant withdraw (yield-claimer ticket 09). Appended too.
+    #[msg("the player holds fewer Tickets than this withdrawal; use request_withdraw")]
+    InsufficientTickets,
 }

@@ -165,6 +165,15 @@ pub mod hex_vault {
         custody::process_withdraw(ctx)
     }
 
+    /// Owner-signed (yield-claimer ticket 09): pays in the same transaction,
+    /// redeeming the gap from the venue when free idle is short.
+    pub fn instant_withdraw<'info>(
+        ctx: Context<'info, InstantWithdraw<'info>>,
+        amount: u64,
+    ) -> Result<()> {
+        custody::instant_withdraw(ctx, amount)
+    }
+
     pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         custody::buy_tickets(ctx, amount)
     }
