@@ -1,5 +1,7 @@
 // One-off admin CLI: set-params, pause, unpause, pause-game, pause-jackpot,
-// start-game, start-jackpot, pause-deploy, start-deploy, fund-jackpot, grant-tickets, set-operator,
+// start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
+// start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
+// fund-jackpot, grant-tickets, set-operator,
 // propose-admin, accept-admin, create-invite, shutdown, emergency-crank,
 // sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
@@ -51,6 +53,7 @@ import {
   parseAdminCommand,
   type AdminCommand,
   type SetParamsInput,
+  type SetVenueParamsInput,
 } from "./args";
 import {
   checkLedgerAddress,
@@ -73,7 +76,7 @@ const log = (message: string): void => {
  * three plain calls this file makes.
  */
 interface MethodBuilder {
-  accountsPartial(accounts: Record<string, PublicKey>): {
+  accountsPartial(accounts: Record<string, PublicKey | null>): {
     instruction(): Promise<TransactionInstruction>;
   };
 }
@@ -251,6 +254,111 @@ async function startDeploy(
     .accountsPartial({ signer: mode.signer, pool: chain.poolAddress() })
     .instruction();
   await submit(chain, mode, [ix], "resume deploying to the venue", ledger);
+}
+
+// `set_buy_tickets_pause` is Admin only in both directions (ADR 0019), so both
+// go through `submit`. Bootstrap sets it on mainnet; this clears it.
+async function setBuyTicketsPause(
+  chain: ChainService,
+  mode: AdminMode,
+  paused: boolean,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const ix = await method(chain, "setBuyTicketsPause", paused)
+    .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
+    .instruction();
+  await submit(
+    chain,
+    mode,
+    [ix],
+    paused ? "pause buying tickets" : "resume buying tickets",
+    ledger,
+  );
+}
+
+/** Only the fields given are sent; the program leaves a `null` one alone. */
+async function setVenueParams(
+  chain: ChainService,
+  mode: AdminMode,
+  params: SetVenueParamsInput,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const ix = await method(chain, "setVenueParams", {
+    yieldFeeBps: params.yieldFeeBps ?? null,
+    idleFloorBps: params.idleFloorBps ?? null,
+    idleTargetBps: params.idleTargetBps ?? null,
+    reserveShareCapBps: params.reserveShareCapBps ?? null,
+    reserveLiquidityFloorBps: params.reserveLiquidityFloorBps ?? null,
+    minVenueMove:
+      params.minVenueMove === undefined ? null : new BN(params.minVenueMove.toString()),
+    lossToleranceBps: params.lossToleranceBps ?? null,
+  })
+    .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
+    .instruction();
+  await submit(chain, mode, [ix], "set venue params", ledger);
+}
+
+async function setTreasuryAccounts(
+  chain: ChainService,
+  mode: AdminMode,
+  treasury: PublicKey,
+  buybackReserve: PublicKey,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const pool = await readPool(chain);
+  const ix = await method(chain, "setTreasuryAccounts")
+    .accountsPartial({
+      admin: mode.signer,
+      pool: pool.address,
+      acceptedMint: pool.acceptedMint,
+      treasury,
+      buybackReserve,
+    })
+    .instruction();
+  await submit(
+    chain,
+    mode,
+    [ix],
+    `set the treasury to ${treasury.toBase58()} and the buyback reserve to ${buybackReserve.toBase58()}`,
+    ledger,
+  );
+}
+
+/**
+ * Not Admin-gated in the program: the signer pays from its own USDC account,
+ * so this goes through `submit` for the multisig's sake but takes whichever
+ * key signs. The program moves at most the deficit, so `amount` may overshoot.
+ */
+async function coverDeficit(
+  chain: ChainService,
+  mode: AdminMode,
+  amount: bigint,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const pool = await readPool(chain);
+  // A Squads vault is a PDA, so its ATA owner is off the curve.
+  const payerToken = getAssociatedTokenAddressSync(pool.acceptedMint, mode.signer, true);
+  const ix = await method(chain, "coverDeficit", new BN(amount.toString()))
+    .accountsPartial({
+      payer: mode.signer,
+      pool: pool.address,
+      principalVault: chain.principalVaultAddress(pool.address),
+      acceptedMint: pool.acceptedMint,
+      payerToken,
+      klendProgram: pool.klendProgram,
+      klendMarket: pool.klendMarket,
+      klendReserve: pool.klendReserve,
+      klendCtoken: pool.klendCtoken,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .instruction();
+  await submit(
+    chain,
+    mode,
+    [ix],
+    `cover the deficit with up to ${amount} atomic units from ${payerToken.toBase58()}`,
+    ledger,
+  );
 }
 
 function bnOrNull(value: number | undefined): BN | null {
@@ -442,7 +550,8 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
             pool: pool.address,
             player: player.address,
             weightTree: pool.weightTree,
-            owner: player.owner,
+            // Null, not omitted: the client would fill the fee payer in.
+            owner: null,
             acceptedMint: pool.acceptedMint,
             ownerToken,
             principalVault,
@@ -623,6 +732,16 @@ export async function run(
       return pauseDeploy(chain);
     case "start-deploy":
       return startDeploy(chain, mode, ledger);
+    case "pause-buy-tickets":
+      return setBuyTicketsPause(chain, mode, true, ledger);
+    case "start-buy-tickets":
+      return setBuyTicketsPause(chain, mode, false, ledger);
+    case "set-venue-params":
+      return setVenueParams(chain, mode, command.params, ledger);
+    case "set-treasury-accounts":
+      return setTreasuryAccounts(chain, mode, command.treasury, command.buybackReserve, ledger);
+    case "cover-deficit":
+      return coverDeficit(chain, mode, command.amount, ledger);
     case "set-params":
       return setParams(chain, mode, command.params, ledger);
     case "fund-jackpot":

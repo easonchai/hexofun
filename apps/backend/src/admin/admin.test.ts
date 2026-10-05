@@ -11,6 +11,7 @@
 import {
   AnchorProvider,
   BN,
+  BorshInstructionCoder,
   Program,
   Wallet,
   type Idl,
@@ -18,6 +19,7 @@ import {
 import {
   ACCOUNT_SIZE,
   AccountLayout,
+  getAssociatedTokenAddressSync,
   MINT_SIZE,
   MintLayout,
   TOKEN_PROGRAM_ID,
@@ -62,6 +64,12 @@ const program = new Program(
 );
 
 const bn = (value: bigint | number): BN => new BN(value.toString());
+
+// `program.coder.instruction` is typed as the bare `InstructionCoder`, which
+// has no `decode`; the real object is this class. It reads the IDL's own
+// snake_case names.
+const decodeInstruction = (data: Buffer | undefined) =>
+  new BorshInstructionCoder(idl).decode(data as Buffer);
 
 const poolFields = {
   poolId: bn(1),
@@ -666,6 +674,116 @@ describe("admin run", () => {
     );
     expect(multisig.sent).toEqual([]);
     expect(stdout).toHaveLength(1);
+  });
+
+  // mainnet-review-fixes ticket 05.
+  it("start-buy-tickets sends set_buy_tickets_pause(false) and pause-buy-tickets sends true", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "start-buy-tickets" }, chain, mode));
+    await capture(() => run({ kind: "pause-buy-tickets" }, chain, mode));
+
+    expect(sent.map((batch) => decodeInstruction(batch[0]?.data))).toEqual([
+      { name: "set_buy_tickets_pause", data: { paused: false } },
+      { name: "set_buy_tickets_pause", data: { paused: true } },
+    ]);
+    expect(sent[0]?.[0]?.keys.find((key) => key.isSigner)?.pubkey.equals(mode.signer)).toBe(true);
+  });
+
+  it("set-venue-params sends only the fields given, the rest null", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() =>
+      run(
+        {
+          kind: "set-venue-params",
+          params: { idleFloorBps: 0, minVenueMove: 5_000_000n },
+        },
+        chain,
+        mode,
+      ),
+    );
+
+    const decoded = decodeInstruction(sent[0]?.[0]?.data) as {
+      name: string;
+      data: { params: Record<string, BN | number | null> };
+    };
+    expect(decoded.name).toBe("set_venue_params");
+    const { params } = decoded.data;
+    expect(params.idle_floor_bps).toBe(0);
+    expect(params.min_venue_move?.toString()).toBe("5000000");
+    for (const field of [
+      "yield_fee_bps",
+      "idle_target_bps",
+      "reserve_share_cap_bps",
+      "reserve_liquidity_floor_bps",
+      "loss_tolerance_bps",
+    ]) {
+      expect(params[field]).toBeNull();
+    }
+  });
+
+  it("set-treasury-accounts in multisig mode prints one transaction naming both accounts", async () => {
+    const { chain, sent } = await harness();
+    const multisigVault = Keypair.generate().publicKey;
+    const mode: AdminMode = { signer: multisigVault, multisig: true };
+    const treasury = Keypair.generate().publicKey;
+    const buybackReserve = Keypair.generate().publicKey;
+
+    const { stdout } = await capture(() =>
+      run({ kind: "set-treasury-accounts", treasury, buybackReserve }, chain, mode),
+    );
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+    const keys = tx.instructions[0]?.keys ?? [];
+    expect(keys.some((key) => key.isSigner && key.pubkey.equals(multisigVault))).toBe(true);
+    expect(keys.some((key) => key.pubkey.equals(treasury))).toBe(true);
+    expect(keys.some((key) => key.pubkey.equals(buybackReserve))).toBe(true);
+  });
+
+  it("cover-deficit in local mode pays from the loaded key's own USDC account", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "cover-deficit", amount: 2_000_000n }, chain, mode));
+
+    const ix = sent[0]?.[0] as TransactionInstruction;
+    const decoded = decodeInstruction(ix.data) as { name: string; data: { amount: BN } };
+    expect(decoded.name).toBe("cover_deficit");
+    expect(decoded.data.amount.toString()).toBe("2000000");
+    expect(ix.keys.find((key) => key.isSigner)?.pubkey.equals(mode.signer)).toBe(true);
+    expect(
+      ix.keys.some((key) =>
+        key.pubkey.equals(getAssociatedTokenAddressSync(MINT, mode.signer)),
+      ),
+    ).toBe(true);
+  });
+
+  it("cover-deficit in multisig mode prints one transaction paid by the multisig vault", async () => {
+    const { chain, sent } = await harness();
+    // A PDA stands in for the Squads vault: its token account owner is off the curve.
+    const [multisigVault] = PublicKey.findProgramAddressSync([Buffer.from("vault")], PROGRAM_ID);
+    const mode: AdminMode = { signer: multisigVault, multisig: true };
+
+    const { stdout } = await capture(() =>
+      run({ kind: "cover-deficit", amount: 2_000_000n }, chain, mode),
+    );
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+    expect(
+      tx.instructions[0]?.keys.some(
+        (key) =>
+          key.pubkey.equals(getAssociatedTokenAddressSync(MINT, multisigVault, true)),
+      ),
+    ).toBe(true);
   });
 });
 

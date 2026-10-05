@@ -25,6 +25,19 @@ export interface SetParamsInput {
   readonly bonusCapBps?: number;
 }
 
+/** `set_venue_params`: every field optional, only the ones given are sent.
+ *  The program bounds each value; the CLI only checks it fits the field. */
+export interface SetVenueParamsInput {
+  readonly yieldFeeBps?: number;
+  readonly idleFloorBps?: number;
+  readonly idleTargetBps?: number;
+  readonly reserveShareCapBps?: number;
+  readonly reserveLiquidityFloorBps?: number;
+  /** Atomic units. */
+  readonly minVenueMove?: bigint;
+  readonly lossToleranceBps?: number;
+}
+
 /** `emergency-crank`'s default batch size when `--batch` is not given
  *  (ops-and-envs ticket 08, spec.md "emergency-crank [--batch 5]"). */
 export const DEFAULT_EMERGENCY_CRANK_BATCH = 5;
@@ -42,6 +55,17 @@ export type AdminCommand =
    *  feature pauses. */
   | { readonly kind: "pause-deploy" }
   | { readonly kind: "start-deploy" }
+  /** `set_buy_tickets_pause`: Admin only in both directions. */
+  | { readonly kind: "pause-buy-tickets" }
+  | { readonly kind: "start-buy-tickets" }
+  | { readonly kind: "set-venue-params"; readonly params: SetVenueParamsInput }
+  | {
+      readonly kind: "set-treasury-accounts";
+      readonly treasury: PublicKey;
+      readonly buybackReserve: PublicKey;
+    }
+  /** Not Admin-gated in the program: whoever signs pays from their own USDC. */
+  | { readonly kind: "cover-deficit"; readonly amount: bigint }
   | { readonly kind: "fund-jackpot"; readonly amount: bigint }
   /** Admin path only (uncapped); the operator path is the referral job. */
   | { readonly kind: "grant-tickets"; readonly owner: PublicKey; readonly amount: bigint }
@@ -64,7 +88,7 @@ export type AdminCommand =
   | { readonly kind: "sweep-house" }
   /** Permissionless stuck-state exits the operator does not yet send on its
    *  own (mainnet readiness 2026-09-28, blocker 4): an Open or Requested
-   *  Round past `vrf_timeout`, or a Registering, Drawing or Drawn Epoch past
+   *  Round past `vrf_timeout`, or an Ended, Drawing or Drawn Epoch past
    *  its own deadline. The program checks the deadline; this only names the
    *  account. */
   | { readonly kind: "void-round"; readonly roundId: bigint }
@@ -79,6 +103,10 @@ export const USAGE = [
   "  start-game | start-jackpot   (admin only)",
   "  pause-deploy   (operator or admin; stops deploy_to_venue)",
   "  start-deploy   (admin only)",
+  "  pause-buy-tickets | start-buy-tickets   (admin only; the Bought tickets pause)",
+  "  set-venue-params [--yield-fee-bps N] [--idle-floor-bps N] [--idle-target-bps N] [--reserve-share-cap-bps N] [--reserve-liquidity-floor-bps N] [--min-venue-move N] [--loss-tolerance-bps N]   (N for --min-venue-move is raw atomic USDC)",
+  "  set-treasury-accounts --treasury PUBKEY --buyback-reserve PUBKEY   (token accounts of the pool's mint)",
+  "  cover-deficit --amount N   (any funded signer; pays N raw atomic USDC from its own account, capped at the deficit)",
   "  fund-jackpot --amount N   (N is raw atomic hexUSDC, 6 decimals)",
   "  grant-tickets --owner PUBKEY --amount N   (admin path, uncapped; N is a whole number of tickets)",
   "  set-operator --key PUBKEY",
@@ -89,7 +117,7 @@ export const USAGE = [
   `  emergency-crank [--batch N]   (permissionless; N players per transaction, default ${DEFAULT_EMERGENCY_CRANK_BATCH})`,
   "  sweep-house",
   "  void-round --round N   (permissionless; Open or Requested round past vrf_timeout)",
-  "  rollover-epoch --epoch N   (permissionless; Registering, Drawing or Drawn epoch past its timeout)",
+  "  rollover-epoch --epoch N   (permissionless; Ended, Drawing or Drawn epoch past its timeout)",
 ].join("\n");
 
 function positiveInt(flag: string, raw: string): number {
@@ -128,6 +156,16 @@ function ticketsPerUsdc(flag: string, raw: string): number {
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0 || value > 65_535) {
     throw new Error(`--${flag} must be a whole number from 1 to 65535, got "${raw}"`);
+  }
+  return value;
+}
+
+/** A basis-point field that is a u16 in `SetVenueParamsArgs`. The program's
+ *  own bound per field is tighter and is what refuses a bad value. */
+function u16Bps(flag: string, raw: string): number {
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
+    throw new Error(`--${flag} must be a whole number from 0 to 65535, got "${raw}"`);
   }
   return value;
 }
@@ -187,6 +225,101 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
     case "start-deploy":
       rejectExtra(rest);
       return { kind: command };
+
+    case "pause-buy-tickets":
+    case "start-buy-tickets":
+      rejectExtra(rest);
+      return { kind: command };
+
+    case "set-venue-params": {
+      let values: {
+        "yield-fee-bps"?: string;
+        "idle-floor-bps"?: string;
+        "idle-target-bps"?: string;
+        "reserve-share-cap-bps"?: string;
+        "reserve-liquidity-floor-bps"?: string;
+        "min-venue-move"?: string;
+        "loss-tolerance-bps"?: string;
+      };
+      try {
+        ({ values } = parseArgs({
+          args: [...rest],
+          options: {
+            "yield-fee-bps": { type: "string" },
+            "idle-floor-bps": { type: "string" },
+            "idle-target-bps": { type: "string" },
+            "reserve-share-cap-bps": { type: "string" },
+            "reserve-liquidity-floor-bps": { type: "string" },
+            "min-venue-move": { type: "string" },
+            "loss-tolerance-bps": { type: "string" },
+          },
+          allowPositionals: false,
+        }));
+      } catch (cause) {
+        throw new Error(USAGE, { cause });
+      }
+
+      const params: SetVenueParamsInput = {
+        ...(values["yield-fee-bps"] !== undefined && {
+          yieldFeeBps: u16Bps("yield-fee-bps", values["yield-fee-bps"]),
+        }),
+        ...(values["idle-floor-bps"] !== undefined && {
+          idleFloorBps: u16Bps("idle-floor-bps", values["idle-floor-bps"]),
+        }),
+        ...(values["idle-target-bps"] !== undefined && {
+          idleTargetBps: u16Bps("idle-target-bps", values["idle-target-bps"]),
+        }),
+        ...(values["reserve-share-cap-bps"] !== undefined && {
+          reserveShareCapBps: u16Bps("reserve-share-cap-bps", values["reserve-share-cap-bps"]),
+        }),
+        ...(values["reserve-liquidity-floor-bps"] !== undefined && {
+          reserveLiquidityFloorBps: u16Bps(
+            "reserve-liquidity-floor-bps",
+            values["reserve-liquidity-floor-bps"],
+          ),
+        }),
+        ...(values["min-venue-move"] !== undefined && {
+          minVenueMove: positiveBigInt("min-venue-move", values["min-venue-move"]),
+        }),
+        ...(values["loss-tolerance-bps"] !== undefined && {
+          lossToleranceBps: u16Bps("loss-tolerance-bps", values["loss-tolerance-bps"]),
+        }),
+      };
+      if (Object.keys(params).length === 0) {
+        throw new Error(`set-venue-params needs at least one flag\n${USAGE}`);
+      }
+      return { kind: "set-venue-params", params };
+    }
+
+    case "set-treasury-accounts": {
+      let values: { treasury?: string; "buyback-reserve"?: string };
+      try {
+        ({ values } = parseArgs({
+          args: [...rest],
+          options: { treasury: { type: "string" }, "buyback-reserve": { type: "string" } },
+          allowPositionals: false,
+        }));
+      } catch (cause) {
+        throw new Error(USAGE, { cause });
+      }
+      if (typeof values.treasury !== "string") {
+        throw new Error(`set-treasury-accounts needs --treasury\n${USAGE}`);
+      }
+      if (typeof values["buyback-reserve"] !== "string") {
+        throw new Error(`set-treasury-accounts needs --buyback-reserve\n${USAGE}`);
+      }
+      return {
+        kind: "set-treasury-accounts",
+        treasury: pubkey("treasury", values.treasury),
+        buybackReserve: pubkey("buyback-reserve", values["buyback-reserve"]),
+      };
+    }
+
+    case "cover-deficit":
+      return {
+        kind: "cover-deficit",
+        amount: positiveBigInt("amount", oneFlag(command, "amount", rest)),
+      };
 
     case "fund-jackpot":
       return {
