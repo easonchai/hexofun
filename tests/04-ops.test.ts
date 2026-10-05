@@ -17,6 +17,7 @@ import {
   grantTicketsAsAdmin,
   onChainNowSeconds,
   playerPda,
+  refundAccounts,
   positionPda,
   program,
   provider,
@@ -71,6 +72,7 @@ async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
       ...pool.venue,
+      ...refundAccounts(pool, owner),
     })
     .signers([owner.keypair])
     .rpc();
@@ -86,6 +88,7 @@ async function processWithdraw(pool: PoolCtx, owner: Wallet) {
       ownerToken: owner.tokenAccount,
       principalVault: pool.principalVault,
       tokenProgram: TOKEN_PROGRAM_ID,
+      ...pool.venue,
     })
     .rpc();
 }
@@ -420,6 +423,7 @@ describe("shutdown", () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 4_000_000n);
+      await beginEpoch(pool, 0n); // the deposit is active, so the request queues
       await shutdown(pool);
 
       const walletBefore = await vaultBalance(owner.tokenAccount);
@@ -582,12 +586,14 @@ describe("emergency_withdraw", () => {
   );
 
   it(
-    "pays pending only, and both principal and pending together",
+    "pays the whole Principal once when part of it is queued",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 4_000_000n);
-      await requestWithdraw(pool, owner, 1_500_000n); // 2.5M principal, 1.5M pending
+      await beginEpoch(pool, 0n);
+      // 4M of Principal, of which 1.5M is queued. The queue is inside the 4M.
+      await requestWithdraw(pool, owner, 1_500_000n);
       await shutdown(pool);
 
       const walletBefore = await vaultBalance(owner.tokenAccount);
@@ -669,7 +675,8 @@ describe("sweep_house", () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 4_000_000n);
-      await requestWithdraw(pool, owner, 1_000_000n); // 3M principal, 1M pending
+      await beginEpoch(pool, 0n);
+      await requestWithdraw(pool, owner, 1_000_000n); // 4M principal, 1M of it queued
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
@@ -680,7 +687,7 @@ describe("sweep_house", () => {
 
       expect(await vaultBalance(pool.jackpotVault)).toBe(0n);
       expect(await vaultBalance(pool.treasury)).toBe(treasuryBefore + 2_000_000n);
-      expect(await vaultBalance(pool.principalVault)).toBe(4_000_000n); // 3M + 1M
+      expect(await vaultBalance(pool.principalVault)).toBe(4_000_000n); // the 1M queued is still in it
 
       const event = await findEvent<{ jackpot: BN }>(sig, "houseSwept");
       expect(event?.jackpot.toString()).toBe("2000000");

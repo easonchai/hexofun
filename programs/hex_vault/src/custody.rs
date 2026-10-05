@@ -26,8 +26,6 @@ use crate::events::{
     VenueDeployed, WithdrawRequested, Withdrawn,
     // yield-claimer ticket 07
     Harvested, TreasuryAccountsSet, VenueRecalled,
-    // yield-claimer ticket 09
-    InstantWithdrawn,
     // yield-claimer ticket 10
     DeficitCovered, DeployPauseSet, ImpairedCleared, VenueParamsSet,
 };
@@ -558,14 +556,28 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
     Ok(())
 }
 
-/// Books a withdrawal without moving any USDC (ADR 0009). The principal is
-/// lent out for most of the epoch, so the transfer waits for
-/// `process_withdraw` after the epoch this request was made in has ended.
+/// The one exit for a depositor (ADR 0020). The amount splits in two.
 ///
-/// A second request while one is still pending merges into it and re-stamps
-/// `pending_epoch`, so an unpaid earlier request slides to the later epoch.
-/// The operator pays every due request at each epoch start, so that only
-/// costs a depositor who requests again before the first payout landed.
+/// The part up to `pending_deposit` never held a Ticket, so it refunds at once.
+/// It pays from free idle, the vault balance minus Pending withdrawals, so USDC
+/// queued for a payout is never spent here. When free idle is short the gap is
+/// redeemed from the venue in this instruction. A venue that cannot cover the
+/// gap fails with `VenueIlliquid` before the redeem CPI, and nothing changes.
+/// While the pool is impaired the refund pays the haircut value
+/// (`sync::haircut`), and Principal still falls by the whole refund.
+///
+/// The rest queues (ADR 0009). It raises `pending_withdraw` and re-stamps
+/// `pending_epoch` and `requested_at`, and moves no USDC, Principal, Tickets,
+/// `total_principal` or tree weight: the amount stays in today's draw, the game
+/// and the yield until `process_withdraw` pays it. A second request that queues
+/// something merges into the first and re-stamps the maturity. A request the
+/// refund covers whole leaves the maturity alone.
+///
+/// A queued amount is a sub-balance of Principal, so one request can take at
+/// most Principal minus what is already queued. There is no Tickets rule: a
+/// Player who lost Tickets in a round still gets every unit of Principal.
+///
+/// Allowed while paused or shut down.
 pub fn request_withdraw<'info>(
     ctx: Context<'info, RequestWithdraw<'info>>,
     amount: u64,
@@ -579,168 +591,170 @@ pub fn request_withdraw<'info>(
         ctoken: &a.klend_ctoken,
         remaining: ctx.remaining_accounts,
     };
-    venue::sync(&mut a.pool, &venue)?;
-    let pool = &mut a.pool;
-    let player = &mut a.player;
-    touch(player, pool);
+    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+    touch(&mut a.player, &a.pool);
     // Yield earned so far joins Principal first, so it can be requested too.
-    let owed = settle(pool, player)?;
+    let owed = settle(&mut a.pool, &mut a.player)?;
     let mut change = Change::default();
     change.settled(owed)?;
 
     // Invariant 3: a withdrawal is never blocked by `paused`.
     require!(amount > 0, HexVaultError::ZeroAmount);
+    // Queued Principal cannot be asked for twice. `pending_withdraw` never
+    // passes `principal`, so the saturation only guards the subtraction.
     require!(
-        player.principal >= amount,
+        amount <= a.player.principal.saturating_sub(a.player.pending_withdraw),
         HexVaultError::InsufficientPrincipal
     );
 
-    player.principal = player
-        .principal
-        .checked_sub(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    // A pending deposit is part of Principal, so it cannot outlast it. Ticket 22
-    // splits the amount, pending part first.
-    player.pending_deposit = player.pending_deposit.min(player.principal);
-    // No `entries >= amount` rule: the payout lands after the boundary where
-    // Entries would have reset to Principal anyway, so a player who lost
-    // every Entry in rounds is not locked out for an extra epoch. Entries
-    // may exceed Principal pool-wide until that boundary.
-    let entries_before = player.entries;
-    player.entries = entries_before.saturating_sub(amount);
-    change.principal(-i128::from(amount))?;
-    change.tickets(-i128::from(entries_before - player.entries))?;
-    weight::apply(&a.weight_tree, pool, player, change)?;
-    pool.total_principal = pool
-        .total_principal
-        .checked_sub(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    let refund = amount.min(a.player.pending_deposit);
+    let queued = amount - refund;
 
-    player.pending_withdraw = player
-        .pending_withdraw
-        .checked_add(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    pool.pending_withdrawals = pool
-        .pending_withdrawals
-        .checked_add(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    player.pending_epoch = pool.current_epoch_id;
-    player.requested_at = now;
+    let mut paid = 0;
+    let mut redeemed = 0;
+    if refund > 0 {
+        // Impaired, the refund pays the haircut value (ticket 10). Worked out
+        // before the redeem moves value from the venue to the vault, which does
+        // not change the sum it reads.
+        paid = haircut(&a.pool, a.principal_vault.amount, refund);
+
+        // Saturating: a vault that holds less than is queued has no free idle,
+        // and the whole payment is the gap.
+        let free_idle = a
+            .principal_vault
+            .amount
+            .saturating_sub(a.pool.pending_withdrawals);
+        let gap = paid.saturating_sub(free_idle);
+        if gap > 0 {
+            // The venue's own value, not the booked one, as in `recall`. The
+            // backing also refuses a gap above the reserve's free liquidity
+            // before its CPI.
+            require!(gap <= read, HexVaultError::VenueIlliquid);
+            let before = a.principal_vault.amount;
+            let funds = Funds {
+                vault: &a.principal_vault,
+                mint: &a.accepted_mint,
+                token_program: &a.token_program,
+            };
+            venue::redeem(&a.pool, &venue, &funds, gap)?;
+            let after = venue::value(&a.pool, &venue)?;
+            let fall = read
+                .checked_sub(after)
+                .ok_or(HexVaultError::ArithmeticOverflow)?;
+            a.principal_vault.reload()?;
+            let received = a.principal_vault.amount.saturating_sub(before);
+            require!(received >= gap, HexVaultError::VenueShortReturn);
+            // Book the fall now so the redeem is not a loss at the next sync.
+            // What the value fell by beyond what arrived is rounding dust,
+            // charged to the fee owed and floored at zero, as in `recall`.
+            a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
+            a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(gap));
+            redeemed = gap;
+        }
+
+        // Principal and the pending deposit fall together, and Tickets stay:
+        // these units never held one.
+        a.player.principal = a
+            .player
+            .principal
+            .checked_sub(refund)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        a.player.pending_deposit = a
+            .player
+            .pending_deposit
+            .checked_sub(refund)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        a.pool.total_principal = a
+            .pool
+            .total_principal
+            .checked_sub(refund)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        change.principal(-i128::from(refund))?;
+        // The loss this refund realised leaves the deficit, and takes no part
+        // in a later recovery.
+        clear_if_realised(a.pool.key(), &mut a.pool, refund - paid, impaired_cause::WITHDRAWAL);
+    }
+
+    if queued > 0 {
+        a.player.pending_withdraw = a
+            .player
+            .pending_withdraw
+            .checked_add(queued)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        a.pool.pending_withdrawals = a
+            .pool
+            .pending_withdrawals
+            .checked_add(queued)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        a.player.pending_epoch = a.pool.current_epoch_id;
+        a.player.requested_at = now;
+    }
+    weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
+
+    if paid > 0 {
+        let pool_id_bytes = a.pool.pool_id.to_le_bytes();
+        let pool_bump = [a.pool.bump];
+        let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
+        token_interface::transfer_checked(
+            CpiContext::new_with_signer(
+                a.token_program.key(),
+                TransferChecked {
+                    from: a.principal_vault.to_account_info(),
+                    mint: a.accepted_mint.to_account_info(),
+                    to: a.owner_token.to_account_info(),
+                    authority: a.pool.to_account_info(),
+                },
+                &[signer_seeds],
+            ),
+            paid,
+            a.accepted_mint.decimals,
+        )?;
+    }
 
     emit!(WithdrawRequested {
         owner: a.owner.key(),
         amount,
-        pending: player.pending_withdraw,
-        pending_epoch: player.pending_epoch,
+        pending: a.player.pending_withdraw,
+        pending_epoch: a.player.pending_epoch,
+        refunded: refund,
+        paid,
+        redeemed,
     });
     Ok(())
 }
 
 /// Pays a matured request. No signer at all: the operator pushes these every
 /// epoch, and the depositor (or anyone) can push their own if it does not.
-pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
+///
+/// Syncs, settles and touches first, so the yield earned up to this second
+/// stays with the Player and the Tickets reset has run. Then Principal falls by
+/// the pending amount, Tickets by the same with a floor at zero, and
+/// `total_principal` and the tree follow. While the pool is impaired the payout
+/// is the haircut value of the pending amount as of this second, and what the
+/// Player gave up comes off the deficit.
+pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> Result<()> {
     let now = utils::now()?;
-    let pool = &mut ctx.accounts.pool;
-    let player = &mut ctx.accounts.player;
+    let a = &mut *ctx.accounts;
 
-    let pending = player.pending_withdraw;
+    let pending = a.player.pending_withdraw;
     require!(pending > 0, HexVaultError::NothingPending);
     // Either the epoch the request was made in has been left behind, or a
     // whole epoch's worth of seconds has passed since the request. The
     // second can never come first while the operator is alive, because the
     // epoch the request landed in ends within `epoch_seconds` of it; it is
     // the escape hatch for an operator that stopped calling `begin_epoch`.
-    let deadline = player
+    let deadline = a
+        .player
         .requested_at
-        .checked_add(pool.epoch_seconds)
+        .checked_add(a.pool.epoch_seconds)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     // Shutdown lets a request and its payout land in one transaction: a
     // depositor pulls their own money instead of waiting on the epoch lock.
     require!(
-        pool.shutdown || pool.current_epoch_id > player.pending_epoch || now > deadline,
+        a.pool.shutdown || a.pool.current_epoch_id > a.player.pending_epoch || now > deadline,
         HexVaultError::WithdrawalNotDue
     );
-    // Impaired, the request pays the haircut value (ticket 10). Not impaired,
-    // that is `pending`. This runs on the state as of the last sync, since the
-    // instruction has no venue accounts.
-    let paid = haircut(pool, ctx.accounts.principal_vault.amount, pending);
-    // Checked before anything is written, so a vault still waiting on the
-    // yield venue leaves the request exactly as it was for the next attempt.
-    require!(
-        ctx.accounts.principal_vault.amount >= paid,
-        HexVaultError::InsufficientVaultLiquidity
-    );
 
-    let pool_id_bytes = pool.pool_id.to_le_bytes();
-    let pool_bump = [pool.bump];
-    let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
-
-    token_interface::transfer_checked(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.key(),
-            TransferChecked {
-                from: ctx.accounts.principal_vault.to_account_info(),
-                mint: ctx.accounts.accepted_mint.to_account_info(),
-                to: ctx.accounts.owner_token.to_account_info(),
-                authority: pool.to_account_info(),
-            },
-            &[signer_seeds],
-        ),
-        paid,
-        ctx.accounts.accepted_mint.decimals,
-    )?;
-
-    player.pending_withdraw = 0;
-    pool.pending_withdrawals = pool
-        .pending_withdrawals
-        .checked_sub(pending)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    clear_if_realised(pool.key(), pool, pending - paid, impaired_cause::WITHDRAWAL);
-
-    emit!(Withdrawn {
-        owner: player.owner,
-        amount: paid,
-        principal: player.principal,
-        entries: player.entries,
-    });
-    Ok(())
-}
-
-/// Takes a haircut withdrawal's loss off the deficit and, if that took it to
-/// zero, emits `ImpairedCleared`.
-fn clear_if_realised(pool_key: Pubkey, pool: &mut Pool, loss: u64, cause: u8) {
-    if let Some(deficit) = realise_loss(pool, loss) {
-        emit!(ImpairedCleared {
-            pool: pool_key,
-            deficit,
-            cause,
-        });
-    }
-}
-
-/// Pays a withdrawal in the same transaction (yield-claimer ticket 09, ADR
-/// 0017). Signed by the Player's owner. Syncs and settles first, so the yield
-/// earned up to this second leaves with the Principal.
-///
-/// The Player must hold Tickets of at least `amount`. Without that rule a
-/// Player who lost Tickets in a round could withdraw and deposit again and get
-/// them back, and the pool's Tickets would grow without limit. Principal
-/// without Tickets leaves through `request_withdraw`.
-///
-/// Free idle is the vault balance minus Pending withdrawals, so USDC queued for
-/// a payout is never spent here. When free idle is short the gap is redeemed
-/// from the venue in this instruction. A venue that cannot cover the gap fails
-/// with `VenueIlliquid` before the redeem CPI, and nothing changes.
-///
-/// While the pool is impaired the exit pays the haircut value (`sync::haircut`),
-/// and the Player's Principal and Tickets still fall by the whole `amount`.
-///
-/// Allowed while paused. After Shutdown `emergency_withdraw` is the path.
-pub fn instant_withdraw<'info>(
-    ctx: Context<'info, InstantWithdraw<'info>>,
-    amount: u64,
-) -> Result<()> {
-    let a = &mut *ctx.accounts;
     let venue = Venue {
         program: &a.klend_program,
         market: &a.klend_market,
@@ -748,89 +762,51 @@ pub fn instant_withdraw<'info>(
         ctoken: &a.klend_ctoken,
         remaining: ctx.remaining_accounts,
     };
-    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+    venue::sync(&mut a.pool, &venue)?;
     touch(&mut a.player, &a.pool);
     let owed = settle(&mut a.pool, &mut a.player)?;
     let mut change = Change::default();
     change.settled(owed)?;
 
-    require!(amount > 0, HexVaultError::ZeroAmount);
-    require!(!a.pool.shutdown, HexVaultError::PoolShutDown);
+    // Impaired, the request pays the haircut value as of this sync. Not
+    // impaired, that is `pending`.
+    let paid = haircut(&a.pool, a.principal_vault.amount, pending);
+    // Checked before anything is written, so a vault still waiting on the
+    // yield venue leaves the request exactly as it was for the next attempt.
     require!(
-        a.player.principal >= amount,
-        HexVaultError::InsufficientPrincipal
+        a.principal_vault.amount >= paid,
+        HexVaultError::InsufficientVaultLiquidity
     );
-    require!(
-        a.player.entries >= amount,
-        HexVaultError::InsufficientTickets
-    );
-
-    // Impaired, `amount` of Principal and Tickets leaves for the haircut value
-    // (ticket 10). Worked out before the redeem moves value from the venue to
-    // the vault, which does not change the sum it reads.
-    let paid = haircut(&a.pool, a.principal_vault.amount, amount);
-
-    // Saturating: a vault that holds less than is queued has no free idle, and
-    // the whole payment is the gap.
-    let free_idle = a
-        .principal_vault
-        .amount
-        .saturating_sub(a.pool.pending_withdrawals);
-    let gap = paid.saturating_sub(free_idle);
-    if gap > 0 {
-        // The venue's own value, not the booked one, as in `recall`. The
-        // backing also refuses a gap above the reserve's free liquidity before
-        // its CPI.
-        require!(gap <= read, HexVaultError::VenueIlliquid);
-        let before = a.principal_vault.amount;
-        let funds = Funds {
-            vault: &a.principal_vault,
-            mint: &a.accepted_mint,
-            token_program: &a.token_program,
-        };
-        venue::redeem(&a.pool, &venue, &funds, gap)?;
-        let after = venue::value(&a.pool, &venue)?;
-        let fall = read
-            .checked_sub(after)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
-        a.principal_vault.reload()?;
-        let received = a.principal_vault.amount.saturating_sub(before);
-        require!(received >= gap, HexVaultError::VenueShortReturn);
-        // Book the fall now so the redeem is not a loss at the next sync. What
-        // the value fell by beyond what arrived is rounding dust, charged to
-        // the fee owed and floored at zero, as in `recall`.
-        a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
-        a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(gap));
-    }
 
     a.player.principal = a
         .player
         .principal
-        .checked_sub(amount)
+        .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    a.player.entries = a
-        .player
-        .entries
-        .checked_sub(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    // Pending is part of Principal, so it cannot outlast it. Ticket 22 removes
-    // this instruction.
-    a.player.pending_deposit = a.player.pending_deposit.min(a.player.principal);
+    // No Tickets rule: Tickets the Player lost in a round floor at zero, as the
+    // epoch reset would have done.
+    let entries_before = a.player.entries;
+    a.player.entries = entries_before.saturating_sub(pending);
+    change.principal(-i128::from(pending))?;
+    change.tickets(-i128::from(entries_before - a.player.entries))?;
+    weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
     a.pool.total_principal = a
         .pool
         .total_principal
-        .checked_sub(amount)
+        .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    change.principal(-i128::from(amount))?;
-    change.tickets(-i128::from(amount))?;
-    weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
-    // The loss this exit realised leaves the deficit, and takes no part in a
-    // later recovery.
-    clear_if_realised(a.pool.key(), &mut a.pool, amount - paid, impaired_cause::WITHDRAWAL);
+    a.player.pending_withdraw = 0;
+    a.pool.pending_withdrawals = a
+        .pool
+        .pending_withdrawals
+        .checked_sub(pending)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    clear_if_realised(a.pool.key(), &mut a.pool, pending - paid, impaired_cause::WITHDRAWAL);
 
     let pool_id_bytes = a.pool.pool_id.to_le_bytes();
     let pool_bump = [a.pool.bump];
     let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
+
     token_interface::transfer_checked(
         CpiContext::new_with_signer(
             a.token_program.key(),
@@ -846,16 +822,25 @@ pub fn instant_withdraw<'info>(
         a.accepted_mint.decimals,
     )?;
 
-    emit!(InstantWithdrawn {
-        owner: a.owner.key(),
-        amount,
-        redeemed: gap,
-        settled: owed,
+    emit!(Withdrawn {
+        owner: a.player.owner,
+        amount: paid,
         principal: a.player.principal,
         entries: a.player.entries,
-        paid,
     });
     Ok(())
+}
+
+/// Takes a haircut withdrawal's loss off the deficit and, if that took it to
+/// zero, emits `ImpairedCleared`.
+fn clear_if_realised(pool_key: Pubkey, pool: &mut Pool, loss: u64, cause: u8) {
+    if let Some(deficit) = realise_loss(pool, loss) {
+        emit!(ImpairedCleared {
+            pool: pool_key,
+            deficit,
+            cause,
+        });
+    }
 }
 
 /// Permissionless (yield-claimer ticket 05). Syncs, then moves idle USDC
@@ -1295,7 +1280,8 @@ pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs
 }
 
 /// Permissionless crank, only valid once the pool is shut down: pays one
-/// Player's whole `principal + pending_withdraw` to their own USDC ATA, so a
+/// Player's whole Principal, which already holds the pending deposit and the
+/// queued withdrawal, to their own USDC ATA, so a
 /// depositor gets out even if the team disappears (spec
 /// "emergency_withdraw"). House is skipped: its principal is protocol money
 /// and leaves through `sweep_house` instead.
@@ -1323,14 +1309,13 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         HexVaultError::HouseCannotEmergencyWithdraw
     );
 
+    // Principal already holds the pending deposit and the queued withdrawal, so
+    // it is the whole claim. Adding `pending_withdraw` would pay that part twice.
     let principal = player.principal;
     let pending = player.pending_withdraw;
-    let total = principal
-        .checked_add(pending)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    require!(total > 0, HexVaultError::ZeroAmount);
+    require!(principal > 0, HexVaultError::ZeroAmount);
     // Impaired, the whole balance pays the haircut value (ticket 10).
-    let paid = haircut(pool, a.principal_vault.amount, total);
+    let paid = haircut(pool, a.principal_vault.amount, principal);
     // No partial payouts: either the vault covers this Player in full, or
     // nothing moves and the next attempt starts from the same numbers.
     require!(
@@ -1353,7 +1338,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         .pending_withdrawals
         .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    clear_if_realised(pool.key(), pool, total - paid, impaired_cause::WITHDRAWAL);
+    clear_if_realised(pool.key(), pool, principal - paid, impaired_cause::WITHDRAWAL);
 
     let pool_id_bytes = pool.pool_id.to_le_bytes();
     let pool_bump = [pool.bump];
@@ -1458,8 +1443,8 @@ fn bought_amount_after(
 ///
 /// Capped per Player per epoch at `principal`, checked against the live
 /// balance at call time rather than a start-of-day snapshot. `principal` only
-/// falls when a withdrawal is requested, so a `request_withdraw` before a
-/// `buy_tickets` can only tighten this player's remaining allowance for the
+/// falls when a refund pays or a queued withdrawal is processed, so a
+/// `request_withdraw` before a `buy_tickets` can only tighten this player's remaining allowance for the
 /// epoch, never raise it, and `bought_amount` is never reset by anything but
 /// an epoch change, so re-depositing withdrawn principal cannot reopen room
 /// the player already spent. While the ended epoch is still being drawn,
@@ -2105,47 +2090,11 @@ pub struct Deposit<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// No token accounts: the request moves nothing. The venue accounts are for
-/// sync only.
+/// Signed by the Player's owner, who is paid straight to `owner_token` when
+/// part of the request refunds. The venue accounts are for sync and the redeem;
+/// a backing's extras go in `remaining_accounts`.
 #[derive(Accounts)]
 pub struct RequestWithdraw<'info> {
-    pub owner: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
-        bump = pool.bump,
-        has_one = weight_tree,
-    )]
-    pub pool: Box<Account<'info, Pool>>,
-
-    #[account(
-        mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
-        bump = player.bump,
-    )]
-    pub player: Box<Account<'info, Player>>,
-
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
-
-    /// CHECK: `venue::check` pins it to `pool.klend_program`.
-    pub klend_program: UncheckedAccount<'info>,
-    /// CHECK: `venue::check` pins it to `pool.klend_market`.
-    pub klend_market: UncheckedAccount<'info>,
-    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
-    #[account(mut)]
-    pub klend_reserve: UncheckedAccount<'info>,
-    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
-    #[account(mut)]
-    pub klend_ctoken: UncheckedAccount<'info>,
-}
-
-/// Signed by the Player's owner, who is paid straight to `owner_token`. The
-/// venue accounts are for sync and the redeem; a backing's extras go in
-/// `remaining_accounts`.
-#[derive(Accounts)]
-pub struct InstantWithdraw<'info> {
     pub owner: Signer<'info>,
 
     #[account(
@@ -2207,6 +2156,7 @@ pub struct ProcessWithdraw<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
+        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -2218,6 +2168,9 @@ pub struct ProcessWithdraw<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
+
+    #[account(mut)]
+    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2239,6 +2192,17 @@ pub struct ProcessWithdraw<'info> {
         token::token_program = token_program,
     )]
     pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
 }

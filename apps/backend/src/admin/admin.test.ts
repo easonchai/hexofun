@@ -568,7 +568,8 @@ describe("admin run", () => {
     const { chain, sent } = await harness({
       players: [
         { owner: alice, principal: 1_000_000n, pendingWithdraw: 0n },
-        { owner: bob, principal: 0n, pendingWithdraw: 500_000n },
+        // A queued withdrawal is inside Principal, so Bob's 500,000 is all of it.
+        { owner: bob, principal: 500_000n, pendingWithdraw: 500_000n },
       ],
     });
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };

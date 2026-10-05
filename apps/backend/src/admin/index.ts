@@ -400,7 +400,8 @@ async function playersOwedABalance(chain: ChainService): Promise<CrankPlayer[]> 
     if (raw.isHouse) continue; // exits through sweep-house instead
     const principal = BigInt(raw.principal.toString());
     const pendingWithdraw = BigInt(raw.pendingWithdraw.toString());
-    if (principal + pendingWithdraw <= 0n) continue;
+    // A queued withdrawal is part of Principal until it pays (ADR 0020).
+    if (principal <= 0n) continue;
     players.push({ address: pubkey, owner: raw.owner, principal, pendingWithdraw });
   }
   return players;

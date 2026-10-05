@@ -1593,141 +1593,6 @@
       "args": []
     },
     {
-      "name": "instant_withdraw",
-      "docs": [
-        "Owner-signed (yield-claimer ticket 09): pays in the same transaction,",
-        "redeeming the gap from the venue when free idle is short."
-      ],
-      "discriminator": [
-        171,
-        49,
-        145,
-        176,
-        48,
-        101,
-        112,
-        162
-      ],
-      "accounts": [
-        {
-          "name": "owner",
-          "signer": true
-        },
-        {
-          "name": "pool",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  111,
-                  111,
-                  108
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool.pool_id",
-                "account": "Pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "player",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  108,
-                  97,
-                  121,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "owner"
-              }
-            ]
-          }
-        },
-        {
-          "name": "weight_tree",
-          "writable": true,
-          "relations": [
-            "pool"
-          ]
-        },
-        {
-          "name": "accepted_mint"
-        },
-        {
-          "name": "owner_token",
-          "writable": true
-        },
-        {
-          "name": "principal_vault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  105,
-                  110,
-                  99,
-                  105,
-                  112,
-                  97,
-                  108
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "klend_program"
-        },
-        {
-          "name": "klend_market"
-        },
-        {
-          "name": "klend_reserve",
-          "writable": true
-        },
-        {
-          "name": "klend_ctoken",
-          "writable": true
-        },
-        {
-          "name": "token_program"
-        }
-      ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        }
-      ]
-    },
-    {
       "name": "payout",
       "discriminator": [
         149,
@@ -1979,6 +1844,13 @@
           }
         },
         {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
           "name": "accepted_mint"
         },
         {
@@ -2010,6 +1882,20 @@
               }
             ]
           }
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
         },
         {
           "name": "token_program"
@@ -2419,6 +2305,11 @@
     },
     {
       "name": "request_withdraw",
+      "docs": [
+        "Owner-signed (ADR 0020): the pending deposit part refunds in this",
+        "transaction, redeeming the gap from the venue when free idle is short.",
+        "The rest queues for `process_withdraw`."
+      ],
       "discriminator": [
         137,
         95,
@@ -2491,6 +2382,39 @@
           ]
         },
         {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "owner_token",
+          "writable": true
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
           "name": "klend_program"
         },
         {
@@ -2503,6 +2427,9 @@
         {
           "name": "klend_ctoken",
           "writable": true
+        },
+        {
+          "name": "token_program"
         }
       ],
       "args": [
@@ -3755,19 +3682,6 @@
       ]
     },
     {
-      "name": "InstantWithdrawn",
-      "discriminator": [
-        19,
-        59,
-        52,
-        128,
-        171,
-        153,
-        53,
-        137
-      ]
-    },
-    {
       "name": "JackpotFunded",
       "discriminator": [
         120,
@@ -4710,9 +4624,9 @@
       "name": "EmergencyWithdrawn",
       "docs": [
         "Permissionless: `emergency_withdraw` paid one Player's whole balance to",
-        "its own USDC ATA once the pool was shut down. `total` is what was paid:",
-        "`principal + pending`, or the haircut value of it while the pool is impaired",
-        "(ticket 10)."
+        "its own USDC ATA once the pool was shut down. `total` is what was paid: all",
+        "of `principal`, which holds `pending` already, or the haircut value of it",
+        "while the pool is impaired (ticket 10)."
       ],
       "type": {
         "kind": "struct",
@@ -5062,51 +4976,6 @@
       }
     },
     {
-      "name": "InstantWithdrawn",
-      "docs": [
-        "`instant_withdraw` paid `amount` to the owner in the same transaction",
-        "(yield-claimer ticket 09). `redeemed` is what it took from the venue to",
-        "cover free idle, `settled` the yield that joined Principal first.",
-        "`principal` and `entries` are the Player's balances afterwards."
-      ],
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "owner",
-            "type": "pubkey"
-          },
-          {
-            "name": "amount",
-            "type": "u64"
-          },
-          {
-            "name": "redeemed",
-            "type": "u64"
-          },
-          {
-            "name": "settled",
-            "type": "u64"
-          },
-          {
-            "name": "principal",
-            "type": "u64"
-          },
-          {
-            "name": "entries",
-            "type": "u64"
-          },
-          {
-            "name": "paid",
-            "docs": [
-              "What reached the owner. Under `amount` while the pool is impaired."
-            ],
-            "type": "u64"
-          }
-        ]
-      }
-    },
-    {
       "name": "JackpotFunded",
       "type": {
         "kind": "struct",
@@ -5316,8 +5185,9 @@
           {
             "name": "pending_withdraw",
             "docs": [
-              "Principal already deducted and waiting for `process_withdraw` to move",
-              "the USDC. 0 when nothing is owed."
+              "Queued by `request_withdraw` and waiting for `process_withdraw` to move",
+              "the USDC. A sub-balance of `principal`, which it leaves only when it",
+              "pays. 0 when nothing is queued."
             ],
             "type": "u64"
           },
@@ -5625,7 +5495,8 @@
             "name": "pending_withdrawals",
             "docs": [
               "Σ `Player.pending_withdraw` across the pool. USDC the principal vault",
-              "holds for queued withdrawals, which no other payout may spend."
+              "holds for queued withdrawals, which no other payout may spend. Part of",
+              "`total_principal`, not a second claim beside it."
             ],
             "type": "u64"
           },
@@ -6691,7 +6562,7 @@
           {
             "name": "amount",
             "docs": [
-              "This request alone."
+              "This request alone, the refunded part and the queued part together."
             ],
             "type": "u64"
           },
@@ -6704,6 +6575,28 @@
           },
           {
             "name": "pending_epoch",
+            "type": "u64"
+          },
+          {
+            "name": "refunded",
+            "docs": [
+              "The part that was a pending deposit and paid at once (ADR 0020)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "paid",
+            "docs": [
+              "What reached the owner for the refund. Under `refunded` while the pool",
+              "is impaired."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "redeemed",
+            "docs": [
+              "What the refund took from the venue to cover free idle."
+            ],
             "type": "u64"
           }
         ]

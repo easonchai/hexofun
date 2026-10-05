@@ -394,6 +394,16 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
             })
             .signers([wallet.keypair])
             .rpc();
+          // A deposit holds no Ticket until the next epoch (ADR 0020), so the
+          // admin grants the Tickets a depositor from yesterday would hold.
+          await method("grantTickets", new BN(DEPOSIT.toString()))
+            .accountsPartial({
+              signer: authority.publicKey,
+              pool,
+              player: chain.playerAddress(wallet.keypair.publicKey),
+              weightTree: weightTree.publicKey,
+            })
+            .rpc();
         }
         // 800 free idle is far above the 10% target: the operator deploys the
         // excess into the stub venue on its own, with no instruction from here.

@@ -439,16 +439,16 @@ export async function buyTickets(
 }
 
 /**
- * Pays `amount` to the wallet in this one transaction (instant_withdraw).
- * The program syncs the venue itself, so no refresh instruction goes in
- * front; it redeems from klend when free idle is short, which is why the
- * klend extras ride along. The compute limit comes from `sendMany`'s
- * simulation (the redeem path measured 101k units on the mainnet fork).
- * Fails with `VenueIlliquid` when the reserve cannot cover the gap and
- * `InsufficientTickets` past min(Principal, Tickets); the form offers the
- * queued request for the first.
+ * The one withdraw (ADR 0020). The part of `amount` that is still a pending
+ * deposit pays to the wallet in this transaction and the rest queues for
+ * `process_withdraw` once the epoch ends (ADR 0009). The program syncs the venue
+ * itself, so no refresh instruction goes in front; a refund redeems from klend
+ * when free idle is short, which is why the klend extras ride along. The compute
+ * limit comes from `sendMany`'s simulation. Fails with `VenueIlliquid` when the
+ * reserve cannot cover the refund's gap, and with `InsufficientPrincipal` past
+ * Principal less what is already queued.
  */
-export async function instantWithdraw(
+export async function requestWithdraw(
   program: HexVaultProgram,
   owner: TxSigner,
   pool: PoolLike,
@@ -458,7 +458,7 @@ export async function instantWithdraw(
   const ownerToken = acceptedAta(pool.acceptedMint, o);
   const builder = method(
     program,
-    "instantWithdraw",
+    "requestWithdraw",
   )(bn(amount))
     .accounts({
       owner: o,
@@ -486,32 +486,6 @@ export async function instantWithdraw(
 }
 
 /**
- * Books the withdrawal. No USDC moves here: `process_withdraw` pays it out
- * once the epoch this lands in has ended (ADR 0009). Ticket 05 builds the UI
- * around the wait; this is the same button pointed at the new instruction.
- */
-export async function requestWithdraw(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  amount: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const builder = method(
-    program,
-    "requestWithdraw",
-  )(bn(amount))
-    .accounts({
-      owner: o,
-      pool: pool.address,
-      player: playerAddress(pool.address, o),
-      weightTree: pool.weightTree,
-      ...venueAccounts(pool),
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
-}
-
-/**
  * Pays out the whole pending amount. The program takes no signer, so this is
  * the depositor's own escape hatch when the operator has not pushed it yet:
  * the wallet only pays the fee. Fails with `WithdrawalNotDue` before the
@@ -529,9 +503,11 @@ export async function processWithdraw(
     .accounts({
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
+      ...venueAccounts(pool),
       tokenProgram: TOKEN_PROGRAM,
     })
     // A mainnet depositor may have closed the ATA since depositing; the
@@ -578,8 +554,13 @@ export async function shutdownWithdraw(
           pool: pool.address,
           player: playerAddress(pool.address, o),
           weightTree: pool.weightTree,
+          acceptedMint: pool.acceptedMint,
+          ownerToken,
+          principalVault: principalVaultAddress(pool.address),
           ...venueAccounts(pool),
+          tokenProgram: TOKEN_PROGRAM,
         })
+        .remainingAccounts(klendRemaining(pool))
         .instruction(),
     );
   }
@@ -597,9 +578,11 @@ export async function shutdownWithdraw(
       .accounts({
         pool: pool.address,
         player: playerAddress(pool.address, o),
+        weightTree: pool.weightTree,
         acceptedMint: pool.acceptedMint,
         ownerToken,
         principalVault: principalVaultAddress(pool.address),
+        ...venueAccounts(pool),
         tokenProgram: TOKEN_PROGRAM,
       })
       .instruction(),

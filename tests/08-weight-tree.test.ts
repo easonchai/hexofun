@@ -23,6 +23,7 @@ import {
   leafTickets,
   onChainNowSeconds,
   playerPda,
+  refundAccounts,
   positionPda,
   program,
   provider,
@@ -68,6 +69,21 @@ async function deposit(pool: PoolCtx, owner: Wallet, amount: bigint) {
     .rpc();
 }
 
+async function processWithdraw(pool: PoolCtx, owner: Wallet) {
+  return program.methods
+    .processWithdraw()
+    .accountsPartial({
+      pool: pool.pool,
+      player: playerPda(pool.pool, owner.keypair.publicKey),
+      acceptedMint: pool.mint,
+      ownerToken: owner.tokenAccount,
+      principalVault: pool.principalVault,
+      ...pool.venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+}
+
 async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
   return program.methods
     .requestWithdraw(new BN(amount.toString()))
@@ -76,6 +92,7 @@ async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
       ...pool.venue,
+      ...refundAccounts(pool, owner),
     })
     .signers([owner.keypair])
     .rpc();
@@ -270,6 +287,8 @@ class Eager {
   entries = 0n;
   /** The part of `principal` deposited in `epochId`: no Tickets until the next epoch. */
   pending = 0n;
+  /** `pending_withdraw`: inside `principal` and `entries` until it pays. */
+  queued = 0n;
   epochId: bigint;
   frozenTickets = 0n;
   frozenEpoch = 0n;
@@ -297,11 +316,21 @@ class Eager {
     this.pending += amount;
   }
 
-  /** What `request_withdraw` does to the balances, Tickets saturating. */
-  withdraw(amount: bigint): void {
-    this.principal -= amount;
-    this.entries = this.entries > amount ? this.entries - amount : 0n;
-    if (this.pending > this.principal) this.pending = this.principal;
+  /** `request_withdraw`: the pending part refunds, which lowers Principal and
+   *  the pending amount and no Tickets. The rest queues and moves nothing. */
+  request(amount: bigint): void {
+    const refund = amount < this.pending ? amount : this.pending;
+    this.principal -= refund;
+    this.pending -= refund;
+    this.queued += amount - refund;
+  }
+
+  /** `process_withdraw`: Principal falls by the queued amount and Tickets by
+   *  the same, floored at zero. */
+  process(): void {
+    this.principal -= this.queued;
+    this.entries = this.entries > this.queued ? this.entries - this.queued : 0n;
+    this.queued = 0n;
   }
 
   /** Tickets held at the end of epoch `e`. */
@@ -480,9 +509,10 @@ describe("weight tree", () => {
         await check(`${name} settles a position`);
       }
 
+      // `c`'s 3M is a pending deposit, so this refunds and moves no Ticket.
       await requestWithdraw(pool, wallets.c, 1_000_000n);
-      (await touched("c")).withdraw(1_000_000n);
-      await check("c requests a withdrawal");
+      (await touched("c")).request(1_000_000n);
+      await check("c refunds part of a pending deposit");
 
       // Epoch 2: epoch 1 stays readable behind it.
       await retryUntilOk(() => beginEpoch(pool, 1n));
@@ -492,14 +522,20 @@ describe("weight tree", () => {
       (await touched("a")).deposit(1_000_000n);
       await check("a deposits in epoch 2");
 
+      // `b`'s Principal is active by now, so this queues and moves nothing.
       await requestWithdraw(pool, wallets.b, 2_000_000n);
-      (await touched("b")).withdraw(2_000_000n);
-      await check("b requests a withdrawal in epoch 2");
+      (await touched("b")).request(2_000_000n);
+      await check("b queues a withdrawal in epoch 2");
 
       // Epoch 3: epoch 1 is gone, epoch 2 is the previous one, and `c`, idle
       // all of epoch 2, still holds its Principal there.
       await retryUntilOk(() => beginEpoch(pool, 2n));
       await check("epoch 3 begins");
+
+      // The queued withdrawal pays now, and lowers Principal and Tickets.
+      await processWithdraw(pool, wallets.b);
+      (await touched("b")).process();
+      await check("b's queued withdrawal is paid");
 
       await grantTickets(pool, owners.c, 500_000n);
       (await touched("c")).entries += 500_000n;

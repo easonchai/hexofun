@@ -210,20 +210,21 @@ describe("solvency and haircut", () => {
   };
 
   it("is the signed margin of vault plus venue over every liability", () => {
-    // 400 + 800 = 1200 against 1000 + 100 + 20 = 1120.
-    expect(solvencyMargin(pool, 400n)).toBe(80n);
-    expect(solvencyMargin(pool, 300n)).toBe(-20n);
+    // 400 + 800 = 1200 against 1000 + 20 = 1020. The 100 queued is inside the
+    // 1000 of Principal, so it is not added again.
+    expect(solvencyMargin(pool, 400n)).toBe(180n);
+    expect(solvencyMargin(pool, 200n)).toBe(-20n);
   });
 
   it("counts the recorded deficit as a liability the pool is excused from", () => {
-    expect(solvencyMargin({ ...pool, deficit: 50n }, 300n)).toBe(30n);
+    expect(solvencyMargin({ ...pool, deficit: 50n }, 200n)).toBe(30n);
   });
 
-  it("pays net assets over claims, capped at 1", () => {
-    // Net 1200 - 20 = 1180 over claims 1100.
+  it("pays net assets over total Principal, capped at 1", () => {
+    // Net 1200 - 20 = 1180 over 1000.
     expect(haircutFactor(pool, 400n)).toBe(1);
-    // An empty vault: net 800 - 20 = 780 over claims 1100.
-    expect(haircutFactor(pool, 0n)).toBeCloseTo(0.70909, 5);
+    // An empty vault: net 800 - 20 = 780 over 1000.
+    expect(haircutFactor(pool, 0n)).toBeCloseTo(0.78, 5);
   });
 
   it("is zero for a pool with no claims", () => {

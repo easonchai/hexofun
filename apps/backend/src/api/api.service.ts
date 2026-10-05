@@ -50,7 +50,6 @@ export const ROUND_REQUESTED = 1;
 const FEED_NAMES = [
   "Deposited",
   "Withdrawn",
-  "InstantWithdrawn",
   "PositionBought",
   "RoundSettled",
   "JackpotPaid",

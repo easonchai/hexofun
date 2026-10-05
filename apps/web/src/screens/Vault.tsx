@@ -1,11 +1,11 @@
 /**
  * VAULT tab: the Figma "Deposit" frame. One widget with DEPOSIT / WITHDRAW
  * tabs on the HOME halftone background. The program is the custody boundary.
- * WITHDRAW sends `instant_withdraw` when the pool can pay the amount at once
- * (up to min(Principal, Tickets), ticket 16) and says so before confirm.
- * Otherwise it sends `request_withdraw`, which deducts Principal and Tickets
- * now and pays out after the epoch ends (ADR 0009); `instantWithdraw.ts`
- * decides. The pending row below the widget carries that wait: the amount,
+ * WITHDRAW sends `request_withdraw` (ADR 0020): the part that is still a
+ * pending deposit pays in the same transaction and the rest queues and pays
+ * after the epoch ends (ADR 0009). The copy and the `instantWithdraw.ts`
+ * preview still describe the retired instant path until ticket 23 replaces them.
+ * The pending row below the widget carries that wait: the amount,
  * the day it pays in, and a "pay out now" button that sends the permissionless
  * `process_withdraw` when the operator has not.
  *
@@ -25,7 +25,6 @@ import type { PublicKey } from "@solana/web3.js";
 import {
   awaitSendResult,
   deposit,
-  instantWithdraw,
   processWithdraw,
   requestWithdraw,
   shutdownWithdraw,
@@ -176,13 +175,15 @@ export function Vault(props: VaultScreenProps) {
   const amount = parseAtomic(amountText, DECIMALS);
   const amountUsdc = amount === null ? 0 : Number(formatAtomic(amount, DECIMALS));
   /**
-   * What the pills clamp to: wallet on deposit, Principal on withdraw.
-   * `request_withdraw` only checks Principal now (ADR 0009), so Tickets
-   * spent in the game no longer hold any of it back. Null only on deposit,
+   * What the pills clamp to: wallet on deposit, Principal less what is already
+   * queued on withdraw (a queued amount stays inside Principal, ADR 0020).
+   * `request_withdraw` only checks that, so Tickets spent in the game do not
+   * hold any of it back. Null only on deposit,
    * when the wallet balance read failed (ticket 15) — the pills and the
    * over-balance check both stand down rather than guess.
    */
-  const cap = mode === "deposit" ? walletBalance : principal;
+  const cap =
+    mode === "deposit" ? walletBalance : principal > pendingWithdraw ? principal - pendingWithdraw : 0n;
   const balanceUnavailable = mode === "deposit" && walletBalance === null;
   const rentWarning = solRentWarning(solBalance, { sponsored: sendTransaction !== undefined });
 
@@ -347,9 +348,9 @@ export function Vault(props: VaultScreenProps) {
       void run("Withdraw", program, () =>
         shutdownWithdraw(program, signer, pool, amount, pendingWithdraw),
       );
-    } else if (plan?.kind === "instant") {
-      void run("Withdrawn", program, () => instantWithdraw(program, signer, pool, amount));
     } else {
+      // One instruction (ADR 0020): the pending-deposit part refunds in the same
+      // transaction and the rest queues. The split preview is ticket 23's.
       void run("Withdraw requested", program, () =>
         requestWithdraw(program, signer, pool, amount),
       );

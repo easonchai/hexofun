@@ -28,6 +28,7 @@ import {
   nextPoolId,
   onChainNowSeconds,
   playerPda,
+  refundAccounts,
   poolPda,
   principalVaultPda,
   program,
@@ -93,6 +94,7 @@ async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
       ...pool.venue,
+      ...refundAccounts(pool, owner),
     })
     .signers([owner.keypair])
     .rpc(),
@@ -112,6 +114,7 @@ async function processWithdraw(pool: PoolCtx, owner: Wallet) {
       ownerToken: owner.tokenAccount,
       principalVault: pool.principalVault,
       tokenProgram: TOKEN_PROGRAM_ID,
+      ...pool.venue,
     })
     .rpc(),
   );
@@ -197,11 +200,14 @@ describe("custody", () => {
   );
 
   it(
-    "request_withdraw enforces the principal bound and moves nothing",
+    "request_withdraw enforces the principal bound, and a request on active Principal moves nothing",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 3_000_000n);
+      // The first begin_epoch has no end to wait for. The deposit is active
+      // Principal after it, so a request queues instead of refunding.
+      await beginEpoch(pool, 0n);
       const walletBefore = await vaultBalance(owner.tokenAccount);
 
       await expect(requestWithdraw(pool, owner, 3_000_001n)).rejects.toThrow(
@@ -211,20 +217,22 @@ describe("custody", () => {
 
       const signature = await requestWithdraw(pool, owner, 3_000_000n);
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      expect(player.principal.toString()).toBe("0");
-      expect(player.entries.toString()).toBe("0");
+      // The queued amount stays in Principal and in Tickets until it pays.
+      expect(player.principal.toString()).toBe("3000000");
+      expect(player.entries.toString()).toBe("3000000");
       expect(player.pendingWithdraw.toString()).toBe("3000000");
 
-      const event = await findEvent<{ amount: BN; pending: BN; pendingEpoch: BN }>(
+      const event = await findEvent<{ amount: BN; pending: BN; pendingEpoch: BN; refunded: BN }>(
         signature,
         "withdrawRequested",
       );
       expect(event?.amount.toString()).toBe("3000000");
       expect(event?.pending.toString()).toBe("3000000");
-      expect(event?.pendingEpoch.toString()).toBe("0");
+      expect(event?.pendingEpoch.toString()).toBe("1");
+      expect(event?.refunded.toString()).toBe("0");
 
       // The USDC has not moved: it is still in the vault and not in the
-      // wallet, which is the whole point of splitting the instruction.
+      // wallet, which is the whole point of queueing.
       expect(await vaultBalance(owner.tokenAccount)).toBe(walletBefore);
       expect(await vaultBalance(pool.principalVault)).toBe(3_000_000n);
       expect((await program.account.pool.fetch(pool.pool)).pendingWithdrawals.toString()).toBe(
@@ -235,18 +243,22 @@ describe("custody", () => {
   );
 
   it(
-    "request_withdraw works while the pool is paused",
+    "request_withdraw works while the pool is paused, for the refund and for the queue",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 2_000_000n);
+      await beginEpoch(pool, 0n);
+      await deposit(pool, owner, 1_000_000n); // pending
 
       await setPause(pool, true);
-      await requestWithdraw(pool, owner, 1_000_000n);
+      // 1.5M asked: the 1M pending deposit refunds and 0.5M queues.
+      await requestWithdraw(pool, owner, 1_500_000n);
 
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      expect(player.principal.toString()).toBe("1000000");
-      expect(player.pendingWithdraw.toString()).toBe("1000000");
+      expect(player.principal.toString()).toBe("2000000");
+      expect(player.pendingDeposit.toString()).toBe("0");
+      expect(player.pendingWithdraw.toString()).toBe("500000");
     },
     TIMEOUT,
   );
@@ -331,18 +343,19 @@ describe("custody", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1
       await deposit(pool, owner, 4_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is active
 
       await requestWithdraw(pool, owner, 1_500_000n);
       expect(
         (await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey)))
           .pendingEpoch.toString(),
-      ).toBe("1");
+      ).toBe("2");
 
       // Same epoch: the money is still lent out as far as the program knows.
       await expect(processWithdraw(pool, owner)).rejects.toThrow(/WithdrawalNotDue/);
 
       const before = await vaultBalance(owner.tokenAccount);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
+      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3
       const signature = await processWithdraw(pool, owner);
 
       expect((await vaultBalance(owner.tokenAccount)) - before).toBe(1_500_000n);
@@ -369,6 +382,7 @@ describe("custody", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n);
       await deposit(pool, owner, 4_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is active
 
       await requestWithdraw(pool, owner, 1_000_000n);
       const second = await requestWithdraw(pool, owner, 500_000n);
@@ -377,7 +391,7 @@ describe("custody", () => {
       ).toBe("1500000");
 
       const before = await vaultBalance(owner.tokenAccount);
-      await retryUntilOk(() => beginEpoch(pool, 1n));
+      await retryUntilOk(() => beginEpoch(pool, 2n));
       await processWithdraw(pool, owner);
 
       expect((await vaultBalance(owner.tokenAccount)) - before).toBe(1_500_000n);
@@ -397,17 +411,19 @@ describe("custody", () => {
   it(
     "a stalled operator cannot freeze a request: it matures on its own clock",
     async () => {
-      // `begin_epoch` is never called here, so `current_epoch_id` stays 0 and
-      // the epoch-boundary rule can never fire. Only the elapsed time can.
+      // `begin_epoch` is called once, so the deposit is active, and never again,
+      // so `current_epoch_id` stays 1 and the epoch-boundary rule can never
+      // fire. Only the elapsed time can.
       const pool = await setupPool({ epochSeconds: 5 });
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 4_000_000n);
+      await beginEpoch(pool, 0n);
       await requestWithdraw(pool, owner, 2_000_000n);
 
       const player = await program.account.player.fetch(
         playerPda(pool.pool, owner.keypair.publicKey),
       );
-      expect(player.pendingEpoch.toString()).toBe("0");
+      expect(player.pendingEpoch.toString()).toBe("1");
       await expect(processWithdraw(pool, owner)).rejects.toThrow(/WithdrawalNotDue/);
 
       const before = await vaultBalance(owner.tokenAccount);
@@ -415,7 +431,7 @@ describe("custody", () => {
       await processWithdraw(pool, owner);
 
       expect((await vaultBalance(owner.tokenAccount)) - before).toBe(2_000_000n);
-      expect((await program.account.pool.fetch(pool.pool)).currentEpochId.toString()).toBe("0");
+      expect((await program.account.pool.fetch(pool.pool)).currentEpochId.toString()).toBe("1");
     },
     TIMEOUT,
   );

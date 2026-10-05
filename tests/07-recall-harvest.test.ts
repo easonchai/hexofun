@@ -19,6 +19,7 @@ import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { createAccount, createMint, mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   assertSolvent,
+  beginFirstEpoch,
   deployToVenue,
   findEvent,
   harvestMethod,
@@ -26,6 +27,7 @@ import {
   program,
   provider,
   recallMethod,
+  refundAccounts,
   setTreasuryAccountsMethod,
   setupPool,
   setVenueRate,
@@ -77,6 +79,7 @@ async function requestWithdraw(ctx: PoolCtx, owner: Wallet, amount: bigint, solv
       pool: ctx.pool,
       player: playerPda(ctx.pool, owner.keypair.publicKey),
       ...ctx.venue,
+      ...refundAccounts(ctx, owner),
     })
     .signers([owner.keypair])
     .rpc();
@@ -93,6 +96,7 @@ async function processWithdraw(ctx: PoolCtx, owner: Wallet) {
       ownerToken: owner.tokenAccount,
       principalVault: ctx.principalVault,
       tokenProgram: TOKEN_PROGRAM_ID,
+      ...ctx.venue,
     })
     .rpc();
   await assertSolvent(ctx);
@@ -220,6 +224,7 @@ describe("recall", () => {
       // 300 moves to Pending: the vault holds 100 against 300 queued, so free
       // idle is -200. Total is -200 + 900 = 700, the target 70, and the most
       // a recall may take is 70 - (-200) = 270.
+      await beginFirstEpoch(ctx); // the deposit is active, so a request queues
       await requestWithdraw(ctx, owner, 300n * USDC);
 
       await refused(ctx, recallMethod(ctx, 270n * USDC + 1n).rpc(), /RecallExceedsTarget/);
@@ -269,6 +274,7 @@ describe("recall", () => {
       await deploy(ctx, 900n * USDC);
       // Vault 100, Pending 190: the vault is short by 90, under the 100 minimum.
       // Free idle is -90, total 810, target 81, so the room is 171.
+      await beginFirstEpoch(ctx);
       await requestWithdraw(ctx, owner, 190n * USDC);
 
       await refused(ctx, recallMethod(ctx, 89n * USDC).rpc(), /VenueMoveTooSmall/);
@@ -313,6 +319,7 @@ describe("recall", () => {
     async () => {
       const { ctx, owner } = await fundedPool(1_000n * USDC);
       await deploy(ctx, 900n * USDC);
+      await beginFirstEpoch(ctx);
       await requestWithdraw(ctx, owner, 300n * USDC);
       await recall(ctx, 270n * USDC);
       const before = await fetchPool(ctx);
@@ -386,6 +393,7 @@ describe("recall", () => {
       await setRate(ctx, rate);
       await waitPastLastSync(ctx);
       await deployToVenue(ctx, 9_000n * USDC);
+      await beginFirstEpoch(ctx);
       await requestWithdraw(ctx, owner, 1_000n * USDC, false);
       let pool = await fetchPool(ctx);
       expect(pool.venueValue.toString()).toBe("8999999999");
@@ -411,6 +419,7 @@ describe("recall", () => {
       await deploy(ctx, 900n * USDC);
       // Vault 100 against 450 queued: short by 350. Free idle is -350, total
       // 550, target 55, so up to 405 may come back.
+      await beginFirstEpoch(ctx);
       await requestWithdraw(ctx, owner, 450n * USDC);
       const player = await fetchPlayer(ctx, owner);
       await sleepUntilOnChain(Number(player.requestedAt.toString()) + 5 + 1);

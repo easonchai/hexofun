@@ -152,8 +152,16 @@ const CASES: Case[] = [
   },
   {
     name: "WithdrawRequested",
-    fields: [key(OWNER), u64(500_000n), u64(750_000n), u64(4n)],
-    data: { owner: OWNER, amount: "500000", pending: "750000", pendingEpoch: "4" },
+    fields: [key(OWNER), u64(500_000n), u64(750_000n), u64(4n), u64(200_000n), u64(190_000n), u64(50_000n)],
+    data: {
+      owner: OWNER,
+      amount: "500000",
+      pending: "750000",
+      pendingEpoch: "4",
+      refunded: "200000",
+      paid: "190000",
+      redeemed: "50000",
+    },
   },
   {
     name: "Withdrawn",
@@ -303,19 +311,6 @@ const CASES: Case[] = [
       prizeShare: "150",
       feePaid: "99",
       prizePaid: "150",
-    },
-  },
-  {
-    name: "InstantWithdrawn",
-    fields: [key(OWNER), u64(500n), u64(200n), u64(7n), u64(2_500n), u64(2_400n), u64(480n)],
-    data: {
-      owner: OWNER,
-      amount: "500",
-      redeemed: "200",
-      settled: "7",
-      principal: "2500",
-      entries: "2400",
-      paid: "480",
     },
   },
   {

@@ -177,7 +177,8 @@ export class OperatorInstructions {
 
   /**
    * Step 6b: pay one batch of due withdrawal requests. `process_withdraw`
-   * takes no signer, so the operator is here only as the fee payer and as
+   * syncs, settles and writes the Weight tree, so it names both. It takes no
+   * signer, so the operator is here only as the fee payer and as
    * the payer of the owner token accounts it creates. Each payout is
    * preceded by an idempotent ATA creation: the program transfers to a
    * token account of the accepted mint owned by `player.owner`, and a
@@ -204,9 +205,11 @@ export class OperatorInstructions {
             .accountsPartial({
               pool: pool.address,
               player: this.player(pool, owner),
+              weightTree: pool.weightTree,
               acceptedMint: pool.acceptedMint,
               ownerToken,
               principalVault,
+              ...this.venue(pool),
               tokenProgram: TOKEN_PROGRAM_ID,
             })
             .instruction(),

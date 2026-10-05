@@ -111,8 +111,13 @@ landed in commit 8c048d4 before this decision, so tickets 22 and 23 remove it in
 that would also undo tickets 14 and 15. Compute falls, because every tree write loses a 64 by 128 bit multiply
 per entry, and rent per Leaf falls from 72 to 56 bytes, about 0.00028 SOL at 5,080 lamports a byte.
 Pools ship fresh through the pool cutover of ADR 0016 with no account migration, because the Player
-layout and the tree entry both change. The queued amount now stays in `total_principal` until it
-pays, so the solvency invariant and the Haircut formula of ADR 0017, which add or subtract Pending
-withdrawals beside `total_principal`, have to count it once, and the ticket that builds the split has to settle those formulas. The
-glossary defines Tickets, Weight, Weight tree, Leaf, Draw, Pending withdrawal and Pending deposit
-in the new terms.
+layout and the tree entry both change. The queued amount stays in `total_principal` until it pays,
+so Pending withdrawals are a reservation of idle USDC inside Principal and not a second claim beside
+it. The solvency invariant is therefore `vault balance + venue value >= total_principal + yield owed
++ fee owed + prize owed - deficit`, with no Pending term. The Haircut is `amount x (vault balance +
+venue value - owed amounts) / total_principal`, where ADR 0017 had `total_principal + Pending
+withdrawals` in the denominator. Free idle stays the vault balance minus Pending withdrawals, so a
+refund of a pending deposit never spends USDC held for a queued one. `emergency_withdraw` pays the
+Haircut of Principal alone, because Principal already holds the pending deposit and the queued
+amount, and adding Pending withdrawals would pay that part twice. The glossary defines Tickets,
+Weight, Weight tree, Leaf, Draw, Pending withdrawal and Pending deposit in the new terms.

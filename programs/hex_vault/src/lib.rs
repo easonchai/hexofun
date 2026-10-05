@@ -159,6 +159,9 @@ pub mod hex_vault {
         custody::deposit(ctx, amount)
     }
 
+    /// Owner-signed (ADR 0020): the pending deposit part refunds in this
+    /// transaction, redeeming the gap from the venue when free idle is short.
+    /// The rest queues for `process_withdraw`.
     pub fn request_withdraw<'info>(
         ctx: Context<'info, RequestWithdraw<'info>>,
         amount: u64,
@@ -166,17 +169,8 @@ pub mod hex_vault {
         custody::request_withdraw(ctx, amount)
     }
 
-    pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
+    pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> Result<()> {
         custody::process_withdraw(ctx)
-    }
-
-    /// Owner-signed (yield-claimer ticket 09): pays in the same transaction,
-    /// redeeming the gap from the venue when free idle is short.
-    pub fn instant_withdraw<'info>(
-        ctx: Context<'info, InstantWithdraw<'info>>,
-        amount: u64,
-    ) -> Result<()> {
-        custody::instant_withdraw(ctx, amount)
     }
 
     pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {

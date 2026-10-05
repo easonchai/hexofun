@@ -393,20 +393,10 @@ describe("klend backing on a mainnet fork", () => {
   }, TIMEOUT);
 
   it("recalls into the vault at the reserve's exchange rate", async () => {
-    // A queued withdrawal is not free idle: it pulls free idle under target.
+    // A refund of 1,000 of the pending deposit pays out the whole idle band,
+    // which pulls free idle under target.
     await pastLastSync(f);
-    await send(
-      "request_withdraw (sync)",
-      program.methods
-        .requestWithdraw(new BN((1_000n * USDC_UNIT).toString()))
-        .accountsPartial({
-          owner: alice.keypair.publicKey,
-          pool: f.pool,
-          player: playerPda(f.pool, alice.keypair.publicKey),
-          ...f.venue,
-        })
-        .signers([alice.keypair]),
-    );
+    await send("request_withdraw 1000 USDC (refund from free idle)", requestWithdrawMethod(f, alice, 1_000n * USDC_UNIT));
     await pastLastSync(f);
 
     const vaultBefore = await tokenBalance(f.principalVault);
@@ -510,9 +500,12 @@ describe("klend backing on a mainnet fork", () => {
   }, TIMEOUT);
 });
 
-function instantWithdrawMethod(f: ForkPool, owner: Wallet, amount: bigint) {
+// Ticket 22: the one withdraw. The part of the amount that is still a pending
+// deposit refunds in the same transaction. Every deposit on these pools is
+// pending, since no epoch has begun.
+function requestWithdrawMethod(f: ForkPool, owner: Wallet, amount: bigint) {
   return program.methods
-    .instantWithdraw(new BN(amount.toString()))
+    .requestWithdraw(new BN(amount.toString()))
     .accountsPartial({
       owner: owner.keypair.publicKey,
       pool: f.pool,
@@ -529,7 +522,7 @@ function instantWithdrawMethod(f: ForkPool, owner: Wallet, amount: bigint) {
 
 // Yield-claimer ticket 09: the owner is paid in the same transaction, with the
 // gap above free idle redeemed from the real reserve inside the instruction.
-describe("instant withdraw on a mainnet fork", () => {
+describe("pending refund on a mainnet fork", () => {
   let f: ForkPool;
   let alice: Wallet;
   let ctoken: PublicKey;
@@ -539,13 +532,13 @@ describe("instant withdraw on a mainnet fork", () => {
     f = await createForkPool();
     ctoken = f.venue.klendCtoken;
     alice = await fundedWallet(20_000n);
-    await send("deposit 10000 (instant withdraw setup)", depositMethod(f, alice, 10_000n * USDC_UNIT));
+    await send("deposit 10000 (refund setup)", depositMethod(f, alice, 10_000n * USDC_UNIT));
     await pastLastSync(f);
-    await send("deploy_to_venue 9000 USDC (instant withdraw setup)", deployMethod(f, 9_000n * USDC_UNIT));
+    await send("deploy_to_venue 9000 USDC (refund setup)", deployMethod(f, 9_000n * USDC_UNIT));
   }, TIMEOUT);
 
   afterAll(() => {
-    console.log(`CU summary (instant withdraw) ${JSON.stringify(cus)}`);
+    console.log(`CU summary (refund) ${JSON.stringify(cus)}`);
   });
 
   it("pays from free idle without touching the reserve", async () => {
@@ -554,8 +547,8 @@ describe("instant withdraw on a mainnet fork", () => {
     const walletBefore = await tokenBalance(alice.tokenAccount);
 
     await send(
-      "instant_withdraw 200 USDC (free idle only, sync + tree debit)",
-      instantWithdrawMethod(f, alice, 200n * USDC_UNIT),
+      "request_withdraw 200 USDC (refund from free idle, sync + tree debit)",
+      requestWithdrawMethod(f, alice, 200n * USDC_UNIT),
     );
 
     expect((await tokenBalance(alice.tokenAccount)) - walletBefore).toBe(200n * USDC_UNIT);
@@ -572,8 +565,8 @@ describe("instant withdraw on a mainnet fork", () => {
     const gap = amount - vaultBefore;
 
     await send(
-      "instant_withdraw 3000 USDC (sync + redeem + tree debit)",
-      instantWithdrawMethod(f, alice, amount),
+      "request_withdraw 3000 USDC (refund with sync + redeem + tree debit)",
+      requestWithdrawMethod(f, alice, amount),
     );
 
     expect((await tokenBalance(alice.tokenAccount)) - walletBefore).toBe(amount);
@@ -590,7 +583,7 @@ describe("instant withdraw on a mainnet fork", () => {
     expect(within(burned, gap, 2n)).toBe(true);
   }, TIMEOUT);
 
-  it("fails before any redeem CPI when the reserve is illiquid, and the queued request still works", async () => {
+  it("fails before any redeem CPI when the reserve is illiquid, and a refund the reserve can cover still works", async () => {
     // Move all but 100 USDC of the reserve's free liquidity into "borrowed",
     // keeping the total supply the same: the position is worth thousands, the
     // reserve can hand back 100.
@@ -611,7 +604,7 @@ describe("instant withdraw on a mainnet fork", () => {
     await pastLastSync(f);
     const before = await fetchPool(f);
     const walletBefore = await tokenBalance(alice.tokenAccount);
-    const { text, logs } = await failure(instantWithdrawMethod(f, alice, 3_000n * USDC_UNIT).rpc());
+    const { text, logs } = await failure(requestWithdrawMethod(f, alice, 3_000n * USDC_UNIT).rpc());
     expect(text).toContain("VenueIlliquid");
     // The refresh CPI ran; the redeem CPI did not.
     expect(logs.join("\n")).toContain("Instruction: RefreshReservesBatch");
@@ -621,20 +614,14 @@ describe("instant withdraw on a mainnet fork", () => {
     expect(await tokenBalance(alice.tokenAccount)).toBe(walletBefore);
     await resetKlend();
 
-    // The fallback: queue the request, which moves no USDC.
+    // With the reserve liquid again the same call goes through.
+    const walletAfterReset = await tokenBalance(alice.tokenAccount);
     await send(
-      "request_withdraw 1000 USDC (fallback)",
-      program.methods
-        .requestWithdraw(new BN((1_000n * USDC_UNIT).toString()))
-        .accountsPartial({
-          owner: alice.keypair.publicKey,
-          pool: f.pool,
-          player: playerPda(f.pool, alice.keypair.publicKey),
-          ...f.venue,
-        })
-        .signers([alice.keypair]),
+      "request_withdraw 1000 USDC (refund after the reserve recovers)",
+      requestWithdrawMethod(f, alice, 1_000n * USDC_UNIT),
     );
-    expect(big((await fetchPool(f)).pendingWithdrawals)).toBe(1_000n * USDC_UNIT);
+    expect((await tokenBalance(alice.tokenAccount)) - walletAfterReset).toBe(1_000n * USDC_UNIT);
+    expect(big((await fetchPool(f)).pendingWithdrawals)).toBe(0n);
   }, TIMEOUT);
 });
 

@@ -62,7 +62,7 @@ Run these in this order, and only after every winner who can still be paid has b
    operator sends it, and anyone can. Anything still deployed is money `emergency-crank` and
    `sweep-house` cannot reach, so recall it first.
 4. **`emergency-crank [--batch N]`.** Permissionless: lists every Player (House excluded) with
-   `principal + pending_withdraw > 0` read straight off the chain (not the indexer, so it works
+   `principal > 0` (a queued withdrawal is inside Principal) read straight off the chain (not the indexer, so it works
    even if Postgres is behind), creates each owner's associated token account if missing, and
    pays `emergency_withdraw` in batches of `N` (default 5). Stops at the first `InsufficientVault`
    and reports paid, skipped and the shortfall; safe to re-run.

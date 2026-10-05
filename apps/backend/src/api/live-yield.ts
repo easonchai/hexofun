@@ -192,13 +192,15 @@ export interface PoolAssets {
 
 /**
  * While impaired, the share of a withdrawal the pool pays: net assets over
- * claims, the same ratio as the program's `haircut`. 1 when not impaired.
+ * `totalPrincipal`, the same ratio as the program's `haircut`. 1 when not
+ * impaired. A queued withdrawal is still inside `totalPrincipal` (ADR 0020), so
+ * `pendingWithdrawals` is not a claim beside it.
  */
 export function haircutFactor(pool: PoolAssets, vault: bigint): number {
   const owed = pool.yieldOwed + pool.feeOwed + pool.prizeOwed;
   const assets = vault + pool.venueValue;
   const net = assets > owed ? assets - owed : 0n;
-  const claims = pool.totalPrincipal + pool.pendingWithdrawals;
+  const claims = pool.totalPrincipal;
   if (claims === 0n) return 0;
   const factor = Number((net * 1_000_000n) / claims) / 1_000_000;
   return Math.min(factor, 1);
@@ -208,11 +210,11 @@ export function haircutFactor(pool: PoolAssets, vault: bigint): number {
  * The program's solvency invariant as a signed margin: vault plus venue value,
  * less every liability, plus the recorded deficit. Zero or more is solvent.
  * Venue value is as of the last sync, so interest earned since is not in it.
+ * Queued withdrawals are inside `totalPrincipal`, so they are not added again.
  */
 export function solvencyMargin(pool: PoolAssets, vault: bigint): bigint {
   const liabilities =
     pool.totalPrincipal +
-    pool.pendingWithdrawals +
     pool.yieldOwed +
     pool.feeOwed +
     pool.prizeOwed -

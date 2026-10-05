@@ -25,6 +25,7 @@ import {
   leafTickets,
   onChainNowSeconds,
   playerPda,
+  refundAccounts,
   positionPda,
   program,
   grantTicketsAsAdmin,
@@ -110,6 +111,7 @@ async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
       ...pool.venue,
+      ...refundAccounts(pool, owner),
     })
     .signers([owner.keypair])
     .rpc();
@@ -125,6 +127,7 @@ async function processWithdraw(pool: PoolCtx, owner: Wallet) {
       ownerToken: owner.tokenAccount,
       principalVault: pool.principalVault,
       tokenProgram: TOKEN_PROGRAM_ID,
+      ...pool.venue,
     })
     .rpc();
 }
@@ -535,20 +538,24 @@ describe("epochs", () => {
   );
 
   it(
-    "a player who requests their whole balance mid-epoch leaves the epoch with no Tickets",
+    "a queued request stays in the epoch's draw, and a refunded pending deposit never held a Ticket",
     async () => {
       const pool = await setupPool({ epochSeconds: 20 });
       const a = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n);
-
+      const b = await pool.fundedWallet(10_000_000n);
       await deposit(pool, a, 5_000_000n);
-      await requestWithdraw(pool, a, 5_000_000n);
+      await beginEpoch(pool, 0n); // epoch 1: a's deposit is active
+
+      await depositOnly(pool, b, 3_000_000n); // pending in epoch 1, no stand-in Tickets
+      await requestWithdraw(pool, a, 5_000_000n); // queued
+      await requestWithdraw(pool, b, 3_000_000n); // refunded
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
 
-      // The request took every Ticket out before the epoch ended, and the
-      // time held in between earns nothing.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(0n);
+      // The queued request changed no Ticket, so a is in epoch 1's draw in
+      // full. b's refund took back USDC that never held one.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(5_000_000n);
+      expect(await ticketsOf(pool, b.keypair.publicKey, 1n)).toBe(0n);
     },
     TIMEOUT,
   );
@@ -639,8 +646,8 @@ describe("epochs", () => {
       const pool = await setupPool({ epochSeconds: 30, roundSeconds: 5, closeBuffer: 1 });
       const alice = await pool.fundedWallet(10_000_000n);
 
-      await beginEpoch(pool, 0n);
       await deposit(pool, alice, 5_000_000n);
+      await beginEpoch(pool, 0n); // epoch 1: the deposit is active Principal, so it queues
 
       // Everything on tile 0, and tile 5 wins: the pot forfeits to the House
       // and Alice is left holding Entries 0 against Principal 5M.
@@ -657,19 +664,19 @@ describe("epochs", () => {
       // The old `entries >= amount` rule would have locked her out here.
       await requestWithdraw(pool, alice, 5_000_000n);
       const requested = await fetchPlayer(pool, alice.keypair.publicKey);
-      expect(requested.principal.toString()).toBe("0");
+      // The queued 5M stays in her Principal until it pays.
+      expect(requested.principal.toString()).toBe("5000000");
       expect(requested.pendingWithdraw.toString()).toBe("5000000");
       expect(requested.pendingEpoch.toString()).toBe("1");
+      expect(requested.entries.toString()).toBe("0");
 
-      // Mid-epoch the pool's Entries now exceed its Principal: the House
-      // still holds Alice's 5M while total_principal has dropped to 0.
+      // Mid-epoch the pool's Entries exceed what Alice holds: the House has
+      // her 5M, and her Principal is still counted in the pool's total.
       const midPool = await program.account.pool.fetch(pool.pool);
       const midHouse = await fetchPlayer(pool, pool.operator.publicKey);
-      expect(midPool.totalPrincipal.toString()).toBe("0");
+      expect(midPool.totalPrincipal.toString()).toBe("5000000");
       expect(midPool.pendingWithdrawals.toString()).toBe("5000000");
-      expect(BigInt(midHouse.entries.toString())).toBeGreaterThan(
-        BigInt(midPool.totalPrincipal.toString()),
-      );
+      expect(BigInt(midHouse.entries.toString())).toBe(5_000_000n);
 
       const before = await program.provider.connection.getTokenAccountBalance(alice.tokenAccount);
       await retryUntilOk(() => beginEpoch(pool, 1n));
@@ -1636,7 +1643,7 @@ describe("epochs", () => {
   );
 
   it(
-    "bought tickets stake with buy_position, and request_withdraw still deducts min(entries, x)",
+    "bought tickets stake with buy_position, and a refund of the pending deposit takes no Ticket",
     async () => {
       const pool = await setupPool({ epochSeconds: 60, roundSeconds: 30, closeBuffer: 2 });
       const owner = await pool.fundedWallet(10_000_000n);
@@ -1656,10 +1663,11 @@ describe("epochs", () => {
       const afterStake = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(afterStake.entries.toString()).toBe("1000000"); // 6_000_000 - 5_000_000 staked
 
-      // Unaffected by where the entries came from: still min(entries, x).
+      // The deposit is still pending, so asking for it back refunds it. It held
+      // no Ticket, so the 1M of bought Tickets that remain are untouched.
       await requestWithdraw(pool, owner, 1_000_000n);
       const afterWithdraw = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(afterWithdraw.entries.toString()).toBe("0");
+      expect(afterWithdraw.entries.toString()).toBe("1000000");
       expect(afterWithdraw.principal.toString()).toBe("0");
     },
     TIMEOUT,
@@ -1812,9 +1820,10 @@ describe("epochs", () => {
       );
       await settlePosition(pool, 1n, owner.keypair.publicKey);
       await requestWithdraw(pool, owner, 1_000_000n); // never blocked by pause
-      expect(
-        (await fetchPlayer(pool, owner.keypair.publicKey)).pendingWithdraw.toString(),
-      ).toBe("1000000");
+      // The 5M is still a pending deposit, so 1M of it refunded.
+      expect((await fetchPlayer(pool, owner.keypair.publicKey)).principal.toString()).toBe(
+        "4000000",
+      );
     },
     TIMEOUT,
   );

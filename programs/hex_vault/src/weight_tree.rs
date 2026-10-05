@@ -295,6 +295,10 @@ mod tests {
         /// The part of `principal` deposited in `epoch_id`, which earns no
         /// Ticket until the next epoch.
         pending: u64,
+        /// `pending_withdraw`: queued by `request_withdraw` in `queued_epoch`,
+        /// still inside `principal` and `entries` until it pays.
+        queued: u64,
+        queued_epoch: u64,
         epoch_id: u64,
         frozen_tickets: u64,
         frozen_epoch: u64,
@@ -332,6 +336,29 @@ mod tests {
         fn deposit(&mut self, a: u64) {
             self.principal += a;
             self.pending += a;
+        }
+
+        /// `request_withdraw`: the pending deposit part refunds, which lowers
+        /// Principal and the pending amount and no Tickets. The rest queues and
+        /// changes nothing the tree holds. Returns (refunded, queued).
+        fn request(&mut self, a: u64, epoch: u64) -> (u64, u64) {
+            let refund = a.min(self.pending);
+            let queued = a - refund;
+            self.principal -= refund;
+            self.pending -= refund;
+            if queued > 0 {
+                self.queued += queued;
+                self.queued_epoch = epoch;
+            }
+            (refund, queued)
+        }
+
+        /// `process_withdraw`: Principal falls by the queued amount, Tickets by
+        /// the same with a floor at zero.
+        fn process(&mut self) {
+            self.principal -= self.queued;
+            self.entries = self.entries.saturating_sub(self.queued);
+            self.queued = 0;
         }
 
         /// Tickets held at the end of epoch `e`, which the tree must report.
@@ -376,6 +403,10 @@ mod tests {
         untouched_tree: u64,
         deposits: u64,
         pending_folds: u64,
+        refunds: u64,
+        queued_requests: u64,
+        processed: u64,
+        processed_below_tickets: u64,
     }
 
     /// One pool: the tree and the eager model side by side. Player `k` sits
@@ -506,25 +537,43 @@ mod tests {
                     p.principal += a;
                     p.entries += a;
                 }),
-                (33..=44, Some(k)) => self.act(k, |p, rng| {
-                    // Instant withdraw under the Tickets rule.
-                    let a = rng.upto(p.principal.min(p.entries));
-                    p.principal -= a;
-                    p.entries -= a;
-                    p.pending = p.pending.min(p.principal);
-                }),
-                (45..=50, Some(k)) => self.act(k, |p, rng| {
-                    // `request_withdraw`: Entries saturate.
-                    let a = rng.upto(p.principal);
-                    p.principal -= a;
-                    p.entries = p.entries.saturating_sub(a);
-                    p.pending = p.pending.min(p.principal);
-                }),
+                (33..=44, Some(k)) => {
+                    // `request_withdraw`: the pending part refunds, the rest
+                    // queues. What it can take is Principal less the queue.
+                    let epoch = self.clock.current;
+                    let (refund, queued) = self.act(k, |p, rng| {
+                        let a = rng.upto(p.principal - p.queued);
+                        p.request(a, epoch)
+                    });
+                    self.cov.refunds += u64::from(refund > 0);
+                    self.cov.queued_requests += u64::from(queued > 0);
+                }
+                (45..=50, _) => {
+                    // `process_withdraw` for a Player whose request has matured:
+                    // the epoch it was made in is behind the current one.
+                    let due: Vec<usize> = (0..self.players.len())
+                        .filter(|&k| {
+                            let p = &self.players[k];
+                            p.queued > 0 && p.queued_epoch < self.clock.current
+                        })
+                        .collect();
+                    if !due.is_empty() {
+                        let k = due[self.rng.below(due.len() as u64) as usize];
+                        let short = self.act(k, |p, _| {
+                            let short = p.entries < p.queued;
+                            p.process();
+                            short
+                        });
+                        self.cov.processed += 1;
+                        self.cov.processed_below_tickets += u64::from(short);
+                    }
+                }
                 (51..=52, Some(k)) => self.act(k, |p, _| {
                     // `emergency_withdraw`.
                     p.principal = 0;
                     p.entries = 0;
                     p.pending = 0;
+                    p.queued = 0;
                 }),
                 (53..=64, Some(k)) => {
                     // `buy_position`: the stake leaves Entries and the tree.
@@ -577,7 +626,7 @@ mod tests {
             for (e, tree_t) in self.readable_tickets() {
                 let is_current = e == clock.current;
                 for (k, p) in self.players.iter().enumerate() {
-                    assert!(p.pending <= p.principal, "Player {k}");
+                    assert!(p.pending + p.queued <= p.principal, "Player {k}");
                     assert_eq!(
                         tree_t[k],
                         p.tickets(e),
@@ -642,7 +691,8 @@ mod tests {
     /// Same Tickets per Player as `touch` gives, to the unit, in the current
     /// epoch and in the previous one while the current is written, over random
     /// sequences of deposits that activate next epoch, settles, round moves,
-    /// Bought tickets and withdrawals.
+    /// Bought tickets, refunds of pending deposits and queued withdrawals
+    /// processed in a later epoch.
     #[test]
     fn matches_the_eager_ticket_count_over_random_sequences() {
         const SEQUENCES: u64 = 1_000;
@@ -675,6 +725,10 @@ mod tests {
             all.untouched_tree += c.untouched_tree;
             all.deposits += c.deposits;
             all.pending_folds += c.pending_folds;
+            all.refunds += c.refunds;
+            all.queued_requests += c.queued_requests;
+            all.processed += c.processed;
+            all.processed_below_tickets += c.processed_below_tickets;
         }
         // The generator must actually reach every case it claims to cover.
         let Coverage {
@@ -689,6 +743,10 @@ mod tests {
             untouched_tree,
             deposits,
             pending_folds,
+            refunds,
+            queued_requests,
+            processed,
+            processed_below_tickets,
             ..
         } = all;
         for (name, n) in [
@@ -703,6 +761,10 @@ mod tests {
             ("touches that leave the tree alone", untouched_tree),
             ("deposits into an existing Player", deposits),
             ("touches that fold a pending deposit", pending_folds),
+            ("requests that refund a pending deposit", refunds),
+            ("requests that queue", queued_requests),
+            ("queued withdrawals processed", processed),
+            ("processed with fewer Tickets than queued", processed_below_tickets),
         ] {
             assert!(n > 0, "never exercised: {name}");
         }

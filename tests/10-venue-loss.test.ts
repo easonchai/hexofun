@@ -19,6 +19,7 @@ import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   assertSolvent,
+  beginFirstEpoch,
   coverDeficitMethod,
   deployMethod,
   deployToVenue,
@@ -29,6 +30,7 @@ import {
   program,
   provider,
   recallMethod,
+  refundAccounts,
   setDeployPauseMethod,
   setReserveStats,
   setupPool,
@@ -86,6 +88,7 @@ async function requestWithdraw(ctx: PoolCtx, owner: Wallet, amount: bigint) {
       pool: ctx.pool,
       player: playerPda(ctx.pool, owner.keypair.publicKey),
       ...ctx.venue,
+      ...refundAccounts(ctx, owner),
     })
     .signers([owner.keypair])
     .rpc();
@@ -100,6 +103,7 @@ function processMethod(ctx: PoolCtx, owner: Wallet) {
     ownerToken: owner.tokenAccount,
     principalVault: ctx.principalVault,
     tokenProgram: TOKEN_PROGRAM_ID,
+      ...ctx.venue,
   });
 }
 
@@ -116,24 +120,23 @@ function emergencyMethod(ctx: PoolCtx, owner: Wallet) {
   });
 }
 
-function instantMethod(ctx: PoolCtx, owner: Wallet, amount: bigint) {
+/** `request_withdraw` for a Player whose Principal is a pending deposit, which
+ *  is every Player in epoch 0: it refunds in the same transaction (ADR 0020). */
+function refundMethod(ctx: PoolCtx, owner: Wallet, amount: bigint) {
   return program.methods
-    .instantWithdraw(new BN(amount.toString()))
+    .requestWithdraw(new BN(amount.toString()))
     .accountsPartial({
       owner: owner.keypair.publicKey,
       pool: ctx.pool,
       player: playerPda(ctx.pool, owner.keypair.publicKey),
-      acceptedMint: ctx.mint,
-      ownerToken: owner.tokenAccount,
-      principalVault: ctx.principalVault,
+      ...refundAccounts(ctx, owner),
       ...ctx.venue,
-      tokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([owner.keypair]);
 }
 
-async function instantWithdraw(ctx: PoolCtx, owner: Wallet, amount: bigint) {
-  const signature = await instantMethod(ctx, owner, amount).rpc();
+async function refund(ctx: PoolCtx, owner: Wallet, amount: bigint) {
+  const signature = await refundMethod(ctx, owner, amount).rpc();
   await assertSolvent(ctx);
   return signature;
 }
@@ -313,6 +316,7 @@ describe("venue loss and the haircut", () => {
     async () => {
       const { ctx, wallets } = await deployedPool([1_000n * USDC]);
       const [alice] = wallets as [Wallet];
+      await beginFirstEpoch(ctx); // Alice's deposit is active, so her request queues
       // A 1 USDC floor, so a small recall is allowed. Also exercises the setter.
       await setVenueParamsMethod(ctx, { minVenueMove: 1n * USDC }).rpc();
       await reprice(ctx, RATE_08);
@@ -342,19 +346,21 @@ describe("venue loss and the haircut", () => {
   );
 
   it(
-    "pays the haircut on an instant withdrawal, and the Principal and Tickets fall by the whole amount",
+    "pays the haircut on the refund of a pending deposit, and Principal falls by the whole amount",
     async () => {
       const { ctx, wallets } = await impairedPool();
       const [alice] = wallets as [Wallet];
       // Vault 100 + venue 720 over Principal 1,000: 0.82. Withdrawing 500
       // pays 410, redeeming 310 from the venue.
       const walletBefore = await balance(alice.tokenAccount);
-      const signature = await instantWithdraw(ctx, alice, 500n * USDC);
+      const signature = await refund(ctx, alice, 500n * USDC);
 
       expect((await balance(alice.tokenAccount)) - walletBefore).toBe(410n * USDC);
       const player = await fetchPlayer(ctx, alice);
       expect(big(player.principal)).toBe(500n * USDC);
-      expect(big(player.entries)).toBe(500n * USDC);
+      expect(big(player.pendingDeposit)).toBe(500n * USDC);
+      // The refunded units held no Ticket, so none left.
+      expect(big(player.entries)).toBe(1_000n * USDC);
       const pool = await fetchPool(ctx);
       expect(big(pool.totalPrincipal)).toBe(500n * USDC);
       expect(big(pool.venueValue)).toBe(410n * USDC);
@@ -363,11 +369,11 @@ describe("venue loss and the haircut", () => {
       expect(big(pool.deficit)).toBe(90n * USDC);
       expect(pool.impaired).toBe(true);
 
-      const event = await findEvent<{ amount: BN; paid: BN; redeemed: BN }>(
+      const event = await findEvent<{ refunded: BN; paid: BN; redeemed: BN }>(
         signature,
-        "instantWithdrawn",
+        "withdrawRequested",
       );
-      expect(big(event!.amount)).toBe(500n * USDC);
+      expect(big(event!.refunded)).toBe(500n * USDC);
       expect(big(event!.paid)).toBe(410n * USDC);
       expect(big(event!.redeemed)).toBe(310n * USDC);
     },
@@ -383,13 +389,13 @@ describe("venue loss and the haircut", () => {
       const bobBefore = await balance(bob.tokenAccount);
 
       // 0.82 for each of them, whoever goes first.
-      await instantWithdraw(ctx, alice, 300n * USDC);
+      await refund(ctx, alice, 300n * USDC);
       expect((await balance(alice.tokenAccount)) - aliceBefore).toBe(246n * USDC);
-      await instantWithdraw(ctx, bob, 400n * USDC);
+      await refund(ctx, bob, 400n * USDC);
       expect((await balance(bob.tokenAccount)) - bobBefore).toBe(328n * USDC);
       expect((await fetchPool(ctx)).impaired).toBe(true);
 
-      const signature = await instantWithdraw(ctx, alice, 300n * USDC);
+      const signature = await refund(ctx, alice, 300n * USDC);
       expect((await balance(alice.tokenAccount)) - aliceBefore).toBe(492n * USDC);
 
       const pool = await fetchPool(ctx);
@@ -410,7 +416,7 @@ describe("venue loss and the haircut", () => {
     async () => {
       const { ctx, wallets } = await impairedPool([500n * USDC, 500n * USDC]);
       const [alice, bob] = wallets as [Wallet, Wallet];
-      await instantWithdraw(ctx, alice, 500n * USDC);
+      await refund(ctx, alice, 500n * USDC);
       const aliceWallet = await balance(alice.tokenAccount);
       expect(aliceWallet).toBe(410n * USDC);
       expect(big((await fetchPool(ctx)).deficit)).toBe(90n * USDC);
@@ -428,7 +434,7 @@ describe("venue loss and the haircut", () => {
       expect(await balance(alice.tokenAccount)).toBe(aliceWallet);
       expect((await fetchPlayer(ctx, alice)).principal.toString()).toBe("0");
       const bobBefore = await balance(bob.tokenAccount);
-      await instantWithdraw(ctx, bob, 500n * USDC);
+      await refund(ctx, bob, 500n * USDC);
       expect((await balance(bob.tokenAccount)) - bobBefore).toBe(500n * USDC);
     },
     TIMEOUT,
@@ -439,9 +445,11 @@ describe("venue loss and the haircut", () => {
     async () => {
       const { ctx, wallets } = await deployedPool([1_000n * USDC]);
       const [alice] = wallets as [Wallet];
+      await beginFirstEpoch(ctx); // the deposit is active, so the request queues
       await requestWithdraw(ctx, alice, 100n * USDC);
       await reprice(ctx, RATE_08);
-      // Vault 100 + venue 720 = 820 over Principal 900 and Pending 100.
+      // Vault 100 + venue 720 = 820 over 1,000 of Principal, the queued 100
+      // included.
       expect(big((await fetchPool(ctx)).deficit)).toBe(180n * USDC);
       await shutdown(ctx);
 
@@ -460,10 +468,11 @@ describe("venue loss and the haircut", () => {
   );
 
   it(
-    "pays the haircut on an emergency withdrawal, queued amount included",
+    "pays the haircut on an emergency withdrawal of Principal, the queued amount inside it",
     async () => {
       const { ctx, wallets } = await deployedPool([1_000n * USDC]);
       const [alice] = wallets as [Wallet];
+      await beginFirstEpoch(ctx);
       await requestWithdraw(ctx, alice, 100n * USDC);
       await reprice(ctx, RATE_08);
       await shutdown(ctx);
@@ -475,7 +484,7 @@ describe("venue loss and the haircut", () => {
       const walletBefore = await balance(alice.tokenAccount);
       const signature = await emergencyMethod(ctx, alice).rpc();
       await assertSolvent(ctx);
-      // Principal 900 and Pending 100 at 0.82.
+      // Principal is 1,000 and holds the queued 100. At 0.82 that is 820.
       expect((await balance(alice.tokenAccount)) - walletBefore).toBe(820n * USDC);
       const player = await fetchPlayer(ctx, alice);
       expect([player.principal.toString(), player.pendingWithdraw.toString()]).toEqual(["0", "0"]);
@@ -510,7 +519,7 @@ describe("venue loss and the haircut", () => {
 
       for (const step of [
         () => testSyncMethod(ctx).rpc(),
-        () => instantMethod(ctx, owner, 333_333_333n).rpc(),
+        () => refundMethod(ctx, owner, 333_333_333n).rpc(),
         () => recallMethod(ctx, 20n * USDC).rpc(),
         () => testSyncMethod(ctx).rpc(),
       ]) {
@@ -582,7 +591,7 @@ describe("cover deficit", () => {
       expect((await fetchPool(ctx)).impaired).toBe(false);
 
       const walletBefore = await balance(alice.tokenAccount);
-      await instantWithdraw(ctx, alice, 1_000n * USDC);
+      await refund(ctx, alice, 1_000n * USDC);
       expect((await balance(alice.tokenAccount)) - walletBefore).toBe(1_000n * USDC);
     },
     TIMEOUT,

@@ -239,18 +239,18 @@ pub fn settle_before_growth(pool: &mut Pool, player: &mut Player) -> Result<u64>
 }
 
 /// What a withdrawal of `amount` pays while the pool is impaired (ticket 10):
-/// `floor(amount x net assets / claims)`, never more than `amount`. Net assets
-/// are the vault balance plus the venue value, less every owed amount, so the
-/// prize share and the fee have already taken their loss. Claims are
-/// `total_principal` plus Pending withdrawals. Not impaired, it is `amount`.
+/// `floor(amount x net assets / total_principal)`, never more than `amount`. Net
+/// assets are the vault balance plus the venue value, less every owed amount, so
+/// the prize share and the fee have already taken their loss. Not impaired, it
+/// is `amount`.
 ///
-/// The spec writes the ratio as `(vault + venue - Pending - owed) / total_principal`.
-/// With no Pending withdrawals the two are the same. With some, that form makes
-/// the queue senior in the numerator and then haircuts it anyway at process
-/// time, and a full unwind strands USDC. Counting Pending on both sides shares
-/// the loss over every claim, whether queued or not, and pays out all of it.
+/// A queued withdrawal stays in `total_principal` until it pays (ADR 0020), so
+/// Pending withdrawals are a reservation of idle USDC and not a claim beside it.
+/// The denominator counts every claim once, queued or not, and the loss is
+/// shared over all of it. The ticket 10 form added the queue to the denominator
+/// because the queue had already left `total_principal`.
 ///
-/// Instant, process and emergency withdraw all call this with the vault
+/// The refund, process and emergency withdraw all call this with the vault
 /// balance as it stands before the call moves anything. A redeem from the
 /// venue swaps venue value for vault balance, so it does not change the sum.
 pub fn haircut(pool: &Pool, vault_balance: u64, amount: u64) -> u64 {
@@ -260,7 +260,7 @@ pub fn haircut(pool: &Pool, vault_balance: u64, amount: u64) -> u64 {
     let assets = u128::from(vault_balance) + u128::from(pool.venue_value);
     let owed = u128::from(pool.yield_owed) + u128::from(pool.fee_owed) + u128::from(pool.prize_owed);
     let net = assets.saturating_sub(owed);
-    let claims = u128::from(pool.total_principal) + u128::from(pool.pending_withdrawals);
+    let claims = u128::from(pool.total_principal);
     if claims == 0 {
         return 0;
     }
@@ -469,14 +469,17 @@ mod tests {
         assert_eq!(haircut(&p, 150, 400), 300);
         assert_eq!(haircut(&p, 150, 1), 0, "rounds down");
         assert_eq!(haircut(&p, 150, 3), 2);
-        // Every owed amount comes off the assets, and Pending is a claim like
-        // Principal: 750 - 50 = 700 over 1,050.
+        // Every owed amount comes off the assets: 750 - 50 = 700 over 1,000. A
+        // queued withdrawal sits inside `total_principal`, so it changes nothing.
         p.pending_withdrawals = 50;
         p.fee_owed = 10;
         p.prize_owed = 10;
         p.yield_owed = 30;
-        assert_eq!(haircut(&p, 150, 1_000), 666);
-        assert_eq!(haircut(&p, 150, 50), 33);
+        assert_eq!(haircut(&p, 150, 1_000), 700);
+        assert_eq!(haircut(&p, 150, 50), 35);
+        p.pending_withdrawals = 0;
+        assert_eq!(haircut(&p, 150, 50), 35);
+        p.pending_withdrawals = 50;
         // Not impaired pays 1:1, and never more than asked.
         p.impaired = false;
         assert_eq!(haircut(&p, 150, 400), 400);
@@ -486,15 +489,18 @@ mod tests {
     }
 
     #[test]
-    fn with_no_principal_left_queued_requests_share_the_assets_pro_rata() {
-        let mut p = pool(0, 0, 0);
+    fn queued_requests_share_the_assets_pro_rata_inside_total_principal() {
+        // 1,000 of Principal, all of it queued. The queue is inside
+        // `total_principal`, so the ratio is 680 over 1,000.
+        let mut p = pool(1_000, 0, 0);
         p.impaired = true;
         p.pending_withdrawals = 1_000;
         p.venue_value = 200;
         p.fee_owed = 20;
-        // 500 + 200 - 20 = 680 for 1,000 Pending.
+        // 500 + 200 - 20 = 680.
         assert_eq!(haircut(&p, 500, 500), 340);
-        p.pending_withdrawals = 0;
+        // No Principal at all means no claim to pay.
+        p.total_principal = 0;
         assert_eq!(haircut(&p, 500, 500), 0);
     }
 

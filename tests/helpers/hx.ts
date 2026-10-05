@@ -701,6 +701,38 @@ export async function waitPastLastSync(ctx: PoolCtx): Promise<void> {
   await sleepUntilOnChain(Number(pool.lastSyncAt.toString()) + 1);
 }
 
+/**
+ * The first `begin_epoch`, which has no epoch end to wait for. A deposit made in
+ * epoch 0 is active Principal once epoch 1 has begun (ADR 0020), so a suite that
+ * needs a queued withdrawal deposits, calls this, and then requests. In epoch 0
+ * every deposit is a pending deposit, and a request refunds it.
+ */
+export function beginFirstEpoch(ctx: PoolCtx) {
+  return program.methods
+    .beginEpoch()
+    .accountsPartial({
+      operator: ctx.operator.publicKey,
+      pool: ctx.pool,
+      currentEpoch: epochPda(ctx.pool, 0n),
+      epochTwoBehind: epochPda(ctx.pool, 0n),
+      newEpoch: epochPda(ctx.pool, 1n),
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([ctx.operator])
+    .rpc();
+}
+
+/** The accounts `request_withdraw` takes beyond the signer, the pool, the Player
+ *  and the venue: the vault and the owner's USDC account, for a pending refund. */
+export function refundAccounts(ctx: PoolCtx, owner: { tokenAccount: PublicKey }) {
+  return {
+    acceptedMint: ctx.mint,
+    ownerToken: owner.tokenAccount,
+    principalVault: ctx.principalVault,
+    tokenProgram: TOKEN_PROGRAM_ID,
+  };
+}
+
 /** The stub's live value, `floor(shares x rate / 1e18)`, in USDC atomic units. */
 export async function stubVenueValue(ctx: PoolCtx): Promise<bigint> {
   const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
@@ -717,9 +749,10 @@ export async function assertSolvent(ctx: PoolCtx, dust = 0n): Promise<void> {
     (await provider.connection.getTokenAccountBalance(ctx.principalVault)).value.amount,
   );
   const assets = vault + (await stubVenueValue(ctx));
+  // A queued withdrawal stays inside `totalPrincipal` until it pays, so
+  // `pendingWithdrawals` is not added beside it (ADR 0020).
   const claims =
     big(pool.totalPrincipal) +
-    big(pool.pendingWithdrawals) +
     big(pool.yieldOwed) +
     big(pool.feeOwed) +
     big(pool.prizeOwed) -

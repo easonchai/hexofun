@@ -19,7 +19,6 @@ import {
   buyPosition,
   buyTickets,
   deposit,
-  instantWithdraw,
   klendRemaining,
   requestWithdraw,
   settlePosition,
@@ -112,21 +111,25 @@ describe("player instructions against the IDL", () => {
     }
   });
 
-  it("request_withdraw, alone and inside the shutdown pair, names the tree and klend", async () => {
-    const [alone] = await sent((p, o) => requestWithdraw(p, o, pool, 5n));
-    expect(alone!.keys).toHaveLength(idlAccounts("request_withdraw"));
-    const [request, process] = await sent((p, o) => shutdownWithdraw(p, o, pool, 5n, 0n));
-    expect(request!.keys).toHaveLength(idlAccounts("request_withdraw"));
-    expect(process!.keys).toHaveLength(idlAccounts("process_withdraw"));
-  });
-
-  it("instant_withdraw carries the klend redeem extras in klend.rs order", async () => {
-    const [ix] = await sent((p, o) => instantWithdraw(p, o, pool, 5n));
-    const named = idlAccounts("instant_withdraw");
+  it("request_withdraw carries the klend redeem extras in klend.rs order", async () => {
+    const [ix] = await sent((p, o) => requestWithdraw(p, o, pool, 5n));
+    const named = idlAccounts("request_withdraw");
     expect(ix!.keys).toHaveLength(named + 4);
     const keys = ix!.keys.map((k) => k.pubkey.toBase58());
     expect(keys).toContain(pool.weightTree.toBase58());
     expect(keys.slice(named)).toEqual(klendRemaining(pool).map((m) => m.pubkey.toBase58()));
+  });
+
+  it("the shutdown pair names the tree and klend on both instructions", async () => {
+    const [request, process] = await sent((p, o) => shutdownWithdraw(p, o, pool, 5n, 0n));
+    expect(request!.keys).toHaveLength(idlAccounts("request_withdraw") + 4);
+    expect(process!.keys).toHaveLength(idlAccounts("process_withdraw"));
+    for (const ix of [request!, process!]) {
+      const keys = ix.keys.map((k) => k.pubkey.toBase58());
+      for (const k of [pool.weightTree, pool.klendProgram, pool.klendMarket, pool.klendReserve, pool.klendCtoken]) {
+        expect(keys).toContain(k.toBase58());
+      }
+    }
   });
 });
 

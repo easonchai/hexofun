@@ -88,11 +88,18 @@ pub struct Deposited {
 #[event]
 pub struct WithdrawRequested {
     pub owner: Pubkey,
-    /// This request alone.
+    /// This request alone, the refunded part and the queued part together.
     pub amount: u64,
     /// Everything the player now has waiting, this request included.
     pub pending: u64,
     pub pending_epoch: u64,
+    /// The part that was a pending deposit and paid at once (ADR 0020).
+    pub refunded: u64,
+    /// What reached the owner for the refund. Under `refunded` while the pool
+    /// is impaired.
+    pub paid: u64,
+    /// What the refund took from the venue to cover free idle.
+    pub redeemed: u64,
 }
 
 /// A `Withdrawn` event follows once `process_withdraw` moves the USDC. Its
@@ -221,9 +228,9 @@ pub struct PoolShutdown {
 }
 
 /// Permissionless: `emergency_withdraw` paid one Player's whole balance to
-/// its own USDC ATA once the pool was shut down. `total` is what was paid:
-/// `principal + pending`, or the haircut value of it while the pool is impaired
-/// (ticket 10).
+/// its own USDC ATA once the pool was shut down. `total` is what was paid: all
+/// of `principal`, which holds `pending` already, or the haircut value of it
+/// while the pool is impaired (ticket 10).
 #[event]
 pub struct EmergencyWithdrawn {
     pub owner: Pubkey,
@@ -296,22 +303,6 @@ pub struct TreasuryAccountsSet {
     pub pool: Pubkey,
     pub treasury: Pubkey,
     pub buyback_reserve: Pubkey,
-}
-
-/// `instant_withdraw` paid `amount` to the owner in the same transaction
-/// (yield-claimer ticket 09). `redeemed` is what it took from the venue to
-/// cover free idle, `settled` the yield that joined Principal first.
-/// `principal` and `entries` are the Player's balances afterwards.
-#[event]
-pub struct InstantWithdrawn {
-    pub owner: Pubkey,
-    pub amount: u64,
-    pub redeemed: u64,
-    pub settled: u64,
-    pub principal: u64,
-    pub entries: u64,
-    /// What reached the owner. Under `amount` while the pool is impaired.
-    pub paid: u64,
 }
 
 /// A sync saw the venue's value fall past the loss tolerance and some of the

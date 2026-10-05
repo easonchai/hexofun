@@ -17,16 +17,20 @@ describe("nextPrincipal", () => {
     expect(nextPrincipal(10n, { kind: "Deposited", principal: 999n })).toBe(999n);
   });
 
-  it("WithdrawRequested subtracts the request amount", () => {
-    expect(nextPrincipal(100n, { kind: "WithdrawRequested", amount: 40n })).toBe(60n);
+  it("WithdrawRequested subtracts the refunded part", () => {
+    expect(nextPrincipal(100n, { kind: "WithdrawRequested", refunded: 40n })).toBe(60n);
+  });
+
+  it("WithdrawRequested with nothing refunded leaves Principal alone, since a queued amount stays in it", () => {
+    expect(nextPrincipal(100n, { kind: "WithdrawRequested", refunded: 0n })).toBe(100n);
   });
 
   it("WithdrawRequested clamps at 0 instead of going negative", () => {
-    expect(nextPrincipal(10n, { kind: "WithdrawRequested", amount: 40n })).toBe(0n);
+    expect(nextPrincipal(10n, { kind: "WithdrawRequested", refunded: 40n })).toBe(0n);
   });
 
-  it("InstantWithdrawn sets the Principal it carries", () => {
-    expect(nextPrincipal(100n, { kind: "InstantWithdrawn", principal: 60n })).toBe(60n);
+  it("Withdrawn sets the Principal it carries", () => {
+    expect(nextPrincipal(100n, { kind: "Withdrawn", principal: 60n })).toBe(60n);
   });
 
   it("JackpotPaid adds the compounded prize", () => {
@@ -46,14 +50,14 @@ describe("applyReferralEvent", () => {
     expect(next).toEqual({ principal: REFERRAL_QUALIFY_PRINCIPAL, aboveSince: T0 });
   });
 
-  it("a pending withdrawal dropping Principal below 50 USDC clears aboveSince", () => {
+  it("a refund dropping Principal below 50 USDC clears aboveSince", () => {
     const above: ReferralQualificationState = {
       principal: 60_000_000n,
       aboveSince: T0,
     };
     const next = applyReferralEvent(
       above,
-      { kind: "WithdrawRequested", amount: 20_000_000n },
+      { kind: "WithdrawRequested", refunded: 20_000_000n },
       T0 + 500n,
     );
     expect(next).toEqual({ principal: 40_000_000n, aboveSince: null });
@@ -72,7 +76,7 @@ describe("applyReferralEvent", () => {
     const above: ReferralQualificationState = { principal: 60_000_000n, aboveSince: T0 };
     const dipped = applyReferralEvent(
       above,
-      { kind: "WithdrawRequested", amount: 15_000_000n },
+      { kind: "WithdrawRequested", refunded: 15_000_000n },
       T0 + 100n,
     );
     expect(dipped).toEqual({ principal: 45_000_000n, aboveSince: null });

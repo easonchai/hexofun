@@ -711,25 +711,28 @@ const roundClosed = dataLine("RoundClosed", {
 // different event sequence (cross up, dip, restore) per case.
 const depositedFor = (owner: PublicKey, amount: number, principal: number, entries: number) =>
   dataLine("Deposited", { owner, amount: bn(amount), principal: bn(principal), entries: bn(entries) });
+// A request that refunds `amount` of a pending deposit and queues nothing: the
+// refunded part is what lowers Principal, which is what the referral tracker
+// reads.
 const withdrawRequestedFor = (owner: PublicKey, amount: number, pending: number, pendingEpoch = 1) =>
   dataLine("WithdrawRequested", {
     owner,
     amount: bn(amount),
     pending: bn(pending),
     pendingEpoch: bn(pendingEpoch),
+    refunded: bn(amount),
+    paid: bn(amount),
+    redeemed: bn(0),
   });
 // Live yield settles inside the money instructions and emits no event of its
-// own; an instant withdrawal carries the Principal left, which is what the
+// own; a processed withdrawal carries the Principal left, which is what the
 // referral tracker needs.
-const instantWithdrawnFor = (owner: PublicKey, amount: number, principal: number) =>
-  dataLine("InstantWithdrawn", {
+const withdrawnFor = (owner: PublicKey, paid: number, principal: number) =>
+  dataLine("Withdrawn", {
     owner,
-    amount: bn(amount),
-    redeemed: bn(0),
-    settled: bn(7),
+    amount: bn(paid),
     principal: bn(principal),
     entries: bn(principal),
-    paid: bn(amount),
   });
 const jackpotPaidFor = (
   winner: PublicKey,
@@ -1362,14 +1365,11 @@ describe("live yield mirror", () => {
         venueValue: bn(40_000_000),
         deficitRepaid: bn(50),
       }),
-      dataLine("InstantWithdrawn", {
+      dataLine("Withdrawn", {
         owner: OWNER,
-        amount: bn(500),
-        redeemed: bn(200),
-        settled: bn(7),
+        amount: bn(480),
         principal: bn(2_500),
         entries: bn(2_400),
-        paid: bn(480),
       }),
       dataLine("VenueDeployed", { pool, amount: bn(40_000_000), venueValue: bn(40_000_100) }),
       dataLine("VenueRecalled", { pool, amount: bn(5_000_000), venueValue: bn(35_000_100) }),
@@ -1400,7 +1400,7 @@ describe("live yield mirror", () => {
     expect(events.map((event) => [event.poolAddress, event.name])).toEqual(
       [
         "Synced",
-        "InstantWithdrawn",
+        "Withdrawn",
         "VenueDeployed",
         "VenueRecalled",
         "Harvested",
@@ -1410,24 +1410,21 @@ describe("live yield mirror", () => {
       ].map((name) => [active(), name]),
     );
     expect(events[0]?.data).toMatchObject({ yieldIndex: (E18 * 4n).toString(), depositorShare: "700" });
-    expect(events[1]?.data).toMatchObject({ settled: "7", paid: "480", principal: "2500" });
+    expect(events[1]?.data).toMatchObject({ amount: "480", principal: "2500" });
     expect(events[7]?.data).toMatchObject({ refund: "250", reward: "0" });
   });
 
-  it("re-reads the Player an InstantWithdrawn names, without a sweep", async () => {
+  it("re-reads the Player a Withdrawn names, without a sweep", async () => {
     await put("pool", chain.poolAddress(), poolAccount());
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER, { principal: bn(2_500) }));
 
     await fire(
       [
-        dataLine("InstantWithdrawn", {
+        dataLine("Withdrawn", {
           owner: OWNER,
           amount: bn(500),
-          redeemed: bn(0),
-          settled: bn(0),
           principal: bn(2_500),
           entries: bn(2_500),
-          paid: bn(500),
         }),
       ],
       410,
@@ -1614,7 +1611,7 @@ describe("referral qualification", () => {
     expect(row.aboveSince).toBe(1_700_000_000n); // batch()'s fixed block time
   });
 
-  it("a pending withdrawal dropping Principal below 50 USDC clears aboveSince", async () => {
+  it("a refund dropping Principal below 50 USDC clears aboveSince", async () => {
     await seedReferral({ principal: 60_000_000n, aboveSince: 1_600_000_000n });
     await indexer.ingestLogs(
       batch("sig-withdraw", 1n, [withdrawRequestedFor(OWNER, 20_000_000, 20_000_000)]),
@@ -1624,10 +1621,10 @@ describe("referral qualification", () => {
     expect(row.aboveSince).toBeNull();
   });
 
-  it("an instant withdrawal takes Principal to the figure it carries, and below 50 USDC clears aboveSince", async () => {
+  it("a processed withdrawal takes Principal to the figure it carries, and below 50 USDC clears aboveSince", async () => {
     await seedReferral({ principal: 60_000_000n, aboveSince: 1_600_000_000n });
     await indexer.ingestLogs(
-      batch("sig-instant", 1n, [instantWithdrawnFor(OWNER, 20_000_000, 40_000_007)]),
+      batch("sig-withdrawn", 1n, [withdrawnFor(OWNER, 20_000_000, 40_000_007)]),
     );
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
     expect(row.principal).toBe(40_000_007n);

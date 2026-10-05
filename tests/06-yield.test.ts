@@ -26,6 +26,7 @@ import {
   epochPda,
   findEvent,
   playerPda,
+  refundAccounts,
   program,
   provider,
   retryUntilOk,
@@ -93,6 +94,7 @@ function requestWithdrawMethod(ctx: PoolCtx, owner: Wallet, amount: bigint, venu
       pool: ctx.pool,
       player: playerPda(ctx.pool, owner.keypair.publicKey),
       ...venue,
+      ...refundAccounts(ctx, owner),
     })
     .signers([owner.keypair]);
 }
@@ -239,21 +241,22 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       expect(big(before.yieldOwed)).toBe(owed);
       expect(big(playerBefore.principal)).toBe(MILLION);
 
-      // A request that moves one unit settles first.
+      // A request that refunds one unit settles first.
       await requestWithdraw(ctx, a, 1n);
       const after = await fetchPool(ctx);
       const playerAfter = await fetchPlayer(ctx, a);
       expect(big(playerAfter.principal)).toBe(MILLION + owed - 1n);
       expect(owed).toBe(16_200n);
-      expect(big(playerAfter.entries)).toBe(owed - 1n);
-      expect(big(playerAfter.pendingDeposit)).toBe(MILLION);
+      // The refunded unit was pending and held no Ticket, so no Ticket leaves.
+      expect(big(playerAfter.entries)).toBe(owed);
+      expect(big(playerAfter.pendingDeposit)).toBe(MILLION - 1n);
       // The tree agrees: the settled yield is in this epoch's Tickets, and the
       // pending million is not.
-      expect(await ticketsOf(ctx, a.keypair.publicKey, 0n)).toBe(owed - 1n);
-      expect(big(playerAfter.pendingWithdraw)).toBe(1n);
+      expect(await ticketsOf(ctx, a.keypair.publicKey, 0n)).toBe(owed);
+      expect(big(playerAfter.pendingWithdraw)).toBe(0n);
       expect(big(after.totalPrincipal)).toBe(MILLION + owed - 1n);
       expect(big(after.yieldOwed)).toBe(0n);
-      expect(big(after.pendingWithdrawals)).toBe(1n);
+      expect(big(after.pendingWithdrawals)).toBe(0n);
     },
     TIMEOUT,
   );
@@ -403,6 +406,7 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
             pool: ctx.pool,
             player: ctx.house,
             ...ctx.venue,
+      ...refundAccounts(ctx, { tokenAccount: ctx.treasury }),
           })
           .signers([ctx.operator])
           .rpc(),
@@ -423,15 +427,19 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       const owed = depositorShare(gain);
       await waitPastLastSync(ctx);
       // MILLION + owed exceeds the stored Principal until settle adds `owed`.
+      // The million is a pending deposit and refunds at once. The yield was
+      // never pending, so it queues.
       await requestWithdrawMethod(ctx, a, MILLION + owed).rpc();
       await assertSolvent(ctx);
       const player = await fetchPlayer(ctx, a);
-      expect(big(player.principal)).toBe(0n);
-      expect(big(player.entries)).toBe(0n);
-      expect(big(player.pendingWithdraw)).toBe(MILLION + owed);
+      expect(big(player.principal)).toBe(owed);
+      expect(big(player.pendingDeposit)).toBe(0n);
+      expect(big(player.entries)).toBe(owed);
+      expect(big(player.pendingWithdraw)).toBe(owed);
       const pool = await fetchPool(ctx);
-      expect(big(pool.totalPrincipal)).toBe(0n);
-      expect(big(pool.pendingWithdrawals)).toBe(MILLION + owed);
+      // The queued yield is still inside Principal.
+      expect(big(pool.totalPrincipal)).toBe(owed);
+      expect(big(pool.pendingWithdrawals)).toBe(owed);
       expect(big(pool.yieldOwed)).toBe(0n);
     },
     TIMEOUT,

@@ -112,10 +112,10 @@ const ALICE_BONUS_GRANTED = 50_000n;
 
 /** Ticket 14's live yield. The Pool's venue position is past 2^53 so the
  *  solvency margin proves its string path, and sized so the vault plus the
- *  venue cover principal and pending by exactly SOLVENCY_MARGIN. */
+ *  venue cover principal by exactly SOLVENCY_MARGIN. Queued withdrawals are
+ *  inside principal (ADR 0020), so they are not added to it. */
 const POOL_VENUE_VALUE = BigInt(HUGE_U64) + 10_000_000n;
-const SOLVENCY_MARGIN =
-  PRINCIPAL_VAULT_BALANCE + POOL_VENUE_VALUE - (BigInt(HUGE_U64) + POOL_PENDING_WITHDRAWALS);
+const SOLVENCY_MARGIN = PRINCIPAL_VAULT_BALANCE + POOL_VENUE_VALUE - BigInt(HUGE_U64);
 const FREE_IDLE = PRINCIPAL_VAULT_BALANCE - POOL_PENDING_WITHDRAWALS;
 /** `lastSyncAt`, and the index history behind the trailing rates: 5% over
  *  the 7 days to the last sync, 1% over the last 24 hours. */
@@ -560,8 +560,8 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     });
 
     it("returns the haircut factor while impaired and the Bought Tickets switch as set", async () => {
-      // Claims of 20M + 3M pending against 9M in the vault and the venue's
-      // position: net assets 9M + 10M above HUGE_U64's worth of venue value.
+      // Claims of 20M of Principal, the 3M queued inside it, against 9M in the
+      // vault and 10M in the venue's position.
       await prisma.pool.update({
         where: { address: POOL_ADDRESS },
         data: {
@@ -573,8 +573,8 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       });
       try {
         const { body } = await http.get("/pool").expect(200);
-        // (9,000,000 + 10,000,000) / (20,000,000 + 3,000,000)
-        expect(body.live.haircutFactor).toBeCloseTo(19 / 23, 5);
+        // (9,000,000 + 10,000,000) / 20,000,000
+        expect(body.live.haircutFactor).toBeCloseTo(19 / 20, 5);
         expect(body.live.buyTicketsPaused).toBe(true);
         expect(body.pool.impaired).toBe(true);
       } finally {
@@ -761,16 +761,16 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
   it("GET /feed keeps user-facing events only, newest first", async () => {
     const { body } = await http.get("/feed").expect(200);
     expect(body.map((event: { name: string }) => event.name)).toEqual([
-      // Ticket 14: a void refund and an instant withdrawal are history too.
+      // Ticket 14: a void refund and a processed withdrawal are history too.
       "PositionSettled",
-      "InstantWithdrawn",
+      "Withdrawn",
       "PositionSettled",
       "JackpotPaid",
       "PositionSettled",
       "Deposited",
     ]);
     expect(body[0].data).toMatchObject({ refund: "250", reward: "0" });
-    expect(body[1].data).toMatchObject({ amount: "400000", settled: "1200" });
+    expect(body[1].data).toMatchObject({ amount: "400000", principal: "1000000" });
     // The zero-reward PositionSettled and the operator-only RoundOpened are gone.
     expect(body.every((event: { slot: string }) => event.slot !== "11")).toBe(true);
     expect(body.every((event: { slot: string }) => event.slot !== "13")).toBe(true);
@@ -783,7 +783,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     const alice = await http.get(`/feed?owner=${ALICE}`).expect(200);
     expect(alice.body.map((event: { name: string }) => event.name)).toEqual([
       "PositionSettled",
-      "InstantWithdrawn",
+      "Withdrawn",
       "PositionSettled",
       "JackpotPaid",
       "PositionSettled",
@@ -919,7 +919,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
   describe("GET /status live yield", () => {
     it("reports the solvency margin, free idle against the band, the reserve and the tree", async () => {
       const { body } = await http.get("/status").expect(200);
-      // Vault + venue less principal and pending, past 2^53 like the inputs.
+      // Vault + venue less principal, past 2^53 like the inputs.
       expect(body.solvencyMargin).toBe(SOLVENCY_MARGIN.toString());
       expect(body.freeIdle).toBe(FREE_IDLE.toString());
       // 6 USDC of free idle against a Principal past 2^53: under one basis point.
@@ -944,7 +944,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       try {
         const { body } = await http.get("/status").expect(200);
         expect(BigInt(body.solvencyMargin)).toBe(
-          PRINCIPAL_VAULT_BALANCE - (BigInt(HUGE_U64) + POOL_PENDING_WITHDRAWALS),
+          PRINCIPAL_VAULT_BALANCE - BigInt(HUGE_U64),
         );
         expect(body.solvencyMargin.startsWith("-")).toBe(true);
       } finally {
@@ -1723,9 +1723,9 @@ async function seed(prisma: PrismaService): Promise<void> {
       // Reward stored as a JSON number rather than a string, which the feed
       // filter has to accept just the same.
       { slot: 15n, signature: "sig15", index: 0, name: "PositionSettled", data: { owner: ALICE, reward: 7 }, blockTime: NOW - 50n },
-      // Ticket 14: a player's history also shows an instant withdrawal and a
+      // Ticket 14: a player's history also shows a processed withdrawal and a
       // void refund (a zero reward with a refund on PositionSettled).
-      { slot: 19n, signature: "sig19", index: 0, name: "InstantWithdrawn", data: { owner: ALICE, amount: "400000", redeemed: "0", settled: "1200", principal: "1000000", entries: "1000000", paid: "400000" }, blockTime: NOW - 20n },
+      { slot: 19n, signature: "sig19", index: 0, name: "Withdrawn", data: { owner: ALICE, amount: "400000", principal: "1000000", entries: "1000000" }, blockTime: NOW - 20n },
       { slot: 19n, signature: "sig19", index: 1, name: "PositionSettled", data: { owner: ALICE, roundId: "98", reward: "0", refund: "250" }, blockTime: NOW - 20n },
     ].map((row) => ({ ...row, poolAddress: POOL_ADDRESS })),
   });
@@ -1846,7 +1846,7 @@ async function seedRetiredPool(
   await prisma.event.createMany({
     data: [
       { slot: 30n, signature: "retired30", index: 0, name: "Deposited", data: { owner: ALICE, amount: "777" }, blockTime: NOW - 20n },
-      { slot: 31n, signature: "retired31", index: 0, name: "InstantWithdrawn", data: { owner: ALICE, amount: "1", settled: "1" }, blockTime: NOW - 15n },
+      { slot: 31n, signature: "retired31", index: 0, name: "Withdrawn", data: { owner: ALICE, amount: "1", principal: "1", entries: "1" }, blockTime: NOW - 15n },
       { slot: 32n, signature: "retired32", index: 0, name: "PositionBought", data: { roundId: "555", owner: ALICE, tiles: "1", stakePerTile: "1", total: "1" }, blockTime: NOW - 10n },
       { slot: 33n, signature: "retired33", index: 0, name: "RoundVoided", data: { roundId: "101" }, blockTime: NOW - 5n },
     ].map((row) => ({ ...row, poolAddress: RETIRED_POOL_ADDRESS })),

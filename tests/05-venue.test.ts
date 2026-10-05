@@ -17,10 +17,12 @@ import { Keypair, SystemProgram, Transaction, sendAndConfirmTransaction } from "
 import { mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   assertSolvent,
+  beginFirstEpoch,
   deployMethod,
   deployToVenue,
   findEvent,
   playerPda,
+  refundAccounts,
   program,
   provider,
   setupPool,
@@ -70,6 +72,7 @@ async function requestWithdraw(ctx: PoolCtx, owner: Wallet, amount: bigint) {
       pool: ctx.pool,
       player: playerPda(ctx.pool, owner.keypair.publicKey),
       ...ctx.venue,
+      ...refundAccounts(ctx, owner),
     })
     .signers([owner.keypair])
     .rpc();
@@ -280,9 +283,10 @@ describe("deploy_to_venue", () => {
     "leaves a Pending withdrawal out of free idle",
     async () => {
       const { ctx, owner } = await fundedPool(1_000n * USDC);
-      // 400 moves from Principal to Pending: the vault still holds 1,000, but
-      // only 600 of it is free, so the target is 60 and 540 may go (900 with
-      // no withdrawal queued).
+      await beginFirstEpoch(ctx); // the deposit is active, so a request queues
+      // 400 is queued: the vault still holds 1,000, but only 600 of it is
+      // free, so the target is 60 and 540 may go (900 with no withdrawal
+      // queued).
       await requestWithdraw(ctx, owner, 400n * USDC);
       await waitPastLastSync(ctx);
 

@@ -77,9 +77,10 @@ function eventBool(event: DecodedEvent, key: string): boolean | undefined {
 
 /**
  * The Principal-changing events ticket 07's `Referral.aboveSince` tracker
- * needs (live yield settles inside the money instructions, so an
- * InstantWithdrawn, which carries the Principal left, stands where
- * YieldCredited did), paired with their owner, in the batch's own emission order (a dip
+ * needs (live yield settles inside the money instructions. Principal falls when
+ * a pending deposit refunds, which WithdrawRequested reports as `refunded`, and
+ * when a queued withdrawal pays, which Withdrawn reports as the Principal left),
+ * paired with their owner, in the batch's own emission order (a dip
  * and a restore in one batch must be applied as two separate crossings, not
  * collapsed into one net delta). JackpotPaid only counts when `compounded`:
  * a House win never compounds, and an uncompounded win pays a token account
@@ -99,14 +100,15 @@ function referralPrincipalEvents(
       }
     } else if (event.name === "WithdrawRequested") {
       const owner = eventField(event, "owner");
-      if (owner !== undefined && amount !== undefined) {
-        result.push({ owner, event: { kind: "WithdrawRequested", amount: BigInt(amount) } });
+      const refunded = eventField(event, "refunded");
+      if (owner !== undefined && refunded !== undefined) {
+        result.push({ owner, event: { kind: "WithdrawRequested", refunded: BigInt(refunded) } });
       }
-    } else if (event.name === "InstantWithdrawn") {
+    } else if (event.name === "Withdrawn") {
       const owner = eventField(event, "owner");
       const principal = eventField(event, "principal");
       if (owner !== undefined && principal !== undefined) {
-        result.push({ owner, event: { kind: "InstantWithdrawn", principal: BigInt(principal) } });
+        result.push({ owner, event: { kind: "Withdrawn", principal: BigInt(principal) } });
       }
     } else if (event.name === "JackpotPaid" && eventBool(event, "compounded") === true) {
       // JackpotPaid names its player `winner`, not `owner` (see refreshFromLogs).

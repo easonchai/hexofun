@@ -76,7 +76,8 @@ pub struct Pool {
     pub principal_vault_bump: u8,
     pub jackpot_vault_bump: u8,
     /// Σ `Player.pending_withdraw` across the pool. USDC the principal vault
-    /// holds for queued withdrawals, which no other payout may spend.
+    /// holds for queued withdrawals, which no other payout may spend. Part of
+    /// `total_principal`, not a second claim beside it.
     pub pending_withdrawals: u64,
     /// An epoch whose jackpot vault holds less than this at the draw request
     /// rolls over instead of paying out dust.
@@ -267,8 +268,9 @@ pub struct Player {
     pub epoch_id: u64,
     pub is_house: bool,
     pub bump: u8,
-    /// Principal already deducted and waiting for `process_withdraw` to move
-    /// the USDC. 0 when nothing is owed.
+    /// Queued by `request_withdraw` and waiting for `process_withdraw` to move
+    /// the USDC. A sub-balance of `principal`, which it leaves only when it
+    /// pays. 0 when nothing is queued.
     pub pending_withdraw: u64,
     /// The epoch the pending amount was requested in. It pays out once
     /// `pool.current_epoch_id` is past it.
