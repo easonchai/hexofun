@@ -78,6 +78,8 @@ export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   "PoolShutDown",
   "RecallExceedsTarget",
   "RecallNotNeeded",
+  "ReserveLiquidityTooLow",
+  "ReserveShareCapExceeded",
   "VenueIlliquid",
   "VenueMoveTooSmall",
 ]);

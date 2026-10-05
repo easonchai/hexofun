@@ -22,12 +22,23 @@ pub struct GainSplit {
 }
 
 /// What one sync did. `ran` is false for a second sync in the same second.
+///
+/// `gain` is the whole rise. `deficit_repaid` took the first of it, and `split`
+/// divides the rest. `loss` is the whole fall; `prize_absorbed` and
+/// `fee_absorbed` are what the first-loss layers took of a loss past the
+/// tolerance, and `deficit_added` is what was left for the deficit.
+/// `cleared` is true when this sync took the deficit to zero.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SyncOutcome {
     pub ran: bool,
     pub gain: u64,
     pub loss: u64,
     pub split: GainSplit,
+    pub deficit_repaid: u64,
+    pub prize_absorbed: u64,
+    pub fee_absorbed: u64,
+    pub deficit_added: u64,
+    pub cleared: bool,
 }
 
 /// Splits `gain` into fee, depositor share and prize.
@@ -84,8 +95,13 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
     };
     if value_now > before {
         let gain = value_now - before;
+        // A recorded deficit is repaid before any split, so the fee, the
+        // depositors and the prize see only what is left. The prize and fee
+        // owed that a loss consumed are not restored.
+        let deficit_repaid = gain.min(pool.deficit);
+        let gain_left = gain - deficit_repaid;
         let split = split_gain(
-            gain,
+            gain_left,
             pool.yield_fee_bps,
             pool.total_principal,
             pool.base_rate_bps,
@@ -103,21 +119,51 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
         pool.fee_owed = fee_owed;
         pool.yield_owed = yield_owed;
         pool.prize_owed = prize_owed;
+        if deficit_repaid > 0 {
+            pool.deficit -= deficit_repaid;
+            if pool.deficit == 0 {
+                pool.impaired = false;
+                out.cleared = true;
+            }
+        }
         // Running totals for the next harvest event (ticket 07). They only
         // describe history, so a saturated total is harmless: saturate rather
-        // than fail a sync over a counter.
-        pool.harvest_gain = pool.harvest_gain.saturating_add(gain);
+        // than fail a sync over a counter. They count what was split, so
+        // `fee + depositor + prize` stays equal to `gain` there.
+        pool.harvest_gain = pool.harvest_gain.saturating_add(gain_left);
         pool.harvest_fee = pool.harvest_fee.saturating_add(split.fee);
         pool.harvest_depositor = pool.harvest_depositor.saturating_add(split.depositor);
         pool.harvest_prize = pool.harvest_prize.saturating_add(split.prize);
         out.gain = gain;
         out.split = split;
+        out.deficit_repaid = deficit_repaid;
     } else if value_now < before {
-        // Dust only for now. Ticket 10 adds the loss tolerance, `impaired`
-        // and `deficit`.
         let loss = before - value_now;
-        pool.fee_owed = pool.fee_owed.saturating_sub(loss);
         out.loss = loss;
+        // `loss_tolerance_bps` of the value is rounding dust, never a loss.
+        // The fee owed bears it, floored at zero, as at a deploy or a redeem.
+        let tolerance = u128::from(before) * u128::from(pool.loss_tolerance_bps)
+            / u128::from(BPS_DENOMINATOR);
+        if u128::from(loss) <= tolerance {
+            pool.fee_owed = pool.fee_owed.saturating_sub(loss);
+        } else {
+            // First loss: the prize share owed, then the fee owed. Only what
+            // they cannot cover is recorded against depositors. The index
+            // never falls.
+            let prize_absorbed = loss.min(pool.prize_owed);
+            let fee_absorbed = (loss - prize_absorbed).min(pool.fee_owed);
+            let rest = loss - prize_absorbed - fee_absorbed;
+            let deficit = pool.deficit.checked_add(rest).ok_or(HexVaultError::ArithmeticOverflow)?;
+            pool.prize_owed -= prize_absorbed;
+            pool.fee_owed -= fee_absorbed;
+            pool.deficit = deficit;
+            if rest > 0 {
+                pool.impaired = true;
+            }
+            out.prize_absorbed = prize_absorbed;
+            out.fee_absorbed = fee_absorbed;
+            out.deficit_added = rest;
+        }
     }
     pool.venue_value = value_now;
     pool.last_sync_at = now;
@@ -190,6 +236,53 @@ pub fn settle_before_growth(pool: &mut Pool, player: &mut Player) -> Result<u64>
         player.yield_index = pool.yield_index;
     }
     Ok(owed)
+}
+
+/// What a withdrawal of `amount` pays while the pool is impaired (ticket 10):
+/// `floor(amount x net assets / claims)`, never more than `amount`. Net assets
+/// are the vault balance plus the venue value, less every owed amount, so the
+/// prize share and the fee have already taken their loss. Claims are
+/// `total_principal` plus Pending withdrawals. Not impaired, it is `amount`.
+///
+/// The spec writes the ratio as `(vault + venue - Pending - owed) / total_principal`.
+/// With no Pending withdrawals the two are the same. With some, that form makes
+/// the queue senior in the numerator and then haircuts it anyway at process
+/// time, and a full unwind strands USDC. Counting Pending on both sides shares
+/// the loss over every claim, whether queued or not, and pays out all of it.
+///
+/// Instant, process and emergency withdraw all call this with the vault
+/// balance as it stands before the call moves anything. A redeem from the
+/// venue swaps venue value for vault balance, so it does not change the sum.
+pub fn haircut(pool: &Pool, vault_balance: u64, amount: u64) -> u64 {
+    if !pool.impaired {
+        return amount;
+    }
+    let assets = u128::from(vault_balance) + u128::from(pool.venue_value);
+    let owed = u128::from(pool.yield_owed) + u128::from(pool.fee_owed) + u128::from(pool.prize_owed);
+    let net = assets.saturating_sub(owed);
+    let claims = u128::from(pool.total_principal) + u128::from(pool.pending_withdrawals);
+    if claims == 0 {
+        return 0;
+    }
+    // Both factors are under 2^65, so the product fits.
+    let pay = u128::from(amount) * net / claims;
+    u64::try_from(pay).map_or(amount, |p| p.min(amount))
+}
+
+/// Takes `loss` (what a haircut withdrawal gave up, `amount - paid`) off the
+/// recorded deficit. That share of the loss is realised and no later recovery
+/// pays it back. Returns the deficit as it stood if this cleared `impaired`.
+pub fn realise_loss(pool: &mut Pool, loss: u64) -> Option<u64> {
+    if !pool.impaired || loss == 0 {
+        return None;
+    }
+    let before = pool.deficit;
+    pool.deficit = before.saturating_sub(loss);
+    if pool.deficit == 0 {
+        pool.impaired = false;
+        return Some(before);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -284,23 +377,151 @@ mod tests {
         for seed in 0..200 {
             let mut rng = Rng(seed);
             let mut p = pool(rng.next() >> 20, rng.below(3_000) as u16, 500);
+            // Assets start equal to Principal and no fall counts as dust, so
+            // the solvency identity is exact at every step.
+            p.venue_value = p.total_principal;
             let mut now = 0i64;
-            let mut gained = 0u128;
             for _ in 0..50 {
-                now += rng.below(2 * YEAR / 50) as i64;
+                now += 1 + rng.below(2 * YEAR / 50) as i64;
                 let before = p.venue_value;
                 let value = if rng.below(4) == 0 {
                     before.saturating_sub(rng.below(1_000_000))
                 } else {
                     before.saturating_add(rng.below(1 << 40))
                 };
-                let out = apply_sync(&mut p, value, now).unwrap();
-                gained += out.gain as u128;
+                apply_sync(&mut p, value, now).unwrap();
                 let owed = p.fee_owed as u128 + p.yield_owed as u128 + p.prize_owed as u128;
-                assert!(owed <= gained, "seed {seed}");
-                assert!(!p.impaired && p.deficit == 0);
+                // venue value + deficit = Principal + owed, and impaired
+                // follows the deficit.
+                assert_eq!(
+                    p.venue_value as u128 + p.deficit as u128,
+                    p.total_principal as u128 + owed,
+                    "seed {seed}"
+                );
+                assert_eq!(p.impaired, p.deficit > 0, "seed {seed}");
             }
         }
+    }
+
+    #[test]
+    fn a_fall_within_the_tolerance_is_dust_and_never_impairs() {
+        let mut p = pool(1_000_000, 1_000, 1_000);
+        p.loss_tolerance_bps = 1;
+        p.venue_value = 1_000_000;
+        p.prize_owed = 500;
+        p.last_sync_at = 5;
+        // 1 bps of 1,000,000 is 100. A fall of 100 is still inside.
+        let out = apply_sync(&mut p, 999_900, 6).unwrap();
+        assert_eq!((out.loss, out.deficit_added, out.prize_absorbed), (100, 0, 0));
+        assert_eq!((p.venue_value, p.prize_owed, p.deficit, p.impaired), (999_900, 500, 0, false));
+        // 101 is past 1 bps of 999,900 (99), so it is a loss and the prize takes it.
+        let out = apply_sync(&mut p, 999_799, 7).unwrap();
+        assert_eq!((out.prize_absorbed, out.fee_absorbed, out.deficit_added), (101, 0, 0));
+        assert_eq!((p.prize_owed, p.deficit, p.impaired), (399, 0, false));
+    }
+
+    #[test]
+    fn a_loss_takes_prize_then_fee_and_only_the_rest_is_a_deficit() {
+        let mut p = pool(1_000_000, 1_000, 1_000);
+        p.venue_value = 1_000_000;
+        p.prize_owed = 300;
+        p.fee_owed = 200;
+        p.yield_owed = 50;
+        p.yield_index = 7;
+        p.last_sync_at = 5;
+        let out = apply_sync(&mut p, 999_000, 6).unwrap();
+        assert_eq!(out.loss, 1_000);
+        assert_eq!((out.prize_absorbed, out.fee_absorbed, out.deficit_added), (300, 200, 500));
+        assert_eq!((p.prize_owed, p.fee_owed, p.yield_owed), (0, 0, 50));
+        assert_eq!((p.deficit, p.impaired, p.yield_index), (500, true, 7));
+        // A second loss grows the deficit.
+        let out = apply_sync(&mut p, 998_000, 7).unwrap();
+        assert_eq!((out.deficit_added, p.deficit), (1_000, 1_500));
+    }
+
+    #[test]
+    fn a_gain_repays_the_deficit_before_any_split() {
+        let mut p = pool(1_000_000, 1_000, 10_000);
+        p.venue_value = 998_000;
+        p.deficit = 1_500;
+        p.impaired = true;
+        p.last_sync_at = 0;
+        // 1,000 of gain, all of it to the deficit: no fee, no index move.
+        let out = apply_sync(&mut p, 999_000, YEAR as i64).unwrap();
+        assert_eq!((out.deficit_repaid, out.cleared, out.split), (1_000, false, GainSplit::default()));
+        assert_eq!((p.deficit, p.impaired, p.fee_owed, p.yield_index), (500, true, 0, 0));
+        // 2,000 more: 500 clears it and 1,500 splits, fee 150.
+        let out = apply_sync(&mut p, 1_001_000, 2 * YEAR as i64).unwrap();
+        assert_eq!((out.deficit_repaid, out.cleared), (500, true));
+        assert_eq!((out.split.fee, out.split.depositor, out.split.prize), (150, 1_350, 0));
+        assert_eq!((p.deficit, p.impaired, p.fee_owed, p.yield_owed), (0, false, 150, 1_350));
+        assert_eq!(p.harvest_gain, 1_500);
+    }
+
+    #[test]
+    fn the_haircut_is_principal_times_net_assets_over_total_principal() {
+        let mut p = pool(1_000, 0, 0);
+        p.impaired = true;
+        p.venue_value = 600;
+        p.deficit = 250;
+        p.yield_owed = 0;
+        // vault 150 + venue 600 = 750 net, over 1,000 Principal.
+        assert_eq!(haircut(&p, 150, 400), 300);
+        assert_eq!(haircut(&p, 150, 1), 0, "rounds down");
+        assert_eq!(haircut(&p, 150, 3), 2);
+        // Every owed amount comes off the assets, and Pending is a claim like
+        // Principal: 750 - 50 = 700 over 1,050.
+        p.pending_withdrawals = 50;
+        p.fee_owed = 10;
+        p.prize_owed = 10;
+        p.yield_owed = 30;
+        assert_eq!(haircut(&p, 150, 1_000), 666);
+        assert_eq!(haircut(&p, 150, 50), 33);
+        // Not impaired pays 1:1, and never more than asked.
+        p.impaired = false;
+        assert_eq!(haircut(&p, 150, 400), 400);
+        p.impaired = true;
+        p.venue_value = 10_000;
+        assert_eq!(haircut(&p, 150, 400), 400);
+    }
+
+    #[test]
+    fn with_no_principal_left_queued_requests_share_the_assets_pro_rata() {
+        let mut p = pool(0, 0, 0);
+        p.impaired = true;
+        p.pending_withdrawals = 1_000;
+        p.venue_value = 200;
+        p.fee_owed = 20;
+        // 500 + 200 - 20 = 680 for 1,000 Pending.
+        assert_eq!(haircut(&p, 500, 500), 340);
+        p.pending_withdrawals = 0;
+        assert_eq!(haircut(&p, 500, 500), 0);
+    }
+
+    #[test]
+    fn a_haircut_withdrawal_realises_its_share_and_exits_the_recovery() {
+        // Principal 1,000, assets 750, deficit 250. Withdraw 400: paid 300,
+        // loss 100, deficit 150. What is left holds 600 Principal on 450.
+        let mut p = pool(1_000, 0, 0);
+        p.impaired = true;
+        p.deficit = 250;
+        p.venue_value = 750;
+        let paid = haircut(&p, 0, 400);
+        assert_eq!(paid, 300);
+        p.total_principal -= 400;
+        p.venue_value -= paid;
+        assert_eq!(realise_loss(&mut p, 400 - paid), None);
+        assert_eq!(p.deficit, 150);
+        assert_eq!(p.total_principal - p.venue_value, 150, "deficit stays Principal minus assets");
+        // The rest leaves at the same ratio, and the last one clears it.
+        let paid = haircut(&p, 0, 600);
+        assert_eq!(paid, 450);
+        p.total_principal = 0;
+        p.venue_value = 0;
+        assert_eq!(realise_loss(&mut p, 600 - paid), Some(150));
+        assert_eq!((p.deficit, p.impaired), (0, false));
+        // Not impaired, nothing to realise.
+        assert_eq!(realise_loss(&mut p, 5), None);
     }
 
     #[test]
@@ -332,15 +553,19 @@ mod tests {
     }
 
     #[test]
-    fn a_fall_only_reduces_fee_owed() {
+    fn dust_under_the_tolerance_only_reduces_fee_owed() {
         let mut p = pool(1_000_000, 1_000, 1_000);
+        p.loss_tolerance_bps = 10;
         p.venue_value = 10_000;
         p.fee_owed = 30;
         p.last_sync_at = 5;
         let out = apply_sync(&mut p, 9_980, 6).unwrap();
         assert_eq!((out.ran, out.gain, out.loss), (true, 0, 20));
         assert_eq!((p.fee_owed, p.venue_value), (10, 9_980));
-        apply_sync(&mut p, 5_000, 7).unwrap();
+        // 10 bps of 9,980 is 9: a fall of 8 is dust, floored at a fee of zero.
+        apply_sync(&mut p, 9_972, 7).unwrap();
+        assert_eq!(p.fee_owed, 2);
+        apply_sync(&mut p, 9_965, 8).unwrap();
         assert_eq!(p.fee_owed, 0);
         assert!(!p.impaired && p.deficit == 0);
         assert_eq!((p.yield_owed, p.prize_owed, p.yield_index), (0, 0, 0));

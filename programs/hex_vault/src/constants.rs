@@ -43,6 +43,24 @@ pub const DEFAULT_MIN_VENUE_MOVE: u64 = 100_000_000;
 /// A fall in venue value past this share of it is a venue loss.
 pub const DEFAULT_LOSS_TOLERANCE_BPS: u16 = 1;
 
+// Bounds `set_venue_params` enforces (yield-claimer ticket 10). The fee cap is
+// `MAX_YIELD_FEE_BPS` above. A stolen Admin key can move each setting only
+// inside these.
+
+/// The idle target cannot pass this share of the pool. The idle floor cannot
+/// pass the target.
+pub const MAX_IDLE_TARGET_BPS: u16 = 5_000;
+/// The pool's largest share of the reserve's supply, never above 20%.
+pub const MAX_RESERVE_SHARE_CAP_BPS: u16 = 2_000;
+/// Free liquidity the reserve must keep after a deploy, as a multiple of the
+/// pool's position, between 1x and 6x (the field is a `u16`).
+pub const MIN_RESERVE_LIQUIDITY_FLOOR_BPS: u16 = 10_000;
+pub const MAX_RESERVE_LIQUIDITY_FLOOR_BPS: u16 = 60_000;
+/// Smallest deploy or recall, at most 10,000 USDC at 6 decimals.
+pub const MAX_MIN_VENUE_MOVE: u64 = 10_000_000_000;
+/// A fall under this share of venue value is dust, never a loss. 1%.
+pub const MAX_LOSS_TOLERANCE_BPS: u16 = 100;
+
 /// Floors for the two timeouts that gate the permissionless `void_round` and
 /// `rollover_epoch` (production-hardening 14, Finding 5). Below these, a
 /// merely slow ORAO fulfilment or an honest late Payout could be voided or
@@ -68,6 +86,16 @@ pub const SEED_EPOCH: &[u8] = b"epoch";
 pub const SEED_ROUND: &[u8] = b"round";
 pub const SEED_PLAYER: &[u8] = b"player";
 pub const SEED_POSITION: &[u8] = b"position";
+
+/// `ImpairedCleared::cause`: what took the deficit to zero.
+pub mod impaired_cause {
+    /// A venue gain repaid it in a sync.
+    pub const GAIN: u8 = 0;
+    /// `cover_deficit`.
+    pub const COVER: u8 = 1;
+    /// Haircut withdrawals realised the last of it.
+    pub const WITHDRAWAL: u8 = 2;
+}
 
 /// `Epoch::status`. An epoch is Open while it is the current one. `begin_epoch`
 /// moves it to Ended, then `request_draw` walks it Drawing → Drawn → Paid, or

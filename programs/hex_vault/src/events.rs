@@ -95,7 +95,8 @@ pub struct WithdrawRequested {
     pub pending_epoch: u64,
 }
 
-/// A `Withdrawn` event follows once `process_withdraw` moves the USDC.
+/// A `Withdrawn` event follows once `process_withdraw` moves the USDC. Its
+/// `amount` is what was paid, under the request while the pool is impaired.
 #[event]
 pub struct Withdrawn {
     pub owner: Pubkey,
@@ -220,7 +221,9 @@ pub struct PoolShutdown {
 }
 
 /// Permissionless: `emergency_withdraw` paid one Player's whole balance to
-/// its own USDC ATA once the pool was shut down.
+/// its own USDC ATA once the pool was shut down. `total` is what was paid:
+/// `principal + pending`, or the haircut value of it while the pool is impaired
+/// (ticket 10).
 #[event]
 pub struct EmergencyWithdrawn {
     pub owner: Pubkey,
@@ -230,7 +233,8 @@ pub struct EmergencyWithdrawn {
 }
 
 /// A sync saw the venue's value rise and split the gain (yield-claimer
-/// ticket 05). `fee + depositor_share + prize_share` is the gain. Not emitted
+/// ticket 05). `fee + depositor_share + prize_share + deficit_repaid` is the
+/// gain; a recorded deficit is repaid before any split (ticket 10). Not emitted
 /// for a sync that saw no gain, or that ran in the same second as the last.
 #[event]
 pub struct Synced {
@@ -241,6 +245,7 @@ pub struct Synced {
     pub prize_share: u64,
     pub yield_index: u128,
     pub venue_value: u64,
+    pub deficit_repaid: u64,
 }
 
 /// `deploy_to_venue` moved `amount` of idle USDC into the venue.
@@ -305,4 +310,62 @@ pub struct InstantWithdrawn {
     pub settled: u64,
     pub principal: u64,
     pub entries: u64,
+    /// What reached the owner. Under `amount` while the pool is impaired.
+    pub paid: u64,
+}
+
+/// A sync saw the venue's value fall past the loss tolerance and some of the
+/// loss was left over after the prize share and the fee owed took theirs
+/// (yield-claimer ticket 10). `loss` is the whole fall. `prize_absorbed` and
+/// `fee_absorbed` are what those two owed amounts took. `deficit` is the
+/// recorded deficit after, which includes any earlier one. Emitted again each
+/// time a further loss grows it.
+#[event]
+pub struct ImpairedSet {
+    pub pool: Pubkey,
+    pub loss: u64,
+    pub prize_absorbed: u64,
+    pub fee_absorbed: u64,
+    pub deficit: u64,
+}
+
+/// The recorded deficit reached zero and `impaired` cleared (ticket 10).
+/// `deficit` is the deficit that stood before the step that cleared it. `cause`
+/// is one of `impaired_cause`.
+#[event]
+pub struct ImpairedCleared {
+    pub pool: Pubkey,
+    pub deficit: u64,
+    pub cause: u8,
+}
+
+/// `cover_deficit` moved `amount` from `payer` into the principal vault
+/// (ticket 10). `deficit` is what remains.
+#[event]
+pub struct DeficitCovered {
+    pub pool: Pubkey,
+    pub payer: Pubkey,
+    pub amount: u64,
+    pub deficit: u64,
+}
+
+/// `set_deploy_pause` changed the deploy switch (ticket 10).
+#[event]
+pub struct DeployPauseSet {
+    pub pool: Pubkey,
+    pub paused: bool,
+}
+
+/// Admin-only: `set_venue_params` changed the venue settings (ticket 10).
+/// Carries every value as it stands afterwards.
+#[event]
+pub struct VenueParamsSet {
+    pub pool: Pubkey,
+    pub yield_fee_bps: u16,
+    pub idle_floor_bps: u16,
+    pub idle_target_bps: u16,
+    pub reserve_share_cap_bps: u16,
+    pub reserve_liquidity_floor_bps: u16,
+    pub min_venue_move: u64,
+    pub loss_tolerance_bps: u16,
 }

@@ -16,6 +16,13 @@ describe("parseAdminCommand", () => {
     expect(() => parseAdminCommand(["start-game", "now"])).toThrow(/unexpected argument/);
   });
 
+  it("parses pause-deploy and start-deploy with no flags", () => {
+    for (const kind of ["pause-deploy", "start-deploy"]) {
+      expect(parseAdminCommand([kind])).toEqual({ kind });
+    }
+    expect(() => parseAdminCommand(["pause-deploy", "now"])).toThrow(/unexpected argument/);
+  });
+
   it("rejects stray arguments to pause/unpause", () => {
     expect(() => parseAdminCommand(["pause", "now"])).toThrow(/unexpected argument/);
   });

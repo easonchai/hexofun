@@ -1,5 +1,5 @@
 // One-off admin CLI: set-params, pause, unpause, pause-game, pause-jackpot,
-// start-game, start-jackpot, fund-jackpot, grant-tickets, set-operator,
+// start-game, start-jackpot, pause-deploy, start-deploy, fund-jackpot, grant-tickets, set-operator,
 // propose-admin, accept-admin, create-invite, shutdown, emergency-crank,
 // sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
@@ -221,6 +221,36 @@ async function startFeature(
     .accountsPartial({ signer: mode.signer, pool: chain.poolAddress() })
     .instruction();
   await submit(chain, mode, [ix], `start the ${feature}`, ledger);
+}
+
+// yield-claimer ticket 10: `set_deploy_pause` has `set_pause`'s role rule.
+// Pausing signs locally with whichever key is loaded (the Operator's too, the
+// 3am stop for a venue in trouble), and resuming is admin only, so it goes
+// through `submit` and a wrong key is refused before it costs a fee.
+async function pauseDeploy(chain: ChainService): Promise<void> {
+  const ix = await method(chain, "setDeployPause", true)
+    .accountsPartial({ signer: chain.keypair.publicKey, pool: chain.poolAddress() })
+    .instruction();
+  log(`signature ${await chain.send([ix])}`);
+  log("deploy paused");
+}
+
+async function startDeploy(
+  chain: ChainService,
+  mode: AdminMode,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const pool = await readPool(chain);
+  if (!mode.signer.equals(pool.admin)) {
+    const role = mode.signer.equals(pool.operator) ? "the operator" : "not the admin";
+    throw new Error(
+      `start-deploy is admin only: ${mode.signer.toBase58()} is ${role} of pool ${pool.address.toBase58()}; refusing before sending`,
+    );
+  }
+  const ix = await method(chain, "setDeployPause", false)
+    .accountsPartial({ signer: mode.signer, pool: chain.poolAddress() })
+    .instruction();
+  await submit(chain, mode, [ix], "resume deploying to the venue", ledger);
 }
 
 function bnOrNull(value: number | undefined): BN | null {
@@ -588,6 +618,10 @@ export async function run(
       return startFeature(chain, mode, "game", ledger);
     case "start-jackpot":
       return startFeature(chain, mode, "jackpot", ledger);
+    case "pause-deploy":
+      return pauseDeploy(chain);
+    case "start-deploy":
+      return startDeploy(chain, mode, ledger);
     case "set-params":
       return setParams(chain, mode, command.params, ledger);
     case "fund-jackpot":

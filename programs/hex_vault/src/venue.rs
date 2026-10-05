@@ -11,8 +11,9 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
+use crate::constants::{impaired_cause, BPS_DENOMINATOR};
 use crate::errors::HexVaultError;
-use crate::events::Synced;
+use crate::events::{ImpairedCleared, ImpairedSet, Synced};
 use crate::state::Pool;
 use crate::sync::{apply_sync, SyncOutcome};
 use crate::utils;
@@ -54,7 +55,10 @@ impl Venue<'_, '_> {
 
 #[cfg(feature = "test-venue")]
 mod backing {
-    pub use crate::test_venue::{stub_deposit as deposit, stub_redeem as redeem, stub_value as value};
+    pub use crate::test_venue::{
+        stub_deposit as deposit, stub_redeem as redeem, stub_reserve_stats as reserve_stats,
+        stub_value as value,
+    };
 }
 
 #[cfg(not(feature = "test-venue"))]
@@ -63,7 +67,7 @@ mod klend;
 
 #[cfg(not(feature = "test-venue"))]
 mod backing {
-    pub use super::klend::{deposit, redeem, value};
+    pub use super::klend::{deposit, redeem, reserve_stats, value};
 }
 
 /// The pool's position in USDC atomic units, read fresh: the backing makes
@@ -117,7 +121,122 @@ pub fn sync<'info>(
             prize_share: outcome.split.prize,
             yield_index: pool.yield_index,
             venue_value: pool.venue_value,
+            deficit_repaid: outcome.deficit_repaid,
+        });
+    }
+    if outcome.deficit_added > 0 {
+        emit!(ImpairedSet {
+            pool: pool.key(),
+            loss: outcome.loss,
+            prize_absorbed: outcome.prize_absorbed,
+            fee_absorbed: outcome.fee_absorbed,
+            deficit: pool.deficit,
+        });
+    }
+    if outcome.cleared {
+        emit!(ImpairedCleared {
+            pool: pool.key(),
+            deficit: outcome.deficit_repaid,
+            cause: impaired_cause::GAIN,
         });
     }
     Ok((outcome, read))
+}
+
+/// What `deploy_to_venue` needs to know about the reserve, in USDC atomic
+/// units: its total supply (available plus borrowed, less fees) and the
+/// liquidity it can pay out now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReserveStats {
+    pub supply: u64,
+    pub available: u64,
+}
+
+/// The reserve's supply and free liquidity, read fresh. Only a deploy asks.
+pub fn reserve_stats(pool: &Pool, venue: &Venue<'_, '_>) -> Result<ReserveStats> {
+    venue.check(pool)?;
+    backing::reserve_stats(pool, venue)
+}
+
+/// The two deploy caps (ticket 10), judged on the reserve as it will stand
+/// once `amount` has gone in, since a deposit adds to both its supply and its
+/// free liquidity. `position` is the pool's value in the venue before the
+/// deploy.
+///
+/// - The pool's position may not pass `share_cap_bps` of the supply.
+/// - The reserve's free liquidity must stay at least `floor_bps` of the pool's
+///   position, so the pool can always leave.
+pub fn check_deploy_caps(
+    stats: ReserveStats,
+    position: u64,
+    amount: u64,
+    share_cap_bps: u16,
+    floor_bps: u16,
+) -> Result<()> {
+    let bps = u128::from(BPS_DENOMINATOR);
+    let after = u128::from(position) + u128::from(amount);
+    let supply = u128::from(stats.supply) + u128::from(amount);
+    let available = u128::from(stats.available) + u128::from(amount);
+    require!(
+        after * bps <= supply * u128::from(share_cap_bps),
+        HexVaultError::ReserveShareCapExceeded
+    );
+    require!(
+        available * bps >= after * u128::from(floor_bps),
+        HexVaultError::ReserveLiquidityTooLow
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STATS: ReserveStats = ReserveStats {
+        supply: 1_000_000,
+        available: 300_000,
+    };
+
+    #[test]
+    fn the_share_cap_is_judged_after_the_deploy_adds_to_supply() {
+        // 500 bps: position + amount must be at most 5% of supply + amount.
+        // 50,000 into 1,000,000 is 52,631 of 1,050,000 at the limit.
+        assert!(check_deploy_caps(STATS, 0, 52_631, 500, 0).is_ok());
+        assert!(check_deploy_caps(STATS, 0, 52_632, 500, 0).is_err());
+        // Position already held counts.
+        assert!(check_deploy_caps(STATS, 40_000, 10_526, 500, 0).is_ok());
+        assert!(check_deploy_caps(STATS, 40_000, 10_527, 500, 0).is_err());
+        // A zero cap refuses every deploy.
+        assert!(check_deploy_caps(STATS, 0, 1, 0, 0).is_err());
+    }
+
+    #[test]
+    fn the_liquidity_floor_is_judged_after_the_deploy_adds_to_liquidity() {
+        // 20,000 bps: free liquidity (300,000 + amount) at least twice position.
+        // Position 100,000 + 50,000 = 150,000 needs 300,000. Held.
+        assert!(check_deploy_caps(STATS, 100_000, 50_000, 10_000, 20_000).is_ok());
+        // A big position with little liquidity behind it is refused.
+        assert!(check_deploy_caps(STATS, 400_000, 1_000, 10_000, 20_000).is_err());
+        // 300,000 of position needs 600,000 of liquidity and has 400,000,
+        // refused; 100,000 needs 200,000 and has 400,000.
+        assert!(check_deploy_caps(STATS, 200_000, 100_000, 10_000, 20_000).is_err());
+        assert!(check_deploy_caps(STATS, 0, 100_000, 10_000, 20_000).is_ok());
+    }
+
+    #[test]
+    fn the_errors_are_named() {
+        let err = check_deploy_caps(STATS, 0, 60_000, 500, 0).unwrap_err();
+        assert!(format!("{err:?}").contains("ReserveShareCapExceeded"));
+        let err = check_deploy_caps(STATS, 400_000, 1_000, 10_000, 20_000).unwrap_err();
+        assert!(format!("{err:?}").contains("ReserveLiquidityTooLow"));
+    }
+
+    #[test]
+    fn huge_reserves_do_not_overflow() {
+        let big = ReserveStats {
+            supply: u64::MAX,
+            available: u64::MAX,
+        };
+        assert!(check_deploy_caps(big, u64::MAX, u64::MAX, 10_000, 10_000).is_ok());
+    }
 }

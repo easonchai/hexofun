@@ -208,4 +208,12 @@ pub enum HexVaultError {
     // Game rules (yield-claimer ticket 11). Appended too.
     #[msg("buying Tickets is paused")]
     BuyTicketsPaused,
+
+    // Venue loss and safety switches (yield-claimer ticket 10). Appended too.
+    #[msg("this deploy would take the pool past its share of the reserve's supply")]
+    ReserveShareCapExceeded,
+    #[msg("this deploy would leave the reserve under its minimum free liquidity")]
+    ReserveLiquidityTooLow,
+    #[msg("the pool has no venue deficit to cover")]
+    NoDeficit,
 }

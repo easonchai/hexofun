@@ -278,6 +278,27 @@ pub mod hex_vault {
         custody::set_treasury_accounts(ctx)
     }
 
+    /// Admin or Operator turns deploy off, only the Admin turns it back on
+    /// (yield-claimer ticket 10).
+    pub fn set_deploy_pause(ctx: Context<SetDeployPause>, paused: bool) -> Result<()> {
+        custody::set_deploy_pause(ctx, paused)
+    }
+
+    /// Permissionless (ticket 10): pays USDC into the principal vault against
+    /// the recorded venue deficit, capped at it.
+    pub fn cover_deficit<'info>(
+        ctx: Context<'info, CoverDeficit<'info>>,
+        amount: u64,
+    ) -> Result<()> {
+        custody::cover_deficit(ctx, amount)
+    }
+
+    /// Admin-only (ticket 10): fee, idle band, caps, minimum size and loss
+    /// tolerance, each inside its program constant.
+    pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs) -> Result<()> {
+        custody::set_venue_params(ctx, params)
+    }
+
     // Localnet only: the stub venue behind `venue.rs` (yield-claimer ticket
     // 05). Created once after `create_pool`, repriced by the tests.
     #[cfg(feature = "test-venue")]
@@ -288,6 +309,17 @@ pub mod hex_vault {
     #[cfg(feature = "test-venue")]
     pub fn test_set_venue_rate(ctx: Context<TestSetVenueRate>, rate: u128) -> Result<()> {
         test_venue::test_set_venue_rate(ctx, rate)
+    }
+
+    /// Sets what the stub reserve reports as its supply and free liquidity, for
+    /// the deploy caps (ticket 10).
+    #[cfg(feature = "test-venue")]
+    pub fn test_set_reserve_stats(
+        ctx: Context<TestSetVenueRate>,
+        supply: u64,
+        available: u64,
+    ) -> Result<()> {
+        test_venue::test_set_reserve_stats(ctx, supply, available)
     }
 
     /// Runs sync and nothing else, because only deploy runs it in ticket 05.

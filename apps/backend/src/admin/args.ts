@@ -38,6 +38,10 @@ export type AdminCommand =
   | { readonly kind: "pause-jackpot" }
   | { readonly kind: "start-game" }
   | { readonly kind: "start-jackpot" }
+  /** yield-claimer ticket 10: `set_deploy_pause`, same role rule as the
+   *  feature pauses. */
+  | { readonly kind: "pause-deploy" }
+  | { readonly kind: "start-deploy" }
   | { readonly kind: "fund-jackpot"; readonly amount: bigint }
   /** Admin path only (uncapped); the operator path is the referral job. */
   | { readonly kind: "grant-tickets"; readonly owner: PublicKey; readonly amount: bigint }
@@ -73,6 +77,8 @@ export const USAGE = [
   "  unpause",
   "  pause-game | pause-jackpot   (operator or admin)",
   "  start-game | start-jackpot   (admin only)",
+  "  pause-deploy   (operator or admin; stops deploy_to_venue)",
+  "  start-deploy   (admin only)",
   "  fund-jackpot --amount N   (N is raw atomic hexUSDC, 6 decimals)",
   "  grant-tickets --owner PUBKEY --amount N   (admin path, uncapped; N is a whole number of tickets)",
   "  set-operator --key PUBKEY",
@@ -177,6 +183,8 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
     case "pause-jackpot":
     case "start-game":
     case "start-jackpot":
+    case "pause-deploy":
+    case "start-deploy":
       rejectExtra(rest);
       return { kind: command };
 

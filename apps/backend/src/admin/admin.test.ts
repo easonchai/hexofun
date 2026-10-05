@@ -471,6 +471,41 @@ describe("admin run", () => {
     expect(stderr).toContain("game paused");
   });
 
+  // yield-claimer ticket 10.
+  it("pause-deploy signs locally with the loaded key, the operator's included", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    const { stderr } = await capture(() => run({ kind: "pause-deploy" }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    expect(stderr).toContain("deploy paused");
+  });
+
+  it("start-deploy refuses an operator signer before sending", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const mode: AdminMode = { signer: poolFields.operator, multisig: false };
+
+    await expect(
+      capture(() => run({ kind: "start-deploy" }, chain, mode)),
+    ).rejects.toThrow(/start-deploy is admin only: .* is the operator/);
+    expect(sent).toEqual([]);
+    expect(rawSent).toEqual([]);
+  });
+
+  it("start-deploy in multisig mode prints one base58 transaction signed by the admin", async () => {
+    const multisigVault = Keypair.generate().publicKey;
+    const { chain, sent } = await harness({ pool: { admin: multisigVault } });
+    const mode: AdminMode = { signer: multisigVault, multisig: true };
+
+    const { stdout } = await capture(() => run({ kind: "start-deploy" }, chain, mode));
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+  });
+
   it("start-jackpot refuses an operator signer before sending", async () => {
     const { chain, sent, rawSent } = await harness();
     const mode: AdminMode = { signer: poolFields.operator, multisig: false };

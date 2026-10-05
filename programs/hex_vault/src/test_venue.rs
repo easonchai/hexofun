@@ -14,7 +14,7 @@ use anchor_spl::token_interface::{
 use crate::constants::SEED_POOL;
 use crate::errors::HexVaultError;
 use crate::state::Pool;
-use crate::venue::{self, Funds, Venue};
+use crate::venue::{self, Funds, ReserveStats, Venue};
 
 pub const SEED_TEST_RESERVE: &[u8] = b"test-venue-reserve";
 pub const SEED_TEST_VAULT: &[u8] = b"test-venue-vault";
@@ -30,6 +30,11 @@ pub struct TestReserve {
     /// USDC per share, scaled by [`RATE_SCALE`]. Starts at 1.0.
     pub rate: u128,
     pub bump: u8,
+    /// What the stub reports as the reserve's total supply and free liquidity
+    /// for the deploy caps (ticket 10). Start at `u64::MAX`, so no cap binds
+    /// until a test sets them.
+    pub supply: u64,
+    pub available: u64,
 }
 
 fn load(info: &AccountInfo) -> Result<TestReserve> {
@@ -53,6 +58,14 @@ fn value_of(shares: u64, rate: u128) -> Result<u64> {
 pub fn stub_value(_pool: &Pool, venue: &Venue<'_, '_>) -> Result<u64> {
     let reserve = load(venue.reserve)?;
     value_of(reserve.shares, reserve.rate)
+}
+
+pub fn stub_reserve_stats(_pool: &Pool, venue: &Venue<'_, '_>) -> Result<ReserveStats> {
+    let reserve = load(venue.reserve)?;
+    Ok(ReserveStats {
+        supply: reserve.supply,
+        available: reserve.available,
+    })
 }
 
 /// Adds `floor(amount x 1e18 / rate)` shares.
@@ -137,6 +150,19 @@ pub fn test_venue_init(ctx: Context<TestVenueInit>) -> Result<()> {
     reserve.shares = 0;
     reserve.rate = RATE_SCALE;
     reserve.bump = ctx.bumps.reserve;
+    reserve.supply = u64::MAX;
+    reserve.available = u64::MAX;
+    Ok(())
+}
+
+/// Sets the supply and free liquidity the stub reports to the deploy caps.
+pub fn test_set_reserve_stats(
+    ctx: Context<TestSetVenueRate>,
+    supply: u64,
+    available: u64,
+) -> Result<()> {
+    ctx.accounts.reserve.supply = supply;
+    ctx.accounts.reserve.available = available;
     Ok(())
 }
 

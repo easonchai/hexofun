@@ -11,6 +11,9 @@ use anchor_spl::token::spl_token;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 use crate::constants::{
+    impaired_cause, MAX_IDLE_TARGET_BPS, MAX_LOSS_TOLERANCE_BPS, MAX_MIN_VENUE_MOVE,
+    MAX_RESERVE_LIQUIDITY_FLOOR_BPS, MAX_RESERVE_SHARE_CAP_BPS, MAX_YIELD_FEE_BPS,
+    MIN_RESERVE_LIQUIDITY_FLOOR_BPS,
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
     DEFAULT_MIN_VENUE_MOVE, DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS, DEFAULT_RESERVE_SHARE_CAP_BPS,
     DEFAULT_YIELD_FEE_BPS, LAYOUT_VERSION, MIN_PAYOUT_TIMEOUT, MIN_VRF_TIMEOUT,
@@ -25,9 +28,11 @@ use crate::events::{
     Harvested, TreasuryAccountsSet, VenueRecalled,
     // yield-claimer ticket 09
     InstantWithdrawn,
+    // yield-claimer ticket 10
+    DeficitCovered, DeployPauseSet, ImpairedCleared, VenueParamsSet,
 };
 use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
-use crate::sync::{settle, settle_before_growth};
+use crate::sync::{haircut, realise_loss, settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
@@ -650,10 +655,14 @@ pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
         pool.shutdown || pool.current_epoch_id > player.pending_epoch || now > deadline,
         HexVaultError::WithdrawalNotDue
     );
+    // Impaired, the request pays the haircut value (ticket 10). Not impaired,
+    // that is `pending`. This runs on the state as of the last sync, since the
+    // instruction has no venue accounts.
+    let paid = haircut(pool, ctx.accounts.principal_vault.amount, pending);
     // Checked before anything is written, so a vault still waiting on the
     // yield venue leaves the request exactly as it was for the next attempt.
     require!(
-        ctx.accounts.principal_vault.amount >= pending,
+        ctx.accounts.principal_vault.amount >= paid,
         HexVaultError::InsufficientVaultLiquidity
     );
 
@@ -672,7 +681,7 @@ pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
             },
             &[signer_seeds],
         ),
-        pending,
+        paid,
         ctx.accounts.accepted_mint.decimals,
     )?;
 
@@ -681,14 +690,27 @@ pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
         .pending_withdrawals
         .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    clear_if_realised(pool.key(), pool, pending - paid, impaired_cause::WITHDRAWAL);
 
     emit!(Withdrawn {
         owner: player.owner,
-        amount: pending,
+        amount: paid,
         principal: player.principal,
         entries: player.entries,
     });
     Ok(())
+}
+
+/// Takes a haircut withdrawal's loss off the deficit and, if that took it to
+/// zero, emits `ImpairedCleared`.
+fn clear_if_realised(pool_key: Pubkey, pool: &mut Pool, loss: u64, cause: u8) {
+    if let Some(deficit) = realise_loss(pool, loss) {
+        emit!(ImpairedCleared {
+            pool: pool_key,
+            deficit,
+            cause,
+        });
+    }
 }
 
 /// Pays a withdrawal in the same transaction (yield-claimer ticket 09, ADR
@@ -704,6 +726,9 @@ pub fn process_withdraw(ctx: Context<ProcessWithdraw>) -> Result<()> {
 /// a payout is never spent here. When free idle is short the gap is redeemed
 /// from the venue in this instruction. A venue that cannot cover the gap fails
 /// with `VenueIlliquid` before the redeem CPI, and nothing changes.
+///
+/// While the pool is impaired the exit pays the haircut value (`sync::haircut`),
+/// and the Player's Principal and Tickets still fall by the whole `amount`.
 ///
 /// Allowed while paused. After Shutdown `emergency_withdraw` is the path.
 pub fn instant_withdraw<'info>(
@@ -727,8 +752,6 @@ pub fn instant_withdraw<'info>(
 
     require!(amount > 0, HexVaultError::ZeroAmount);
     require!(!a.pool.shutdown, HexVaultError::PoolShutDown);
-    // Ticket 10 replaces this with the haircut payout while impaired.
-    require!(!a.pool.impaired, HexVaultError::PoolImpaired);
     require!(
         a.player.principal >= amount,
         HexVaultError::InsufficientPrincipal
@@ -738,13 +761,18 @@ pub fn instant_withdraw<'info>(
         HexVaultError::InsufficientTickets
     );
 
+    // Impaired, `amount` of Principal and Tickets leaves for the haircut value
+    // (ticket 10). Worked out before the redeem moves value from the venue to
+    // the vault, which does not change the sum it reads.
+    let paid = haircut(&a.pool, a.principal_vault.amount, amount);
+
     // Saturating: a vault that holds less than is queued has no free idle, and
-    // the whole amount is the gap.
+    // the whole payment is the gap.
     let free_idle = a
         .principal_vault
         .amount
         .saturating_sub(a.pool.pending_withdrawals);
-    let gap = amount.saturating_sub(free_idle);
+    let gap = paid.saturating_sub(free_idle);
     if gap > 0 {
         // The venue's own value, not the booked one, as in `recall`. The
         // backing also refuses a gap above the reserve's free liquidity before
@@ -789,6 +817,9 @@ pub fn instant_withdraw<'info>(
     change.principal(-i128::from(amount))?;
     change.tickets(-i128::from(amount))?;
     weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
+    // The loss this exit realised leaves the deficit, and takes no part in a
+    // later recovery.
+    clear_if_realised(a.pool.key(), &mut a.pool, amount - paid, impaired_cause::WITHDRAWAL);
 
     let pool_id_bytes = a.pool.pool_id.to_le_bytes();
     let pool_bump = [a.pool.bump];
@@ -804,7 +835,7 @@ pub fn instant_withdraw<'info>(
             },
             &[signer_seeds],
         ),
-        amount,
+        paid,
         a.accepted_mint.decimals,
     )?;
 
@@ -815,13 +846,15 @@ pub fn instant_withdraw<'info>(
         settled: owed,
         principal: a.player.principal,
         entries: a.player.entries,
+        paid,
     });
     Ok(())
 }
 
 /// Permissionless (yield-claimer ticket 05). Syncs, then moves idle USDC
 /// above the idle target into the venue. Pending withdrawals are not free
-/// idle, so they never leave. The two reserve caps are ticket 10's.
+/// idle, so they never leave. Refused past the reserve-share cap or when it
+/// would leave the reserve under its minimum free liquidity (ticket 10).
 pub fn deploy_to_venue<'info>(
     ctx: Context<'info, DeployToVenue<'info>>,
     amount: u64,
@@ -865,6 +898,16 @@ pub fn deploy_to_venue<'info>(
         u128::from(amount) <= u128::from(free_idle).saturating_sub(target),
         HexVaultError::DeployExceedsIdle
     );
+
+    // The two reserve caps, judged on the reserve as it will stand afterwards.
+    let stats = venue::reserve_stats(&a.pool, &venue)?;
+    venue::check_deploy_caps(
+        stats,
+        read,
+        amount,
+        a.pool.reserve_share_cap_bps,
+        a.pool.reserve_liquidity_floor_bps,
+    )?;
 
     let funds = Funds {
         vault: &a.principal_vault,
@@ -1111,6 +1154,139 @@ pub fn set_treasury_accounts(ctx: Context<SetTreasuryAccounts>) -> Result<()> {
     Ok(())
 }
 
+/// Turns the deploy switch on or off (ticket 10). Same asymmetry as
+/// `set_pause`: the Admin or the Operator key turns it on, only the Admin turns
+/// it off, so a stolen Operator key cannot reopen it.
+pub fn set_deploy_pause(ctx: Context<SetDeployPause>, paused: bool) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    let signer = ctx.accounts.signer.key();
+    let allowed = signer == pool.admin || (paused && signer == pool.operator);
+    require!(allowed, HexVaultError::Unauthorized);
+
+    pool.deploy_paused = paused;
+    emit!(DeployPauseSet {
+        pool: pool.key(),
+        paused,
+    });
+    Ok(())
+}
+
+/// Permissionless (ticket 10). Syncs, then moves `amount` USDC from the
+/// caller into the principal vault against the recorded deficit. Capped at the
+/// deficit: only that much moves, so overpaying is safe. `impaired` clears when
+/// the deficit reaches zero. Fails with `NoDeficit` when there is none.
+pub fn cover_deficit<'info>(ctx: Context<'info, CoverDeficit<'info>>, amount: u64) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+    // A gain since the last sync repays the deficit first, so the cap is the
+    // deficit after it.
+    venue::sync(&mut a.pool, &venue)?;
+
+    require!(amount > 0, HexVaultError::ZeroAmount);
+    let deficit = a.pool.deficit;
+    require!(deficit > 0, HexVaultError::NoDeficit);
+    let paid = amount.min(deficit);
+
+    token_interface::transfer_checked(
+        CpiContext::new(
+            a.token_program.key(),
+            TransferChecked {
+                from: a.payer_token.to_account_info(),
+                mint: a.accepted_mint.to_account_info(),
+                to: a.principal_vault.to_account_info(),
+                authority: a.payer.to_account_info(),
+            },
+        ),
+        paid,
+        a.accepted_mint.decimals,
+    )?;
+
+    let pool = &mut a.pool;
+    pool.deficit = deficit - paid;
+    if pool.deficit == 0 {
+        pool.impaired = false;
+        emit!(ImpairedCleared {
+            pool: pool.key(),
+            deficit,
+            cause: impaired_cause::COVER,
+        });
+    }
+    emit!(DeficitCovered {
+        pool: pool.key(),
+        payer: a.payer.key(),
+        amount: paid,
+        deficit: pool.deficit,
+    });
+    Ok(())
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
+pub struct SetVenueParamsArgs {
+    pub yield_fee_bps: Option<u16>,
+    pub idle_floor_bps: Option<u16>,
+    pub idle_target_bps: Option<u16>,
+    pub reserve_share_cap_bps: Option<u16>,
+    pub reserve_liquidity_floor_bps: Option<u16>,
+    pub min_venue_move: Option<u64>,
+    pub loss_tolerance_bps: Option<u16>,
+}
+
+/// Admin-only (ticket 10). Each value is bounded by a program constant, and
+/// the idle floor may not pass the idle target. The pair is judged on where it
+/// ends up, so one call can move both. Pinned venue addresses are not settable.
+pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    if let Some(v) = params.yield_fee_bps {
+        require!(v <= MAX_YIELD_FEE_BPS, HexVaultError::InvalidParameter);
+        pool.yield_fee_bps = v;
+    }
+    if let Some(v) = params.idle_floor_bps {
+        pool.idle_floor_bps = v;
+    }
+    if let Some(v) = params.idle_target_bps {
+        require!(v <= MAX_IDLE_TARGET_BPS, HexVaultError::InvalidParameter);
+        pool.idle_target_bps = v;
+    }
+    require!(pool.idle_floor_bps <= pool.idle_target_bps, HexVaultError::InvalidParameter);
+    if let Some(v) = params.reserve_share_cap_bps {
+        require!(v <= MAX_RESERVE_SHARE_CAP_BPS, HexVaultError::InvalidParameter);
+        pool.reserve_share_cap_bps = v;
+    }
+    if let Some(v) = params.reserve_liquidity_floor_bps {
+        require!(
+            (MIN_RESERVE_LIQUIDITY_FLOOR_BPS..=MAX_RESERVE_LIQUIDITY_FLOOR_BPS).contains(&v),
+            HexVaultError::InvalidParameter
+        );
+        pool.reserve_liquidity_floor_bps = v;
+    }
+    if let Some(v) = params.min_venue_move {
+        require!(v > 0 && v <= MAX_MIN_VENUE_MOVE, HexVaultError::InvalidParameter);
+        pool.min_venue_move = v;
+    }
+    if let Some(v) = params.loss_tolerance_bps {
+        require!(v <= MAX_LOSS_TOLERANCE_BPS, HexVaultError::InvalidParameter);
+        pool.loss_tolerance_bps = v;
+    }
+
+    emit!(VenueParamsSet {
+        pool: pool.key(),
+        yield_fee_bps: pool.yield_fee_bps,
+        idle_floor_bps: pool.idle_floor_bps,
+        idle_target_bps: pool.idle_target_bps,
+        reserve_share_cap_bps: pool.reserve_share_cap_bps,
+        reserve_liquidity_floor_bps: pool.reserve_liquidity_floor_bps,
+        min_venue_move: pool.min_venue_move,
+        loss_tolerance_bps: pool.loss_tolerance_bps,
+    });
+    Ok(())
+}
+
 /// Permissionless crank, only valid once the pool is shut down: pays one
 /// Player's whole `principal + pending_withdraw` to their own USDC ATA, so a
 /// depositor gets out even if the team disappears (spec
@@ -1147,10 +1323,12 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         .checked_add(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     require!(total > 0, HexVaultError::ZeroAmount);
+    // Impaired, the whole balance pays the haircut value (ticket 10).
+    let paid = haircut(pool, a.principal_vault.amount, total);
     // No partial payouts: either the vault covers this Player in full, or
     // nothing moves and the next attempt starts from the same numbers.
     require!(
-        a.principal_vault.amount >= total,
+        a.principal_vault.amount >= paid,
         HexVaultError::InsufficientVault
     );
 
@@ -1168,6 +1346,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         .pending_withdrawals
         .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    clear_if_realised(pool.key(), pool, total - paid, impaired_cause::WITHDRAWAL);
 
     let pool_id_bytes = pool.pool_id.to_le_bytes();
     let pool_bump = [pool.bump];
@@ -1184,7 +1363,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
             },
             &[signer_seeds],
         ),
-        total,
+        paid,
         a.accepted_mint.decimals,
     )?;
 
@@ -1192,7 +1371,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         owner: player.owner,
         principal,
         pending,
-        total,
+        total: paid,
     });
     Ok(())
 }
@@ -1684,6 +1863,81 @@ pub struct SetTreasuryAccounts<'info> {
 
     #[account(constraint = buyback_reserve.mint == accepted_mint.key() @ HexVaultError::MintMismatch)]
     pub buyback_reserve: Box<InterfaceAccount<'info, TokenAccount>>,
+}
+
+/// Same shape as `SetPause`: the signer may be either role, and the handler
+/// decides which direction it may move.
+#[derive(Accounts)]
+pub struct SetDeployPause<'info> {
+    pub signer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Account<'info, Pool>,
+}
+
+#[derive(Accounts)]
+pub struct SetVenueParams<'info> {
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = admin,
+    )]
+    pub pool: Account<'info, Pool>,
+}
+
+/// Permissionless (ticket 10). Anyone pays; the venue accounts are for the
+/// sync that runs first.
+#[derive(Accounts)]
+pub struct CoverDeficit<'info> {
+    pub payer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PRINCIPAL, pool.key().as_ref()],
+        bump = pool.principal_vault_bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub principal_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(
+        mut,
+        token::mint = accepted_mint,
+        token::authority = payer,
+        token::token_program = token_program,
+    )]
+    pub payer_token: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: `venue::check` pins it to `pool.klend_program`.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
+
+    pub token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]

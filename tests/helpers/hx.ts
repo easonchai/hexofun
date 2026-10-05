@@ -724,7 +724,7 @@ export async function stubVenueValue(ctx: PoolCtx): Promise<bigint> {
  * The solvency invariant (spec "Solvency invariant"): principal vault balance
  * plus venue value covers every claim on it. Call after every instruction.
  */
-export async function assertSolvent(ctx: PoolCtx): Promise<void> {
+export async function assertSolvent(ctx: PoolCtx, dust = 0n): Promise<void> {
   const pool = await program.account.pool.fetch(ctx.pool);
   const vault = big(
     (await provider.connection.getTokenAccountBalance(ctx.principalVault)).value.amount,
@@ -737,9 +737,81 @@ export async function assertSolvent(ctx: PoolCtx): Promise<void> {
     big(pool.feeOwed) +
     big(pool.prizeOwed) -
     big(pool.deficit);
-  if (assets < claims) {
+  if (assets + dust < claims) {
     throw new Error(`insolvent: vault ${vault} + venue ${assets - vault} < claims ${claims}`);
   }
+}
+
+// --- Venue loss and safety switches (yield-claimer ticket 10) ------------------
+
+/** Builder for `set_deploy_pause`. Signed by `signer`, the Admin unless told
+ *  otherwise. */
+export function setDeployPauseMethod(ctx: PoolCtx, paused: boolean, signer: Keypair = ctx.admin) {
+  return program.methods
+    .setDeployPause(paused)
+    .accountsPartial({ signer: signer.publicKey, pool: ctx.pool })
+    .signers([signer]);
+}
+
+/** Builder for `cover_deficit`, paid by `payer` out of `payerToken`. */
+export function coverDeficitMethod(
+  ctx: PoolCtx,
+  amount: bigint,
+  payer: Keypair,
+  payerToken: PublicKey,
+  venue: VenueAccounts = ctx.venue,
+) {
+  return program.methods
+    .coverDeficit(new BN(amount.toString()))
+    .accountsPartial({
+      payer: payer.publicKey,
+      pool: ctx.pool,
+      principalVault: ctx.principalVault,
+      acceptedMint: ctx.mint,
+      payerToken,
+      ...venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers([payer]);
+}
+
+/** Every field optional: `set_venue_params` changes only what is named. */
+export interface VenueParamsArgs {
+  yieldFeeBps?: number;
+  idleFloorBps?: number;
+  idleTargetBps?: number;
+  reserveShareCapBps?: number;
+  reserveLiquidityFloorBps?: number;
+  minVenueMove?: bigint;
+  lossToleranceBps?: number;
+}
+
+/** Builder for `set_venue_params`, signed by `signer`, the Admin by default. */
+export function setVenueParamsMethod(
+  ctx: PoolCtx,
+  params: VenueParamsArgs,
+  signer: Keypair = ctx.admin,
+) {
+  return program.methods
+    .setVenueParams({
+      yieldFeeBps: params.yieldFeeBps ?? null,
+      idleFloorBps: params.idleFloorBps ?? null,
+      idleTargetBps: params.idleTargetBps ?? null,
+      reserveShareCapBps: params.reserveShareCapBps ?? null,
+      reserveLiquidityFloorBps: params.reserveLiquidityFloorBps ?? null,
+      minVenueMove: params.minVenueMove === undefined ? null : new BN(params.minVenueMove.toString()),
+      lossToleranceBps: params.lossToleranceBps ?? null,
+    })
+    .accountsPartial({ admin: signer.publicKey, pool: ctx.pool })
+    .signers([signer]);
+}
+
+/** What the stub reports to the deploy caps as the reserve's supply and free
+ *  liquidity. Both start at u64::MAX, so no cap binds. */
+export function setReserveStats(ctx: PoolCtx, supply: bigint, available: bigint) {
+  return program.methods
+    .testSetReserveStats(new BN(supply.toString()), new BN(available.toString()))
+    .accountsPartial({ pool: ctx.pool, reserve: ctx.venue.klendReserve });
 }
 
 // --- Recall, harvest, treasury accounts (yield-claimer ticket 07) -------------

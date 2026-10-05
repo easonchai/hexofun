@@ -46,7 +46,7 @@ use klend_interface::{from_account_data, SYSVAR_INSTRUCTIONS_ID, TOKEN_PROGRAM_I
 use crate::constants::SEED_POOL;
 use crate::errors::HexVaultError;
 use crate::state::Pool;
-use crate::venue::{Funds, Venue};
+use crate::venue::{Funds, ReserveStats, Venue};
 
 /// Byte offsets inside an SPL token account.
 const TOKEN_MINT: usize = 0;
@@ -210,6 +210,20 @@ pub fn value(_pool: &Pool, venue: &Venue<'_, '_>) -> Result<u64> {
         total_supply_sf(reserve)?,
         reserve.collateral.mint_total_supply,
     )
+}
+
+/// The reserve's total supply (floored) and its free liquidity, for the deploy
+/// caps. Reads without refreshing: the caller synced in this slot, which
+/// refreshed it, and `check_fresh` still refuses a stale one.
+pub fn reserve_stats(_pool: &Pool, venue: &Venue<'_, '_>) -> Result<ReserveStats> {
+    let data = venue.reserve.try_borrow_data()?;
+    let reserve = read_reserve(venue, &data)?;
+    check_fresh(&reserve.last_update, Clock::get()?.slot)?;
+    Ok(ReserveStats {
+        supply: u64::try_from(total_supply_sf(reserve)? >> FRACTION_BITS)
+            .map_err(|_| error!(HexVaultError::ArithmeticOverflow))?,
+        available: reserve.available_liquidity(),
+    })
 }
 
 /// The four extra accounts, after checking each against the reserve.

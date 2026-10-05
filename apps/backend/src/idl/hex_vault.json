@@ -510,6 +510,107 @@
       "args": []
     },
     {
+      "name": "cover_deficit",
+      "docs": [
+        "Permissionless (ticket 10): pays USDC into the principal vault against",
+        "the recorded venue deficit, capped at it."
+      ],
+      "discriminator": [
+        111,
+        47,
+        68,
+        186,
+        165,
+        82,
+        169,
+        88
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "payer_token",
+          "writable": true
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "create_pool",
       "discriminator": [
         233,
@@ -1492,6 +1593,141 @@
       "args": []
     },
     {
+      "name": "instant_withdraw",
+      "docs": [
+        "Owner-signed (yield-claimer ticket 09): pays in the same transaction,",
+        "redeeming the gap from the venue when free idle is short."
+      ],
+      "discriminator": [
+        171,
+        49,
+        145,
+        176,
+        48,
+        101,
+        112,
+        162
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "player",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "owner_token",
+          "writable": true
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "payout",
       "discriminator": [
         149,
@@ -2354,6 +2590,110 @@
       "args": []
     },
     {
+      "name": "set_buy_tickets_pause",
+      "docs": [
+        "Admin-only. Stops `buy_tickets` while set (yield-claimer ticket 11)."
+      ],
+      "discriminator": [
+        89,
+        71,
+        179,
+        241,
+        62,
+        49,
+        29,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_deploy_pause",
+      "docs": [
+        "Admin or Operator turns deploy off, only the Admin turns it back on",
+        "(yield-claimer ticket 10)."
+      ],
+      "discriminator": [
+        53,
+        93,
+        153,
+        166,
+        46,
+        70,
+        236,
+        247
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
       "name": "set_feature_pause",
       "docs": [
         "Sets the game or the jackpot switch on its own (game-jackpot-pause",
@@ -2623,6 +2963,64 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "set_venue_params",
+      "docs": [
+        "Admin-only (ticket 10): fee, idle band, caps, minimum size and loss",
+        "tolerance, each inside its program constant."
+      ],
+      "discriminator": [
+        129,
+        207,
+        20,
+        167,
+        33,
+        235,
+        76,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "SetVenueParamsArgs"
+            }
+          }
+        }
+      ]
     },
     {
       "name": "settle_position",
@@ -3188,6 +3586,45 @@
       ]
     },
     {
+      "name": "BuyTicketsPauseSet",
+      "discriminator": [
+        172,
+        142,
+        138,
+        68,
+        78,
+        84,
+        127,
+        251
+      ]
+    },
+    {
+      "name": "DeficitCovered",
+      "discriminator": [
+        213,
+        208,
+        5,
+        40,
+        54,
+        111,
+        109,
+        198
+      ]
+    },
+    {
+      "name": "DeployPauseSet",
+      "discriminator": [
+        251,
+        159,
+        232,
+        217,
+        9,
+        65,
+        128,
+        251
+      ]
+    },
+    {
       "name": "Deposited",
       "discriminator": [
         111,
@@ -3289,6 +3726,45 @@
         131,
         89,
         0
+      ]
+    },
+    {
+      "name": "ImpairedCleared",
+      "discriminator": [
+        123,
+        43,
+        99,
+        105,
+        134,
+        187,
+        91,
+        56
+      ]
+    },
+    {
+      "name": "ImpairedSet",
+      "discriminator": [
+        74,
+        98,
+        181,
+        18,
+        244,
+        194,
+        33,
+        17
+      ]
+    },
+    {
+      "name": "InstantWithdrawn",
+      "discriminator": [
+        19,
+        59,
+        52,
+        128,
+        171,
+        153,
+        53,
+        137
       ]
     },
     {
@@ -3523,6 +3999,19 @@
         135,
         33,
         227
+      ]
+    },
+    {
+      "name": "VenueParamsSet",
+      "discriminator": [
+        129,
+        229,
+        77,
+        239,
+        181,
+        203,
+        247,
+        154
       ]
     },
     {
@@ -3965,6 +4454,31 @@
       "code": 6079,
       "name": "KlendAccountMismatch",
       "msg": "a klend account does not match the reserve it belongs to"
+    },
+    {
+      "code": 6080,
+      "name": "InsufficientTickets",
+      "msg": "the player holds fewer Tickets than this withdrawal; use request_withdraw"
+    },
+    {
+      "code": 6081,
+      "name": "BuyTicketsPaused",
+      "msg": "buying Tickets is paused"
+    },
+    {
+      "code": 6082,
+      "name": "ReserveShareCapExceeded",
+      "msg": "this deploy would take the pool past its share of the reserve's supply"
+    },
+    {
+      "code": 6083,
+      "name": "ReserveLiquidityTooLow",
+      "msg": "this deploy would leave the reserve under its minimum free liquidity"
+    },
+    {
+      "code": 6084,
+      "name": "NoDeficit",
+      "msg": "the pool has no venue deficit to cover"
     }
   ],
   "types": [
@@ -4000,6 +4514,30 @@
           {
             "name": "pending_admin",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BuyTicketsPauseSet",
+      "docs": [
+        "`set_buy_tickets_pause` flipped the Bought Tickets switch (yield-claimer",
+        "ticket 11)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          },
+          {
+            "name": "at",
+            "type": "i64"
           }
         ]
       }
@@ -4093,6 +4631,53 @@
       }
     },
     {
+      "name": "DeficitCovered",
+      "docs": [
+        "`cover_deficit` moved `amount` from `payer` into the principal vault",
+        "(ticket 10). `deficit` is what remains."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "payer",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DeployPauseSet",
+      "docs": [
+        "`set_deploy_pause` changed the deploy switch (ticket 10)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
       "name": "Deposited",
       "type": {
         "kind": "struct",
@@ -4120,7 +4705,9 @@
       "name": "EmergencyWithdrawn",
       "docs": [
         "Permissionless: `emergency_withdraw` paid one Player's whole balance to",
-        "its own USDC ATA once the pool was shut down."
+        "its own USDC ATA once the pool was shut down. `total` is what was paid:",
+        "`principal + pending`, or the haircut value of it while the pool is impaired",
+        "(ticket 10)."
       ],
       "type": {
         "kind": "struct",
@@ -4398,6 +4985,112 @@
         "fields": [
           {
             "name": "jackpot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ImpairedCleared",
+      "docs": [
+        "The recorded deficit reached zero and `impaired` cleared (ticket 10).",
+        "`deficit` is the deficit that stood before the step that cleared it. `cause`",
+        "is one of `impaired_cause`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          },
+          {
+            "name": "cause",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ImpairedSet",
+      "docs": [
+        "A sync saw the venue's value fall past the loss tolerance and some of the",
+        "loss was left over after the prize share and the fee owed took theirs",
+        "(yield-claimer ticket 10). `loss` is the whole fall. `prize_absorbed` and",
+        "`fee_absorbed` are what those two owed amounts took. `deficit` is the",
+        "recorded deficit after, which includes any earlier one. Emitted again each",
+        "time a further loss grows it."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "loss",
+            "type": "u64"
+          },
+          {
+            "name": "prize_absorbed",
+            "type": "u64"
+          },
+          {
+            "name": "fee_absorbed",
+            "type": "u64"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InstantWithdrawn",
+      "docs": [
+        "`instant_withdraw` paid `amount` to the owner in the same transaction",
+        "(yield-claimer ticket 09). `redeemed` is what it took from the venue to",
+        "cover free idle, `settled` the yield that joined Principal first.",
+        "`principal` and `entries` are the Player's balances afterwards."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "redeemed",
+            "type": "u64"
+          },
+          {
+            "name": "settled",
+            "type": "u64"
+          },
+          {
+            "name": "principal",
+            "type": "u64"
+          },
+          {
+            "name": "entries",
+            "type": "u64"
+          },
+          {
+            "name": "paid",
+            "docs": [
+              "What reached the owner. Under `amount` while the pool is impaired."
+            ],
             "type": "u64"
           }
         ]
@@ -5338,6 +6031,16 @@
           },
           {
             "name": "reward",
+            "docs": [
+              "Stake back plus the share of the losers' pot, for a winner."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "refund",
+            "docs": [
+              "The whole stake returned as Tickets on a voided round (ADR 0019)."
+            ],
             "type": "u64"
           }
         ]
@@ -5632,10 +6335,61 @@
       }
     },
     {
+      "name": "SetVenueParamsArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "yield_fee_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "idle_floor_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "idle_target_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "reserve_share_cap_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "reserve_liquidity_floor_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "min_venue_move",
+            "type": {
+              "option": "u64"
+            }
+          },
+          {
+            "name": "loss_tolerance_bps",
+            "type": {
+              "option": "u16"
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "Synced",
       "docs": [
         "A sync saw the venue's value rise and split the gain (yield-claimer",
-        "ticket 05). `fee + depositor_share + prize_share` is the gain. Not emitted",
+        "ticket 05). `fee + depositor_share + prize_share + deficit_repaid` is the",
+        "gain; a recorded deficit is repaid before any split (ticket 10). Not emitted",
         "for a sync that saw no gain, or that ran in the same second as the last."
       ],
       "type": {
@@ -5667,6 +6421,10 @@
           },
           {
             "name": "venue_value",
+            "type": "u64"
+          },
+          {
+            "name": "deficit_repaid",
             "type": "u64"
           }
         ]
@@ -5767,6 +6525,50 @@
           {
             "name": "venue_value",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueParamsSet",
+      "docs": [
+        "Admin-only: `set_venue_params` changed the venue settings (ticket 10).",
+        "Carries every value as it stands afterwards."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "yield_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "idle_floor_bps",
+            "type": "u16"
+          },
+          {
+            "name": "idle_target_bps",
+            "type": "u16"
+          },
+          {
+            "name": "reserve_share_cap_bps",
+            "type": "u16"
+          },
+          {
+            "name": "reserve_liquidity_floor_bps",
+            "type": "u16"
+          },
+          {
+            "name": "min_venue_move",
+            "type": "u64"
+          },
+          {
+            "name": "loss_tolerance_bps",
+            "type": "u16"
           }
         ]
       }
@@ -5884,7 +6686,8 @@
     {
       "name": "Withdrawn",
       "docs": [
-        "A `Withdrawn` event follows once `process_withdraw` moves the USDC."
+        "A `Withdrawn` event follows once `process_withdraw` moves the USDC. Its",
+        "`amount` is what was paid, under the request while the pool is impaired."
       ],
       "type": {
         "kind": "struct",

@@ -362,7 +362,10 @@ describe("klend backing on a mainnet fork", () => {
     const vaultBefore = await tokenBalance(f.principalVault);
     await send("deploy_to_venue 9000 USDC", deployMethod(f, 9_000n * USDC_UNIT));
 
-    expect(vaultBefore - (await tokenBalance(f.principalVault))).toBe(9_000n * USDC_UNIT);
+    // klend deposits the liquidity that whole cTokens are worth, which can be a
+    // unit under the amount asked, depending on the reserve's live rate.
+    const moved = vaultBefore - (await tokenBalance(f.principalVault));
+    expect(moved <= 9_000n * USDC_UNIT && within(moved, 9_000n * USDC_UNIT, 2n)).toBe(true);
     const held = await tokenBalance(ctoken);
     expect(held > 0n).toBe(true);
     const pool = await fetchPool(f);
@@ -632,5 +635,104 @@ describe("instant withdraw on a mainnet fork", () => {
         .signers([alice.keypair]),
     );
     expect(big((await fetchPool(f)).pendingWithdrawals)).toBe(1_000n * USDC_UNIT);
+  }, TIMEOUT);
+});
+
+function setVenueParamsMethod(f: ForkPool, params: Record<string, number | bigint | null>) {
+  const arg = (key: string) => {
+    const v = params[key];
+    return v === undefined || v === null ? null : typeof v === "bigint" ? new BN(v.toString()) : v;
+  };
+  return program.methods
+    .setVenueParams({
+      yieldFeeBps: arg("yieldFeeBps"),
+      idleFloorBps: arg("idleFloorBps"),
+      idleTargetBps: arg("idleTargetBps"),
+      reserveShareCapBps: arg("reserveShareCapBps"),
+      reserveLiquidityFloorBps: arg("reserveLiquidityFloorBps"),
+      minVenueMove: arg("minVenueMove"),
+      lossToleranceBps: arg("lossToleranceBps"),
+    })
+    .accountsPartial({ admin: f.admin.publicKey, pool: f.pool })
+    .signers([f.admin]);
+}
+
+// Yield-claimer ticket 10: deploy respects the reserve-share cap and the
+// reserve's minimum free liquidity, both read from the real reserve. A refused
+// deploy fails after the refresh CPI and before any deposit CPI.
+describe("deploy caps on a mainnet fork", () => {
+  let f: ForkPool;
+  let alice: Wallet;
+
+  beforeAll(async () => {
+    await resetKlend();
+    f = await createForkPool();
+    alice = await fundedWallet(20_000n);
+    await send("deposit 10000 (deploy caps setup)", depositMethod(f, alice, 10_000n * USDC_UNIT));
+  }, TIMEOUT);
+
+  const noDepositCpi = (logs: string[]) => {
+    expect(logs.join("\n")).toContain("Instruction: RefreshReservesBatch");
+    expect(logs.join("\n")).not.toContain("Instruction: DepositReserveLiquidity");
+  };
+
+  it("refuses a deploy that takes the pool past its share of the reserve's supply", async () => {
+    await pastLastSync(f);
+    // Total supply as klend counts it, in USDC atomic units, from the raw reserve.
+    const data = (await connection.getAccountInfo(RESERVE, "confirmed"))!.data;
+    const u64 = (o: number) => data.readBigUInt64LE(o);
+    const u128 = (o: number) => u64(o) + (u64(o + 8) << 64n);
+    const supply = ((u64(224) << 60n) + u128(232) - u128(344) - u128(360) - u128(376)) >> 60n;
+    const amount = 9_000n * USDC_UNIT;
+    // The share, in bps, the pool would hold after the deploy. The reserve
+    // accrues a little interest between this read and the transaction, so the
+    // cap is set a percent either side of it, not on the line.
+    const share = Number((amount * 10_000n * 1_000n) / (supply + amount)) / 1_000;
+    const tight = Math.floor(share * 0.99);
+    const loose = Math.ceil(share * 1.01) + 1;
+    expect(loose <= 2_000).toBe(true);
+
+    await send("set_venue_params (share cap under)", setVenueParamsMethod(f, { reserveShareCapBps: tight }));
+    const { text, logs } = await failure(deployMethod(f, amount).rpc());
+    expect(text).toContain("ReserveShareCapExceeded");
+    noDepositCpi(logs);
+    expect(big((await fetchPool(f)).venueValue)).toBe(0n);
+
+    // A little more room and the same deploy fits.
+    await send("set_venue_params (share cap over)", setVenueParamsMethod(f, { reserveShareCapBps: loose }));
+    await pastLastSync(f);
+    await send("deploy_to_venue 9000 USDC (inside the cap)", deployMethod(f, amount));
+    expect(big((await fetchPool(f)).venueValue) > 0n).toBe(true);
+  }, TIMEOUT);
+
+  it("refuses a deploy that would leave the reserve under its minimum free liquidity", async () => {
+    await resetKlend();
+    const g = await createForkPool();
+    const bob = await fundedWallet(20_000n);
+    await send("deposit 10000 (liquidity floor setup)", depositMethod(g, bob, 10_000n * USDC_UNIT));
+    await pastLastSync(g);
+
+    // Move all but 100 USDC of the reserve's free liquidity into "borrowed",
+    // keeping the total supply the same. The default floor is twice the pool's
+    // position: 9,000 in leaves 9,100 free against 18,000 wanted.
+    const info = (await connection.getAccountInfo(RESERVE, "confirmed"))!;
+    const data = Buffer.from(info.data);
+    const available = data.readBigUInt64LE(224);
+    const keep = 100n * USDC_UNIT;
+    data.writeBigUInt64LE(keep, 224);
+    const borrowedSf = data.readBigUInt64LE(232) + (data.readBigUInt64LE(240) << 64n);
+    const next = borrowedSf + ((available - keep) << 60n);
+    data.writeBigUInt64LE(next & 0xffff_ffff_ffff_ffffn, 232);
+    data.writeBigUInt64LE(next >> 64n, 240);
+    await surf("surfnet_setAccount", [
+      RESERVE.toBase58(),
+      { lamports: info.lamports, data: data.toString("hex"), owner: info.owner.toBase58(), executable: false },
+    ]);
+
+    const { text, logs } = await failure(deployMethod(g, 9_000n * USDC_UNIT).rpc());
+    expect(text).toContain("ReserveLiquidityTooLow");
+    noDepositCpi(logs);
+    expect(big((await fetchPool(g)).venueValue)).toBe(0n);
+    await resetKlend();
   }, TIMEOUT);
 });
