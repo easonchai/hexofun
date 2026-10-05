@@ -641,7 +641,7 @@ describe("runTick", () => {
   });
 
   // --- 3b. Referral bonuses (docs/plan/hexo-referrals ticket 08): grants
-  // due for the epoch that just began, batched like registration.
+  // due for the epoch that just began, batched like withdrawals.
 
   it("3b. grants up to eight referral bonuses per transaction and records the signature", async () => {
     const referrers = Array.from({ length: 10 }, () =>

@@ -32,8 +32,8 @@ export interface PoolParams {
   /** Seconds a Drawn epoch waits for its payout before it may roll over
    * unpaid. */
   readonly payoutTimeout: number;
-  /** Base yield's APR on time-weighted Principal, in basis points. Env
-   *  override BASE_RATE_BPS. */
+  /** Ceiling on the depositors' share of venue yield, as an APR on
+   *  `total_principal` in basis points. Env override BASE_RATE_BPS. */
   readonly baseRateBps: number;
   /** Tickets credited per USDC spent in `buy_tickets`. Env override
    *  TICKETS_PER_USDC. */
@@ -88,7 +88,7 @@ export const DEFAULT_POOL_PARAMS: PoolParams = {
   epochAnchor: nextSundayAnchor(new Date()),
   roundSeconds: 90,
   closeBuffer: 5,
-  // The program's floor since ADR 0019 (was 120, under the new floor).
+  // Equal to the program's floor, MIN_VRF_TIMEOUT in constants.rs.
   vrfTimeout: 180,
   minDeposit: 1_000_000n, // 1 hexUSDC at 6 decimals
   houseCutBps: 600, // 6%, the rate PRD-V2 §5.4 asks for

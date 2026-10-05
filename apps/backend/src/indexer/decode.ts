@@ -173,7 +173,7 @@ export interface DecodedPool {
   /** Game pause (game-jackpot-pause ticket 02): no new Round or Position. */
   gamePaused: boolean;
   /** Jackpot pause (game-jackpot-pause ticket 02): no new epoch, ticket
-   *  purchase, grant or registration close. */
+   *  purchase or grant, and an ended epoch does not request its draw. */
   jackpotPaused: boolean;
   /** Live yield (yield-claimer): the Weight tree, the pinned klend accounts,
    *  the Yield index and its owed amounts, and the venue settings. */

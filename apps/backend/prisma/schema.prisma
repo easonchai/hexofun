@@ -15,7 +15,7 @@ datasource db {
 model Pool {
   address             String  @id
   poolId              BigInt
-  /// Squads multisig on mainnet: set_params, unpause, admin_withdraw, set_operator.
+  /// Squads multisig on mainnet: set_params, unpause, set_operator.
   admin               String
   /// The hot crank key the backend signs with.
   operator            String
@@ -57,8 +57,8 @@ model Pool {
   shutdown            Boolean
   /// Game pause: no new Round or Position (game-jackpot-pause).
   gamePaused          Boolean @default(false)
-  /// Jackpot pause: no new epoch, ticket purchase, grant or registration
-  /// close (game-jackpot-pause).
+  /// Jackpot pause: no new epoch, no ticket purchase or grant, and an ended
+  /// epoch does not request its draw (game-jackpot-pause).
   jackpotPaused       Boolean @default(false)
   /// Live yield (yield-claimer tickets 05 to 11). The defaults are what a
   /// pool row written before this migration reads; the next sync upserts the
@@ -388,7 +388,7 @@ model OperatorState {
    *  before the first successful tick. */
   lastSuccessAt    BigInt?
   /** Ticket 09: true on a tick whose previous epoch missed its expected
-   *  deadline (epoch length + registration window + VRF timeout + slack) to
+   *  deadline (epoch end + VRF timeout + slack) to
    *  reach a terminal status; false once one does. Null before any tick has
    *  ever looked. */
   epochNoProgress  Boolean?

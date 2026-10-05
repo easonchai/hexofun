@@ -77,8 +77,8 @@ export function prefixWeights(nodes: readonly Node[], epochId: bigint): bigint[]
  * The 1-based leaf whose range holds `epoch.target`, or null when none does.
  * `epoch` must still be readable on chain, which a Drawn epoch always is.
  *
- * ponytail: linear in the node count, one pass per payout. At the 145,000
- * node ceiling that is still milliseconds; replace with binary lifting only
+ * ponytail: linear in the node count, one pass per payout. At the 187,244
+ * Leaf ceiling that is still milliseconds; replace with binary lifting only
  * if it ever shows up in a tick's timing.
  */
 export function leafHoldingTarget(nodes: readonly Node[], epoch: EpochState): number | null {

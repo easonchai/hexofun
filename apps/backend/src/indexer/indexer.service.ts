@@ -649,8 +649,8 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * Re-reads exactly the accounts one confirmed transaction touched.
    *
    * Most of them are named by the transaction's own events. Two instructions
-   * emit none — `request_round_randomness` moves the open Round, and
-   * `close_registration` moves the epoch that just ended — so the open Round
+   * emit none on their usual path — `request_round_randomness` moves the open
+   * Round, and `request_draw` moves the epoch that just ended — so the open Round
    * and the two epochs either side of the pool's cursor are asked for every
    * time rather than derived from an event that is not there. That is four
    * addresses on a quiet transaction and a handful on a busy one, all in one

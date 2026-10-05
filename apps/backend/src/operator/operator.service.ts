@@ -100,7 +100,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    *  timestamp; null when `LAUNCH_AT` is unset. */
   private readonly launchAt: bigint | null;
   /** Logged once, the first tick that sees the pool shut down, so the
-   *  epoch and registration loops stopping is announced instead of just
+   *  epoch and round loops stopping is announced instead of just
    *  going quiet (ops-and-envs ticket 08). Shutdown is irreversible, so
    *  this never needs to reset. */
   private shutdownAnnounced = false;

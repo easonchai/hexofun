@@ -66,7 +66,7 @@ export function randomnessAddress(
 /**
  * `utils::vrf_seed`: keccak256(domain || pool || id_le || nonce). A Round or
  * Epoch stores its seed once the program computes it, so this is only needed
- * for `request_round_randomness` and `close_registration`, which have to
+ * for `request_round_randomness` and `request_draw`, which have to
  * derive the randomness account address for the same request they are about
  * to make (beta-launch-fixes ticket 02: the nonce makes that address
  * unknowable to anyone before the request lands).

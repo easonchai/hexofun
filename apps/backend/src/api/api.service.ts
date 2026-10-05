@@ -368,9 +368,9 @@ export class ApiService {
 
   /**
    * `Epoch.jackpot_amount` is a snapshot the program takes once, at
-   * `close_registration`. While the epoch is still open it is 0 on chain no
+   * `request_draw`. While the epoch is still open it is 0 on chain no
    * matter what `fund_jackpot` has moved into the vault, so the open epoch
-   * reports the vault's token balance instead. From REGISTERING on the chain
+   * reports the vault's token balance instead. From Ended on the chain
    * value is authoritative (the vault drains to the winner at payout).
    */
   private async liveJackpot(epoch: Epoch): Promise<bigint> {
