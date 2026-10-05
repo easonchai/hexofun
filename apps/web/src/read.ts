@@ -36,6 +36,13 @@ export interface PoolLike {
   /** Already validated and capped (`safePriorityFee`); the only fee the send
    *  helper (`actions.ts`, ticket 08) ever signs with. */
   priorityFeeMicroLamports: number;
+  /** The Weight tree and the four pinned klend accounts (yield-claimer):
+   *  deposit, withdraw and the game instructions all name them. */
+  weightTree: PublicKey;
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
 }
 
 /**
@@ -99,6 +106,11 @@ export function poolFromDto(
     };
   }
   const mint = new PublicKey(dto.mint);
+  // An indexer row from before the live-yield layout has none of these; no
+  // instruction can be built without them.
+  if (!dto.weightTree || !dto.klendProgram || !dto.klendMarket || !dto.klendReserve || !dto.klendCtoken) {
+    return { ok: false, reason: "The pool is not indexed yet. Try again in a moment." };
+  }
   return {
     ok: true,
     pool: {
@@ -112,6 +124,11 @@ export function poolFromDto(
       baseRateBps: dto.baseRateBps,
       ticketsPerUsdc: dto.ticketsPerUsdc,
       priorityFeeMicroLamports: safePriorityFee(priorityFeeMicroLamports),
+      weightTree: new PublicKey(dto.weightTree),
+      klendProgram: new PublicKey(dto.klendProgram),
+      klendMarket: new PublicKey(dto.klendMarket),
+      klendReserve: new PublicKey(dto.klendReserve),
+      klendCtoken: new PublicKey(dto.klendCtoken),
     },
   };
 }

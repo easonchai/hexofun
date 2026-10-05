@@ -117,6 +117,13 @@ export interface PoolDto {
   previousEpochEndsAt: string;
   totalPrincipal: string;
   updatedSlot: string;
+  /** The Weight tree and the four pinned klend accounts every Player
+   *  instruction that syncs names. Empty strings on a row not yet indexed. */
+  weightTree: string;
+  klendProgram: string;
+  klendMarket: string;
+  klendReserve: string;
+  klendCtoken: string;
 }
 
 export interface EpochDto {
@@ -256,7 +263,12 @@ export interface LiveYieldDto {
   yieldFeeBps: number;
   /** The on-chain Bought Tickets pause. */
   buyTicketsPaused: boolean;
-  /** Only while the pool is impaired. */
+  /** Atomic USDC; null while the vault cannot be read. */
+  freeIdle: string | null;
+  /** Only with `?withdraw=`: whether free idle plus the reserve's free
+   *  liquidity covers that amount. Null when unasked or unreadable. */
+  instantWithdrawCoverable: boolean | null;
+  /** While impaired, the share of a withdrawal the pool pays (0 to 1); else null. */
   haircutFactor: number | null;
 }
 
@@ -318,11 +330,17 @@ export interface StateDto {
   launchAt: string | null;
 }
 
+/** `withdraw` (atomic USDC) asks `live.instantWithdrawCoverable` about that amount. */
 export const fetchPoolSummary = (
   baseUrl: string,
   signal?: AbortSignal,
+  withdraw?: bigint,
 ): Promise<ApiResult<PoolSummaryDto>> =>
-  get<PoolSummaryDto>(baseUrl, "/pool", signal);
+  get<PoolSummaryDto>(
+    baseUrl,
+    withdraw === undefined ? "/pool" : `/pool?withdraw=${withdraw}`,
+    signal,
+  );
 
 export const fetchEpochs = (
   baseUrl: string,

@@ -1,11 +1,13 @@
 /**
  * VAULT tab: the Figma "Deposit" frame. One widget with DEPOSIT / WITHDRAW
  * tabs on the HOME halftone background. The program is the custody boundary.
- * WITHDRAW sends `request_withdraw`, which deducts Principal and Tickets now
- * and pays out after the epoch ends (ADR 0009). The pending row below the
- * widget carries that wait: the amount, the day it pays in, and a "pay out
- * now" button that sends the permissionless `process_withdraw` when the
- * operator has not.
+ * WITHDRAW sends `instant_withdraw` when the pool can pay the amount at once
+ * (up to min(Principal, Tickets), ticket 16) and says so before confirm.
+ * Otherwise it sends `request_withdraw`, which deducts Principal and Tickets
+ * now and pays out after the epoch ends (ADR 0009); `instantWithdraw.ts`
+ * decides. The pending row below the widget carries that wait: the amount,
+ * the day it pays in, and a "pay out now" button that sends the permissionless
+ * `process_withdraw` when the operator has not.
  *
  * Ticket 07: `currentEpoch` comes from App's one `GET /state` poll instead
  * of a duplicate `/epochs/current` poll of its own; `onDone` tightens that
@@ -17,12 +19,13 @@
  * now; its markup was removed but buyTickets.ts and useBuyTickets.ts stay, so
  * bringing it back is markup only, behind `buyTicketsVisible`.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import {
   awaitSendResult,
   deposit,
+  instantWithdraw,
   processWithdraw,
   requestWithdraw,
   shutdownWithdraw,
@@ -30,8 +33,20 @@ import {
   type TxSigner,
 } from "../actions.js";
 import { track } from "../analytics.js";
-import type { CurrentEpochDto } from "../api.js";
+import {
+  apiBaseUrl,
+  fetchPlayer,
+  fetchPoolSummary,
+  type CurrentEpochDto,
+  type LiveYieldDto,
+} from "../api.js";
 import { LogoCog } from "../arena/Arena.js";
+import {
+  effectiveTickets,
+  instantLimit,
+  offersQueue,
+  planWithdraw,
+} from "../instantWithdraw.js";
 import { CLUSTER, type HexVaultProgram } from "../chain.js";
 import {
   addCapped,
@@ -48,10 +63,12 @@ import {
   decodeSendFailure,
   failureReason,
   NOTHING_PENDING_CODE,
+  thrownCode,
   thrownReason,
 } from "../playerErrors.js";
 import { solRentWarning, type PoolLike } from "../read.js";
 import { SHUTDOWN_BANNER } from "../shutdown.js";
+import { useApiPoll } from "../useApiPoll.js";
 import { YieldBalance } from "../YieldBalance.js";
 import { GlyphRow } from "./Home.js";
 
@@ -172,6 +189,42 @@ export function Vault(props: VaultScreenProps) {
   const balanceUnavailable = mode === "deposit" && walletBalance === null;
   const rentWarning = solRentWarning(solBalance, { sponsored: sendTransaction !== undefined });
 
+  const ownerBase58 = owner?.toBase58();
+  const loadPlayerExtras = useCallback(
+    (signal: AbortSignal) =>
+      ownerBase58
+        ? fetchPlayer(apiBaseUrl(), ownerBase58, signal)
+        : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
+    [ownerBase58],
+  );
+  const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
+
+  // Withdraw mode asks `/pool?withdraw=` whether the pool can pay the typed
+  // amount at once (and whether it is impaired). The amount settles for
+  // 400 ms first so typing does not send a request per keystroke.
+  const [coverAmount, setCoverAmount] = useState<bigint | null>(null);
+  useEffect(() => {
+    if (mode !== "withdraw" || !amount) {
+      setCoverAmount(null);
+      return;
+    }
+    const timer = window.setTimeout(() => setCoverAmount(amount), 400);
+    return () => window.clearTimeout(timer);
+  }, [mode, amount]);
+  const loadCover = useCallback(
+    async (signal: AbortSignal) => {
+      const result = await fetchPoolSummary(apiBaseUrl(), signal, coverAmount ?? undefined);
+      return result.ok
+        ? { ok: true as const, data: { asked: coverAmount, live: result.data.live as LiveYieldDto } }
+        : result;
+    },
+    [coverAmount],
+  );
+  const cover = useApiPoll(loadCover, 10_000);
+  /** The instant transaction failed for lack of liquidity; stay on the queue. */
+  const [forceQueue, setForceQueue] = useState(false);
+  useEffect(() => setForceQueue(false), [amountText, mode]);
+
   // The payout landed (or the request was never there): drop the flag, so a
   // later request for the same amount does not inherit this one's state.
   useEffect(() => {
@@ -214,10 +267,16 @@ export function Vault(props: VaultScreenProps) {
       }
       if (result.kind !== "landed") {
         if (label === "Deposit") track("deposit_failed", { amount_usdc: amountUsdc, reason: failureReason(result) });
+        // yield-claimer ticket 16: the pool could not pay at once; the copy
+        // says so, and the form drops to the queued request for this amount.
+        if (label === "Withdrawn" && result.kind === "failed" && offersQueue(result.code)) {
+          setForceQueue(true);
+        }
         setNote({ tone: "err", text: decodeSendFailure(result) });
         return;
       }
       if (label === "Deposit") track("deposit_confirmed", { amount_usdc: amountUsdc });
+      else if (label === "Withdrawn") track("withdraw_instant", { amount_usdc: amountUsdc });
       else track("withdraw_requested", { amount_usdc: amountUsdc, shutdown: label === "Withdraw" });
       // Deposit gets the confirmed modal; withdraw keeps the inline note.
       if (label === "Deposit" && amount !== null) {
@@ -232,6 +291,7 @@ export function Vault(props: VaultScreenProps) {
       onDone();
     } catch (error) {
       if (label === "Deposit") track("deposit_failed", { amount_usdc: amountUsdc, reason: thrownReason(error) });
+      if (label === "Withdrawn" && offersQueue(thrownCode(error))) setForceQueue(true);
       setNote({
         tone: "err",
         text: decodePlayerError(error),
@@ -247,6 +307,24 @@ export function Vault(props: VaultScreenProps) {
   const overCap = connected && amount !== null && cap !== null && amount > cap;
   const underMin =
     mode === "deposit" && pool !== null && amount !== null && amount < pool.minDeposit;
+  const currentEpochId = currentEpoch ? BigInt(currentEpoch.id) : null;
+  const tickets = effectiveTickets(
+    principal,
+    entries,
+    playerExtras.data ? BigInt(playerExtras.data.epochId) : null,
+    currentEpochId,
+  );
+  /** The most `instant_withdraw` takes: the smaller of Principal and Tickets. */
+  const instantMax = instantLimit(principal, tickets);
+  const live = cover.data?.live ?? null;
+  // The cover answer is only about the amount it was asked for.
+  const coverable =
+    cover.data !== null && cover.data.asked === amount ? live?.instantWithdrawCoverable ?? null : null;
+  const haircutFactor = live?.haircutFactor ?? null;
+  const plan =
+    mode === "withdraw" && !shutdown && amount !== null && amount > 0n
+      ? planWithdraw({ amount, principal, tickets, coverable, haircutFactor, forceQueue })
+      : null;
   const withdrawPreview =
     mode === "withdraw" && amount !== null ? previewWithdraw(entries, amount) : null;
 
@@ -261,6 +339,8 @@ export function Vault(props: VaultScreenProps) {
       void run("Withdraw", program, () =>
         shutdownWithdraw(program, signer, pool, amount, pendingWithdraw),
       );
+    } else if (plan?.kind === "instant") {
+      void run("Withdrawn", program, () => instantWithdraw(program, signer, pool, amount));
     } else {
       void run("Withdraw requested", program, () =>
         requestWithdraw(program, signer, pool, amount),
@@ -318,7 +398,9 @@ export function Vault(props: VaultScreenProps) {
         ? "POOL CLOSED"
         : mode === "deposit" && paused
           ? "POOL PAUSED"
-          : mode.toUpperCase();
+          : mode === "withdraw" && plan?.kind === "queued"
+            ? "REQUEST WITHDRAWAL"
+            : mode.toUpperCase();
 
   return (
     <div className="vault" data-testid="vault-screen">
@@ -374,7 +456,9 @@ export function Vault(props: VaultScreenProps) {
                   ? walletBalance === null
                     ? "Balance unavailable"
                     : `Available ${fmt2(walletBalance)} ${SYMBOL}`
-                  : `Withdrawable at day end ${fmt2(principal)} ${SYMBOL}`}
+                  : shutdown
+                    ? `Withdrawable ${fmt2(principal)} ${SYMBOL}`
+                    : `Withdrawable now ${fmt2(instantMax)} ${SYMBOL}`}
               </span>
             </label>
 
@@ -394,7 +478,9 @@ export function Vault(props: VaultScreenProps) {
                 className="vault-pill"
                 disabled={cap === null}
                 onClick={() => {
-                  if (cap !== null) setAmountText(fmt2(cap));
+                  // On withdraw, MAX is what leaves at once; typing more queues the rest.
+                  const max = mode === "withdraw" && !shutdown ? instantMax : cap;
+                  if (max !== null) setAmountText(fmt2(max));
                 }}
               >
                 MAX
@@ -411,16 +497,49 @@ export function Vault(props: VaultScreenProps) {
                 </>
               ) : (
                 <>
+                  {plan ? (
+                    <div className="vault-line" data-testid="withdraw-kind">
+                      <dt>Payout</dt>
+                      <dd>
+                        {plan.kind === "instant"
+                          ? "Instant"
+                          : `Queued, pays after day #${currentEpochId ?? "…"} ends`}
+                      </dd>
+                    </div>
+                  ) : null}
                   <div className="vault-line">
-                    <dt>You receive at day end</dt>
+                    <dt>{shutdown || plan?.kind === "queued" ? "You receive at day end" : "You receive"}</dt>
+                    <dd data-testid="withdraw-receive">
+                      {fmt2(plan ? plan.receive : (amount ?? 0n))} {SYMBOL}
+                    </dd>
+                  </div>
+                  {plan && plan.haircut > 0n ? (
+                    <div className="vault-line" data-testid="withdraw-haircut">
+                      <dt>Haircut</dt>
+                      <dd>
+                        -{fmt2(plan.haircut)} {SYMBOL}
+                      </dd>
+                    </div>
+                  ) : null}
+                  <div className="vault-line" data-testid="withdraw-tickets-removed">
+                    <dt>Tickets removed</dt>
                     <dd>
-                      {fmt2(amount ?? 0n)} {SYMBOL}
+                      {fmt2(
+                        (plan ? tickets - plan.ticketsAfter : null) ??
+                          (withdrawPreview ? entries - withdrawPreview.entriesAfter : 0n),
+                      )}
                     </dd>
                   </div>
                   <div className="vault-line">
                     <dt>Tickets after</dt>
                     <dd>
-                      {fmt2(withdrawPreview ? withdrawPreview.entriesAfter : entries)}
+                      {fmt2(
+                        plan
+                          ? plan.ticketsAfter
+                          : withdrawPreview
+                            ? withdrawPreview.entriesAfter
+                            : entries,
+                      )}
                     </dd>
                   </div>
                 </>
@@ -478,7 +597,26 @@ export function Vault(props: VaultScreenProps) {
                 <span className="vault-note" data-testid="withdraw-lock-note">
                   {shutdown
                     ? "Principal and Tickets leave your account now. The pool is closed, so the payout lands in this same transaction."
-                    : "Principal and Tickets leave your account now. The USDC pays out once today's draw is over."}
+                    : plan?.kind === "instant"
+                      ? "Principal and Tickets leave your account now and the USDC lands in your wallet in this transaction."
+                      : "Principal and Tickets leave your account now. The USDC pays out once today's draw is over."}
+                </span>
+              ) : null}
+              {mode === "withdraw" && !shutdown && principal > instantMax ? (
+                <span className="vault-note" data-testid="withdraw-locked-note">
+                  Only the smaller of your Principal and Tickets leaves at once. The other{" "}
+                  {fmt2(principal - instantMax)} {SYMBOL} unlocks at the next daily reset, or you can queue it now.
+                </span>
+              ) : null}
+              {mode === "withdraw" && plan?.reason === "pool-short" ? (
+                <span className="vault-note" data-testid="withdraw-pool-short-note">
+                  The pool can't pay that much at once right now, so it goes in the queue.
+                </span>
+              ) : null}
+              {mode === "withdraw" && haircutFactor !== null && haircutFactor < 1 ? (
+                <span className="vault-note" data-testid="withdraw-impaired-note">
+                  The pool lost value on its lending venue, so every withdrawal pays{" "}
+                  {Number((haircutFactor * 100).toFixed(2))}% of the amount until it recovers.
                 </span>
               ) : null}
               {overCap ? (

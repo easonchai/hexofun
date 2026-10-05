@@ -1,12 +1,11 @@
 /**
  * PRD §9 demo loop, end to end: faucet, deposit, play a round, settle, and
- * request a withdrawal. See docs/product-requirements.md §9.
+ * withdraw. See docs/product-requirements.md §9.
  *
- * The withdrawal stops at the request (ADR 0009): `process_withdraw` cannot
- * go through until the epoch the request landed in has ended, which is a day
- * on a normal pool, so this asserts the pending row instead of waiting for
- * the cash. The "pay out now" button and the payout itself are covered by
- * the program's localnet suite, which can cross an epoch boundary at will.
+ * The withdrawal is instant (yield-claimer ticket 16): `instant_withdraw`
+ * pays in the same transaction when the pool can cover it. The queued path,
+ * its pending row and the "pay out now" button are covered by the program's
+ * localnet suite, which can cross an epoch boundary at will.
  *
  * Base URL: E2E_BASE_URL, default http://127.0.0.1:5173 (see
  * playwright.config.ts). Ticket 12 has not deployed anything yet, so there is
@@ -83,7 +82,7 @@ async function selectTile(page: Page, tileNumber: number): Promise<void> {
   }).toPass({ timeout: 90_000 });
 }
 
-test("faucet, deposit, play a round, settle, request a withdrawal", async ({
+test("faucet, deposit, play a round, settle, withdraw", async ({
   page,
 }) => {
   await connectBurnerWallet(page);
@@ -152,34 +151,24 @@ test("faucet, deposit, play a round, settle, request a withdrawal", async ({
   // The dashboard's Withdraw button opens the widget already on that tab.
   await page.getByTestId("tab-dashboard").click();
   await page.getByTestId("dash-withdraw").click();
-  // The ceiling is Principal alone now, whatever the game did to Tickets
-  // (ADR 0009). This only checks the number is live and positive.
+  // The ceiling for an instant withdrawal is min(Principal, Tickets), and it
+  // moves with the game. This only checks the number is live and positive.
   const shownWithdrawable = parseAfterLabel(
     await page.getByTestId("withdrawable-now").innerText(),
-    "Withdrawable at day end",
+    "Withdrawable now",
   );
   expect(shownWithdrawable).toBeGreaterThan(0);
 
-  // 6. Request the whole Principal. No USDC moves: the row below books it
-  // as pending against the epoch that has to end first.
+  // 6. Withdraw that much. The pool pays at once (yield-claimer ticket 16):
+  // the form says "Instant" before confirm, the USDC lands in the wallet and
+  // there is no pending row.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
+  await expect(page.getByTestId("withdraw-kind")).toContainText("Instant");
   const withdrawSubmit = page.getByTestId("withdraw-submit");
   await expect(withdrawSubmit).toBeEnabled();
   await withdrawSubmit.click();
-  await expect(page.getByTestId("vault-note")).toContainText(
-    /withdraw requested/i,
-    { timeout: 30_000 },
-  );
-
-  // 7. The pending row shows the amount and says it waits out the day. The
-  // request lands inside the current epoch, so it is never due yet and the
-  // pay-out button must not be offered.
-  const pendingRow = page.getByTestId("pending-withdraw");
-  await expect(pendingRow).toContainText(String(shownWithdrawable), {
+  await expect(page.getByTestId("vault-note")).toContainText(/withdrawn/i, {
     timeout: 30_000,
   });
-  await expect(page.getByTestId("pending-withdraw-state")).toContainText(
-    /pays out after day #\d+ ends/,
-  );
-  await expect(page.getByTestId("pay-out-now")).toHaveCount(0);
+  await expect(page.getByTestId("pending-withdraw")).toHaveCount(0);
 });

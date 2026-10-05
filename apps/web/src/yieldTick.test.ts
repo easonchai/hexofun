@@ -90,6 +90,8 @@ describe("rateCopy", () => {
     },
     yieldFeeBps: 1_000,
     buyTicketsPaused: false,
+    freeIdle: null,
+    instantWithdrawCoverable: null,
     haircutFactor: null,
   });
 

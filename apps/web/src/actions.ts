@@ -15,6 +15,7 @@ import { createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-t
 import {
   ComputeBudgetProgram,
   PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
   SystemProgram,
   Transaction,
   TransactionExpiredBlockheightExceededError,
@@ -27,6 +28,7 @@ import {
   bn,
   jackpotVaultAddress,
   method,
+  PROGRAM_ID,
   playerAddress,
   positionAddress,
   principalVaultAddress,
@@ -321,6 +323,43 @@ export async function awaitSendResult(
   );
 }
 
+/** The four pinned klend accounts every instruction that runs sync names. */
+const venueAccounts = (pool: PoolLike) => ({
+  klendProgram: pool.klendProgram,
+  klendMarket: pool.klendMarket,
+  klendReserve: pool.klendReserve,
+  klendCtoken: pool.klendCtoken,
+});
+
+/**
+ * What a klend redeem needs beyond the pinned four, in the order klend.rs
+ * reads them: the lending market authority, the reserve's liquidity supply
+ * vault, the cToken mint and the instructions sysvar. klend derives the first
+ * three from the market and the liquidity mint, so no RPC read is needed; the
+ * program checks each against the reserve itself. The `test-venue` stub pins
+ * this program as its own klend and ignores them (apps/backend operator/
+ * instructions.ts `venueRemaining` does the same).
+ */
+export function klendRemaining(pool: PoolLike, programId: PublicKey = PROGRAM_ID) {
+  if (pool.klendProgram.equals(programId)) return [];
+  const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
+    PublicKey.findProgramAddressSync(
+      seeds.map((seed) => (typeof seed === "string" ? Buffer.from(seed) : seed.toBuffer())),
+      pool.klendProgram,
+    )[0];
+  const meta = (pubkey: PublicKey, isWritable: boolean) => ({
+    pubkey,
+    isSigner: false,
+    isWritable,
+  });
+  return [
+    meta(derive("lma", pool.klendMarket), false),
+    meta(derive("reserve_liq_supply", pool.klendMarket, pool.acceptedMint), true),
+    meta(derive("reserve_coll_mint", pool.klendMarket, pool.acceptedMint), true),
+    meta(SYSVAR_INSTRUCTIONS_PUBKEY, false),
+  ];
+}
+
 /** Sends `builder`'s instructions through `sendMany` above. */
 async function send(
   program: HexVaultProgram,
@@ -348,9 +387,11 @@ export async function deposit(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
+      ...venueAccounts(pool),
       tokenProgram: TOKEN_PROGRAM,
       systemProgram: SystemProgram.programId,
     })
@@ -388,11 +429,59 @@ export async function buyTickets(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken: acceptedAta(pool.acceptedMint, o),
       jackpotVault: jackpotVaultAddress(pool.address),
       tokenProgram: TOKEN_PROGRAM,
     });
+  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+}
+
+/**
+ * Pays `amount` to the wallet in this one transaction (instant_withdraw).
+ * The program syncs the venue itself, so no refresh instruction goes in
+ * front; it redeems from klend when free idle is short, which is why the
+ * klend extras ride along. The compute limit comes from `sendMany`'s
+ * simulation (the redeem path measured 101k units on the mainnet fork).
+ * Fails with `VenueIlliquid` when the reserve cannot cover the gap and
+ * `InsufficientTickets` past min(Principal, Tickets); the form offers the
+ * queued request for the first.
+ */
+export async function instantWithdraw(
+  program: HexVaultProgram,
+  owner: TxSigner,
+  pool: PoolLike,
+  amount: bigint,
+): Promise<SendResult> {
+  const o = owner.publicKey;
+  const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const builder = method(
+    program,
+    "instantWithdraw",
+  )(bn(amount))
+    .accounts({
+      owner: o,
+      pool: pool.address,
+      player: playerAddress(pool.address, o),
+      weightTree: pool.weightTree,
+      acceptedMint: pool.acceptedMint,
+      ownerToken,
+      principalVault: principalVaultAddress(pool.address),
+      ...venueAccounts(pool),
+      tokenProgram: TOKEN_PROGRAM,
+    })
+    .remainingAccounts(klendRemaining(pool))
+    // A mainnet depositor may have closed the ATA since depositing.
+    .preInstructions([
+      createAssociatedTokenAccountIdempotentInstruction(
+        o,
+        ownerToken,
+        o,
+        pool.acceptedMint,
+        TOKEN_PROGRAM,
+      ),
+    ]);
   return send(program, owner, builder, pool.priorityFeeMicroLamports);
 }
 
@@ -416,6 +505,8 @@ export async function requestWithdraw(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      weightTree: pool.weightTree,
+      ...venueAccounts(pool),
     });
   return send(program, owner, builder, pool.priorityFeeMicroLamports);
 }
@@ -486,6 +577,8 @@ export async function shutdownWithdraw(
           owner: o,
           pool: pool.address,
           player: playerAddress(pool.address, o),
+          weightTree: pool.weightTree,
+          ...venueAccounts(pool),
         })
         .instruction(),
     );
@@ -530,6 +623,7 @@ export async function buyPosition(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      weightTree: pool.weightTree,
       round,
       position: positionAddress(round, o),
       systemProgram: SystemProgram.programId,
@@ -549,6 +643,7 @@ export async function settlePosition(
   const builder = method(program, "settlePosition")()
     .accounts({
       pool: pool.address,
+      weightTree: pool.weightTree,
       round,
       player: playerAddress(pool.address, o),
       owner: o,

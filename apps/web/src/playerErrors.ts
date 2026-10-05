@@ -8,11 +8,19 @@
  */
 import { currentPage, reportError } from "./errorReport.js";
 import { idl } from "./idl.js";
+import {
+  INSUFFICIENT_TICKETS_CODE,
+  VENUE_ILLIQUID_CODE,
+  VENUE_SHORT_RETURN_CODE,
+} from "./instantWithdraw.js";
 
 const GENERIC = "Something went wrong. Try again in a moment.";
 
 /** `NothingPending`: the operator's crank already paid this withdrawal. */
 export const NOTHING_PENDING_CODE = 6038;
+
+const QUEUE_COPY =
+  "The pool can't pay that out instantly right now. Queue it and it pays after the day ends.";
 
 /** Hand-written copy for the codes players actually run into. */
 const HAND_WRITTEN: Record<number, string> = {
@@ -25,6 +33,13 @@ const HAND_WRITTEN: Record<number, string> = {
   6051: "This pool is closed. Withdrawals still work; nothing else does.", // PoolShutDown
   6058: "The game is paused right now. Try again once it restarts.", // GamePaused
   6059: "The daily draw is paused, so Tickets can't be bought right now.", // JackpotPaused
+  6077: "The pool's lending rate is a moment out of date. Try again.", // ReserveStale
+  // yield-claimer ticket 16: the instant withdraw's refusals. The form offers
+  // the queued request next to the first two, so the copy says so.
+  [VENUE_ILLIQUID_CODE]: QUEUE_COPY, // VenueIlliquid
+  [VENUE_SHORT_RETURN_CODE]: QUEUE_COPY, // VenueShortReturn
+  [INSUFFICIENT_TICKETS_CODE]:
+    "Only Tickets you still hold can leave at once. The rest unlocks at the next daily reset, or you can queue it.", // InsufficientTickets
 };
 
 const IDL_MESSAGE_BY_CODE = new Map(
@@ -111,6 +126,12 @@ export function failureReason(
 ): string {
   if (result.kind === "expired") return "expired";
   return result.code === null ? "unknown_error" : `program_error_${result.code}`;
+}
+
+/** The Anchor error code inside a thrown error, or null. The Vault reads it to
+ *  offer the queued request when an instant withdraw was refused at send. */
+export function thrownCode(error: unknown): number | null {
+  return extractCode(error instanceof Error ? error.message : String(error));
 }
 
 /** `failureReason` for a thrown error, via the same text parsing as `decodePlayerError`. */

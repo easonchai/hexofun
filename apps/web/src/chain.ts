@@ -20,6 +20,7 @@ export type HexVaultProgram = Program<Idl>;
 export interface TxBuilder {
   accounts(accounts: Record<string, unknown>): TxBuilder;
   preInstructions(instructions: unknown[]): TxBuilder;
+  remainingAccounts(accounts: unknown[]): TxBuilder;
   /** Unsigned legacy transaction; fee payer and blockhash left unset. */
   transaction(): Promise<Transaction>;
   /** The raw instruction, for combining more than one into one transaction

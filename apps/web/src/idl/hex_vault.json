@@ -54,96 +54,6 @@
       "args": []
     },
     {
-      "name": "admin_withdraw",
-      "discriminator": [
-        160,
-        166,
-        147,
-        222,
-        46,
-        220,
-        75,
-        224
-      ],
-      "accounts": [
-        {
-          "name": "admin",
-          "signer": true,
-          "relations": [
-            "pool"
-          ]
-        },
-        {
-          "name": "pool",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  111,
-                  111,
-                  108
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool.pool_id",
-                "account": "Pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "accepted_mint"
-        },
-        {
-          "name": "admin_token",
-          "docs": [
-            "Checked by address, not just by owner: a fat-fingered destination",
-            "fails here rather than landing somewhere the admin has to chase."
-          ],
-          "writable": true
-        },
-        {
-          "name": "principal_vault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  105,
-                  110,
-                  99,
-                  105,
-                  112,
-                  97,
-                  108
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "token_program"
-        }
-      ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        }
-      ]
-    },
-    {
       "name": "begin_epoch",
       "discriminator": [
         56,
@@ -327,6 +237,13 @@
           }
         },
         {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
           "name": "round",
           "writable": true,
           "pda": {
@@ -469,6 +386,13 @@
           }
         },
         {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
           "name": "accepted_mint"
         },
         {
@@ -507,148 +431,6 @@
         {
           "name": "amount",
           "type": "u64"
-        }
-      ]
-    },
-    {
-      "name": "close_registration",
-      "discriminator": [
-        44,
-        118,
-        178,
-        58,
-        21,
-        125,
-        102,
-        138
-      ],
-      "accounts": [
-        {
-          "name": "operator",
-          "docs": [
-            "Pays ORAO's request fee and the request account's rent, so it must be",
-            "writable."
-          ],
-          "writable": true,
-          "signer": true,
-          "relations": [
-            "pool"
-          ]
-        },
-        {
-          "name": "pool",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  111,
-                  111,
-                  108
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool.pool_id",
-                "account": "Pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "epoch",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  101,
-                  112,
-                  111,
-                  99,
-                  104
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "epoch.epoch_id",
-                "account": "Epoch"
-              }
-            ]
-          }
-        },
-        {
-          "name": "jackpot_vault",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  106,
-                  97,
-                  99,
-                  107,
-                  112,
-                  111,
-                  116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "randomness",
-          "docs": [
-            "against `vrf::randomness_address(&seed)` in the handler once the seed",
-            "is computed from the instruction's own `nonce` argument",
-            "(production-hardening ticket 02)."
-          ],
-          "writable": true
-        },
-        {
-          "name": "vrf_network_state",
-          "docs": [
-            "`mut` because `request_v2` increments its `num_received`: the CPI marks",
-            "it writable, and an outer context that is not cannot grant that."
-          ],
-          "writable": true
-        },
-        {
-          "name": "vrf_treasury",
-          "docs": [
-            "rejects any other account, so it is only forwarded here."
-          ],
-          "writable": true
-        },
-        {
-          "name": "vrf_program",
-          "address": "VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": [
-        {
-          "name": "nonce",
-          "type": {
-            "array": [
-              "u8",
-              32
-            ]
-          }
         }
       ]
     },
@@ -726,6 +508,107 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "cover_deficit",
+      "docs": [
+        "Permissionless (ticket 10): pays USDC into the principal vault against",
+        "the recorded venue deficit, capped at it."
+      ],
+      "discriminator": [
+        111,
+        47,
+        68,
+        186,
+        165,
+        82,
+        169,
+        88
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "payer_token",
+          "writable": true
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
     },
     {
       "name": "create_pool",
@@ -850,10 +733,31 @@
           }
         },
         {
+          "name": "weight_tree",
+          "docs": [
+            "Created in the same transaction by a top-level",
+            "`system_program::create_account`, owned by this program and sized for",
+            "the header alone (zero nodes). `zero` refuses one already in use."
+          ],
+          "writable": true
+        },
+        {
           "name": "treasury"
         },
         {
           "name": "buyback_reserve"
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve"
+        },
+        {
+          "name": "klend_ctoken"
         },
         {
           "name": "token_program"
@@ -969,6 +873,100 @@
       ]
     },
     {
+      "name": "deploy_to_venue",
+      "docs": [
+        "Permissionless (yield-claimer ticket 05): syncs, then moves idle USDC",
+        "above the idle target into the venue. Venue-specific extra accounts go",
+        "in `remaining_accounts`."
+      ],
+      "discriminator": [
+        84,
+        39,
+        245,
+        25,
+        32,
+        202,
+        145,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "deposit",
       "discriminator": [
         242,
@@ -1036,6 +1034,16 @@
           }
         },
         {
+          "name": "weight_tree",
+          "docs": [
+            "Grows by one node at this Player's first deposit, `owner` paying."
+          ],
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
           "name": "accepted_mint"
         },
         {
@@ -1067,6 +1075,20 @@
               }
             ]
           }
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
         },
         {
           "name": "token_program"
@@ -1222,6 +1244,13 @@
           }
         },
         {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
           "name": "owner"
         },
         {
@@ -1256,6 +1285,20 @@
               }
             ]
           }
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
         },
         {
           "name": "token_program"
@@ -1324,90 +1367,6 @@
                   112,
                   111,
                   116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "token_program"
-        }
-      ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        }
-      ]
-    },
-    {
-      "name": "fund_yield",
-      "discriminator": [
-        114,
-        176,
-        26,
-        168,
-        64,
-        230,
-        10,
-        223
-      ],
-      "accounts": [
-        {
-          "name": "source_authority",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "pool",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  111,
-                  111,
-                  108
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool.pool_id",
-                "account": "Pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "accepted_mint"
-        },
-        {
-          "name": "source",
-          "writable": true
-        },
-        {
-          "name": "principal_vault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  105,
-                  110,
-                  99,
-                  105,
-                  112,
-                  97,
-                  108
                 ]
               },
               {
@@ -1498,6 +1457,267 @@
               }
             ]
           }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "harvest",
+      "docs": [
+        "Permissionless (ticket 07): pays the yield fee owed to the Treasury and",
+        "the prize share owed to the jackpot vault."
+      ],
+      "discriminator": [
+        228,
+        241,
+        31,
+        182,
+        53,
+        169,
+        59,
+        199
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "jackpot_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  106,
+                  97,
+                  99,
+                  107,
+                  112,
+                  111,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "instant_withdraw",
+      "docs": [
+        "Owner-signed (yield-claimer ticket 09): pays in the same transaction,",
+        "redeeming the gap from the venue when free idle is short."
+      ],
+      "discriminator": [
+        171,
+        49,
+        145,
+        176,
+        48,
+        101,
+        112,
+        162
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "player",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "owner_token",
+          "writable": true
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
         }
       ],
       "args": [
@@ -1541,6 +1761,13 @@
               }
             ]
           }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
         },
         {
           "name": "accepted_mint"
@@ -1663,6 +1890,20 @@
           "relations": [
             "pool"
           ]
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
         },
         {
           "name": "token_program"
@@ -1827,18 +2068,123 @@
       ]
     },
     {
-      "name": "register",
+      "name": "recall",
+      "docs": [
+        "Permissionless (yield-claimer ticket 07): syncs, then redeems `amount`",
+        "from the venue while free idle is under the idle target."
+      ],
       "discriminator": [
-        211,
-        124,
-        67,
-        15,
-        211,
-        194,
-        178,
-        240
+        116,
+        112,
+        101,
+        191,
+        131,
+        230,
+        83,
+        84
       ],
       "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "request_draw",
+      "docs": [
+        "Operator-only (ticket 08): snapshots the ended epoch's Weight total and",
+        "its prize, then asks the VRF for the draw, or rolls the epoch over."
+      ],
+      "discriminator": [
+        22,
+        180,
+        8,
+        81,
+        47,
+        21,
+        86,
+        159
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
         {
           "name": "pool",
           "writable": true,
@@ -1889,35 +2235,78 @@
           }
         },
         {
-          "name": "player",
-          "writable": true,
+          "name": "weight_tree",
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "jackpot_vault",
           "pda": {
             "seeds": [
               {
                 "kind": "const",
                 "value": [
-                  112,
-                  108,
+                  106,
                   97,
-                  121,
-                  101,
-                  114
+                  99,
+                  107,
+                  112,
+                  111,
+                  116
                 ]
               },
               {
                 "kind": "account",
                 "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "player.owner",
-                "account": "Player"
               }
             ]
           }
+        },
+        {
+          "name": "randomness",
+          "docs": [
+            "against `vrf::randomness_address(&seed)` in the handler once the seed",
+            "is computed from the instruction's own `nonce` argument",
+            "(production-hardening ticket 02)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vrf_network_state",
+          "docs": [
+            "`mut` because `request_v2` increments its `num_received`: the CPI marks",
+            "it writable, and an outer context that is not cannot grant that."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vrf_treasury",
+          "docs": [
+            "rejects any other account, so it is only forwarded here."
+          ],
+          "writable": true
+        },
+        {
+          "name": "vrf_program",
+          "address": "VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
-      "args": []
+      "args": [
+        {
+          "name": "nonce",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "request_round_randomness",
@@ -2093,6 +2482,27 @@
               }
             ]
           }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
         }
       ],
       "args": [
@@ -2178,6 +2588,110 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "set_buy_tickets_pause",
+      "docs": [
+        "Admin-only. Stops `buy_tickets` while set (yield-claimer ticket 11)."
+      ],
+      "discriminator": [
+        89,
+        71,
+        179,
+        241,
+        62,
+        49,
+        29,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_deploy_pause",
+      "docs": [
+        "Admin or Operator turns deploy off, only the Admin turns it back on",
+        "(yield-claimer ticket 10)."
+      ],
+      "discriminator": [
+        53,
+        93,
+        153,
+        166,
+        46,
+        70,
+        236,
+        247
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
     },
     {
       "name": "set_feature_pause",
@@ -2394,6 +2908,121 @@
       ]
     },
     {
+      "name": "set_treasury_accounts",
+      "docs": [
+        "Admin-only (ticket 07): sets `treasury` and `buyback_reserve`."
+      ],
+      "discriminator": [
+        142,
+        1,
+        21,
+        103,
+        208,
+        84,
+        140,
+        0
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "treasury"
+        },
+        {
+          "name": "buyback_reserve"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_venue_params",
+      "docs": [
+        "Admin-only (ticket 10): fee, idle band, caps, minimum size and loss",
+        "tolerance, each inside its program constant."
+      ],
+      "discriminator": [
+        129,
+        207,
+        20,
+        167,
+        33,
+        235,
+        76,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "SetVenueParamsArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "settle_position",
       "discriminator": [
         33,
@@ -2426,6 +3055,13 @@
               }
             ]
           }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
         },
         {
           "name": "round",
@@ -2618,6 +3254,13 @@
               }
             ]
           }
+        },
+        {
+          "name": "weight_tree",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
         }
       ],
       "args": []
@@ -2676,7 +3319,7 @@
       "name": "sweep_house",
       "docs": [
         "Admin-only, only valid once shut down (ops-and-envs ticket 04): moves",
-        "the jackpot and any unspent yield budget to `pool.treasury`."
+        "the jackpot's unreserved balance to `pool.treasury`."
       ],
       "discriminator": [
         76,
@@ -2698,7 +3341,6 @@
         },
         {
           "name": "pool",
-          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -2736,32 +3378,6 @@
                   112,
                   111,
                   116
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              }
-            ]
-          }
-        },
-        {
-          "name": "principal_vault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  114,
-                  105,
-                  110,
-                  99,
-                  105,
-                  112,
-                  97,
-                  108
                 ]
               },
               {
@@ -2879,53 +3495,66 @@
     {
       "name": "Player",
       "discriminator": [
-        205,
-        222,
-        112,
-        7,
-        165,
-        155,
-        206,
-        218
+        72,
+        86,
+        80,
+        108,
+        121,
+        114,
+        48,
+        50
       ]
     },
     {
       "name": "Pool",
       "discriminator": [
-        241,
-        154,
-        109,
-        4,
-        17,
-        177,
-        109,
-        188
+        72,
+        86,
+        80,
+        111,
+        111,
+        108,
+        48,
+        50
       ]
     },
     {
       "name": "Position",
       "discriminator": [
-        170,
-        188,
-        143,
-        228,
-        122,
-        64,
-        247,
-        208
+        72,
+        86,
+        80,
+        111,
+        115,
+        110,
+        48,
+        50
       ]
     },
     {
       "name": "Round",
       "discriminator": [
-        87,
-        127,
-        165,
-        51,
-        73,
-        78,
-        116,
-        174
+        72,
+        86,
+        82,
+        111,
+        110,
+        100,
+        48,
+        50
+      ]
+    },
+    {
+      "name": "WeightTree",
+      "discriminator": [
+        135,
+        232,
+        246,
+        91,
+        255,
+        88,
+        80,
+        205
       ]
     }
   ],
@@ -2954,6 +3583,45 @@
         82,
         110,
         243
+      ]
+    },
+    {
+      "name": "BuyTicketsPauseSet",
+      "discriminator": [
+        172,
+        142,
+        138,
+        68,
+        78,
+        84,
+        127,
+        251
+      ]
+    },
+    {
+      "name": "DeficitCovered",
+      "discriminator": [
+        213,
+        208,
+        5,
+        40,
+        54,
+        111,
+        109,
+        198
+      ]
+    },
+    {
+      "name": "DeployPauseSet",
+      "discriminator": [
+        251,
+        159,
+        232,
+        217,
+        9,
+        65,
+        128,
+        251
       ]
     },
     {
@@ -3035,6 +3703,19 @@
       ]
     },
     {
+      "name": "Harvested",
+      "discriminator": [
+        249,
+        229,
+        78,
+        151,
+        106,
+        185,
+        149,
+        11
+      ]
+    },
+    {
       "name": "HouseSwept",
       "discriminator": [
         250,
@@ -3045,6 +3726,45 @@
         131,
         89,
         0
+      ]
+    },
+    {
+      "name": "ImpairedCleared",
+      "discriminator": [
+        123,
+        43,
+        99,
+        105,
+        134,
+        187,
+        91,
+        56
+      ]
+    },
+    {
+      "name": "ImpairedSet",
+      "discriminator": [
+        74,
+        98,
+        181,
+        18,
+        244,
+        194,
+        33,
+        17
+      ]
+    },
+    {
+      "name": "InstantWithdrawn",
+      "discriminator": [
+        19,
+        59,
+        52,
+        128,
+        171,
+        153,
+        53,
+        137
       ]
     },
     {
@@ -3165,32 +3885,6 @@
       ]
     },
     {
-      "name": "PrincipalDeployed",
-      "discriminator": [
-        246,
-        19,
-        6,
-        131,
-        183,
-        199,
-        220,
-        131
-      ]
-    },
-    {
-      "name": "Registered",
-      "discriminator": [
-        11,
-        222,
-        10,
-        72,
-        160,
-        110,
-        165,
-        227
-      ]
-    },
-    {
       "name": "RoundClosed",
       "discriminator": [
         45,
@@ -3243,6 +3937,19 @@
       ]
     },
     {
+      "name": "Synced",
+      "discriminator": [
+        114,
+        244,
+        163,
+        97,
+        99,
+        80,
+        164,
+        70
+      ]
+    },
+    {
       "name": "TicketsBought",
       "discriminator": [
         204,
@@ -3269,6 +3976,58 @@
       ]
     },
     {
+      "name": "TreasuryAccountsSet",
+      "discriminator": [
+        224,
+        164,
+        232,
+        175,
+        160,
+        179,
+        181,
+        148
+      ]
+    },
+    {
+      "name": "VenueDeployed",
+      "discriminator": [
+        162,
+        89,
+        215,
+        75,
+        46,
+        135,
+        33,
+        227
+      ]
+    },
+    {
+      "name": "VenueParamsSet",
+      "discriminator": [
+        129,
+        229,
+        77,
+        239,
+        181,
+        203,
+        247,
+        154
+      ]
+    },
+    {
+      "name": "VenueRecalled",
+      "discriminator": [
+        100,
+        65,
+        229,
+        193,
+        202,
+        1,
+        150,
+        81
+      ]
+    },
+    {
       "name": "WithdrawRequested",
       "discriminator": [
         114,
@@ -3292,32 +4051,6 @@
         124,
         219,
         13
-      ]
-    },
-    {
-      "name": "YieldCredited",
-      "discriminator": [
-        169,
-        232,
-        146,
-        128,
-        99,
-        163,
-        114,
-        110
-      ]
-    },
-    {
-      "name": "YieldFunded",
-      "discriminator": [
-        6,
-        69,
-        199,
-        236,
-        23,
-        178,
-        100,
-        64
       ]
     }
   ],
@@ -3621,6 +4354,131 @@
       "code": 6059,
       "name": "JackpotPaused",
       "msg": "the jackpot is paused"
+    },
+    {
+      "code": 6060,
+      "name": "DrawPendingWeightTree",
+      "msg": "payout is disabled until the Weight tree draw lands (yield-claimer ticket 08)"
+    },
+    {
+      "code": 6061,
+      "name": "VenueMismatch",
+      "msg": "a venue account does not match the address pinned on the pool"
+    },
+    {
+      "code": 6062,
+      "name": "VenueUnavailable",
+      "msg": "no yield venue is built into this program yet"
+    },
+    {
+      "code": 6063,
+      "name": "VenueIlliquid",
+      "msg": "the venue cannot return that much right now"
+    },
+    {
+      "code": 6064,
+      "name": "VenueMoveTooSmall",
+      "msg": "the amount is below the pool's minimum venue move"
+    },
+    {
+      "code": 6065,
+      "name": "DeployExceedsIdle",
+      "msg": "the amount is more than the idle USDC above the idle target"
+    },
+    {
+      "code": 6066,
+      "name": "DeployPaused",
+      "msg": "deploying to the venue is paused"
+    },
+    {
+      "code": 6067,
+      "name": "PoolImpaired",
+      "msg": "the pool is impaired by a venue loss"
+    },
+    {
+      "code": 6068,
+      "name": "RecallNotNeeded",
+      "msg": "free idle USDC is already at or above the idle target"
+    },
+    {
+      "code": 6069,
+      "name": "RecallExceedsTarget",
+      "msg": "the amount would lift free idle USDC above the idle target"
+    },
+    {
+      "code": 6070,
+      "name": "VenueShortReturn",
+      "msg": "the venue returned less USDC than was asked for"
+    },
+    {
+      "code": 6071,
+      "name": "NothingToHarvest",
+      "msg": "no yield fee or prize share is owed"
+    },
+    {
+      "code": 6072,
+      "name": "WeightTreeFull",
+      "msg": "the Weight tree is full: a new Player would push its account past 10 MiB"
+    },
+    {
+      "code": 6073,
+      "name": "WeightTreeInvalid",
+      "msg": "the Weight tree account is malformed"
+    },
+    {
+      "code": 6074,
+      "name": "PlayerHasNoLeaf",
+      "msg": "this Player has no leaf in the Weight tree"
+    },
+    {
+      "code": 6075,
+      "name": "EpochNotReadable",
+      "msg": "the epoch is not readable in the Weight tree any more"
+    },
+    {
+      "code": 6076,
+      "name": "EpochNotAwaitingDraw",
+      "msg": "the epoch has not ended, or its draw was already requested"
+    },
+    {
+      "code": 6077,
+      "name": "ReserveStale",
+      "msg": "the klend reserve is still stale after the refresh"
+    },
+    {
+      "code": 6078,
+      "name": "ReserveUnreadable",
+      "msg": "the reserve account is not a klend Reserve this program can read"
+    },
+    {
+      "code": 6079,
+      "name": "KlendAccountMismatch",
+      "msg": "a klend account does not match the reserve it belongs to"
+    },
+    {
+      "code": 6080,
+      "name": "InsufficientTickets",
+      "msg": "the player holds fewer Tickets than this withdrawal; use request_withdraw"
+    },
+    {
+      "code": 6081,
+      "name": "BuyTicketsPaused",
+      "msg": "buying Tickets is paused"
+    },
+    {
+      "code": 6082,
+      "name": "ReserveShareCapExceeded",
+      "msg": "this deploy would take the pool past its share of the reserve's supply"
+    },
+    {
+      "code": 6083,
+      "name": "ReserveLiquidityTooLow",
+      "msg": "this deploy would leave the reserve under its minimum free liquidity"
+    },
+    {
+      "code": 6084,
+      "name": "NoDeficit",
+      "msg": "the pool has no venue deficit to cover"
     }
   ],
   "types": [
@@ -3656,6 +4514,30 @@
           {
             "name": "pending_admin",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BuyTicketsPauseSet",
+      "docs": [
+        "`set_buy_tickets_pause` flipped the Bought Tickets switch (yield-claimer",
+        "ticket 11)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          },
+          {
+            "name": "at",
+            "type": "i64"
           }
         ]
       }
@@ -3718,17 +4600,14 @@
             "type": "u64"
           },
           {
-            "name": "registration_window",
-            "type": "i64"
-          },
-          {
             "name": "payout_timeout",
             "type": "i64"
           },
           {
             "name": "base_rate_bps",
             "docs": [
-              "Base yield's APR in basis points, capped at `BPS_DENOMINATOR`."
+              "Ceiling on the depositor share, as an APR in basis points, capped at",
+              "`BPS_DENOMINATOR`."
             ],
             "type": "u16"
           },
@@ -3747,6 +4626,53 @@
               "`BPS_DENOMINATOR`."
             ],
             "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DeficitCovered",
+      "docs": [
+        "`cover_deficit` moved `amount` from `payer` into the principal vault",
+        "(ticket 10). `deficit` is what remains."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "payer",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DeployPauseSet",
+      "docs": [
+        "`set_deploy_pause` changed the deploy switch (ticket 10)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
           }
         ]
       }
@@ -3779,7 +4705,9 @@
       "name": "EmergencyWithdrawn",
       "docs": [
         "Permissionless: `emergency_withdraw` paid one Player's whole balance to",
-        "its own USDC ATA once the pool was shut down."
+        "its own USDC ATA once the pool was shut down. `total` is what was paid:",
+        "`principal + pending`, or the haircut value of it while the pool is impaired",
+        "(ticket 10)."
       ],
       "type": {
         "kind": "struct",
@@ -3841,7 +4769,7 @@
           {
             "name": "jackpot_amount",
             "docs": [
-              "Jackpot vault balance snapshotted at `close_registration`."
+              "Jackpot vault balance snapshotted at the draw request."
             ],
             "type": "u64"
           },
@@ -3884,18 +4812,17 @@
           {
             "name": "registration_opened_at",
             "docs": [
-              "When `begin_epoch` moved this epoch to Registering, which is when",
-              "anyone could first register for it. 0 until then.",
-              "`close_registration` measures `Pool.registration_window` from the",
-              "later of this and `ends_at`, so an operator who delays `begin_epoch`",
-              "cannot bundle the whole registration window into one transaction."
+              "When `begin_epoch` moved this epoch to Registering. 0 until then.",
+              "`rollover_epoch` measures `Pool.vrf_timeout` from the later of this",
+              "and `ends_at` for an epoch that was never sent to the draw."
             ],
             "type": "i64"
           },
           {
             "name": "version",
             "docs": [
-              "Set to [`CURRENT_VERSION`] by `begin_epoch`. See `Pool::version`."
+              "Set to [`crate::constants::EPOCH_VERSION`] by `begin_epoch`. See",
+              "`Pool::version`."
             ],
             "type": "u8"
           },
@@ -4005,11 +4932,53 @@
       }
     },
     {
+      "name": "Harvested",
+      "docs": [
+        "`harvest` paid the yield fee to the Treasury and the prize share to the",
+        "jackpot vault (ticket 07). `gain`, `fee`, `depositor_share` and",
+        "`prize_share` are the totals booked since the previous harvest. `fee_paid`",
+        "is `fee_owed` less any rounding dust the redeem cost, so it can be a few",
+        "units under what the pool owed. `prize_paid` is the whole prize owed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "gain",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "depositor_share",
+            "type": "u64"
+          },
+          {
+            "name": "prize_share",
+            "type": "u64"
+          },
+          {
+            "name": "fee_paid",
+            "type": "u64"
+          },
+          {
+            "name": "prize_paid",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "HouseSwept",
       "docs": [
-        "Admin-only: `sweep_house` moved the whole jackpot and any unspent yield",
-        "budget to `pool.treasury` once the pool was shut down. Principal is never",
-        "swept."
+        "Admin-only: `sweep_house` moved the jackpot's unreserved balance to",
+        "`pool.treasury` once the pool was shut down. Principal is never swept."
       ],
       "type": {
         "kind": "struct",
@@ -4017,9 +4986,111 @@
           {
             "name": "jackpot",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ImpairedCleared",
+      "docs": [
+        "The recorded deficit reached zero and `impaired` cleared (ticket 10).",
+        "`deficit` is the deficit that stood before the step that cleared it. `cause`",
+        "is one of `impaired_cause`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
           },
           {
-            "name": "yield_budget",
+            "name": "deficit",
+            "type": "u64"
+          },
+          {
+            "name": "cause",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ImpairedSet",
+      "docs": [
+        "A sync saw the venue's value fall past the loss tolerance and some of the",
+        "loss was left over after the prize share and the fee owed took theirs",
+        "(yield-claimer ticket 10). `loss` is the whole fall. `prize_absorbed` and",
+        "`fee_absorbed` are what those two owed amounts took. `deficit` is the",
+        "recorded deficit after, which includes any earlier one. Emitted again each",
+        "time a further loss grows it."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "loss",
+            "type": "u64"
+          },
+          {
+            "name": "prize_absorbed",
+            "type": "u64"
+          },
+          {
+            "name": "fee_absorbed",
+            "type": "u64"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InstantWithdrawn",
+      "docs": [
+        "`instant_withdraw` paid `amount` to the owner in the same transaction",
+        "(yield-claimer ticket 09). `redeemed` is what it took from the venue to",
+        "cover free idle, `settled` the yield that joined Principal first.",
+        "`principal` and `entries` are the Player's balances afterwards."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "redeemed",
+            "type": "u64"
+          },
+          {
+            "name": "settled",
+            "type": "u64"
+          },
+          {
+            "name": "principal",
+            "type": "u64"
+          },
+          {
+            "name": "entries",
+            "type": "u64"
+          },
+          {
+            "name": "paid",
+            "docs": [
+              "What reached the owner. Under `amount` while the pool is impaired."
+            ],
             "type": "u64"
           }
         ]
@@ -4136,10 +5207,6 @@
             "type": "u64"
           },
           {
-            "name": "registration_window",
-            "type": "i64"
-          },
-          {
             "name": "payout_timeout",
             "type": "i64"
           },
@@ -4214,54 +5281,19 @@
           {
             "name": "entries",
             "docs": [
-              "Lottery weight units. Moved between players by the game."
+              "Tickets: lottery weight units, moved between players by the game."
             ],
             "type": "u64"
-          },
-          {
-            "name": "weight_acc",
-            "docs": [
-              "Σ entries × seconds within `epoch_id`."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "last_update",
-            "type": "i64"
           },
           {
             "name": "epoch_id",
             "docs": [
-              "The epoch `weight_acc` belongs to."
+              "The epoch `entries` belongs to. [`crate::touch::touch`] resets",
+              "`entries` to `principal` the first time the Player is touched in a",
+              "later epoch. The Weight tree holds range sums, not per-Player stamps,",
+              "so this lazy reset still lives here (ticket 02's progress note)."
             ],
             "type": "u64"
-          },
-          {
-            "name": "frozen_weight",
-            "docs": [
-              "Final weight for `frozen_epoch`, set by [`crate::touch::touch`]."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "frozen_epoch",
-            "type": "u64"
-          },
-          {
-            "name": "reg_epoch",
-            "docs": [
-              "Epoch this player is registered for. `reg_start`/`reg_end` are its",
-              "interval in that epoch's `registered_weight`."
-            ],
-            "type": "u64"
-          },
-          {
-            "name": "reg_start",
-            "type": "u128"
-          },
-          {
-            "name": "reg_end",
-            "type": "u128"
           },
           {
             "name": "is_house",
@@ -4295,31 +5327,6 @@
               "cannot freeze a depositor's money."
             ],
             "type": "i64"
-          },
-          {
-            "name": "principal_acc",
-            "docs": [
-              "Σ principal × seconds within `epoch_id`. Mirrors `weight_acc` with",
-              "Principal in place of Entries."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "frozen_principal_acc",
-            "docs": [
-              "Final principal-seconds for `frozen_epoch`, set by",
-              "[`crate::touch::touch`] alongside `frozen_weight`."
-            ],
-            "type": "u128"
-          },
-          {
-            "name": "yield_epoch",
-            "docs": [
-              "The epoch Base yield was last credited for. Guards `register` against",
-              "crediting the same epoch twice, independent of `reg_epoch` (which a",
-              "zero-weight registration never sets)."
-            ],
-            "type": "u64"
           },
           {
             "name": "bought_epoch",
@@ -4357,10 +5364,25 @@
             "type": "u64"
           },
           {
+            "name": "yield_index",
+            "docs": [
+              "`Pool.yield_index` at this Player's last settle (ADR 0017)."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "leaf_index",
+            "docs": [
+              "This Player's 1-based Leaf in the Weight tree, assigned at first",
+              "deposit by ticket 08. 0 means no Leaf yet."
+            ],
+            "type": "u32"
+          },
+          {
             "name": "version",
             "docs": [
-              "Set to [`CURRENT_VERSION`] by `Player::init_if_fresh`. See",
-              "`Pool::version`."
+              "Set to [`LAYOUT_VERSION`] by `Player::init_if_fresh` and",
+              "`create_pool`. See `Pool::version`."
             ],
             "type": "u8"
           },
@@ -4369,7 +5391,7 @@
             "docs": [
               "Take new fields from here. Their zero value must be the safe default,",
               "or bump `version` and migrate on first touch. See ADR 0013. Smaller",
-              "than `Pool`'s and `Epoch`'s: Player rent is paid by the depositor."
+              "than `Pool`'s: Player rent is paid by the depositor."
             ],
             "type": {
               "array": [
@@ -4558,13 +5580,6 @@
             "type": "u64"
           },
           {
-            "name": "carry_pot",
-            "docs": [
-              "Entries carried out of a voided round into the next round's pot."
-            ],
-            "type": "u64"
-          },
-          {
             "name": "total_principal",
             "type": "u64"
           },
@@ -4583,27 +5598,18 @@
           {
             "name": "pending_withdrawals",
             "docs": [
-              "Σ `Player.pending_withdraw` across the pool. `admin_withdraw` refuses",
-              "to leave the principal vault holding less than this."
+              "Σ `Player.pending_withdraw` across the pool. USDC the principal vault",
+              "holds for queued withdrawals, which no other payout may spend."
             ],
             "type": "u64"
           },
           {
             "name": "min_jackpot",
             "docs": [
-              "An epoch whose jackpot vault holds less than this at",
-              "`close_registration` rolls over instead of paying out dust."
+              "An epoch whose jackpot vault holds less than this at the draw request",
+              "rolls over instead of paying out dust."
             ],
             "type": "u64"
-          },
-          {
-            "name": "registration_window",
-            "docs": [
-              "Seconds after an epoch's `ends_at` during which `close_registration`",
-              "is refused, so the operator cannot draw before everyone who earned",
-              "weight in that epoch has been registered. `0 <= this < epoch_seconds`."
-            ],
-            "type": "i64"
           },
           {
             "name": "payout_timeout",
@@ -4617,29 +5623,20 @@
             "name": "jackpot_reserved",
             "docs": [
               "Jackpot already promised to an epoch that is Drawing or Drawn and has",
-              "not paid yet. `close_registration` snapshots the vault minus this, so",
-              "the next epoch cannot take a prize the previous one still owes.",
-              "Released on `payout` and on either branch of `rollover_epoch`."
+              "not paid yet. The draw request snapshots the vault minus this, so the",
+              "next epoch cannot take a prize the previous one still owes. Released",
+              "on `payout` and on either branch of `rollover_epoch`."
             ],
             "type": "u64"
           },
           {
             "name": "base_rate_bps",
             "docs": [
-              "Base yield's APR on time-weighted Principal, in basis points, capped",
-              "at `BPS_DENOMINATOR`. An admin parameter, so it can change without a",
-              "program upgrade."
+              "The ceiling on the depositor share of a venue gain, as an APR on",
+              "`total_principal` in basis points, capped at `BPS_DENOMINATOR`. Gain",
+              "above it goes to the prize share (ADR 0017)."
             ],
             "type": "u16"
-          },
-          {
-            "name": "yield_budget",
-            "docs": [
-              "USDC already in the principal vault, earmarked for Base yield and not",
-              "yet credited to anyone. `fund_yield` raises it; `register` draws it",
-              "down and never credits past what it holds."
-            ],
-            "type": "u64"
           },
           {
             "name": "tickets_per_usdc",
@@ -4678,7 +5675,7 @@
           {
             "name": "version",
             "docs": [
-              "Set to [`CURRENT_VERSION`] by `create_pool`. Lets a future upgrade",
+              "Set to [`LAYOUT_VERSION`] by `create_pool`. Lets a future upgrade",
               "tell an old account apart from a freshly created one and migrate it",
               "lazily on first touch."
             ],
@@ -4688,9 +5685,7 @@
             "name": "shutdown",
             "docs": [
               "Admin-only and irreversible (spec \"Shutdown\"). Stops every inflow,",
-              "the game and the draw, and lets withdrawals skip the epoch lock.",
-              "Carved from the front of `_reserved` (ops-and-envs ticket 02),",
-              "exercising the ADR 0013 rule once: `false` is the safe zero value."
+              "the game and the draw, and lets withdrawals skip the epoch lock."
             ],
             "type": "bool"
           },
@@ -4698,23 +5693,183 @@
             "name": "game_paused",
             "docs": [
               "Stops `create_round` and `buy_position` (game-jackpot-pause ticket",
-              "01). `create_pool` sets this `true`; the zero value stays the safe",
-              "default for a pool that predates this field. Carved from",
-              "`_reserved` alongside `jackpot_paused`."
+              "01). `create_pool` sets this `true`."
             ],
             "type": "bool"
           },
           {
             "name": "jackpot_paused",
             "docs": [
-              "Stops the epoch cycle's next step: `begin_epoch`, `buy_tickets`,",
-              "`grant_tickets` and `close_registration` (game-jackpot-pause ticket",
-              "01). An epoch already Drawing or Drawn still finishes. `create_pool`",
-              "sets this `true`; the zero value stays the safe default for a pool",
-              "that predates this field. Carved from `_reserved` alongside",
-              "`game_paused`."
+              "Stops the epoch cycle's next step: `begin_epoch`, `buy_tickets` and",
+              "`grant_tickets` (game-jackpot-pause ticket 01). An epoch already",
+              "Drawing or Drawn still finishes. `create_pool` sets this `true`."
             ],
             "type": "bool"
+          },
+          {
+            "name": "weight_tree",
+            "docs": [
+              "The pool's [`WeightTree`] account, created at `create_pool`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_program",
+            "docs": [
+              "The pinned klend program, lending market, reserve and the pool's",
+              "cToken account. `create_pool` takes them (never the default key) and",
+              "every venue instruction checks its accounts against them."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_ctoken",
+            "type": "pubkey"
+          },
+          {
+            "name": "yield_index",
+            "docs": [
+              "Depositor share per unit of Principal, scaled by 1e18. Only rises."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "venue_value",
+            "docs": [
+              "The venue position's value at the last sync, and when that was."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "last_sync_at",
+            "type": "i64"
+          },
+          {
+            "name": "yield_owed",
+            "docs": [
+              "Depositor yield the index has credited and no Player has settled."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "fee_owed",
+            "docs": [
+              "Yield fee owed to the Treasury, paid out by harvest."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "prize_owed",
+            "docs": [
+              "Prize share owed to the jackpot vault, paid out by harvest."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "deficit",
+            "docs": [
+              "Venue loss not yet repaid. Nonzero only while `impaired`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "yield_fee_bps",
+            "docs": [
+              "The team's share of every gain, at most `MAX_YIELD_FEE_BPS`."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "idle_floor_bps",
+            "docs": [
+              "Idle band: free idle USDC as a share of the pool. Recall below the",
+              "floor, deploy above the target."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "idle_target_bps",
+            "type": "u16"
+          },
+          {
+            "name": "reserve_share_cap_bps",
+            "docs": [
+              "Deploy cap: the pool's largest share of the reserve's supply."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "reserve_liquidity_floor_bps",
+            "docs": [
+              "Deploy cap: free liquidity the reserve must keep after a deploy, as a",
+              "multiple of the pool's position in basis points (20_000 is twice it)."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "min_venue_move",
+            "docs": [
+              "Smallest deploy or recall, in USDC atomic units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "loss_tolerance_bps",
+            "docs": [
+              "A fall in venue value past this share of it is a venue loss."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "deploy_paused",
+            "docs": [
+              "Stops deploy. Either key sets it, only the Admin clears it."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "impaired",
+            "docs": [
+              "Set by a venue loss, cleared when `deficit` reaches zero."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "buy_tickets_paused",
+            "docs": [
+              "Stops `buy_tickets` (ADR 0019). Admin-only setter in ticket 11."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "harvest_gain",
+            "docs": [
+              "Running totals of every gain booked since the last harvest, for the",
+              "harvest event (yield-claimer ticket 07). `apply_sync` adds to them,",
+              "`harvest` reads and zeroes them. They are not claims: only the owed",
+              "amounts above are."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "harvest_fee",
+            "type": "u64"
+          },
+          {
+            "name": "harvest_depositor",
+            "type": "u64"
+          },
+          {
+            "name": "harvest_prize",
+            "type": "u64"
           },
           {
             "name": "_reserved",
@@ -4725,7 +5880,7 @@
             "type": {
               "array": [
                 "u8",
-                125
+                96
               ]
             }
           }
@@ -4810,6 +5965,25 @@
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "version",
+            "docs": [
+              "Set to [`LAYOUT_VERSION`] by `buy_position`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Take new fields from here. See ADR 0013."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           }
         ]
       }
@@ -4857,59 +6031,17 @@
           },
           {
             "name": "reward",
-            "type": "u64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "PrincipalDeployed",
-      "docs": [
-        "The admin pulled principal out to a yield venue. Coming back is a plain",
-        "SPL transfer into the vault, so there is no matching event for the return."
-      ],
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "pool",
-            "type": "pubkey"
-          },
-          {
-            "name": "amount",
+            "docs": [
+              "Stake back plus the share of the losers' pot, for a winner."
+            ],
             "type": "u64"
           },
           {
-            "name": "vault_remaining",
+            "name": "refund",
+            "docs": [
+              "The whole stake returned as Tickets on a voided round (ADR 0019)."
+            ],
             "type": "u64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "Registered",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "epoch_id",
-            "type": "u64"
-          },
-          {
-            "name": "owner",
-            "type": "pubkey"
-          },
-          {
-            "name": "weight",
-            "type": "u128"
-          },
-          {
-            "name": "reg_start",
-            "type": "u128"
-          },
-          {
-            "name": "reg_end",
-            "type": "u128"
           }
         ]
       }
@@ -4957,8 +6089,8 @@
           {
             "name": "pot",
             "docs": [
-              "Entries staked in this round plus any carry from a voided round.",
-              "Stays gross: the House cut is never subtracted from it."
+              "Entries staked in this round. Stays gross: the House cut is never",
+              "subtracted from it."
             ],
             "type": "u64"
           },
@@ -4996,12 +6128,35 @@
             "docs": [
               "Positions bought on this round still open (not yet settled).",
               "Incremented in `buy_position`, decremented when `settle_position`",
-              "closes its Position. `close_round` refuses while this is nonzero.",
-              "No `_reserved` to carve this from: Round has none by design (spec),",
-              "since it is short-lived and reclaimed by `close_round` (ops-and-envs",
-              "ticket 05), so a layout change here only affects in-flight rounds."
+              "closes its Position. `close_round` refuses while this is nonzero."
             ],
             "type": "u32"
+          },
+          {
+            "name": "vrf_request_slot",
+            "docs": [
+              "Slot `request_round_randomness` landed in. 0 until then."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "version",
+            "docs": [
+              "Set to [`LAYOUT_VERSION`] by `create_round`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "_reserved",
+            "docs": [
+              "Take new fields from here. See ADR 0013."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
           }
         ]
       }
@@ -5046,13 +6201,6 @@
           {
             "name": "ends_at",
             "type": "i64"
-          },
-          {
-            "name": "carry_in",
-            "docs": [
-              "Entries carried in from a voided round."
-            ],
-            "type": "u64"
           }
         ]
       }
@@ -5101,10 +6249,6 @@
         "fields": [
           {
             "name": "round_id",
-            "type": "u64"
-          },
-          {
-            "name": "carry_pot",
             "type": "u64"
           }
         ]
@@ -5164,12 +6308,6 @@
             }
           },
           {
-            "name": "registration_window",
-            "type": {
-              "option": "i64"
-            }
-          },
-          {
             "name": "payout_timeout",
             "type": {
               "option": "i64"
@@ -5192,6 +6330,102 @@
             "type": {
               "option": "u16"
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SetVenueParamsArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "yield_fee_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "idle_floor_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "idle_target_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "reserve_share_cap_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "reserve_liquidity_floor_bps",
+            "type": {
+              "option": "u16"
+            }
+          },
+          {
+            "name": "min_venue_move",
+            "type": {
+              "option": "u64"
+            }
+          },
+          {
+            "name": "loss_tolerance_bps",
+            "type": {
+              "option": "u16"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Synced",
+      "docs": [
+        "A sync saw the venue's value rise and split the gain (yield-claimer",
+        "ticket 05). `fee + depositor_share + prize_share + deficit_repaid` is the",
+        "gain; a recorded deficit is repaid before any split (ticket 10). Not emitted",
+        "for a sync that saw no gain, or that ran in the same second as the last."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "gain",
+            "type": "u64"
+          },
+          {
+            "name": "fee",
+            "type": "u64"
+          },
+          {
+            "name": "depositor_share",
+            "type": "u64"
+          },
+          {
+            "name": "prize_share",
+            "type": "u64"
+          },
+          {
+            "name": "yield_index",
+            "type": "u128"
+          },
+          {
+            "name": "venue_value",
+            "type": "u64"
+          },
+          {
+            "name": "deficit_repaid",
+            "type": "u64"
           }
         ]
       }
@@ -5248,6 +6482,178 @@
       }
     },
     {
+      "name": "TreasuryAccountsSet",
+      "docs": [
+        "Admin-only: `set_treasury_accounts` replaced the Treasury and the buyback",
+        "reserve (ticket 07)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "treasury",
+            "type": "pubkey"
+          },
+          {
+            "name": "buyback_reserve",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueDeployed",
+      "docs": [
+        "`deploy_to_venue` moved `amount` of idle USDC into the venue.",
+        "`venue_value` is the pool's recorded venue value afterwards."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "venue_value",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueParamsSet",
+      "docs": [
+        "Admin-only: `set_venue_params` changed the venue settings (ticket 10).",
+        "Carries every value as it stands afterwards."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "yield_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "idle_floor_bps",
+            "type": "u16"
+          },
+          {
+            "name": "idle_target_bps",
+            "type": "u16"
+          },
+          {
+            "name": "reserve_share_cap_bps",
+            "type": "u16"
+          },
+          {
+            "name": "reserve_liquidity_floor_bps",
+            "type": "u16"
+          },
+          {
+            "name": "min_venue_move",
+            "type": "u64"
+          },
+          {
+            "name": "loss_tolerance_bps",
+            "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueRecalled",
+      "docs": [
+        "`recall` moved `amount` of USDC from the venue back into the principal",
+        "vault (yield-claimer ticket 07). `venue_value` is the recorded value after."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "venue_value",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WeightTree",
+      "docs": [
+        "Header of the pool's Fenwick weight tree (ADR 0018). The nodes follow it",
+        "in the same account, `node_count` of them, `node_size` bytes each,",
+        "starting 8-aligned right after this header. `create_pool` sizes the",
+        "account for zero nodes; ticket 08 grows it by one node per first deposit.",
+        "",
+        "Created by a top-level `system_program::create_account` in the",
+        "`create_pool` transaction, owned by this program and zeroed, because an",
+        "in-program create is capped at 10 KiB and the tree may pass that."
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "docs": [
+              "[`crate::constants::WEIGHT_TREE_VERSION`]."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "_padding",
+            "type": {
+              "array": [
+                "u8",
+                3
+              ]
+            }
+          },
+          {
+            "name": "node_size",
+            "docs": [
+              "[`WEIGHT_TREE_NODE_SIZE`]."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "node_count",
+            "type": "u64"
+          },
+          {
+            "name": "pool",
+            "docs": [
+              "The `Pool` this tree belongs to."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
       "name": "WithdrawRequested",
       "type": {
         "kind": "struct",
@@ -5280,7 +6686,8 @@
     {
       "name": "Withdrawn",
       "docs": [
-        "A `Withdrawn` event follows once `process_withdraw` moves the USDC."
+        "A `Withdrawn` event follows once `process_withdraw` moves the USDC. Its",
+        "`amount` is what was paid, under the request while the pool is impaired."
       ],
       "type": {
         "kind": "struct",
@@ -5299,50 +6706,6 @@
           },
           {
             "name": "entries",
-            "type": "u64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "YieldCredited",
-      "docs": [
-        "`shortfall` is what `base_rate_bps` would have credited beyond what",
-        "`yield_budget` could cover, 0 when the budget paid in full."
-      ],
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "epoch_id",
-            "type": "u64"
-          },
-          {
-            "name": "owner",
-            "type": "pubkey"
-          },
-          {
-            "name": "amount",
-            "type": "u64"
-          },
-          {
-            "name": "shortfall",
-            "type": "u64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "YieldFunded",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "amount",
-            "type": "u64"
-          },
-          {
-            "name": "budget",
             "type": "u64"
           }
         ]
