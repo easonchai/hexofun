@@ -1,5 +1,7 @@
 # Every Player is in the draw through a Fenwick weight tree, and registration is removed
 
+Superseded in part by ADR 0020: the tree's slots hold Tickets instead of time-weighted Weight; the tree, parity slots, lazy reset, idle rule and append stand.
+
 Status: accepted (2026-10-04). Prototype 02 reported the same day: the tree matched today's `touch` and `register` to the unit over 1,000 random sequences in both readable epochs, a node is 72 bytes, and a worst-path update costs about 2,000 CU at 100,000 nodes. One correction from the prototype: the Player keeps an epoch stamp, because the lazy reset of Tickets to Principal needs it and the tree holds range sums, not per-Player stamps.
 
 ADR 0002 made the draw time-weighted and on chain: each Player accumulated `entries × seconds` on

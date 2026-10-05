@@ -1,5 +1,7 @@
 # Depositors earn what the venue paid through a live Yield index, and withdraw at once
 
+Superseded in part by ADR 0020: the instant withdraw and its Tickets rule are removed; the Yield index, Idle band, deploy, recall, harvest and venue loss stand.
+
 Until now yield worked in three manual steps. The Admin pulled USDC out of the principal vault with
 `admin_withdraw` and lent it at Kamino off the program (ADR 0010). The Admin funded a Yield budget
 with `fund_yield`, and `register` credited a fixed Base yield out of it once per ended epoch

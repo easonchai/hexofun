@@ -2,7 +2,7 @@
 
 The product is HEXO (hexo.fun). `hex_vault` is the program name and HexVault the codename; neither appears on a screen.
 
-A no-loss savings app on Solana: users deposit USDC into a pool, earn a Base yield on it, the rest of the pool's yield becomes the daily draw's prize, and each depositor's time-weighted Tickets decide their odds. Tickets can be risked in a MinePEA-style hex-tile game against other depositors to win more Tickets, but principal is never at stake.
+A no-loss savings app on Solana: users deposit USDC into a pool, earn a Base yield on it, the rest of the pool's yield becomes the daily draw's prize, and each depositor's Tickets decide their odds. Tickets can be risked in a MinePEA-style hex-tile game against other depositors to win more Tickets, but principal is never at stake.
 
 Player-facing words differ from mechanism names in three places, on purpose: the screen says "day" where the code says epoch, "prize" or "hexpot" where the code says jackpot, and "tickets" where the code says entries. Code, API and program identifiers keep the mechanism names.
 
@@ -15,7 +15,7 @@ One deployed instance of the product: one accepted asset, one principal vault, o
 _Avoid_: Vault (ambiguous with the token accounts), protocol
 
 **Deposit**:
-The single action that puts USDC into the pool and credits equal Principal and Tickets to the depositor.
+The single action that puts USDC into the pool and credits equal Principal to the depositor at once. The matching Tickets start with the next epoch, and until then the amount is a Pending deposit.
 _Avoid_: Stake, mine, buy-in
 
 **Principal**:
@@ -23,15 +23,19 @@ A depositor's 1:1 claim on the USDC they deposited, tracked as a number in their
 _Avoid_: PT, principal token, receipt, balance
 
 **Withdraw**:
-Removing Principal from the pool, by one of two paths. The instant path pays in the same transaction: it needs Tickets of at least the amount, takes the amount off both Principal and Tickets, pays from free idle in the principal vault, and redeems any gap from the venue in the same instruction. When the venue's free liquidity cannot cover the gap the instant path fails whole and the screen offers the queued path instead. A queued request for `x` needs Principal of at least `x`, deducts `x` from Principal and `min(Tickets, x)` from Tickets at once, and pays after the epoch it was requested in ends, when anyone may push the transfer. A pause blocks neither path, and while the pool is Impaired both pay a Haircut. Code calls the queued pair `request_withdraw` and `process_withdraw`.
+Removing Principal from the pool with one request, `request_withdraw(amount)`, which needs Principal of at least the amount and splits it. The part up to the Player's Pending deposit never held a Ticket and refunds in the same transaction. It pays from free idle in the principal vault and redeems any gap from the venue in the same instruction. When the venue's free liquidity cannot cover the gap the whole request fails and changes nothing. The rest becomes a Pending withdrawal and pays after the epoch it was requested in ends, when anyone may push the transfer with `process_withdraw`. There is no instant exit for Principal that holds Tickets. A pause blocks neither part, and while the pool is Impaired both pay a Haircut.
 _Avoid_: Unstake, redeem (a venue operation), cash out
 
 **Pending withdrawal**:
-A requested withdrawal whose USDC has not moved yet. It lives on the Player as `pending_withdraw` and `pending_epoch`, and is summed across the pool as `Pool.pending_withdrawals`. The Principal and Tickets behind it are already gone; the transfer happens on the first `process_withdraw` after `pending_epoch` ends, and fails with `InsufficientVaultLiquidity` while the vault is short.
-_Avoid_: Queue, unbonding, escrow, claim
+The queued part of a withdrawal request, whose USDC has not moved yet. It lives on the Player as `pending_withdraw` and `pending_epoch`, and is summed across the pool as `Pool.pending_withdrawals`. The Principal and Tickets behind it stay in place until it pays, so it stays in the draw and the game and keeps earning yield. The transfer happens on the first `process_withdraw` after `pending_epoch` ends, which takes the amount off Principal and Tickets, and fails with `InsufficientVaultLiquidity` while the vault is short. Several requests in one epoch merge into one.
+_Avoid_: Queue, unbonding, escrow, claim, instant withdraw (retired)
+
+**Pending deposit**:
+Principal deposited in the current epoch. It earns yield from the second it lands and Tickets from the next epoch, and the Player can refund it at once. It lives on the Player as `pending_deposit` and `pending_deposit_epoch`, and it is part of Principal, not an addition to it. The screen shows it as "+N from tomorrow's draw" beside the active Tickets.
+_Avoid_: Unconfirmed deposit, escrow, queued deposit, activation queue
 
 **Player**:
-One wallet's account in one pool: its Principal, Tickets, the Yield index at its last settle, and its Leaf in the Weight tree.
+One wallet's account in one pool: its Principal, Tickets, any Pending deposit and Pending withdrawal, the Yield index at its last settle, and its Leaf in the Weight tree.
 _Avoid_: User account, position (a game concept)
 
 **House**:
@@ -75,7 +79,7 @@ A pool state set when the venue position's value falls between two Syncs by more
 _Avoid_: Paused (a separate switch), insolvent, frozen, default
 
 **Haircut**:
-What a withdrawal pays while the pool is Impaired: the amount times the pool's real value, `vault balance + venue value − Pending withdrawals − owed amounts`, divided by `total_principal`, rounded down. Principal and Tickets still fall by the full amount, and a Player who leaves this way takes no part in a later recovery. Instant, queued and Emergency withdraw all apply it.
+What a withdrawal pays while the pool is Impaired: the amount times the pool's real value, `vault balance + venue value − Pending withdrawals − owed amounts`, divided by `total_principal`, rounded down. Principal and Tickets still fall by the full amount, and a Player who leaves this way takes no part in a later recovery. The refund of a Pending deposit, a processed Pending withdrawal and Emergency withdraw all apply it, and a queued one applies it at the moment it pays.
 _Avoid_: Loss (the venue's fall in value), slashing, penalty, exit fee
 
 ### Lottery
@@ -94,19 +98,19 @@ _Avoid_: Commission, referral reward pool
 
 
 **Tickets**:
-A depositor's current balance of lottery weight units. Created 1:1 with Principal on deposit, added by Bought tickets and Granted tickets, moved between players by the game, and reset to equal Principal at each new epoch. Non-transferable, non-redeemable, never USDC. Code, the API and the program call them entries (`Player.entries`); the screen and this glossary say Tickets.
-_Avoid_: Entries (on screen), ET, entry token, chances, chips
+A whole-unit count, one per micro-USDC, and the number the draw selects over. A Player holds Principal's worth of Tickets in each epoch, and fresh Principal joins from the next epoch, so a deposit made today is in tomorrow's draw. Yield, Bought tickets, Granted tickets, round rewards, void refunds, House credits and the Prize add Tickets the moment they land. The game moves them between players, and Tickets reset to equal Principal at each new epoch. Non-transferable, non-redeemable, never USDC. Code, the API and the program call them entries (`Player.entries`); the screen and this glossary say Tickets.
+_Avoid_: Entries (on screen), ET, entry token, chances, chips, TWAB
 
 **Weight**:
-A Player's time-weighted Tickets over one epoch: Tickets held times seconds. It is credited forward: every Ticket change adds the change times the seconds left until `epoch_end`, so the number is final the moment the epoch ends, with no transaction. A change after `epoch_end` and before the next epoch begins credits nothing, so a deposit in that gap starts earning Weight when the new epoch starts. Depositing later in an epoch earns less Weight. Weight, not Tickets, is what the draw selects over.
-_Avoid_: TWAB, average balance, odds, registered weight (retired)
+Retired as a quantity. It was Tickets times seconds held, and the draw now selects over Tickets, so the number on screen is the number the draw uses. The word survives only in "Weight tree".
+_Avoid_: TWAB, average balance, odds, registered weight (retired), ticket-seconds
 
 **Weight tree**:
-One zero-copy account per pool that holds every Player's Weight as a Fenwick tree, one entry per Player ever created. Each entry keeps two epoch-parity slots, so a new epoch starts with no transaction and the ended one stays readable until the epoch after next begins. The root is the epoch's total Weight, and the Draw walks down from it to the winner. It grows by one entry at a Player's first deposit, paid for by that depositor, up to 10 MiB, about 145,000 Players. It replaced per-Player registration.
+One zero-copy account per pool that holds every Player's Tickets as a Fenwick tree, one entry per Player ever created. Each entry keeps two epoch-parity slots, so a new epoch starts with no transaction and the ended one stays readable until the epoch after next begins. The root is the epoch's total Tickets, and the Draw walks down from it to the winner. It grows by one 56-byte entry at a Player's first deposit, paid for by that depositor, up to 10 MiB, about 187,000 Players. It replaced per-Player registration.
 _Avoid_: Sum tree (the general structure), registration, snapshot, Merkle tree
 
 **Leaf**:
-A Player's place in the Weight tree: an index assigned at first deposit, stored on the Player, never reused. A Fenwick entry holds a range sum, not one Player's value, so a Player's own Weight is the difference of two prefix sums; the Indexer computes it. `payout` checks the winner's Leaf against the draw's target.
+A Player's place in the Weight tree: an index assigned at first deposit, stored on the Player, never reused. A Fenwick entry holds a range sum, not one Player's value, so a Player's own Tickets in the tree are the difference of two prefix sums; the Indexer reads the Player's Tickets directly. `payout` checks that the winner's Leaf range holds the draw's target.
 _Avoid_: Node, entry (a tree slot that sums a range), slot (one epoch-parity half of an entry), registration interval
 
 **Epoch**:
@@ -130,7 +134,7 @@ The jackpot vault's current balance: this epoch's prize once funded, plus anythi
 _Avoid_: Jackpot (on screen), honeypot, prize pool
 
 **Draw**:
-The verifiable random selection of one point in an epoch's total Weight via ORAO VRF, from a hash of all 64 bytes of its randomness. The Player whose Leaf in the Weight tree covers the point wins the Prize.
+The verifiable random selection of one point in an epoch's Ticket total via ORAO VRF. The program hashes all 64 bytes of the randomness and reduces the digest to a target under the 64-bit total of Tickets. The Player whose Leaf in the Weight tree covers the target wins the Prize.
 _Avoid_: Snapshot, lottery, raffle
 
 **Payout**:
@@ -138,7 +142,7 @@ Moving the Prize from the jackpot vault into the principal vault and adding it t
 _Avoid_: Claim, redeem
 
 **Rollover**:
-A Prize that stays in the hexpot for the next epoch because the epoch ended with no Weight, the draw's randomness never arrived, or the jackpot vault held less than the pool's `min_jackpot` when the draw was requested.
+A Prize that stays in the hexpot for the next epoch because the epoch ended with no Tickets, the draw's randomness never arrived, or the jackpot vault held less than the pool's `min_jackpot` when the draw was requested.
 _Avoid_: Expiry, unclaimed prize
 
 ### Game
@@ -220,7 +224,7 @@ The backend component that mirrors program accounts and finalized events into Po
 _Avoid_: Cache, backend (too broad)
 
 **Pause**:
-A reversible pool state (`Pool.paused`) that stops all Ticket movement, `buy_position` and both `grant_tickets` paths, while leaving an open Round free to finish: both Withdraw paths, `settle_round`, `void_round`, `settle_position`, `close_round`, the epoch cranks and `fund_jackpot` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
+A reversible pool state (`Pool.paused`) that stops all Ticket movement, `buy_position` and both `grant_tickets` paths, while leaving an open Round free to finish: Withdraw, `settle_round`, `void_round`, `settle_position`, `close_round`, the epoch cranks and `fund_jackpot` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
 _Avoid_: Shutdown (a separate, irreversible state), freeze, halt
 
 **Shutdown**:
@@ -240,7 +244,7 @@ A per-deployment switch the team sets when the app is deployed that covers a fea
 _Avoid_: Pause (a pool switch), feature flag, hide
 
 **Emergency withdraw**:
-A permissionless crank, valid only once a pool is shut down, that pays one Player's whole Principal and pending withdrawal to their own wallet in one instruction (`emergency_withdraw`). Anyone may run it for any Player; the House is excluded, since its principal is protocol money and leaves through a Sweep instead.
+A permissionless crank, valid only once a pool is shut down, that pays one Player's whole Principal, Pending deposit included, and Pending withdrawal to their own wallet in one instruction (`emergency_withdraw`). Anyone may run it for any Player; the House is excluded, since its principal is protocol money and leaves through a Sweep instead.
 _Avoid_: Force withdraw, bailout, rescue
 
 **Sweep**:
