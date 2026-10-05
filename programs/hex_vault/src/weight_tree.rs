@@ -543,18 +543,13 @@ mod tests {
                     }
                 }
                 (65..=74, _) if !self.stakes.is_empty() => {
-                    // `settle_position`: the stake and a reward come back only
-                    // while the stake's epoch is still the current one. A
-                    // stale one is touched and credits nothing.
+                    // `settle_position`: touch, then the stake and a reward
+                    // come back as a plain delta, in whatever epoch is current
+                    // by then.
                     let i = self.rng.below(self.stakes.len() as u64) as usize;
                     let (k, stake, epoch) = self.stakes.swap_remove(i);
-                    let live = epoch == self.clock.current;
-                    self.act(k, |p, rng| {
-                        if live {
-                            p.entries += stake + rng.upto(stake);
-                        }
-                    });
-                    if live {
+                    self.act(k, |p, rng| p.entries += stake + rng.upto(stake));
+                    if epoch == self.clock.current {
                         self.cov.settled_stakes += 1;
                     } else {
                         self.cov.stale_stakes += 1;
@@ -848,9 +843,7 @@ mod tests {
 
     /// A stake taken in epoch `e` is already back in epoch `e + 1`: the slot
     /// reset rebuilds the Tickets from `principal_sum`, which a stake never
-    /// lowers. Crediting a settle after the rollover would count the stake
-    /// twice, exactly as `settle_position` evaporates a late reward for the
-    /// same reason.
+    /// lowers. A settle after the rollover is a plain delta on top of that.
     #[test]
     fn a_stake_from_a_rolled_over_epoch_is_already_back() {
         let (mut tree, mut clock) = fresh(2);
@@ -868,7 +861,7 @@ mod tests {
         // No settle yet, and leaf 2 already holds its full Principal.
         assert_eq!(tickets(&tree, &clock, 2, 2), 1_000);
 
-        // A settle credited now would put leaf 2 above its Principal.
+        // A settle credited now lands above its Principal.
         update(&mut tree, 2, 0, 400, &clock).unwrap();
         assert_eq!(tickets(&tree, &clock, 2, 2), 1_400);
         assert_eq!(tickets(&tree, &clock, 2, 1), 600);

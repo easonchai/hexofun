@@ -187,6 +187,7 @@ function context(over: Partial<TickContext> = {}): Recorder {
     lastWithdrawState: null,
     lastVenueState: null,
     lastExpectedErrors: new Map(),
+    lastRoundSkipEpochId: null,
     // Unconfigured by default (ticket 05): begin_epoch is never withheld in
     // any test that is not about the launch window.
     launchAt: null,
@@ -1219,6 +1220,29 @@ describe("runTick", () => {
     // The epoch end is the closest candidate: sooner than the 60 s safety
     // interval, and there is no open round to bound it further.
     expect(result.nextWakeAt).toBe(NOW + 59n);
+  });
+
+  it("7. reports a skipped round once per epoch, not once per tick", async () => {
+    const straddling = {
+      pool: pool({ openRoundId: 0n }),
+      currentEpoch: epoch({ endsAt: NOW + 59n }),
+      openRound: null,
+    };
+    const first = await runTick(context(straddling).ctx);
+    expect(first.action).toBeNull();
+    expect(first.roundSkip).toEqual({ epochId: 2n, endsAt: NOW + 59n });
+
+    // The service remembers the epoch it logged, so the next tick stays quiet.
+    const later = await runTick(
+      context({ ...straddling, lastRoundSkipEpochId: 2n }).ctx,
+    );
+    expect(later.roundSkip).toBeUndefined();
+
+    // A round that fits is no skip at all.
+    const fits = await runTick(
+      context({ pool: pool({ openRoundId: 0n }), openRound: null }).ctx,
+    );
+    expect(fits.roundSkip).toBeUndefined();
   });
 
   it("7. does not open a round while the pool is paused", async () => {

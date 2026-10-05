@@ -1326,85 +1326,13 @@ describe("epochs", () => {
     TIMEOUT,
   );
 
-  // --- Cross-epoch Round settlement (audit-fixes/01): the program's own
-  // guard against crediting a Round into an Epoch it didn't run in. `touch`
-  // has already reset Entries to Principal for anyone it sees by the time
-  // these settle, so the pot has to evaporate instead of paying out, or the
-  // invariant below would drift.
+  // --- Cross-epoch Round settlement. A Round that ended inside its epoch
+  // can settle after the roll: `touch` runs first and the credit is a plain
+  // delta in the epoch now current (yield-claimer ticket 21; the winner's
+  // case is in 02-rounds).
 
   it(
-    "a Round settled after its Epoch rolls over pays nothing, but stays zero-sum",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 24, roundSeconds: 8, closeBuffer: 2 });
-      const alice = await pool.fundedWallet(10_000_000n);
-      const bob = await pool.fundedWallet(10_000_000n);
-
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, alice, 5_000_000n);
-      await deposit(pool, bob, 5_000_000n);
-
-      const epoch1 = await fetchEpoch(pool, 1n);
-      const endsAt = Number(epoch1.endsAt.toString());
-      const startsAt = endsAt - 8; // the Round ends exactly at the Epoch's ends_at
-
-      await sleepUntilOnChain(startsAt);
-      await createRound(pool, 1n, 1n, startsAt, endsAt);
-      await buyPosition(pool, alice, 1n, 1n << 0n, 1_000_000n); // tile 0
-      await buyPosition(pool, bob, 1n, 1n << 1n, 1_000_000n); // tile 1
-
-      await sleepUntilOnChain(endsAt);
-      // Roll the Epoch before the Round is ever settled: the program's own
-      // guard, not the operator's ordering, is what has to hold here.
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-
-      const seed = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
-      const randomness = await fulfillRandomness(seed, randomnessFor(0)); // tile 0 wins
-      await settleRound(pool, 1n, randomness);
-
-      const settled = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      expect(settled.status).toBe(round_status.SETTLED);
-      // The Round records the cut it would have taken, but the Epoch has
-      // rolled over, so it evaporated with the rest of the pot instead of
-      // reaching the House.
-      expect(settled.houseCut.toString()).toBe("60000"); // 6% of the 1M losers' pot
-      expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
-
-      const alicePositionPda = positionPda(roundPda(pool.pool, 1n), alice.keypair.publicKey);
-      const bobPositionPda = positionPda(roundPda(pool.pool, 1n), bob.keypair.publicKey);
-      const aliceRentBefore = (await program.provider.connection.getAccountInfo(alicePositionPda))!.lamports;
-      const bobRentBefore = (await program.provider.connection.getAccountInfo(bobPositionPda))!.lamports;
-      const aliceBalBefore = await program.provider.connection.getBalance(alice.keypair.publicKey);
-      const bobBalBefore = await program.provider.connection.getBalance(bob.keypair.publicKey);
-
-      const aliceSig = await settlePosition(pool, 1n, alice.keypair.publicKey);
-      const bobSig = await settlePosition(pool, 1n, bob.keypair.publicKey);
-
-      const aliceEvent = await findEvent<{ reward: BN }>(aliceSig, "positionSettled");
-      const bobEvent = await findEvent<{ reward: BN }>(bobSig, "positionSettled");
-      expect(aliceEvent?.reward.toString()).toBe("0");
-      expect(bobEvent?.reward.toString()).toBe("0");
-
-      const playerA = await fetchPlayer(pool, alice.keypair.publicKey);
-      const playerB = await fetchPlayer(pool, bob.keypair.publicKey);
-      const house = await fetchPlayer(pool, pool.operator.publicKey);
-      const poolAfter = await program.account.pool.fetch(pool.pool);
-
-      const entriesSum =
-        BigInt(playerA.entries.toString()) + BigInt(playerB.entries.toString()) + BigInt(house.entries.toString());
-      expect(entriesSum).toBe(BigInt(poolAfter.totalPrincipal.toString()));
-
-      await expect(program.account.position.fetch(alicePositionPda)).rejects.toThrow();
-      await expect(program.account.position.fetch(bobPositionPda)).rejects.toThrow();
-      expect(await program.provider.connection.getBalance(alice.keypair.publicKey)).toBe(
-        aliceBalBefore + aliceRentBefore,
-      );
-      expect(await program.provider.connection.getBalance(bob.keypair.publicKey)).toBe(bobBalBefore + bobRentBefore);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a forfeited Round from an ended Epoch credits the House nothing",
+    "a forfeited Round from an ended Epoch credits the House its pot in the new epoch",
     async () => {
       const pool = await setupPool({ epochSeconds: 24, roundSeconds: 8, closeBuffer: 2 });
       const alice = await pool.fundedWallet(10_000_000n);
@@ -1423,8 +1351,6 @@ describe("epochs", () => {
       await sleepUntilOnChain(endsAt);
       await retryUntilOk(() => beginEpoch(pool, 1n));
 
-      const houseBefore = await fetchPlayer(pool, pool.operator.publicKey);
-
       const seed = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
       const randomness = await fulfillRandomness(seed, randomnessFor(5)); // nobody on tile 5
       await settleRound(pool, 1n, randomness);
@@ -1432,19 +1358,18 @@ describe("epochs", () => {
       const settled = await program.account.round.fetch(roundPda(pool.pool, 1n));
       expect(settled.status).toBe(round_status.FORFEITED);
 
-      const houseAfter = await fetchPlayer(pool, pool.operator.publicKey);
-      expect(houseAfter.entries.toString()).toBe(houseBefore.entries.toString());
+      const house = await fetchPlayer(pool, pool.operator.publicKey);
+      expect(house.entries.toString()).toBe("1000000");
+      expect(await ticketsOf(pool, pool.operator.publicKey, 2n)).toBe(1_000_000n);
     },
     TIMEOUT,
   );
 
   it(
-    "a voided Round from an ended Epoch refunds nothing and counts the stake once",
+    "a voided Round from an ended Epoch refunds the stake in the new epoch",
     async () => {
-      // yield-claimer ticket 11, ticket 02's note: the epoch boundary already
-      // put the staked Tickets back (a stake lowers Tickets, never Principal),
-      // so a refund after the rollover would count them twice. The Player
-      // loses nothing, and the tree's Tickets for the new epoch must not move.
+      // yield-claimer ticket 21: touch runs first, then the refund is a plain
+      // delta in the epoch now current.
       const pool = await setupPool({ epochSeconds: 20, roundSeconds: 6, closeBuffer: 1, vrfTimeout: 2 });
       const alice = await pool.fundedWallet(10_000_000n);
 
@@ -1474,15 +1399,15 @@ describe("epochs", () => {
       expect(voided.status).toBe(round_status.VOIDED);
       expect(voided.houseCut.toString()).toBe("0");
 
-      const ticketsBefore = await ticketsOf(pool, alice.keypair.publicKey, 2n);
       const sig = await settlePosition(pool, 1n, alice.keypair.publicKey);
       const event = await findEvent<{ reward: BN; refund: BN }>(sig, "positionSettled");
-      expect(event?.refund.toString()).toBe("0");
+      expect(event?.refund.toString()).toBe("1000000");
       expect(event?.reward.toString()).toBe("0");
 
+      // The reset put her back at her 5M Principal and the refund lands on top.
       const player = await fetchPlayer(pool, alice.keypair.publicKey);
-      expect(player.entries.toString()).toBe("5000000"); // back at Principal, once
-      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(ticketsBefore);
+      expect(player.entries.toString()).toBe("6000000");
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(6_000_000n);
       expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
     },
     TIMEOUT,

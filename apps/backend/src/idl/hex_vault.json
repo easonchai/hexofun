@@ -4479,6 +4479,11 @@
       "code": 6084,
       "name": "NoDeficit",
       "msg": "the pool has no venue deficit to cover"
+    },
+    {
+      "code": 6085,
+      "name": "RoundStraddlesEpoch",
+      "msg": "the round would end after the current epoch ends"
     }
   ],
   "types": [

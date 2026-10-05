@@ -290,4 +290,28 @@ describe("idleBoardLabel", () => {
   it("says nothing between rounds of a running game", () => {
     expect(idleBoardLabel(false, true, false)).toBeNull();
   });
+  // Ticket 21: a 60 s round that would end after the epoch does is never opened.
+  it("counts down to the epoch end once the next round would not fit", () => {
+    // A round ending exactly at the epoch end still fits, as `buy_position` allows.
+    expect(idleBoardLabel(false, true, false, 1_940n, 2_000n, 60n)).toBeNull();
+    expect(idleBoardLabel(false, true, false, 1_941n, 2_000n, 60n)).toBe(
+      "ROUND CLOSED, NEW DAY STARTS IN 59S",
+    );
+    expect(idleBoardLabel(false, true, false, 1_999n, 2_000n, 60n)).toBe(
+      "ROUND CLOSED, NEW DAY STARTS IN 1S",
+    );
+  });
+  it("holds at zero until the next epoch begins", () => {
+    expect(idleBoardLabel(false, true, false, 2_003n, 2_000n, 60n)).toBe(
+      "ROUND CLOSED, NEW DAY STARTS IN 0S",
+    );
+  });
+  it("says nothing while a whole round still fits, or once the new epoch is current", () => {
+    expect(idleBoardLabel(false, true, false, 1_939n, 2_000n, 60n)).toBeNull();
+    expect(idleBoardLabel(false, true, false, 2_003n, 88_400n, 60n)).toBeNull();
+  });
+  it("lets an open round or a paused game win over the countdown", () => {
+    expect(idleBoardLabel(true, true, false, 1_990n, 2_000n, 60n)).toBeNull();
+    expect(idleBoardLabel(false, true, true, 1_990n, 2_000n, 60n)).toBe("GAME PAUSED");
+  });
 });

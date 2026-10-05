@@ -623,7 +623,14 @@ export function App() {
               houseCutBps={pool?.houseCutBps ?? 0}
               idleLabel={
                 state
-                  ? idleBoardLabel(state.openRound !== null, state.currentEpoch !== null, gamePaused)
+                  ? idleBoardLabel(
+                      state.openRound !== null,
+                      state.currentEpoch !== null,
+                      gamePaused,
+                      now ?? BigInt(state.chainTime),
+                      state.currentEpoch ? BigInt(state.currentEpoch.endsAt) : null,
+                      BigInt(state.pool.roundSeconds),
+                    )
                   : null
               }
               onToggleTile={(n) => {

@@ -68,15 +68,29 @@ export function phaseFor(
  * game switch says: the operator opens no round before epoch 1. Otherwise
  * the game switch decides. Null means "nothing to say", so the board shows
  * its ordinary waiting state.
+ *
+ * `epochEndsAt` and `roundSeconds` add the last case (yield-claimer ticket
+ * 21): a round that would end after the epoch does is never opened, so the
+ * last `roundSeconds` of an epoch have no round to show. The label counts
+ * down to the epoch end and goes away when the next epoch begins, because
+ * the new epoch's end is a whole round away again.
  */
 export function idleBoardLabel(
   roundOpen: boolean,
   epochStarted: boolean,
   gamePaused: boolean,
-): "STARTS SOON" | "GAME PAUSED" | null {
+  now: bigint = 0n,
+  epochEndsAt: bigint | null = null,
+  roundSeconds: bigint = 0n,
+): string | null {
   if (roundOpen) return null;
   if (!epochStarted) return "STARTS SOON";
-  return gamePaused ? "GAME PAUSED" : null;
+  if (gamePaused) return "GAME PAUSED";
+  if (epochEndsAt !== null && now + roundSeconds > epochEndsAt) {
+    const left = epochEndsAt > now ? epochEndsAt - now : 0n;
+    return `ROUND CLOSED, NEW DAY STARTS IN ${left}S`;
+  }
+  return null;
 }
 
 /** True once the round has a winning tile the program will pay against. */

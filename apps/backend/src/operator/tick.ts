@@ -209,6 +209,9 @@ export interface TickContext {
   /** Ticket 12: how many times in a row each `action:target` key has hit an
    *  expected error. Empty before anything has repeated. */
   readonly lastExpectedErrors: ReadonlyMap<string, number>;
+  /** Ticket 21: the epoch whose skipped round was last reported, null before
+   *  the first one. */
+  readonly lastRoundSkipEpochId: bigint | null;
   /** Beta-launch-fixes ticket 05: holds step 3 back from the Pool's very
    *  first `begin_epoch` until this chain timestamp. Null runs step 3 as
    *  before (unconfigured, or the Pool already has an Epoch). */
@@ -297,6 +300,10 @@ export interface TickOutcome {
   /** Ticket 12: the updated expected-error repeat counts, present only when
    *  a step this tick recorded, cleared or escalated one. */
   readonly expectedErrors?: ReadonlyMap<string, number>;
+  /** Ticket 21: set on the first tick of an epoch that holds back a round
+   *  because it would end after the epoch does. Absent on every later tick of
+   *  that epoch, so the service logs it once. */
+  readonly roundSkip?: { readonly epochId: bigint; readonly endsAt: bigint };
   /** Ticket 09: whether the previous epoch has missed its expected deadline
    *  to reach a terminal status. Present on every tick. */
   readonly epochNoProgress?: boolean;
@@ -835,13 +842,21 @@ async function decide(ctx: TickContext): Promise<Decision> {
     !pool.paused &&
     !pool.gamePaused &&
     currentEpoch &&
-    now + pool.roundSeconds <= currentEpoch.endsAt &&
     revealDone
   ) {
-    await ctx.send(
-      await ctx.ix.createRound(pool, now, now + pool.roundSeconds),
-    );
-    return finish({ action: "create_round", withdrawShortfall });
+    if (now + pool.roundSeconds <= currentEpoch.endsAt) {
+      await ctx.send(
+        await ctx.ix.createRound(pool, now, now + pool.roundSeconds),
+      );
+      return finish({ action: "create_round", withdrawShortfall });
+    }
+    // Ticket 21: the round would end after the epoch does, which `buy_position`
+    // refuses. Reported once per epoch, not once per tick.
+    const skip =
+      ctx.lastRoundSkipEpochId !== currentEpoch.epochId
+        ? { roundSkip: { epochId: currentEpoch.epochId, endsAt: currentEpoch.endsAt } }
+        : {};
+    return finish({ ...NOTHING, withdrawShortfall, ...skip });
   }
 
   return finish({ ...NOTHING, withdrawShortfall });

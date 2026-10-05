@@ -119,6 +119,14 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
 
     let round = &mut ctx.accounts.round;
     require!(round.status == round_status::OPEN, HexVaultError::RoundNotOpen);
+    // No stake may fall between two draws: a round that ends after its epoch
+    // does is closed to Positions. `create_round` already bounds new rounds, so
+    // only one opened before epoch 1 began can get here. Before that there is
+    // no epoch end to bound against, the same exemption `create_round` has.
+    require!(
+        pool.current_epoch_id == 0 || round.ends_at <= pool.current_epoch_ends_at,
+        HexVaultError::RoundStraddlesEpoch
+    );
     let close_at = round
         .ends_at
         .checked_sub(pool.close_buffer)
@@ -241,13 +249,6 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
     let tile_total = round.tile_total(winning_tile)?;
     let forfeited = tile_total == 0;
 
-    // A Round whose Epoch already rolled over already had its Entries
-    // returned to Principal by `touch`; crediting the House here would mint
-    // Entries the invariant doesn't allow (audit-fixes/01), so the House's
-    // share just evaporates instead. Same rule for the whole forfeited pot
-    // and for the cut on a settled one.
-    let epoch_is_current = round.epoch_id == pool.current_epoch_id;
-
     // On a forfeited round the House already takes the whole pot, so there is
     // nothing left to cut. On a settled one it takes `house_cut_bps` of the
     // losers' pot (the pot minus the winning tile's total, ADR 0019). Winners
@@ -273,7 +274,9 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
     // behaves exactly as it did before the cut existed.
     let house_credit = if forfeited { pot } else { house_cut };
 
-    if epoch_is_current && (forfeited || house_credit > 0) {
+    // A settle after the epoch rolled credits like any other: `touch` runs
+    // first, so the credit is a plain delta in the epoch now current.
+    if forfeited || house_credit > 0 {
         let house = &mut ctx.accounts.house;
         touch(house, pool);
         house.entries = house
@@ -290,7 +293,6 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
     } else {
         round_status::SETTLED
     };
-    // Recorded even when it evaporated, so the Round is a complete record.
     round.house_cut = house_cut;
     round.winning_tile = winning_tile;
     pool.open_round_id = 0;
@@ -323,44 +325,38 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
     let position = &ctx.accounts.position;
     let mut reward: u64 = 0;
     let mut refund: u64 = 0;
-    // Same evaporation rule as `settle_round`: once the Round's Epoch has
-    // rolled over, `touch` already returned this reward's Entries to
-    // Principal (a stake lowers Tickets, never Principal), so crediting it
-    // now would mint Entries (audit-fixes/01). A voided stake follows the
-    // same rule, which is why a refund after the rollover would count twice.
-    if round.epoch_id == pool.current_epoch_id {
-        if round.status == round_status::VOIDED {
-            // ADR 0019: a void returns every stake whole, with no cut.
-            refund = position
-                .stake_per_tile
-                .checked_mul(utils::tile_count(position.tiles)?)
-                .ok_or(HexVaultError::ArithmeticOverflow)?;
-        } else if round.status == round_status::SETTLED
-            && utils::tile_is_covered(position.tiles, round.winning_tile)
-        {
-            // tile_total is > 0 here: settle_round only reaches Settled (rather
-            // than Forfeited) when some position covers winning_tile, and this
-            // one does, so it contributed at least stake_per_tile to it.
-            let tile_total = round.tile_total(round.winning_tile)?;
-            // The losers' pot less the House's `house_cut` (taken in
-            // `settle_round`) is shared by stake on the winning tile, on top
-            // of every winner's own stake coming back whole.
-            let payable = round
-                .pot
-                .checked_sub(tile_total)
-                .and_then(|losers| losers.checked_sub(round.house_cut))
-                .ok_or(HexVaultError::ArithmeticOverflow)?;
-            let share = u128::from(payable)
-                .checked_mul(u128::from(position.stake_per_tile))
-                .ok_or(HexVaultError::ArithmeticOverflow)?
-                / u128::from(tile_total);
-            // Integer division truncates towards zero; the remainder stays
-            // unminted. Negligible dust, documented and accepted (spec §2.3).
-            reward = position
-                .stake_per_tile
-                .checked_add(u64::try_from(share).map_err(|_| HexVaultError::ArithmeticOverflow)?)
-                .ok_or(HexVaultError::ArithmeticOverflow)?;
-        }
+    // Paid whatever epoch the Round ran in, as in `settle_round`.
+    if round.status == round_status::VOIDED {
+        // ADR 0019: a void returns every stake whole, with no cut.
+        refund = position
+            .stake_per_tile
+            .checked_mul(utils::tile_count(position.tiles)?)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+    } else if round.status == round_status::SETTLED
+        && utils::tile_is_covered(position.tiles, round.winning_tile)
+    {
+        // tile_total is > 0 here: settle_round only reaches Settled (rather
+        // than Forfeited) when some position covers winning_tile, and this
+        // one does, so it contributed at least stake_per_tile to it.
+        let tile_total = round.tile_total(round.winning_tile)?;
+        // The losers' pot less the House's `house_cut` (taken in
+        // `settle_round`) is shared by stake on the winning tile, on top
+        // of every winner's own stake coming back whole.
+        let payable = round
+            .pot
+            .checked_sub(tile_total)
+            .and_then(|losers| losers.checked_sub(round.house_cut))
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        let share = u128::from(payable)
+            .checked_mul(u128::from(position.stake_per_tile))
+            .ok_or(HexVaultError::ArithmeticOverflow)?
+            / u128::from(tile_total);
+        // Integer division truncates towards zero; the remainder stays
+        // unminted. Negligible dust, documented and accepted (spec §2.3).
+        reward = position
+            .stake_per_tile
+            .checked_add(u64::try_from(share).map_err(|_| HexVaultError::ArithmeticOverflow)?)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
     }
 
     let credit = reward

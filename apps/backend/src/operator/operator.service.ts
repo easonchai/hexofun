@@ -94,6 +94,8 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   private lastExpectedErrors = new Map<string, number>();
   /** Ticket 13: what the venue cranks remember across ticks (see `VenueState`). */
   private lastVenueState: VenueState | null = null;
+  /** Ticket 21: the epoch whose skipped round was last logged. */
+  private lastRoundSkipEpochId: bigint | null = null;
   /** Ticket 05: holds step 3's very first `begin_epoch` back until this chain
    *  timestamp; null when `LAUNCH_AT` is unset. */
   private readonly launchAt: bigint | null;
@@ -245,6 +247,12 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       if (outcome.withdrawState) this.lastWithdrawState = outcome.withdrawState;
       if (outcome.venueState) this.lastVenueState = outcome.venueState;
       if (outcome.expectedErrors) this.lastExpectedErrors = new Map(outcome.expectedErrors);
+      if (outcome.roundSkip) {
+        this.lastRoundSkipEpochId = outcome.roundSkip.epochId;
+        this.logger.log(
+          `not opening a round: it would end after epoch ${outcome.roundSkip.epochId} ends at ${outcome.roundSkip.endsAt}`,
+        );
+      }
       if (outcome.action) this.logger.log(`sent ${outcome.action}`);
       if (outcome.stepError) this.logger.warn(`tick step failed: ${outcome.stepError}`);
       // A new Round exists on chain now; the Sparring player buys in without
@@ -328,6 +336,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       lastWithdrawState: this.lastWithdrawState,
       lastVenueState: this.lastVenueState,
       lastExpectedErrors: this.lastExpectedErrors,
+      lastRoundSkipEpochId: this.lastRoundSkipEpochId,
       launchAt: this.launchAt,
       fulfilled: (seed) => this.fulfilled(seed),
       principalVaultBalance: () => this.principalVaultBalance(),

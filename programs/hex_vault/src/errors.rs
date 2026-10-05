@@ -216,4 +216,8 @@ pub enum HexVaultError {
     ReserveLiquidityTooLow,
     #[msg("the pool has no venue deficit to cover")]
     NoDeficit,
+
+    // Rounds end inside their epoch (yield-claimer ticket 21). Appended too.
+    #[msg("the round would end after the current epoch ends")]
+    RoundStraddlesEpoch,
 }

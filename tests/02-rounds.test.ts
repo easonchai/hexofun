@@ -12,6 +12,7 @@ import { BN } from "@anchor-lang/core";
 import { Keypair, PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
+  assertSolvent,
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
   epochPda,
@@ -138,15 +139,32 @@ async function beginFirstEpoch(pool: PoolCtx) {
     .rpc();
 }
 
-/** Creates a round starting now (validator time). `currentEpoch` only
- * matters once an epoch is open (`pool.currentEpochId != 0`); before that
- * any pubkey is accepted. */
+/** Opens epoch `current + 1`, which has to have ended already once `current` is 1 or more. */
+async function beginEpoch(pool: PoolCtx, current: bigint) {
+  return program.methods
+    .beginEpoch()
+    .accountsPartial({
+      operator: pool.operator.publicKey,
+      pool: pool.pool,
+      currentEpoch: epochPda(pool.pool, current),
+      epochTwoBehind: epochPda(pool.pool, current > 0n ? current - 1n : 0n),
+      newEpoch: epochPda(pool.pool, current + 1n),
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([pool.operator])
+    .rpc();
+}
+
+/** Creates a round starting now (validator time), or ending at `endsAtAt`
+ * when given. `currentEpoch` only matters once an epoch is open
+ * (`pool.currentEpochId != 0`); before that any pubkey is accepted. */
 async function createRound(
   pool: PoolCtx,
   roundSeconds: number,
   currentEpoch: PublicKey = pool.pool,
+  endsAtAt?: number,
 ) {
-  const startsAt = await chainNow();
+  const startsAt = endsAtAt === undefined ? await chainNow() : endsAtAt - roundSeconds;
   const endsAt = startsAt + roundSeconds;
   const poolAccount = await program.account.pool.fetch(pool.pool);
   const roundId = BigInt(poolAccount.nextRoundId.toString());
@@ -1178,6 +1196,106 @@ describe("rounds", () => {
 
       const roundAfter = await program.account.round.fetch(round);
       expect(roundAfter.status).toBe(1); // still Requested
+    },
+    TIMEOUT,
+  );
+
+  // --- Ticket 21: a round ends inside its epoch. `create_round` bounds every
+  // round opened once epoch 1 exists, so a straddling one can only have been
+  // opened before it began. `epochAnchor` puts epoch 1's end (the first grid
+  // point) at a known second, and `create_round` takes any start, so the round
+  // is aimed at that second to the unit.
+
+  const GRID_LEAD = 20;
+
+  it(
+    "buy_position is refused when the round would end after the epoch does",
+    async () => {
+      const anchor = (await chainNow()) + GRID_LEAD;
+      const pool = await setupPool({ epochSeconds: 30, epochAnchor: anchor, roundSeconds: 6, closeBuffer: 2 });
+      const alice = await pool.fundedWallet(10_000_000n);
+      await deposit(pool, alice, 5_000_000n);
+
+      // One second past the epoch's end, opened before there was an epoch.
+      const { round } = await createRound(pool, 6, pool.pool, anchor + 1);
+      await beginFirstEpoch(pool);
+      expect(
+        (await program.account.epoch.fetch(epochPda(pool.pool, 1n))).endsAt.toNumber(),
+      ).toBe(anchor);
+
+      await expect(buyPosition(pool, alice, round, 1n << 0n, 1_000_000n)).rejects.toThrow(
+        /RoundStraddlesEpoch/,
+      );
+      // Nothing moved: no Position, the Tickets are whole, the pot is empty.
+      await expectClosed(positionPda(round, alice.keypair.publicKey));
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 1n)).toBe(5_000_000n);
+      expect((await program.account.round.fetch(round)).pot.toString()).toBe("0");
+      await assertSolvent(pool);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "buy_position is allowed when the round ends one second earlier, with the epoch",
+    async () => {
+      const anchor = (await chainNow()) + GRID_LEAD;
+      const pool = await setupPool({ epochSeconds: 30, epochAnchor: anchor, roundSeconds: 6, closeBuffer: 2 });
+      const alice = await pool.fundedWallet(10_000_000n);
+      await deposit(pool, alice, 5_000_000n);
+
+      const { round } = await createRound(pool, 6, pool.pool, anchor);
+      await beginFirstEpoch(pool);
+
+      await buyPosition(pool, alice, round, 1n << 0n, 1_000_000n);
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 1n)).toBe(4_000_000n);
+      expect((await program.account.round.fetch(round)).pot.toString()).toBe("1000000");
+      await assertSolvent(pool);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "a round that ended inside its epoch settles after the roll and credits plain Ticket deltas in the new one",
+    async () => {
+      const pool = await setupPool({ epochSeconds: 24, roundSeconds: 8, closeBuffer: 2 });
+      const alice = await pool.fundedWallet(10_000_000n);
+      const bob = await pool.fundedWallet(10_000_000n);
+      await beginFirstEpoch(pool);
+      await deposit(pool, alice, 5_000_000n);
+      await deposit(pool, bob, 5_000_000n);
+
+      const epoch1End = (await program.account.epoch.fetch(epochPda(pool.pool, 1n))).endsAt.toNumber();
+      await waitUntil(epoch1End - 8, 0);
+      // The last round of the epoch ends with it.
+      const { round, endsAt } = await createRound(pool, 8, epochPda(pool.pool, 1n), epoch1End);
+      await buyPosition(pool, alice, round, 1n << 0n, 1_000_000n); // tile 0
+      await buyPosition(pool, bob, round, 1n << 1n, 1_000_000n); // tile 1
+      await assertSolvent(pool);
+
+      // The epoch rolls before the round is settled.
+      await waitUntil(endsAt);
+      await beginEpoch(pool, 1n);
+      expect((await program.account.pool.fetch(pool.pool)).currentEpochId.toString()).toBe("2");
+      const root = async () => (await leafTickets(await fetchTree(pool), 2n)).reduce((x, y) => x + y, 0n);
+
+      const settled = await playToSettlement(pool, round, endsAt, 0); // tile 0 wins
+      expect(settled.status).toBe(2); // Settled
+      expect(settled.houseCut.toString()).toBe("60000"); // 6% of the 1M losers' pot
+      // The House's cut is a plain delta in epoch 2.
+      expect(await ticketsOf(pool, pool.operator.publicKey, 2n)).toBe(60_000n);
+
+      await settlePosition(pool, round, alice.keypair.publicKey);
+      await settlePosition(pool, round, bob.keypair.publicKey);
+      // touch ran first and reset both to their 5M Principal. Alice's reward
+      // (her 1M stake plus the 940k share) lands on top, and Bob's stake is
+      // not taken a second time.
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(6_940_000n);
+      expect(await ticketsOf(pool, bob.keypair.publicKey, 2n)).toBe(5_000_000n);
+      expect(await root()).toBe(12_000_000n);
+      const aliceAfter = await program.account.player.fetch(playerPda(pool.pool, alice.keypair.publicKey));
+      expect(aliceAfter.entries.toString()).toBe("6940000");
+      expect(aliceAfter.principal.toString()).toBe("5000000");
+      await assertSolvent(pool);
     },
     TIMEOUT,
   );
