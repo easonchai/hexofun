@@ -11,17 +11,13 @@
  * of a duplicate `/epochs/current` poll of its own; `onDone` tightens that
  * poll (see `useStatePoll.ts` `kick`) instead of triggering a chain re-read.
  *
- * Ticket 10: base yield is placeholder UI (plain elements, no Figma styling
- * yet), unlike the deposit/withdraw widget above it. Buy Tickets is hidden for
+ * Yield-claimer ticket 15: the balance (Principal plus unsettled yield,
+ * ticking) and the "up to X%" rate sit in `YieldBalance.tsx`, which polls
+ * `GET /players/:owner` and `GET /pool` itself. Buy Tickets is hidden for
  * now; its markup was removed but buyTickets.ts and useBuyTickets.ts stay, so
- * bringing it back is markup only. The math split mirrors how ticket 09
- * split access.ts / useAccessGate.ts / AccessGate.tsx, so the designer's
- * restyle only touches this file's markup. `buyAllowanceLeft`/yield figures
- * are not on `GET /state`'s embedded Player, so this screen polls
- * `GET /players/:owner` on its own slower interval, same as Dashboard.tsx and
- * WeeklyDraw.tsx already do for their own list data.
+ * bringing it back is markup only, behind `buyTicketsVisible`.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import {
@@ -34,10 +30,8 @@ import {
   type TxSigner,
 } from "../actions.js";
 import { track } from "../analytics.js";
-import { apiBaseUrl, fetchPlayer, type CurrentEpochDto } from "../api.js";
+import type { CurrentEpochDto } from "../api.js";
 import { LogoCog } from "../arena/Arena.js";
-import { apyFromBaseRateBps } from "../buyTickets.js";
-import { InfoTip } from "../InfoTip.js";
 import { CLUSTER, type HexVaultProgram } from "../chain.js";
 import {
   addCapped,
@@ -58,7 +52,7 @@ import {
 } from "../playerErrors.js";
 import { solRentWarning, type PoolLike } from "../read.js";
 import { SHUTDOWN_BANNER } from "../shutdown.js";
-import { useApiPoll } from "../useApiPoll.js";
+import { YieldBalance } from "../YieldBalance.js";
 import { GlyphRow } from "./Home.js";
 
 const DECIMALS = 6;
@@ -72,15 +66,6 @@ const ONE = 10n ** BigInt(DECIMALS);
 const INPUT_DECIMALS = 2;
 /** The Figma quick pills: each adds this many whole USDC. */
 const QUICK_ADDS = [50n, 100n, 500n] as const;
-
-const YIELD_TIP = [
-  "Base yield is paid into your deposit once a day, so it compounds. The estimate is a year at today's rate.",
-];
-
-/** A year of compounded Base yield on `amount` at `apy` percent, in atomic
- *  units. Display only: floats are fine at these magnitudes. */
-const yearlyYield = (amount: bigint, apy: number): bigint =>
-  BigInt(Math.floor((Number(amount) * apy) / 100));
 
 /**
  * `NothingPending` (playerErrors.ts, ticket 09 — this used to be this file's
@@ -187,16 +172,6 @@ export function Vault(props: VaultScreenProps) {
   const balanceUnavailable = mode === "deposit" && walletBalance === null;
   const rentWarning = solRentWarning(solBalance, { sponsored: sendTransaction !== undefined });
 
-  const ownerBase58 = owner?.toBase58();
-  const loadPlayerExtras = useCallback(
-    (signal: AbortSignal) =>
-      ownerBase58
-        ? fetchPlayer(apiBaseUrl(), ownerBase58, signal)
-        : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
-    [ownerBase58],
-  );
-  const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
-
   // The payout landed (or the request was never there): drop the flag, so a
   // later request for the same amount does not inherit this one's state.
   useEffect(() => {
@@ -270,7 +245,6 @@ export function Vault(props: VaultScreenProps) {
   // 15): unknown is not "over balance", so this stands down rather than
   // guess — `balanceUnavailable`'s own note carries the warning instead.
   const overCap = connected && amount !== null && cap !== null && amount > cap;
-  const apy = pool ? apyFromBaseRateBps(pool.baseRateBps) : null;
   const underMin =
     mode === "deposit" && pool !== null && amount !== null && amount < pool.minDeposit;
   const withdrawPreview =
@@ -379,6 +353,7 @@ export function Vault(props: VaultScreenProps) {
           </div>
 
           <div className="vault-body">
+            <YieldBalance owner={owner} principal={principal} />
             <label className="vault-amount">
               <span className="vault-amount-dollar" aria-hidden="true">
                 $
@@ -432,17 +407,6 @@ export function Vault(props: VaultScreenProps) {
                   <div className="vault-line">
                     <dt>Tickets</dt>
                     <dd>{fmt2(amount ?? 0n)}</dd>
-                  </div>
-                  <div className="vault-line" data-testid="estimated-yield">
-                    <dt className="vault-line-label">
-                      Estimated yield
-                      <InfoTip id="estimated-yield-tip" paragraphs={YIELD_TIP} />
-                    </dt>
-                    <dd>
-                      {apy === null
-                        ? "—"
-                        : `$${fmt2(yearlyYield(amount ?? 0n, apy))} (${Number(apy.toFixed(2))}% APY)`}
-                    </dd>
                   </div>
                 </>
               ) : (
@@ -557,36 +521,6 @@ export function Vault(props: VaultScreenProps) {
         </section>
         <GlyphRow />
       </div>
-
-      {/* Ticket 10: placeholder UI. Plain elements, no Figma styling yet;
-          see this file's header comment for where the math lives. */}
-      {/* <section data-testid="vault-yield" aria-label="Base yield"> */}
-      {/*   <h2>Base yield</h2> */}
-      {/*   <dl> */}
-      {/*     <div> */}
-      {/*       <dt>Rate</dt> */}
-      {/*       <dd data-testid="yield-apy"> */}
-      {/*         {pool ? `${apyFromBaseRateBps(pool.baseRateBps).toFixed(2)}% APY` : "—"} */}
-      {/*       </dd> */}
-      {/*     </div> */}
-      {/*     <div> */}
-      {/*       <dt>Yield yesterday</dt> */}
-      {/*       <dd data-testid="yield-yesterday"> */}
-      {/*         {playerExtras.data */}
-      {/*           ? `${fmt2(BigInt(playerExtras.data.yieldLastEpoch))} ${SYMBOL}` */}
-      {/*           : "—"} */}
-      {/*       </dd> */}
-      {/*     </div> */}
-      {/*     <div> */}
-      {/*       <dt>Yield to date</dt> */}
-      {/*       <dd data-testid="yield-to-date"> */}
-      {/*         {playerExtras.data */}
-      {/*           ? `${fmt2(BigInt(playerExtras.data.yieldToDate))} ${SYMBOL}` */}
-      {/*           : "—"} */}
-      {/*       </dd> */}
-      {/*     </div> */}
-      {/*   </dl> */}
-      {/* </section> */}
 
       {confirmed !== null ? (
         <DepositConfirmed

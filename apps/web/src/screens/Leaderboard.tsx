@@ -37,7 +37,7 @@ export function Leaderboard({ owner }: LeaderboardScreenProps) {
         }
       >
         {rows.length === 0 ? (
-          <p className="screen-copy">no players have registered weight yet.</p>
+          <p className="screen-copy">no player has any weight yet.</p>
         ) : (
           <div className="board-list board-list-5col" data-testid="leaderboard-rows">
             <div className="board-row board-head">

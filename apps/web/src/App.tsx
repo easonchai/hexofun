@@ -730,15 +730,11 @@ export function App() {
         ) : null}
         {tab === "DAILY DRAW" ? (
           <WeeklyDraw
-            program={program}
             owner={publicKey ?? undefined}
-            sendTransaction={sendTransaction}
-            pool={pool}
             now={now}
             currentEpoch={state?.currentEpoch ?? null}
             jackpotPaused={jackpotPaused}
             player={player}
-            onDone={statePoll.kick}
           />
         ) : null}
         {tab === "LEADERBOARD" ? (

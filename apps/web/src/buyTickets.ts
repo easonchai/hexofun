@@ -1,20 +1,10 @@
 /**
- * Pure buy-tickets and base-yield math (docs/plan/hexo-referrals ticket 10):
- * what a USDC purchase is worth in tonight's draw, the APY `base_rate_bps`
- * compounds to (ADR 0011), and why the buy button is disabled. Kept out of
- * Vault.tsx so the designer's restyle doesn't touch any of this.
+ * Pure buy-tickets math (docs/plan/hexo-referrals ticket 10): what a USDC
+ * purchase is worth in tonight's draw, why the buy button is disabled and
+ * whether the entry shows at all. Kept out of Vault.tsx so the designer's
+ * restyle doesn't touch any of this.
  */
 import { SHUTDOWN_REASON } from "./shutdown.js";
-
-/**
- * ADR 0011: `register` credits `base_rate_bps` APR once per ended epoch, so
- * it compounds daily. `(1 + apr/365)^365 - 1`, as a percentage: 488 bps APR
- * compounds to about 5% APY (spec.md).
- */
-export function apyFromBaseRateBps(baseRateBps: number): number {
-  const dailyRate = baseRateBps / 10_000 / 365;
-  return ((1 + dailyRate) ** 365 - 1) * 100;
-}
 
 /** `amount × tickets_per_usdc`, mirroring `buy_tickets`' checked multiply. */
 export function ticketsFromUsdc(amountAtomic: bigint, ticketsPerUsdc: number): bigint {
@@ -53,3 +43,9 @@ export function buyDisabledReason(opts: {
   if (opts.allowanceLeft <= 0n) return "today's buy allowance is spent";
   return null;
 }
+
+/** The Bought Tickets entry shows only when neither the Vercel gate nor the
+ *  on-chain pause says no. `onChainPaused` is null until `/pool` answers, and
+ *  an unknown pause hides the entry rather than guess. */
+export const buyTicketsVisible = (vercelGated: boolean, onChainPaused: boolean | null): boolean =>
+  !vercelGated && onChainPaused === false;

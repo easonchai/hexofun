@@ -2942,6 +2942,13 @@ input::placeholder {
   margin: 20px 0;
 }
 
+/* The earning balance sits above the amount box, so it drops the top margin
+   and keeps its digits from jittering as they tick. */
+.vault-earning {
+  margin-top: 0;
+  font-variant-numeric: tabular-nums;
+}
+
 .vault-line {
   display: flex;
   justify-content: space-between;

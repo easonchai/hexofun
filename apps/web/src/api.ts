@@ -104,6 +104,8 @@ export interface PoolDto {
   /** Tickets credited per USDC spent in `buy_tickets`. */
   ticketsPerUsdc: number;
   paused: boolean;
+  /** Venue loss past the tolerance: the balance stops earning and exits take a haircut. */
+  impaired: boolean;
   /** game-jackpot-pause: no new rounds or positions while true. A new pool
    *  starts with it on. */
   gamePaused: boolean;
@@ -234,10 +236,35 @@ export interface StatusDto {
   launchAt: string | null;
 }
 
+/** A trailing paid rate; `aprBps` is null until two history points exist. */
+export interface TrailingRateDto {
+  aprBps: number | null;
+  windowSeconds: number;
+  shortHistory: boolean;
+}
+
+/** `GET /pool`'s `live` block (yield-claimer ticket 14). Rates are APR in bps. */
+export interface LiveYieldDto {
+  rates: {
+    trailing24h: TrailingRateDto;
+    trailing7d: TrailingRateDto;
+    /** Null while the reserve or the vault is unreadable. */
+    estimatedBps: number | null;
+    /** The most depositors earn: `base_rate_bps`. */
+    ceilingBps: number;
+  };
+  yieldFeeBps: number;
+  /** The on-chain Bought Tickets pause. */
+  buyTicketsPaused: boolean;
+  /** Only while the pool is impaired. */
+  haircutFactor: number | null;
+}
+
 export interface PoolSummaryDto {
   pool: PoolDto;
   currentEpoch: EpochDto | null;
   openRound: RoundSummaryDto | null;
+  live: LiveYieldDto;
 }
 
 /** Draw progress for the epoch that just ended. */

@@ -7,7 +7,7 @@
  * message)` — instead of a bare signature or a thrown error, and triggers
  * the chain re-read only on `landed`.
  *
- * `settlePosition`, `register` and `processWithdraw` are permissionless: the
+ * `settlePosition` and `processWithdraw` are permissionless: the
  * program takes no signer for them, so the connected wallet is only the fee
  * payer.
  */
@@ -25,7 +25,6 @@ import {
 import {
   acceptedAta,
   bn,
-  epochAddress,
   jackpotVaultAddress,
   method,
   playerAddress,
@@ -558,19 +557,3 @@ export async function settlePosition(
   return send(program, owner, builder, pool.priorityFeeMicroLamports);
 }
 
-/** Records this Player's final Weight in an ended epoch that is Registering. */
-export async function register(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  epochId: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const builder = method(program, "register")()
-    .accounts({
-      pool: pool.address,
-      epoch: epochAddress(pool.address, epochId),
-      player: playerAddress(pool.address, o),
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
-}

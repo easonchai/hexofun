@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { apyFromBaseRateBps, buyDisabledReason, drawValue, ticketsFromUsdc } from "./buyTickets.js";
+import { buyDisabledReason, buyTicketsVisible, drawValue, ticketsFromUsdc } from "./buyTickets.js";
 
 const EPOCH_SECONDS = 86_400n;
 
@@ -40,13 +40,15 @@ describe("ticketsFromUsdc", () => {
   });
 });
 
-describe("apyFromBaseRateBps", () => {
-  it("compounds 488 bps APR to about 5% APY (spec.md)", () => {
-    expect(apyFromBaseRateBps(488)).toBeCloseTo(5.0, 1);
+describe("buyTicketsVisible", () => {
+  it("shows only when neither the Vercel gate nor the on-chain pause says no", () => {
+    expect(buyTicketsVisible(false, false)).toBe(true);
+    expect(buyTicketsVisible(true, false)).toBe(false);
+    expect(buyTicketsVisible(false, true)).toBe(false);
   });
 
-  it("is zero for a zero rate", () => {
-    expect(apyFromBaseRateBps(0)).toBe(0);
+  it("hides while the on-chain pause is unknown", () => {
+    expect(buyTicketsVisible(false, null)).toBe(false);
   });
 });
 

@@ -21,10 +21,6 @@ describe("decodeErrorCode", () => {
       "The vault is being topped up. Try the payout again in a few minutes.",
     ], // InsufficientVaultLiquidity
     [NOTHING_PENDING_CODE, "Already paid out. Refreshing your balance."], // NothingPending
-    [
-      6042,
-      "Today's draw hasn't closed registration yet. Try again in a moment.",
-    ], // RegistrationWindowOpen
     [6051, "This pool is closed. Withdrawals still work; nothing else does."], // PoolShutDown
     [
       6058,
