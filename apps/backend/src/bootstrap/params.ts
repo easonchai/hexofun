@@ -3,6 +3,7 @@
 // import it without the script's chain calls running on import.
 import { parseArgs } from "node:util";
 
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 
 export interface PoolParams {
@@ -28,9 +29,6 @@ export interface PoolParams {
   /** Atomic units. An epoch closing with less than this in the jackpot vault
    * rolls over instead of paying out dust. */
   readonly minJackpot: bigint;
-  /** Seconds past an epoch's end before `close_registration` is allowed, so
-   * late registrants are never drawn past. 0 <= this < epochSeconds. */
-  readonly registrationWindow: number;
   /** Seconds a Drawn epoch waits for its payout before it may roll over
    * unpaid. */
   readonly payoutTimeout: number;
@@ -95,7 +93,6 @@ export const DEFAULT_POOL_PARAMS: PoolParams = {
   minDeposit: 1_000_000n, // 1 hexUSDC at 6 decimals
   houseCutBps: 600, // 6%, the rate PRD-V2 §5.4 asks for
   minJackpot: 1_000_000n, // 1 hexUSDC at 6 decimals
-  registrationWindow: 600, // 10 minutes for the crank to register everyone
   // A day less an hour before an unpayable winner rolls over. Strictly less
   // than epochSeconds: set_params requires payout_timeout < epoch_seconds
   // (beta-launch-fixes ticket 03), so bootstrap's own defaults have to hold
@@ -109,7 +106,7 @@ export const DEFAULT_POOL_PARAMS: PoolParams = {
 };
 
 export const USAGE =
-  "usage: bootstrap [--epoch-seconds N] [--round-seconds N] [--epoch-anchor ISO8601] [--house-cut-bps N] [--min-jackpot USDC] [--registration-window N] [--payout-timeout N] [--admin PUBKEY] [--operator PUBKEY] [--treasury PUBKEY] [--buyback-reserve PUBKEY] [--start]";
+  "usage: bootstrap [--epoch-seconds N] [--round-seconds N] [--epoch-anchor ISO8601] [--house-cut-bps N] [--min-jackpot USDC] [--payout-timeout N] [--admin PUBKEY] [--operator PUBKEY] [--treasury PUBKEY] [--buyback-reserve PUBKEY] [--start]";
 
 /** mainnet-beta's genesis hash. Every other cluster (devnet, testnet,
  * localnet) keeps today's hot-key convenience defaults. */
@@ -177,6 +174,84 @@ export function buyTicketsPausedFor(
   return value === "true";
 }
 
+/** The four accounts `create_pool` pins as the Pool's venue for good. */
+export interface VenuePins {
+  readonly klendProgram: PublicKey;
+  readonly klendMarket: PublicKey;
+  readonly klendReserve: PublicKey;
+  readonly klendCtoken: PublicKey;
+  /** Set when `klendCtoken` is the Pool's own ATA of this mint, which
+   * bootstrap then has to create: nothing else will before the first deploy. */
+  readonly ctokenMint?: PublicKey;
+}
+
+/** Kamino's USDC reserve on its main market, read 2026-10-04 (yield-claimer
+ * progress-01, tests/fork/klend.fork.ts). `cmint` is the reserve's cToken mint. */
+const MAINNET_KLEND = {
+  KLEND_PROGRAM: "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD",
+  KLEND_MARKET: "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF",
+  KLEND_RESERVE: "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59",
+  cmint: "B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D",
+} as const;
+
+/**
+ * The venue `create_pool` pins (yield-claimer ticket 12). Mainnet defaults to
+ * Kamino's USDC reserve, each of KLEND_PROGRAM, KLEND_MARKET, KLEND_RESERVE and
+ * KLEND_CTOKEN overriding its own; with KLEND_RESERVE set, KLEND_CTOKEN has to
+ * be too, since the cToken account belongs to the reserve. Every other cluster
+ * must name all four, because a wrong pin is permanent and there is no safe
+ * guess. `KLEND_VENUE=test` pins the `test-venue` build's stub (localnet only,
+ * bootstrap then runs `test_venue_init`). `env` is handed in so this stays pure.
+ */
+export function venuePinsFor(
+  genesisHash: string,
+  env: Readonly<Record<string, string | undefined>>,
+  pool: PublicKey,
+  programId: PublicKey,
+): VenuePins {
+  const mainnet = genesisHash === MAINNET_GENESIS_HASH;
+  if (env.KLEND_VENUE?.trim() === "test") {
+    if (mainnet) throw new Error("KLEND_VENUE=test is refused on mainnet");
+    const stub = (seed: string): PublicKey =>
+      PublicKey.findProgramAddressSync([Buffer.from(seed), pool.toBuffer()], programId)[0];
+    return {
+      klendProgram: programId,
+      klendMarket: pool,
+      klendReserve: stub("test-venue-reserve"),
+      klendCtoken: stub("test-venue-vault"),
+    };
+  }
+  const read = (key: string): PublicKey | undefined => {
+    const raw = env[key]?.trim();
+    if (!raw) return undefined;
+    try {
+      return new PublicKey(raw);
+    } catch (cause) {
+      throw new Error(`${key} must be a base58 pubkey, got "${raw}"`, { cause });
+    }
+  };
+  const klendProgram = read("KLEND_PROGRAM") ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_PROGRAM) : undefined);
+  const klendMarket = read("KLEND_MARKET") ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_MARKET) : undefined);
+  const reserve = read("KLEND_RESERVE");
+  const klendReserve = reserve ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_RESERVE) : undefined);
+  const ctoken = read("KLEND_CTOKEN");
+  const ctokenMint = mainnet && !reserve && !ctoken ? new PublicKey(MAINNET_KLEND.cmint) : undefined;
+  const klendCtoken = ctoken ?? (ctokenMint && getAssociatedTokenAddressSync(ctokenMint, pool, true));
+
+  const missing = Object.entries({
+    KLEND_PROGRAM: klendProgram,
+    KLEND_MARKET: klendMarket,
+    KLEND_RESERVE: klendReserve,
+    KLEND_CTOKEN: klendCtoken,
+  }).filter(([, value]) => !value).map(([key]) => key);
+  if (!klendProgram || !klendMarket || !klendReserve || !klendCtoken) {
+    throw new Error(
+      `${missing.join(", ")} must be set${mainnet ? "" : " off mainnet (or KLEND_VENUE=test on a test-venue localnet)"}`,
+    );
+  }
+  return { klendProgram, klendMarket, klendReserve, klendCtoken, ...(ctokenMint ? { ctokenMint } : {}) };
+}
+
 /** The accepted mint is 6 decimals on every cluster we run on (bootstrap.ts
  * rejects any other), so whole USDC scales by a constant. */
 const USDC_DECIMALS = 1_000_000n;
@@ -198,14 +273,11 @@ function pubkey(flag: string, raw: string): PublicKey {
   }
 }
 
-/** `min` is 0 for the one flag create_pool lets be zero, the registration
- *  window; every other duration has to be positive. */
-function seconds(flag: string, raw: string, min = 1): number {
+function seconds(flag: string, raw: string): number {
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < min) {
-    const bound = min === 0 ? "non-negative" : "positive";
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(
-      `--${flag} must be a ${bound} whole number of seconds, got "${raw}"`,
+      `--${flag} must be a positive whole number of seconds, got "${raw}"`,
     );
   }
   return value;
@@ -244,7 +316,6 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
     "epoch-anchor"?: string;
     "house-cut-bps"?: string;
     "min-jackpot"?: string;
-    "registration-window"?: string;
     "payout-timeout"?: string;
     admin?: string;
     operator?: string;
@@ -261,7 +332,6 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
         "epoch-anchor": { type: "string" },
         "house-cut-bps": { type: "string" },
         "min-jackpot": { type: "string" },
-        "registration-window": { type: "string" },
         "payout-timeout": { type: "string" },
         admin: { type: "string" },
         operator: { type: "string" },
@@ -296,15 +366,6 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
     ...(values["min-jackpot"] === undefined
       ? {}
       : { minJackpot: wholeUsdc("min-jackpot", values["min-jackpot"]) }),
-    ...(values["registration-window"] === undefined
-      ? {}
-      : {
-          registrationWindow: seconds(
-            "registration-window",
-            values["registration-window"],
-            0,
-          ),
-        }),
     ...(values["payout-timeout"] === undefined
       ? {}
       : { payoutTimeout: seconds("payout-timeout", values["payout-timeout"]) }),
@@ -338,13 +399,6 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
   // rather than after both accounts have been checked to exist.
   if (params.treasury && params.buybackReserve && params.treasury.equals(params.buybackReserve)) {
     throw new Error("--treasury and --buyback-reserve must differ");
-  }
-  // Same rule, same reason: create_pool requires registration_window <
-  // epoch_seconds, and failing here costs nothing.
-  if (params.registrationWindow >= params.epochSeconds) {
-    throw new Error(
-      `--epoch-seconds must be greater than the ${params.registrationWindow}s registration window`,
-    );
   }
   // set_params requires payout_timeout < epoch_seconds (beta-launch-fixes
   // ticket 03); create_pool doesn't enforce it, but a pool bootstrapped past

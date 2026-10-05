@@ -1,3 +1,4 @@
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
@@ -10,6 +11,7 @@ import {
   isoSeconds,
   nextSundayAnchor,
   parsePoolParams,
+  venuePinsFor,
 } from "./params";
 
 const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
@@ -27,9 +29,7 @@ describe("parsePoolParams", () => {
   });
 
   it("overrides only the flags given", () => {
-    // Above the 600s default registration window, which create_pool requires
-    // to be shorter than the epoch, and above a payout timeout shorter than
-    // it too.
+    // Above a payout timeout, which has to be shorter than the epoch.
     expect(
       parsePoolParams(["--epoch-seconds", "1200", "--payout-timeout", "700"]),
     ).toEqual({
@@ -51,28 +51,21 @@ describe("parsePoolParams", () => {
     });
   });
 
-  it("takes a registration window of zero and a positive payout timeout", () => {
-    expect(
-      parsePoolParams(["--registration-window", "0", "--payout-timeout", "60"]),
-    ).toEqual({
+  it("takes a positive payout timeout", () => {
+    expect(parsePoolParams(["--payout-timeout", "60"])).toEqual({
       ...DEFAULT_POOL_PARAMS,
-      registrationWindow: 0,
       payoutTimeout: 60,
     });
     expect(() => parsePoolParams(["--payout-timeout", "0"])).toThrow(
       /positive/,
     );
-    expect(() => parsePoolParams(["--registration-window=-1"])).toThrow(
-      /non-negative/,
-    );
   });
 
-  it("rejects a registration window that swallows the epoch", () => {
-    // The 600s default window against a 120s epoch: create_pool would fail
-    // with InvalidParameter after the mint and vaults already exist.
-    expect(() =>
-      parsePoolParams(["--epoch-seconds", "120", "--payout-timeout", "60"]),
-    ).toThrow(/registration window/);
+  it("no longer has a registration window", () => {
+    expect(DEFAULT_POOL_PARAMS).not.toHaveProperty("registrationWindow");
+    expect(() => parsePoolParams(["--registration-window", "0"])).toThrow(
+      /usage/,
+    );
   });
 
   it("rejects a payout timeout at or above the epoch length", () => {
@@ -321,6 +314,64 @@ describe("isoSeconds", () => {
   it("rejects a value Date cannot parse", () => {
     expect(() => isoSeconds("epoch-anchor", "2026-13-01")).toThrow(/ISO 8601/);
     expect(() => isoSeconds("epoch-anchor", "")).toThrow(/ISO 8601/);
+  });
+});
+
+describe("venuePinsFor", () => {
+  const pool = Keypair.generate().publicKey;
+  const programId = Keypair.generate().publicKey;
+  const key = () => Keypair.generate().publicKey.toBase58();
+
+  it("defaults to Kamino's USDC reserve on mainnet, with the pool's cToken ATA", () => {
+    const pins = venuePinsFor(MAINNET_GENESIS_HASH, {}, pool, programId);
+    expect(pins.klendProgram.toBase58()).toBe("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+    expect(pins.klendMarket.toBase58()).toBe("7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF");
+    expect(pins.klendReserve.toBase58()).toBe("D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59");
+    expect(pins.ctokenMint?.toBase58()).toBe("B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D");
+    expect(pins.klendCtoken.equals(getAssociatedTokenAddressSync(pins.ctokenMint!, pool, true))).toBe(true);
+  });
+
+  it("takes an explicit cToken account as is, without asking bootstrap to create one", () => {
+    const klendCtoken = key();
+    const pins = venuePinsFor(MAINNET_GENESIS_HASH, { KLEND_CTOKEN: klendCtoken }, pool, programId);
+    expect(pins.klendCtoken.toBase58()).toBe(klendCtoken);
+    expect(pins).not.toHaveProperty("ctokenMint");
+  });
+
+  it("makes a mainnet reserve override bring its own cToken account", () => {
+    expect(() =>
+      venuePinsFor(MAINNET_GENESIS_HASH, { KLEND_RESERVE: key() }, pool, programId),
+    ).toThrow(/KLEND_CTOKEN must be set/);
+  });
+
+  it("has no default off mainnet and names every missing variable", () => {
+    expect(() => venuePinsFor(DEVNET_GENESIS_HASH, {}, pool, programId)).toThrow(
+      /KLEND_PROGRAM, KLEND_MARKET, KLEND_RESERVE, KLEND_CTOKEN must be set/,
+    );
+    const env = {
+      KLEND_PROGRAM: key(),
+      KLEND_MARKET: key(),
+      KLEND_RESERVE: key(),
+      KLEND_CTOKEN: key(),
+    };
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, env, pool, programId).klendReserve.toBase58()).toBe(
+      env.KLEND_RESERVE,
+    );
+  });
+
+  it("rejects a value that is not a pubkey", () => {
+    expect(() =>
+      venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_PROGRAM: "nope" }, pool, programId),
+    ).toThrow(/KLEND_PROGRAM must be a base58 pubkey/);
+  });
+
+  it("pins the test-venue stub on KLEND_VENUE=test, never on mainnet", () => {
+    const pins = venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId);
+    expect(pins.klendProgram.equals(programId)).toBe(true);
+    expect(pins.klendMarket.equals(pool)).toBe(true);
+    expect(() =>
+      venuePinsFor(MAINNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId),
+    ).toThrow(/refused on mainnet/);
   });
 });
 

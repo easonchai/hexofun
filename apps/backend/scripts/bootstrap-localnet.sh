@@ -73,6 +73,11 @@ export OPERATOR_KEYPAIR
 export RPC_URL="$rpc"
 export PROGRAM_ID="$program_id"
 export POOL_ID="${POOL_ID:-1}"
+# Needs a program built with `--features test-vrf,test-venue` (what
+# tests/run-local.sh builds): the stub venue is what create_pool pins here, and
+# the committed IDL snapshot has no test_venue_init, so read the built one.
+export KLEND_VENUE=test
+export HEXVAULT_IDL_PATH="$root/target/idl/hex_vault.json"
 
 echo
 echo "=== run 1 (fresh cluster) ==="

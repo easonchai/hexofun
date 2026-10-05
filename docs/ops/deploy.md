@@ -223,6 +223,19 @@ positionally: `spl-token create-account <accepted-mint> <new-account-keypair.jso
 bootstrap --admin <squads-vault> --treasury <treasury-address> --buyback-reserve <buyback-address>
 ```
 
+## The venue a Pool pins
+
+`create_pool` pins four klend addresses on the Pool for good (`klend_program`, `klend_market`,
+`klend_reserve`, `klend_ctoken`), and a wrong pin cannot be fixed afterwards. Bootstrap takes them
+from `KLEND_PROGRAM`, `KLEND_MARKET`, `KLEND_RESERVE` and `KLEND_CTOKEN`. On mainnet each defaults
+to Kamino's USDC reserve on the main market, and `KLEND_CTOKEN` to the pool PDA's ATA of the
+reserve's cToken mint, which bootstrap creates before `create_pool`. Overriding `KLEND_RESERVE`
+there requires `KLEND_CTOKEN` too. Any other cluster has no default and bootstrap names the
+missing variables; on a localnet built with `--features test-vrf,test-venue`, `KLEND_VENUE=test`
+pins the stub venue and runs `test_venue_init` (`apps/backend/scripts/bootstrap-localnet.sh` sets
+it). Bootstrap prints `WEIGHT_TREE` and the four pins as the chain recorded them, for a second
+person to check.
+
 ## Moving admin and the upgrade authority to Squads later
 
 Not done yet for this environment split (spec.md "Out of Scope"): a new mainnet pool starts with
