@@ -180,4 +180,12 @@ pub enum HexVaultError {
     VenueShortReturn,
     #[msg("no yield fee or prize share is owed")]
     NothingToHarvest,
+
+    // klend backing (yield-claimer ticket 12). Appended too.
+    #[msg("the klend reserve is still stale after the refresh")]
+    ReserveStale,
+    #[msg("the reserve account is not a klend Reserve this program can read")]
+    ReserveUnreadable,
+    #[msg("a klend account does not match the reserve it belongs to")]
+    KlendAccountMismatch,
 }

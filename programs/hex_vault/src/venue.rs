@@ -4,10 +4,9 @@
 //!
 //! Every operation first checks the four accounts it was handed against the
 //! addresses pinned on the Pool, then goes to the backing. Under `test-venue`
-//! that is the stub in `test_venue.rs`. Without it there is no backing yet and
-//! each operation fails with `VenueUnavailable`. Ticket 12 adds klend as a
-//! second backing behind the same three functions and reads its extra
-//! accounts from [`Venue::remaining`].
+//! that is the stub in `test_venue.rs`. Without it, it is klend through
+//! `klend.rs` (ticket 12), which reads its extra accounts from
+//! [`Venue::remaining`].
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
@@ -59,30 +58,12 @@ mod backing {
 }
 
 #[cfg(not(feature = "test-venue"))]
+#[path = "klend.rs"]
+mod klend;
+
+#[cfg(not(feature = "test-venue"))]
 mod backing {
-    use super::*;
-
-    pub fn value(_pool: &Pool, _venue: &Venue) -> Result<u64> {
-        err!(HexVaultError::VenueUnavailable)
-    }
-
-    pub fn deposit<'info>(
-        _pool: &Account<'info, Pool>,
-        _venue: &Venue<'_, 'info>,
-        _funds: &Funds<'_, 'info>,
-        _amount: u64,
-    ) -> Result<()> {
-        err!(HexVaultError::VenueUnavailable)
-    }
-
-    pub fn redeem<'info>(
-        _pool: &Account<'info, Pool>,
-        _venue: &Venue<'_, 'info>,
-        _funds: &Funds<'_, 'info>,
-        _amount: u64,
-    ) -> Result<()> {
-        err!(HexVaultError::VenueUnavailable)
-    }
+    pub use super::klend::{deposit, redeem, value};
 }
 
 /// The pool's position in USDC atomic units, read fresh: the backing makes

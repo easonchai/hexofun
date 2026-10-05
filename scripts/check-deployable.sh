@@ -33,4 +33,19 @@ for feature in test-vrf test-venue; do
   fi
 done
 
-echo "check-deployable: $SO carries no test-vrf or test-venue symbols"
+# The test-only instructions live in test_vrf.rs and test_venue.rs, and the
+# panic locations in them name the file. A build without test-venue must also
+# carry the klend backing (yield-claimer ticket 12), whose source path is
+# compiled in the same way: a binary with neither is a plain build of an
+# older tree, and every venue call in it would fail.
+hits=$(strings "$SO" | grep -c "src/test_vrf.rs\|src/test_venue.rs" || true)
+if [ "$hits" -ne 0 ]; then
+  echo "check-deployable: $SO contains test-only instruction code ($hits matches); rebuild with a plain anchor build" >&2
+  exit 1
+fi
+if ! strings "$SO" | grep -q "src/klend.rs"; then
+  echo "check-deployable: $SO has no klend backing; rebuild with a plain anchor build of this tree" >&2
+  exit 1
+fi
+
+echo "check-deployable: $SO carries the klend backing and no test-only code"

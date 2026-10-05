@@ -46,3 +46,12 @@ bytemuck = { version = "1.25", features = ["derive", "min_const_generics"] }
 # can find a contact from the deployed program address. No default features:
 # the `parser` feature (thiserror + memchr) is only needed to read one back.
 solana-security-txt = "1.1.3"
+# yield-claimer ticket 12: Kamino's published instruction builders and zero-copy
+# `Reserve`, BUSL-1.1 with a grant for use as an unmodified dependency. Needs
+# `cargo update fixed --precise 1.30.0` (1.31 wants rustc 1.93, platform-tools
+# ships 1.89); Cargo.lock pins it. Its `Pubkey` and `Instruction` are
+# solana-pubkey 2.x types, so `klend.rs` rebuilds them from bytes before CPI.
+klend-interface = "0.6.0"
+
+[dev-dependencies]
+bytemuck = "1"
