@@ -231,6 +231,8 @@ export interface DecodedPlayer {
   isHouse: boolean;
   pendingWithdraw: BN;
   pendingEpoch: BN;
+  /** Chain unix seconds the pending withdrawal was last requested at. */
+  requestedAt: BN;
   /** The epoch `boughtAmount` is counted against. */
   boughtEpoch: BN;
   /** USDC spent in `buy_tickets` so far in `boughtEpoch`, capped at `principal`. */
@@ -360,6 +362,7 @@ export function playerRow(player: DecodedPlayer, poolAddress: string): Prisma.Pl
     isHouse: player.isHouse,
     pendingWithdraw: big(player.pendingWithdraw),
     pendingEpoch: big(player.pendingEpoch),
+    requestedAt: big(player.requestedAt),
     boughtEpoch: big(player.boughtEpoch),
     boughtAmount: big(player.boughtAmount),
     bonusEpoch: big(player.bonusEpoch),

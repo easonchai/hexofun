@@ -26,8 +26,8 @@ import {
   estimatedRateBps,
   freeIdle,
   haircutFactor,
-  instantWithdrawCoverable,
   pendingTickets,
+  withdrawMaturity,
   solvencyMargin,
   supplyRateBps,
   trailingRate,
@@ -266,10 +266,8 @@ export class ApiService {
    * The Pool row, current Epoch and open Round, plus `live` (ticket 14): the
    * 24-hour and 7-day paid rates, the estimated current rate, the ceiling,
    * the fee, the Bought Tickets switch, and the haircut while impaired.
-   * `withdraw`, when given, adds whether an instant withdrawal of that many
-   * atomic units can be paid.
    */
-  async getPool(withdraw?: bigint) {
+  async getPool() {
     const pool = await this.requirePool();
     const poolAddress = this.poolAddress;
     const [currentEpoch, openRound, balances] = await Promise.all([
@@ -286,7 +284,7 @@ export class ApiService {
       pool,
       currentEpoch,
       openRound: openRound === null ? null : summarizeRound(openRound),
-      live: await this.liveYield(pool, balances, withdraw),
+      live: await this.liveYield(pool, balances),
     };
   }
 
@@ -311,7 +309,7 @@ export class ApiService {
     );
   }
 
-  private async liveYield(pool: Pool, balances: ChainBalances, withdraw: bigint | undefined) {
+  private async liveYield(pool: Pool, balances: ChainBalances) {
     // The window ends at the pool's own last sync, not at the newest history
     // row, which the one-a-minute thinning can leave up to a minute behind.
     const latest = { at: pool.lastSyncAt, yieldIndex: toBigInt(pool.yieldIndex) };
@@ -335,11 +333,6 @@ export class ApiService {
       yieldFeeBps: pool.yieldFeeBps,
       buyTicketsPaused: pool.buyTicketsPaused,
       freeIdle: idle,
-      /** Null when `?withdraw=` is absent or the vault or reserve is unreadable. */
-      instantWithdrawCoverable:
-        withdraw === undefined || idle === null || balances.reserve === null
-          ? null
-          : instantWithdrawCoverable(withdraw, idle, pool.venueValue, balances.reserve.available),
       /** The share of a withdrawal the pool pays, while impaired; else null. */
       haircutFactor:
         pool.impaired && balances.vaultLiquidity !== null
@@ -442,8 +435,9 @@ export class ApiService {
 
   /**
    * Principal, the yield earned since the last settle as of the pool's last
-   * sync (`unsettledYield`, `syncedAt`), and the Weight the tree holds for the
-   * Player in the current epoch.
+   * sync (`unsettledYield`, `syncedAt`), the Weight the tree holds for the
+   * Player in the current epoch, and `pendingMaturesAt`, when the queued
+   * withdrawal pays (null with nothing queued).
    */
   async getPlayer(owner: string) {
     const [pool, player] = await Promise.all([
@@ -459,9 +453,19 @@ export class ApiService {
     }
     const { weights, total } = await this.weightsFor(pool, [player]);
     const mine = weights[0] as LiveWeight;
+    const queuedEpoch =
+      player.pendingWithdraw > 0n
+        ? await this.prisma.epoch.findUnique({
+            where: { poolAddress_id: { poolAddress: this.poolAddress, id: player.pendingEpoch } },
+          })
+        : null;
     return {
       ...playerDto(mine, total),
       ...playerTicketExtras(player, pool.currentEpochId),
+      pendingMaturesAt:
+        player.pendingWithdraw > 0n
+          ? withdrawMaturity(queuedEpoch?.endsAt ?? null, player.requestedAt, pool.epochSeconds)
+          : null,
       unsettledYield: unsettledYield(player.principal, toBigInt(pool.yieldIndex), toBigInt(player.yieldIndex)),
       syncedAt: pool.lastSyncAt,
     };
@@ -703,6 +707,14 @@ export class ApiService {
       this.prisma.weightTreeState.findUnique({ where: { poolAddress } }),
     ]);
     const balances = await this.chainBalances(pool?.klendReserve);
+    // Players whose deposit has not earned a Ticket yet: one made in the
+    // current epoch. An older one has folded into Tickets already, touched or not.
+    const awaitingActivation =
+      pool === null
+        ? 0
+        : await this.prisma.player.count({
+            where: { poolAddress, pendingDeposit: { gt: 0 }, pendingDepositEpoch: { gte: pool.currentEpochId } },
+          });
     // Ticket 09: the current epoch's own close deadline and jackpot, for the
     // near-close alert conditions. One extra row read, gated on a pool
     // actually being indexed, same tolerance as the rest of this method.
@@ -715,6 +727,7 @@ export class ApiService {
     return {
       ...statusFrom(operator, cursor, rpc, pool, balances, this.operatorSolWarn),
       ...this.yieldStatus(pool, balances, tree),
+      pendingDepositPlayers: awaitingActivation,
       // Ticket 05: null once the Pool has an Epoch, or when `LAUNCH_AT` is
       // unset — the same rule `/state`'s `launchAt` follows.
       launchAt: pool !== null && pool.currentEpochId > 0n ? null : this.launchAt,

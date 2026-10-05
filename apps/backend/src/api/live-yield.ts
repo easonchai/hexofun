@@ -1,7 +1,7 @@
 // The read model's live-yield arithmetic (yield-claimer ticket 14): what a
 // Player has earned but not settled, the pool's trailing paid rate, the
-// estimated current rate off klend's reserve, instant-withdraw cover, the
-// haircut and the solvency margin. Pure, so each rule is a plain unit test;
+// estimated current rate off klend's reserve, the haircut and the solvency
+// margin. Pure, so each rule is a plain unit test;
 // `api.service.ts` feeds it rows and balances.
 //
 // Rates are APR in basis points as plain numbers. `null` means unknown, never
@@ -168,16 +168,19 @@ export function estimatedRateBps(inputs: {
   return Math.min(net, inputs.ceilingBps);
 }
 
-/** Whether an instant withdrawal of `amount` can be paid: free idle first,
- *  then a redeem of what the reserve has free and the pool holds there. */
-export function instantWithdrawCoverable(
-  amount: bigint,
-  freeIdleAmount: bigint,
-  venueValue: bigint,
-  reserveAvailable: bigint,
-): boolean {
-  const redeemable = venueValue < reserveAvailable ? venueValue : reserveAvailable;
-  return amount <= freeIdleAmount + redeemable;
+/**
+ * When a queued withdrawal pays: the earlier of the pending epoch's end (the
+ * next epoch starts then) and one epoch length after the request, the two ways
+ * `process_withdraw` matures. `epochEndsAt` is null when that epoch's row is
+ * not indexed, which leaves the request-based time.
+ */
+export function withdrawMaturity(
+  epochEndsAt: bigint | null,
+  requestedAt: bigint,
+  epochSeconds: bigint,
+): bigint {
+  const stalled = requestedAt + epochSeconds;
+  return epochEndsAt !== null && epochEndsAt < stalled ? epochEndsAt : stalled;
 }
 
 export interface PoolAssets {

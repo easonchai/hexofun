@@ -31,6 +31,7 @@ export const LIVE_POOL_DEFAULTS = {
 export const LIVE_PLAYER_DEFAULTS = {
   yieldIndex: new Prisma.Decimal(0),
   leafIndex: 0,
+  requestedAt: 0n,
   pendingDeposit: 0n,
   pendingDepositEpoch: 0n,
 };

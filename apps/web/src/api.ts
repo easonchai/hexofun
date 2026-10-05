@@ -201,6 +201,9 @@ export type PlayerExtrasDto = PlayerDto & {
   syncedAt: string;
   /** USDC still spendable in `buy_tickets` today, capped at Principal. */
   buyAllowanceLeft: string;
+  /** Chain unix seconds the queued withdrawal pays at: the earlier of the
+   *  epoch's end and one epoch length after the request. Null with nothing queued. */
+  pendingMaturesAt: string | null;
 };
 
 /** 404s with a human reason until the wallet has a Player (deposited once). */
@@ -274,9 +277,6 @@ export interface LiveYieldDto {
   buyTicketsPaused: boolean;
   /** Atomic USDC; null while the vault cannot be read. */
   freeIdle: string | null;
-  /** Only with `?withdraw=`: whether free idle plus the reserve's free
-   *  liquidity covers that amount. Null when unasked or unreadable. */
-  instantWithdrawCoverable: boolean | null;
   /** While impaired, the share of a withdrawal the pool pays (0 to 1); else null. */
   haircutFactor: number | null;
 }
@@ -339,17 +339,10 @@ export interface StateDto {
   launchAt: string | null;
 }
 
-/** `withdraw` (atomic USDC) asks `live.instantWithdrawCoverable` about that amount. */
 export const fetchPoolSummary = (
   baseUrl: string,
   signal?: AbortSignal,
-  withdraw?: bigint,
-): Promise<ApiResult<PoolSummaryDto>> =>
-  get<PoolSummaryDto>(
-    baseUrl,
-    withdraw === undefined ? "/pool" : `/pool?withdraw=${withdraw}`,
-    signal,
-  );
+): Promise<ApiResult<PoolSummaryDto>> => get<PoolSummaryDto>(baseUrl, "/pool", signal);
 
 export const fetchEpochs = (
   baseUrl: string,

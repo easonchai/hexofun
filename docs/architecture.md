@@ -102,7 +102,7 @@ sends the transaction.
 | `close_round` | anyone | Rent returns to `pool.operator`; refuses while any Position is open |
 
 The live-yield rewrite removes `admin_withdraw` and `fund_yield` (ADR 0017) and `register` and
-`close_registration` (ADR 0018), so they are gone from this table. Instant withdraw, deploy,
+`close_registration` (ADR 0018), so they are gone from this table. Deploy,
 recall, Harvest, `cover_deficit` and the new Admin setters join it as their tickets in
 `docs/plan/yield-claimer/` land. The epoch lifecycle and backend jobs below follow ticket 13;
 the fund flow still draws the pre-rewrite program until the doc ticket redraws it.

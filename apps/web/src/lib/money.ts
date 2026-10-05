@@ -121,16 +121,17 @@ export function pendingTickets(
 }
 
 /**
- * What `request_withdraw(amount)` does to the two balances: Principal drops
- * by the whole amount, Tickets by min(Tickets, amount). The old
- * `entries >= amount` rule is gone (ADR 0009), so a player who spent every
- * Ticket in the game can still request their whole Principal.
+ * How `request_withdraw(amount)` splits (ADR 0020). The part up to the pending
+ * deposit never held a Ticket, so it refunds in the same transaction. The rest
+ * queues, stays in today's draw and pays after the epoch ends. Same
+ * `min(amount, pending_deposit)` the program takes.
  */
-export function previewWithdraw(
-  entries: bigint,
+export function splitWithdraw(
   amount: bigint,
-): { entriesAfter: bigint } {
-  return { entriesAfter: entries > amount ? entries - amount : 0n };
+  pendingDeposit: bigint,
+): { payNow: bigint; queued: bigint } {
+  const payNow = amount < pendingDeposit ? amount : pendingDeposit;
+  return { payNow, queued: amount - payNow };
 }
 
 /**

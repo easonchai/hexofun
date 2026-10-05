@@ -8,12 +8,12 @@ import {
   estimatedRateBps,
   freeIdle,
   haircutFactor,
-  instantWithdrawCoverable,
   pendingTickets,
   solvencyMargin,
   supplyRateBps,
   trailingRate,
   unsettledYield,
+  withdrawMaturity,
   type PoolAssets,
   type ReserveStats,
 } from "./live-yield";
@@ -178,16 +178,16 @@ describe("estimatedRateBps", () => {
   });
 });
 
-describe("instantWithdrawCoverable", () => {
-  it("is covered by free idle alone", () => {
-    expect(instantWithdrawCoverable(100n, 100n, 0n, 0n)).toBe(true);
-    expect(instantWithdrawCoverable(101n, 100n, 0n, 0n)).toBe(false);
+describe("withdrawMaturity", () => {
+  const request = 1_000n;
+
+  it("is the pending epoch's end when that comes before one epoch length", () => {
+    expect(withdrawMaturity(request + 600n, request, DAY)).toBe(request + 600n);
   });
 
-  it("adds what the reserve can free, but never more than the pool holds there", () => {
-    expect(instantWithdrawCoverable(150n, 100n, 500n, 50n)).toBe(true);
-    expect(instantWithdrawCoverable(151n, 100n, 500n, 50n)).toBe(false);
-    expect(instantWithdrawCoverable(150n, 100n, 40n, 1_000n)).toBe(false);
+  it("is one epoch length after the request when the epoch ends later or has no row", () => {
+    expect(withdrawMaturity(request + DAY + 1n, request, DAY)).toBe(request + DAY);
+    expect(withdrawMaturity(null, request, DAY)).toBe(request + DAY);
   });
 });
 

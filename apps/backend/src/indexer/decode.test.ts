@@ -590,6 +590,7 @@ describe("playerRow", () => {
     isHouse: false,
     pendingWithdraw: new BN(0),
     pendingEpoch: new BN(0),
+    requestedAt: new BN(0),
     boughtEpoch: new BN(0),
     boughtAmount: new BN(0),
     bonusEpoch: new BN(0),
@@ -604,12 +605,17 @@ describe("playerRow", () => {
   // Ticket 03: `request_withdraw` parks the amount on the Player and the
   // vault screen reads it back off /players/:owner, so a field dropped here
   // is a depositor who cannot see their own pending money.
-  it("carries the pending withdrawal and the epoch it pays in", () => {
-    const player = decodedPlayer({ pendingWithdraw: new BN(750_000), pendingEpoch: new BN(4) });
+  it("carries the pending withdrawal, the epoch it pays in and when it was requested", () => {
+    const player = decodedPlayer({
+      pendingWithdraw: new BN(750_000),
+      pendingEpoch: new BN(4),
+      requestedAt: new BN(1_700_000_000),
+    });
     expect(playerRow(player, POOL)).toMatchObject({
       poolAddress: POOL,
       pendingWithdraw: 750_000n,
       pendingEpoch: 4n,
+      requestedAt: 1_700_000_000n,
     });
   });
 

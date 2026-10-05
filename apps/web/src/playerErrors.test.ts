@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { decodeErrorCode, decodePlayerError, NOTHING_PENDING_CODE } from "./playerErrors.js";
+import {
+  decodeErrorCode,
+  decodePlayerError,
+  decodeSendFailure,
+  NOTHING_PENDING_CODE,
+} from "./playerErrors.js";
 
 beforeEach(() => {
   // Every path under test logs the raw error; keep it out of the test output.
@@ -31,6 +36,10 @@ describe("decodeErrorCode", () => {
       6059,
       "The daily draw is paused, so Tickets can't be bought right now.",
     ], // JackpotPaused
+    [
+      6063,
+      "The pool is short on cash and can't refund that deposit yet. Nothing changed on your account. Try again later.",
+    ], // VenueIlliquid
   ])("has player copy for code %i", (code, copy) => {
     expect(decodeErrorCode(code)).toBe(copy);
   });
@@ -100,6 +109,22 @@ describe("decodePlayerError", () => {
     expect(decodePlayerError(new Error("simulation failed: JackpotPaused"))).toBe(
       "The daily draw is paused, so Tickets can't be bought right now.",
     );
+  });
+
+  it("tells the player the refund failed and to try later, with no raw error", () => {
+    const sent = decodeSendFailure({
+      kind: "failed",
+      code: 6063,
+      message: '{"InstructionError":[2,{"Custom":6063}]}',
+    });
+    const thrown = decodePlayerError(
+      new Error("AnchorError. Error Code: VenueIlliquid. Error Number: 6063. Error Message: x"),
+    );
+    for (const text of [sent, thrown]) {
+      expect(text).toMatch(/refund that deposit/);
+      expect(text).toMatch(/Try again later/);
+      expect(text).not.toMatch(/6063|Custom|VenueIlliquid|Instruction/);
+    }
   });
 
   it("falls back to a generic line for a non-program error", () => {

@@ -11,7 +11,7 @@ import {
   parseAtomic,
   pendingTickets,
   pendingWithdrawal,
-  previewWithdraw,
+  splitWithdraw,
 } from "./money.js";
 
 describe("vault widget math", () => {
@@ -73,14 +73,6 @@ describe("atomic formatting", () => {
 });
 
 describe("withdrawal math", () => {
-  it("takes Tickets down by at most the requested amount", () => {
-    expect(previewWithdraw(5_000_000n, 2_000_000n).entriesAfter).toBe(3_000_000n);
-    // Tickets spent in the game: the request still goes through, and Tickets
-    // floor at zero instead of going negative.
-    expect(previewWithdraw(1_000_000n, 5_000_000n).entriesAfter).toBe(0n);
-    expect(previewWithdraw(0n, 5_000_000n).entriesAfter).toBe(0n);
-  });
-
   it("keeps addresses short for display", () => {
     expect(formatAddress("6aDFSdwXESHF7UXJRCkHogNtUTbDPajmLupsfvzTSGvB")).toBe(
       "6aDF…SGvB",
@@ -161,5 +153,22 @@ describe("tickets and the pending deposit", () => {
   it("reads the row as it is while the epoch is unknown", () => {
     expect(effectiveTickets(500n, 100n, 4n, null)).toBe(100n);
     expect(pendingTickets(400n, 4n, null)).toBe(400n);
+  });
+});
+
+// ADR 0020: the pending deposit refunds now, the rest queues. 400 of Principal
+// is pending in these cases.
+describe("splitWithdraw", () => {
+  it("pays an amount inside the pending deposit now and queues nothing", () => {
+    expect(splitWithdraw(250n, 400n)).toEqual({ payNow: 250n, queued: 0n });
+    expect(splitWithdraw(400n, 400n)).toEqual({ payNow: 400n, queued: 0n });
+  });
+
+  it("queues the whole amount when no deposit is pending", () => {
+    expect(splitWithdraw(250n, 0n)).toEqual({ payNow: 0n, queued: 250n });
+  });
+
+  it("pays the pending part now and queues the rest", () => {
+    expect(splitWithdraw(700n, 400n)).toEqual({ payNow: 400n, queued: 300n });
   });
 });

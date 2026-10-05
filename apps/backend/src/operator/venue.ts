@@ -151,7 +151,7 @@ export function nextHarvestAt(
 /**
  * The one venue crank this tick should send, or null. Harvest first, because
  * its window closes; then recall, because an under-floor vault is what makes
- * an instant withdrawal redeem; then deploy.
+ * a refund redeem from the venue; then deploy.
  *
  * Deploy waits out a deploy pause and an impaired venue, and nothing deploys
  * after Shutdown. Recall and harvest stay available then (harvest is refused

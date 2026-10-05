@@ -544,19 +544,8 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body.live.yieldFeeBps).toBe(1_000);
       expect(body.live.buyTicketsPaused).toBe(false);
       expect(body.live.freeIdle).toBe(FREE_IDLE.toString());
-      expect(body.live.instantWithdrawCoverable).toBeNull();
       expect(body.live.haircutFactor).toBeNull();
       assertNoLargeNumbers(body, "/pool (live)");
-    });
-
-    it("answers whether an instant withdrawal of the asked amount is covered by free idle plus the reserve's free liquidity", async () => {
-      const covered = FREE_IDLE + RESERVE_AVAILABLE;
-      const yes = await http.get(`/pool?withdraw=${covered}`).expect(200);
-      expect(yes.body.live.instantWithdrawCoverable).toBe(true);
-      const no = await http.get(`/pool?withdraw=${covered + 1n}`).expect(200);
-      expect(no.body.live.instantWithdrawCoverable).toBe(false);
-      await http.get("/pool?withdraw=abc").expect(400);
-      await http.get("/pool?withdraw=-1").expect(400);
     });
 
     it("returns the haircut factor while impaired and the Bought Tickets switch as set", async () => {
@@ -737,6 +726,36 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       await prisma.player.update({
         where: activePlayer(BOB),
         data: { principal: 0n, entries: 0n, epochId: CURRENT_EPOCH, pendingDeposit: 0n, pendingDepositEpoch: 0n },
+      });
+    }
+  });
+
+  // Ticket 23: a queued withdrawal comes with when it pays, the earlier of the
+  // pending epoch's end and one epoch length after the request.
+  it("GET /players/:owner gives the queued withdrawal's maturity", async () => {
+    const queue = (pendingEpoch: bigint, requestedAt: bigint) =>
+      prisma.player.update({
+        where: activePlayer(BOB),
+        data: { pendingWithdraw: 300_000n, pendingEpoch, requestedAt },
+      });
+    try {
+      expect((await http.get(`/players/${BOB}`).expect(200)).body.pendingMaturesAt).toBeNull();
+
+      // Requested a minute ago: the epoch ends 40s sooner than a day after that.
+      await queue(CURRENT_EPOCH, NOW - 60n);
+      const queued = (await http.get(`/players/${BOB}`).expect(200)).body;
+      expect(queued.pendingWithdraw).toBe("300000");
+      expect(queued.pendingMaturesAt).toBe((CURRENT_START + EPOCH_LENGTH).toString());
+
+      // Requested 10s before the previous epoch ended: that end comes first.
+      await queue(PREVIOUS_EPOCH, CURRENT_START - 10n);
+      expect((await http.get(`/players/${BOB}`).expect(200)).body.pendingMaturesAt).toBe(
+        CURRENT_START.toString(),
+      );
+    } finally {
+      await prisma.player.update({
+        where: activePlayer(BOB),
+        data: { pendingWithdraw: 0n, pendingEpoch: 0n, requestedAt: 0n },
       });
     }
   });
@@ -937,6 +956,27 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body.treeCapacity).toBe(187_244);
       expect(body.treeUsedBps).toBe(0);
       assertNoLargeNumbers(body, "/status (live yield)");
+    });
+
+    it("counts the Players whose deposit is still waiting for its first Ticket", async () => {
+      expect((await http.get("/status").expect(200)).body.pendingDepositPlayers).toBe(0);
+      const seed = (pendingDepositEpoch: bigint) =>
+        prisma.player.update({
+          where: activePlayer(BOB),
+          data: { principal: 500_000n, pendingDeposit: 500_000n, pendingDepositEpoch },
+        });
+      try {
+        await seed(CURRENT_EPOCH);
+        expect((await http.get("/status").expect(200)).body.pendingDepositPlayers).toBe(1);
+        // Deposited an epoch ago: folded into Tickets, nothing waiting.
+        await seed(PREVIOUS_EPOCH);
+        expect((await http.get("/status").expect(200)).body.pendingDepositPlayers).toBe(0);
+      } finally {
+        await prisma.player.update({
+          where: activePlayer(BOB),
+          data: { principal: 0n, pendingDeposit: 0n, pendingDepositEpoch: 0n },
+        });
+      }
     });
 
     it("reports a negative margin as a negative number when the pool is short", async () => {

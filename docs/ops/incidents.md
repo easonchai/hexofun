@@ -182,8 +182,9 @@ Starts with `FREE_IDLE_LOW` or `RESERVE_LIQUIDITY_LOW`.
    for longer than `ALERT_IDLE_LOW_S`. The operator recalls from the venue when it falls under the
    floor, so this fires when that is not happening. Check `GET /status`'s `freeIdle`,
    `freeIdleBps`, `reserveFreeLiquidity` and the operator's `lastError`. A recall the reserve cannot
-   pay (`VenueIlliquid`) is the usual cause, and means instant withdrawals past free idle will fail
-   until the reserve has liquidity again; queued withdrawals still work.
+   pay (`VenueIlliquid`) is the usual cause, and means a refund of a same-day deposit past free idle
+   fails (the depositor sees "try again later") until the reserve has liquidity again. Queued
+   withdrawals still work and pay once the epoch ends.
 2. `RESERVE_LIQUIDITY_LOW` means klend's reserve has less free liquidity than
    `ALERT_RESERVE_FREE_MIN` atomic USDC. The pool's own position can only be recalled as far as the
    reserve can pay, so check `reserveUtilizationBps` and consider `admin pause-deploy` to stop adding

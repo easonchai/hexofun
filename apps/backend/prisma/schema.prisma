@@ -158,6 +158,9 @@ model Player {
   pendingWithdraw BigInt
   /// The epoch the request was made in. It pays once the pool has moved past it.
   pendingEpoch    BigInt
+  /// Chain unix seconds the pending withdrawal was last requested at. The
+  /// request also matures one epoch length after this.
+  requestedAt     BigInt @default(0)
   /// The pool's yield index at this Player's last settle, scaled by 1e18.
   /// Unsettled yield is principal x (pool.yieldIndex - this) / 1e18.
   yieldIndex         Decimal @default(0) @db.Decimal(40, 0)

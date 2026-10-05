@@ -2,10 +2,12 @@
  * PRD §9 demo loop, end to end: faucet, deposit, play a round, settle, and
  * withdraw. See docs/product-requirements.md §9.
  *
- * The withdrawal is instant (yield-claimer ticket 16): `instant_withdraw`
- * pays in the same transaction when the pool can cover it. The queued path,
- * its pending row and the "pay out now" button are covered by the program's
- * localnet suite, which can cross an epoch boundary at will.
+ * The withdrawal is one `request_withdraw` (ADR 0020): the part still pending
+ * from today's deposit refunds in the same transaction and any rest queues.
+ * The demo deposits and withdraws on the same day, so the whole amount is a
+ * pending deposit and pays at once. The queued path, its pending row and the
+ * "pay out now" button are covered by the program's localnet suite, which can
+ * cross an epoch boundary at will.
  *
  * Base URL: E2E_BASE_URL, default http://127.0.0.1:5173 (see
  * playwright.config.ts). Ticket 12 has not deployed anything yet, so there is
@@ -151,23 +153,22 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   // The dashboard's Withdraw button opens the widget already on that tab.
   await page.getByTestId("tab-dashboard").click();
   await page.getByTestId("dash-withdraw").click();
-  // The ceiling for an instant withdrawal is min(Principal, Tickets), and it
-  // moves with the game. This only checks the number is live and positive.
+  // The ceiling is Principal less anything already queued.
   const shownWithdrawable = parseAfterLabel(
     await page.getByTestId("withdrawable-now").innerText(),
-    "Withdrawable now",
+    "Withdrawable",
   );
   expect(shownWithdrawable).toBeGreaterThan(0);
 
-  // 6. Withdraw that much. The pool pays at once (yield-claimer ticket 16):
-  // the form says "Instant" before confirm, the USDC lands in the wallet and
-  // there is no pending row.
+  // 6. Withdraw that much. Today's deposit never held a Ticket, so the form
+  // says it pays now, the USDC lands in the wallet and there is no pending row.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
-  await expect(page.getByTestId("withdraw-kind")).toContainText("Instant");
+  await expect(page.getByTestId("withdraw-pays-now")).toContainText("pays now");
+  await expect(page.getByTestId("withdraw-pays-later")).toHaveCount(0);
   const withdrawSubmit = page.getByTestId("withdraw-submit");
   await expect(withdrawSubmit).toBeEnabled();
   await withdrawSubmit.click();
-  await expect(page.getByTestId("vault-note")).toContainText(/withdrawn/i, {
+  await expect(page.getByTestId("vault-note")).toContainText(/withdraw requested/i, {
     timeout: 30_000,
   });
   await expect(page.getByTestId("pending-withdraw")).toHaveCount(0);
