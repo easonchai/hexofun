@@ -1,5 +1,5 @@
 /**
- * LEADERBOARD tab: top players by Weight in the current epoch (a day on screen), straight
+ * LEADERBOARD tab: top players by Tickets in the current epoch (a day on screen), straight
  * from `GET /leaderboard` (already sorted server-side). Pure read: this
  * screen sends no on-chain instruction.
  */
@@ -33,18 +33,18 @@ export function Leaderboard({ owner }: LeaderboardScreenProps) {
         wide
         title="LEADERBOARD"
         aside={
-          <span className="dual-line-inline">top {LIMIT} by weight, today</span>
+          <span className="dual-line-inline">top {LIMIT} by tickets, today</span>
         }
       >
         {rows.length === 0 ? (
-          <p className="screen-copy">no player has any weight yet.</p>
+          <p className="screen-copy">no player has any tickets yet.</p>
         ) : (
           <div className="board-list board-list-5col" data-testid="leaderboard-rows">
             <div className="board-row board-head">
               <span>#</span>
               <span>player</span>
               <span>tickets</span>
-              <span>weight</span>
+              <span>in draw</span>
               <span>odds</span>
             </div>
             {rows.map((row, index) => (

@@ -1,13 +1,13 @@
 /**
  * Owns the Buy Tickets widget's state (ticket 10): the amount input, the
- * derived tickets/draw-value/disabled-reason, and send-and-confirm. The
+ * derived tickets/disabled-reason, and send-and-confirm. The
  * markup only reads what this returns, mirroring useAccessGate.ts.
  */
 import { useCallback, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import { awaitSendResult, buyTickets, type TxSigner } from "./actions.js";
-import { buyDisabledReason, drawValue, ticketsFromUsdc } from "./buyTickets.js";
+import { buyDisabledReason, ticketsFromUsdc } from "./buyTickets.js";
 import type { HexVaultProgram } from "./chain.js";
 import { parseAtomic } from "./lib/money.js";
 import { decodePlayerError, decodeSendFailure } from "./playerErrors.js";
@@ -27,9 +27,6 @@ export interface UseBuyTicketsOptions {
   principal: bigint;
   /** Null until `GET /players/:owner` has answered once. */
   allowanceLeft: bigint | null;
-  /** Seconds left in today's draw, for the draw-value preview. */
-  secondsLeft: bigint;
-  epochSeconds: bigint;
   onDone: () => void;
 }
 
@@ -38,7 +35,6 @@ export interface BuyTicketsState {
   setAmountText: (text: string) => void;
   amount: bigint | null;
   tickets: bigint;
-  drawValueTickets: bigint;
   allowanceLeft: bigint | null;
   /** Reason the button is disabled, or null when it can be pressed. */
   disabledReason: string | null;
@@ -58,8 +54,6 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
     shutdown,
     principal,
     allowanceLeft,
-    secondsLeft,
-    epochSeconds,
     onDone,
   } = options;
   const [amountText, setAmountText] = useState("");
@@ -68,7 +62,6 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
 
   const amount = parseAtomic(amountText, DECIMALS);
   const tickets = amount !== null ? ticketsFromUsdc(amount, pool?.ticketsPerUsdc ?? 0) : 0n;
-  const drawValueTickets = drawValue(tickets, secondsLeft, epochSeconds);
 
   // `allowanceLeft` lags behind `principal`/`paused`/`shutdown` (its own
   // slower poll), so "loading…" only shows for a depositor who is genuinely
@@ -120,7 +113,6 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
     setAmountText,
     amount,
     tickets,
-    drawValueTickets,
     allowanceLeft,
     disabledReason,
     busy,

@@ -99,7 +99,7 @@ export interface PoolDto {
   minDeposit: string;
   /** Share of a settled round's pot credited to the House, in basis points. */
   houseCutBps: number;
-  /** Base yield's APR on time-weighted Principal, in basis points (ADR 0011). */
+  /** The ceiling on the depositor share of yield, in basis points. */
   baseRateBps: number;
   /** Tickets credited per USDC spent in `buy_tickets`. */
   ticketsPerUsdc: number;

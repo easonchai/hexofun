@@ -1,7 +1,7 @@
 /**
  * DAILY DRAW tab: the epoch's yield as today's prize, on the
  * tab ticket 10 emptied out when it deleted the old EXPLORE screen. Everything
- * here is aggregate state from the API (epoch, prize amount, your weight and
+ * here is aggregate state from the API (epoch, prize amount, your Tickets and
  * odds, the pool total, past winners). It sends nothing on chain: every
  * Player is in the draw, so there is nothing to register.
  *
@@ -82,7 +82,7 @@ export function WeeklyDraw(props: WeeklyDrawScreenProps) {
         <p className="screen-copy">
           Today's prize is the yield above what depositors earn, paid in full
           to one winner. Every deposit is in the draw. Your odds are your
-          share of the day's Weight at the draw, assuming nobody deposits,
+          share of the day's Tickets at the draw, assuming nobody deposits,
           withdraws or plays before then.
         </p>
         <StatGrid>
@@ -94,7 +94,7 @@ export function WeeklyDraw(props: WeeklyDrawScreenProps) {
             testid="prize-amount"
           />
           <Stat
-            label="Your weight"
+            label="Your tickets"
             value={
               player
                 ? player.weight === null

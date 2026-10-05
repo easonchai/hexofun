@@ -27,9 +27,9 @@ export interface PoolLike {
   /** Share of a settled round's pot credited to the House, in basis points. */
   houseCutBps: number;
   paused: boolean;
-  /** One epoch's length in seconds, for the buy-tickets draw-value preview. */
+  /** One epoch's length in seconds. */
   epochSeconds: bigint;
-  /** Base yield's APR on time-weighted Principal, in basis points (ADR 0011). */
+  /** The ceiling on the depositor share of yield, in basis points. */
   baseRateBps: number;
   /** Tickets credited per USDC spent in `buy_tickets`. */
   ticketsPerUsdc: number;
