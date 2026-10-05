@@ -1293,6 +1293,7 @@ pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
     // `begin_epoch` first runs (beta-launch-fixes ticket 03).
     require!(pool.current_epoch_id > 0, HexVaultError::NoEpochYet);
     require!(!pool.jackpot_paused, HexVaultError::JackpotPaused);
+    require!(!pool.buy_tickets_paused, HexVaultError::BuyTicketsPaused);
     require!(amount > 0, HexVaultError::ZeroAmount);
     require!(!player.is_house, HexVaultError::HouseCannotBuyTickets);
 

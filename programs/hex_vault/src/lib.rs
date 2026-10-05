@@ -119,6 +119,11 @@ pub mod hex_vault {
         custody::set_feature_pause(ctx, feature, paused)
     }
 
+    /// Admin-only. Stops `buy_tickets` while set (yield-claimer ticket 11).
+    pub fn set_buy_tickets_pause(ctx: Context<SetBuyTicketsPause>, paused: bool) -> Result<()> {
+        rounds::set_buy_tickets_pause(ctx, paused)
+    }
+
     /// Admin-only and irreversible (ops-and-envs ticket 02, spec
     /// "Shutdown"). Stops every inflow, the game and the draw, and lets
     /// withdrawals skip the epoch lock.

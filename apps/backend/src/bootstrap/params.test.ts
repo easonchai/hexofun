@@ -5,6 +5,7 @@ import {
   DEFAULT_POOL_PARAMS,
   MAINNET_GENESIS_HASH,
   assertMainnetSafe,
+  buyTicketsPausedFor,
   envInt,
   isoSeconds,
   nextSundayAnchor,
@@ -320,5 +321,24 @@ describe("isoSeconds", () => {
   it("rejects a value Date cannot parse", () => {
     expect(() => isoSeconds("epoch-anchor", "2026-13-01")).toThrow(/ISO 8601/);
     expect(() => isoSeconds("epoch-anchor", "")).toThrow(/ISO 8601/);
+  });
+});
+
+describe("buyTicketsPausedFor", () => {
+  it("defaults on for mainnet-beta and off everywhere else", () => {
+    expect(buyTicketsPausedFor(MAINNET_GENESIS_HASH, undefined)).toBe(true);
+    expect(buyTicketsPausedFor(MAINNET_GENESIS_HASH, " ")).toBe(true);
+    expect(buyTicketsPausedFor(DEVNET_GENESIS_HASH, undefined)).toBe(false);
+  });
+
+  it("lets the env value win in either direction", () => {
+    expect(buyTicketsPausedFor(DEVNET_GENESIS_HASH, "true")).toBe(true);
+    expect(buyTicketsPausedFor(MAINNET_GENESIS_HASH, "false")).toBe(false);
+  });
+
+  it("rejects anything else", () => {
+    expect(() => buyTicketsPausedFor(DEVNET_GENESIS_HASH, "yes")).toThrow(
+      /BUY_TICKETS_PAUSED/,
+    );
   });
 });

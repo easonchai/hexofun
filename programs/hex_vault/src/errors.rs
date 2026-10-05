@@ -204,4 +204,8 @@ pub enum HexVaultError {
     // Instant withdraw (yield-claimer ticket 09). Appended too.
     #[msg("the player holds fewer Tickets than this withdrawal; use request_withdraw")]
     InsufficientTickets,
+
+    // Game rules (yield-claimer ticket 11). Appended too.
+    #[msg("buying Tickets is paused")]
+    BuyTicketsPaused,
 }

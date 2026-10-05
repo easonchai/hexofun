@@ -158,6 +158,25 @@ export function assertMainnetSafe(input: MainnetGuardInput): void {
   }
 }
 
+/**
+ * Whether bootstrap sets the pool's Bought Tickets switch (yield-claimer
+ * ticket 11, ADR 0019). On by default on mainnet-beta, off on every other
+ * cluster; `BUY_TICKETS_PAUSED=true|false` overrides either way, and the
+ * mainnet env template sets it to true. `raw` is the env value, handed in
+ * so this stays pure.
+ */
+export function buyTicketsPausedFor(
+  genesisHash: string,
+  raw: string | undefined,
+): boolean {
+  const value = raw?.trim() ?? "";
+  if (value === "") return genesisHash === MAINNET_GENESIS_HASH;
+  if (value !== "true" && value !== "false") {
+    throw new Error(`BUY_TICKETS_PAUSED must be true or false, got "${raw}"`);
+  }
+  return value === "true";
+}
+
 /** The accepted mint is 6 decimals on every cluster we run on (bootstrap.ts
  * rejects any other), so whole USDC scales by a constant. */
 const USDC_DECIMALS = 1_000_000n;

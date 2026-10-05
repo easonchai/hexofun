@@ -68,6 +68,15 @@ pub struct FeaturePaused {
     pub at: i64,
 }
 
+/// `set_buy_tickets_pause` flipped the Bought Tickets switch (yield-claimer
+/// ticket 11).
+#[event]
+pub struct BuyTicketsPauseSet {
+    pub pool: Pubkey,
+    pub paused: bool,
+    pub at: i64,
+}
+
 #[event]
 pub struct Deposited {
     pub owner: Pubkey,
@@ -141,7 +150,10 @@ pub struct RoundClosed {
 pub struct PositionSettled {
     pub round_id: u64,
     pub owner: Pubkey,
+    /// Stake back plus the share of the losers' pot, for a winner.
     pub reward: u64,
+    /// The whole stake returned as Tickets on a voided round (ADR 0019).
+    pub refund: u64,
 }
 
 #[event]

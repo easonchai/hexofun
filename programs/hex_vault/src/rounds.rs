@@ -18,7 +18,7 @@ use crate::constants::{
 };
 use crate::errors::HexVaultError;
 use crate::events::{
-    PositionBought, PositionSettled, RoundClosed, RoundOpened, RoundSettled, RoundVoided,
+    BuyTicketsPauseSet, PositionBought, PositionSettled, RoundClosed, RoundOpened, RoundSettled, RoundVoided,
 };
 use crate::state::{Epoch, Player, Pool, Position, Round, WeightTree};
 use crate::touch::touch;
@@ -262,16 +262,21 @@ pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
 
     // On a forfeited round the House already takes the whole pot, so there is
     // nothing left to cut. On a settled one it takes `house_cut_bps` of the
-    // gross pot and the winners split the rest in `settle_position`.
+    // losers' pot (the pot minus the winning tile's total, ADR 0019). Winners
+    // get their own stake back whole in `settle_position` plus their share of
+    // what is left of the losers' pot.
     let house_cut = if forfeited {
         0
     } else {
-        let cut = u128::from(pot)
+        let losers_pot = pot
+            .checked_sub(tile_total)
+            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        let cut = u128::from(losers_pot)
             .checked_mul(u128::from(pool.house_cut_bps))
             .ok_or(HexVaultError::ArithmeticOverflow)?
             / u128::from(BPS_DENOMINATOR);
-        // cut <= pot because house_cut_bps <= BPS_DENOMINATOR, so the cast
-        // back to u64 cannot truncate.
+        // cut <= losers_pot because house_cut_bps <= BPS_DENOMINATOR, so the
+        // cast back to u64 cannot truncate.
         u64::try_from(cut).map_err(|_| HexVaultError::ArithmeticOverflow)?
     };
     // A forfeited round always touches the House, even on an empty pot, so
@@ -329,39 +334,57 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
 
     let position = &ctx.accounts.position;
     let mut reward: u64 = 0;
+    let mut refund: u64 = 0;
     // Same evaporation rule as `settle_round`: once the Round's Epoch has
     // rolled over, `touch` already returned this reward's Entries to
-    // Principal, so crediting it now would mint Entries (audit-fixes/01).
-    if round.epoch_id == pool.current_epoch_id
-        && round.status == round_status::SETTLED
-        && utils::tile_is_covered(position.tiles, round.winning_tile)
-    {
-        // tile_total is > 0 here: settle_round only reaches Settled (rather
-        // than Forfeited) when some position covers winning_tile, and this
-        // one does, so it contributed at least stake_per_tile to it.
-        let tile_total = round.tile_total(round.winning_tile)?;
-        // The House already took `house_cut` in `settle_round`; the winners
-        // split what is left of the gross pot.
-        let payable = round
-            .pot
-            .checked_sub(round.house_cut)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
-        let reward_u128 = u128::from(payable)
-            .checked_mul(u128::from(position.stake_per_tile))
-            .ok_or(HexVaultError::ArithmeticOverflow)?
-            / u128::from(tile_total);
-        // Integer division truncates towards zero; the remainder stays
-        // unminted. Negligible dust, documented and accepted (spec §2.3).
-        reward = u64::try_from(reward_u128).map_err(|_| HexVaultError::ArithmeticOverflow)?;
+    // Principal (a stake lowers Tickets, never Principal), so crediting it
+    // now would mint Entries (audit-fixes/01). A voided stake follows the
+    // same rule, which is why a refund after the rollover would count twice.
+    if round.epoch_id == pool.current_epoch_id {
+        if round.status == round_status::VOIDED {
+            // ADR 0019: a void returns every stake whole, with no cut.
+            refund = position
+                .stake_per_tile
+                .checked_mul(utils::tile_count(position.tiles)?)
+                .ok_or(HexVaultError::ArithmeticOverflow)?;
+        } else if round.status == round_status::SETTLED
+            && utils::tile_is_covered(position.tiles, round.winning_tile)
+        {
+            // tile_total is > 0 here: settle_round only reaches Settled (rather
+            // than Forfeited) when some position covers winning_tile, and this
+            // one does, so it contributed at least stake_per_tile to it.
+            let tile_total = round.tile_total(round.winning_tile)?;
+            // The losers' pot less the House's `house_cut` (taken in
+            // `settle_round`) is shared by stake on the winning tile, on top
+            // of every winner's own stake coming back whole.
+            let payable = round
+                .pot
+                .checked_sub(tile_total)
+                .and_then(|losers| losers.checked_sub(round.house_cut))
+                .ok_or(HexVaultError::ArithmeticOverflow)?;
+            let share = u128::from(payable)
+                .checked_mul(u128::from(position.stake_per_tile))
+                .ok_or(HexVaultError::ArithmeticOverflow)?
+                / u128::from(tile_total);
+            // Integer division truncates towards zero; the remainder stays
+            // unminted. Negligible dust, documented and accepted (spec §2.3).
+            reward = position
+                .stake_per_tile
+                .checked_add(u64::try_from(share).map_err(|_| HexVaultError::ArithmeticOverflow)?)
+                .ok_or(HexVaultError::ArithmeticOverflow)?;
+        }
     }
 
-    if reward > 0 {
+    let credit = reward
+        .checked_add(refund)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    if credit > 0 {
         player.entries = player
             .entries
-            .checked_add(reward)
+            .checked_add(credit)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
         let mut change = Change::new(pool, utils::now()?);
-        change.tickets(i128::from(reward))?;
+        change.tickets(i128::from(credit))?;
         weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
     }
 
@@ -374,6 +397,21 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
         round_id: round.round_id,
         owner: position.owner,
         reward,
+        refund,
+    });
+    Ok(())
+}
+
+/// Admin-only. While set, `buy_tickets` refuses (yield-claimer ticket 11,
+/// ADR 0019). Unlike `set_feature_pause` the operator cannot move it either
+/// way: it is a compliance switch, not an emergency brake.
+pub fn set_buy_tickets_pause(ctx: Context<SetBuyTicketsPause>, paused: bool) -> Result<()> {
+    let pool = &mut ctx.accounts.pool;
+    pool.buy_tickets_paused = paused;
+    emit!(BuyTicketsPauseSet {
+        pool: pool.key(),
+        paused,
+        at: utils::now()?,
     });
     Ok(())
 }
@@ -418,9 +456,9 @@ pub fn void_round(ctx: Context<VoidRound>) -> Result<()> {
         require!(now > timeout_at, HexVaultError::VrfTimeoutNotElapsed);
     }
 
-    // `carry_pot` is gone (ADR 0019). Until ticket 11 refunds each stake at
-    // `settle_position`, a voided pot is returned to nobody this epoch; the
-    // epoch boundary still resets everyone's Tickets to Principal.
+    // `carry_pot` is gone (ADR 0019). A void takes no cut and carries nothing:
+    // each Position gets its stake back as Tickets at `settle_position`, while
+    // the Round's epoch is still the current one.
     round.status = round_status::VOIDED;
     pool.open_round_id = 0;
 
@@ -689,6 +727,19 @@ pub struct VoidRound<'info> {
     /// does. It need not exist: an unfulfilled request is the normal case
     /// here.
     pub randomness: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SetBuyTicketsPause<'info> {
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+        has_one = admin,
+    )]
+    pub pool: Account<'info, Pool>,
 }
 
 #[derive(Accounts)]

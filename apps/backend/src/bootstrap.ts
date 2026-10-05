@@ -33,6 +33,7 @@ import bs58 from "bs58";
 
 import {
   assertMainnetSafe,
+  buyTicketsPausedFor,
   parsePoolParams,
   type PoolParams,
 } from "./bootstrap/params";
@@ -60,6 +61,7 @@ interface PoolAccount {
   buybackReserve: PublicKey;
   gamePaused: boolean;
   jackpotPaused: boolean;
+  buyTicketsPaused: boolean;
 }
 
 const log = (message: string): void => {
@@ -328,6 +330,35 @@ async function startPool(
   }
 }
 
+/**
+ * yield-claimer ticket 11: sets the Bought Tickets switch, admin only on
+ * chain. Reads the pool first, so a re-run sends nothing twice.
+ */
+async function pauseBuyTickets(
+  program: Program<Idl>,
+  admin: Keypair,
+  pool: PublicKey,
+): Promise<void> {
+  const setBuyTicketsPause = program.methods.setBuyTicketsPause;
+  if (!setBuyTicketsPause) {
+    throw new Error(
+      "the IDL has no set_buy_tickets_pause instruction; run `pnpm --filter @hexvault/backend sync-idl`",
+    );
+  }
+  const info = await program.provider.connection.getAccountInfo(pool);
+  if (!info) throw new Error(`pool ${pool.toBase58()} not found after create_pool`);
+  const state = program.coder.accounts.decode<PoolAccount>("pool", info.data);
+  if (state.buyTicketsPaused) {
+    log("Bought Tickets already paused");
+    return;
+  }
+  await setBuyTicketsPause(true)
+    .accountsPartial({ admin: admin.publicKey, pool })
+    .signers([admin])
+    .rpc();
+  log("paused Bought Tickets");
+}
+
 async function main(): Promise<void> {
   // Same file and precedence as Nest's ConfigModule: process.env wins.
   if (existsSync(".env")) process.loadEnvFile();
@@ -512,6 +543,19 @@ async function main(): Promise<void> {
         params,
       ),
     );
+  }
+  // yield-claimer ticket 11: Bought Tickets ship paused on mainnet. Before
+  // the game starts, so no Ticket is sold in between.
+  if (buyTicketsPausedFor(genesisHash, process.env.BUY_TICKETS_PAUSED)) {
+    if (roles.admin.equals(authority.publicKey)) {
+      await step("pausing Bought Tickets", () =>
+        pauseBuyTickets(program, authority, pool),
+      );
+    } else {
+      log(
+        `warning: Bought Tickets are still on; admin ${roles.admin.toBase58()} must send set_buy_tickets_pause(true) before launch`,
+      );
+    }
   }
   if (params.start) {
     await step("starting the jackpot and the game", () =>

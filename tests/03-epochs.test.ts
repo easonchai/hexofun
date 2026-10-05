@@ -1383,7 +1383,7 @@ describe("epochs", () => {
       // The Round records the cut it would have taken, but the Epoch has
       // rolled over, so it evaporated with the rest of the pot instead of
       // reaching the House.
-      expect(settled.houseCut.toString()).toBe("120000"); // 6% of 2M
+      expect(settled.houseCut.toString()).toBe("60000"); // 6% of the 1M losers' pot
       expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
 
       const alicePositionPda = positionPda(roundPda(pool.pool, 1n), alice.keypair.publicKey);
@@ -1455,11 +1455,13 @@ describe("epochs", () => {
     TIMEOUT,
   );
 
-  // Skipped until yield-claimer ticket 11: `carry_pot` is gone (ADR 0019),
-  // and ticket 11's refund-after-rollover rule replaces what this checked.
-  it.skip(
-    "voiding a Round from an ended Epoch adds nothing to carry_pot",
+  it(
+    "a voided Round from an ended Epoch refunds nothing and counts the stake once",
     async () => {
+      // yield-claimer ticket 11, ticket 02's note: the epoch boundary already
+      // put the staked Tickets back (a stake lowers Tickets, never Principal),
+      // so a refund after the rollover would count them twice. The Player
+      // loses nothing, and the tree's Weight for the new epoch must not move.
       const pool = await setupPool({ epochSeconds: 20, roundSeconds: 6, closeBuffer: 1, vrfTimeout: 2 });
       const alice = await pool.fundedWallet(10_000_000n);
 
@@ -1483,19 +1485,22 @@ describe("epochs", () => {
 
       const requested = await program.account.round.fetch(roundPda(pool.pool, 1n));
       await sleepUntilOnChain(Number(requested.requestedAt.toString()) + 2 + 1); // past vrf_timeout
-
-      const poolBeforeVoid = await program.account.pool.fetch(pool.pool);
-      expect(poolBeforeVoid.carryPot.toString()).toBe("0");
-      const sig = await retryUntilOk(() => voidRound(pool, 1n, seed));
+      await retryUntilOk(() => voidRound(pool, 1n, seed));
 
       const voided = await program.account.round.fetch(roundPda(pool.pool, 1n));
       expect(voided.status).toBe(round_status.VOIDED);
+      expect(voided.houseCut.toString()).toBe("0");
 
-      const poolAfterVoid = await program.account.pool.fetch(pool.pool);
-      expect(poolAfterVoid.carryPot.toString()).toBe("0"); // the 1M pot evaporated, not carried
+      const weightBefore = await weightOf(pool, alice.keypair.publicKey, 2n);
+      const sig = await settlePosition(pool, 1n, alice.keypair.publicKey);
+      const event = await findEvent<{ reward: BN; refund: BN }>(sig, "positionSettled");
+      expect(event?.refund.toString()).toBe("0");
+      expect(event?.reward.toString()).toBe("0");
 
-      const event = await findEvent<{ carryPot: BN }>(sig, "roundVoided");
-      expect(event?.carryPot.toString()).toBe("0");
+      const player = await fetchPlayer(pool, alice.keypair.publicKey);
+      expect(player.entries.toString()).toBe("5000000"); // back at Principal, once
+      expect(await weightOf(pool, alice.keypair.publicKey, 2n)).toBe(weightBefore);
+      expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
     },
     TIMEOUT,
   );
@@ -1635,6 +1640,43 @@ describe("epochs", () => {
       await deposit(pool, owner, 4_000_000n);
       await setPause(pool, true);
       await expect(buyTickets(pool, owner, 1_000_000n)).rejects.toThrow(/PoolPaused/);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "refuses while the Bought Tickets switch is set, which only the Admin moves, and resumes when cleared",
+    async () => {
+      // yield-claimer ticket 11, ADR 0019.
+      const pool = await setupPool();
+      const owner = await pool.fundedWallet(10_000_000n);
+      await deposit(pool, owner, 4_000_000n);
+      await beginEpoch(pool, 0n);
+      const setSwitch = (signer: Keypair, paused: boolean) =>
+        program.methods
+          .setBuyTicketsPause(paused)
+          .accountsPartial({ admin: signer.publicKey, pool: pool.pool })
+          .signers([signer])
+          .rpc();
+
+      // The operator may pause the pool but not this switch.
+      await expect(setSwitch(pool.operator, true)).rejects.toThrow(/ConstraintHasOne|Unauthorized/);
+      expect((await program.account.pool.fetch(pool.pool)).buyTicketsPaused).toBe(false);
+
+      const sig = await setSwitch(pool.admin, true);
+      expect((await program.account.pool.fetch(pool.pool)).buyTicketsPaused).toBe(true);
+      expect((await findEvent<{ paused: boolean }>(sig, "buyTicketsPauseSet"))?.paused).toBe(true);
+      await expect(buyTickets(pool, owner, 1_000_000n)).rejects.toThrow(/BuyTicketsPaused/);
+      // The pool pause still stops it on its own, switch or not.
+      await setSwitch(pool.admin, false);
+      await setPause(pool, true);
+      await expect(buyTickets(pool, owner, 1_000_000n)).rejects.toThrow(/PoolPaused/);
+      await setPause(pool, false);
+
+      await buyTickets(pool, owner, 1_000_000n);
+      expect((await fetchPlayer(pool, owner.keypair.publicKey)).entries.toString()).toBe(
+        (4_000_000n + 1_000_000n * BigInt(pool.ticketsPerUsdc)).toString(),
+      );
     },
     TIMEOUT,
   );
