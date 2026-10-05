@@ -1327,9 +1327,9 @@ describe("epochs", () => {
   );
 
   // --- Cross-epoch Round settlement. A Round that ended inside its epoch
-  // can settle after the roll: `touch` runs first and the credit is a plain
-  // delta in the epoch now current (yield-claimer ticket 21; the winner's
-  // case is in 02-rounds).
+  // can settle after the roll: `touch` runs first, the reset has already
+  // restored every stake, and the credit is a plain delta in the epoch now
+  // current (yield-claimer ticket 21; the winner's case is in 02-rounds).
 
   it(
     "a forfeited Round from an ended Epoch credits the House its pot in the new epoch",
@@ -1366,10 +1366,10 @@ describe("epochs", () => {
   );
 
   it(
-    "a voided Round from an ended Epoch refunds the stake in the new epoch",
+    "a voided Round from an ended Epoch credits nothing, since the reset already restored the stake",
     async () => {
-      // yield-claimer ticket 21: touch runs first, then the refund is a plain
-      // delta in the epoch now current.
+      // yield-claimer ticket 21: touch runs first and a refund would count
+      // the stake twice.
       const pool = await setupPool({ epochSeconds: 20, roundSeconds: 6, closeBuffer: 1, vrfTimeout: 2 });
       const alice = await pool.fundedWallet(10_000_000n);
 
@@ -1401,13 +1401,13 @@ describe("epochs", () => {
 
       const sig = await settlePosition(pool, 1n, alice.keypair.publicKey);
       const event = await findEvent<{ reward: BN; refund: BN }>(sig, "positionSettled");
-      expect(event?.refund.toString()).toBe("1000000");
+      expect(event?.refund.toString()).toBe("0");
       expect(event?.reward.toString()).toBe("0");
 
-      // The reset put her back at her 5M Principal and the refund lands on top.
+      // The reset already put her back at her 5M Principal, so nothing is credited.
       const player = await fetchPlayer(pool, alice.keypair.publicKey);
-      expect(player.entries.toString()).toBe("6000000");
-      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(6_000_000n);
+      expect(player.entries.toString()).toBe("5000000");
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(5_000_000n);
       expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
     },
     TIMEOUT,

@@ -1286,14 +1286,14 @@ describe("rounds", () => {
 
       await settlePosition(pool, round, alice.keypair.publicKey);
       await settlePosition(pool, round, bob.keypair.publicKey);
-      // touch ran first and reset both to their 5M Principal. Alice's reward
-      // (her 1M stake plus the 940k share) lands on top, and Bob's stake is
-      // not taken a second time.
-      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(6_940_000n);
+      // touch ran first and reset both to their 5M Principal, which already
+      // holds the stakes. Alice gets only her 940k share on top, and Bob's
+      // stake is not taken a second time.
+      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(5_940_000n);
       expect(await ticketsOf(pool, bob.keypair.publicKey, 2n)).toBe(5_000_000n);
-      expect(await root()).toBe(12_000_000n);
+      expect(await root()).toBe(11_000_000n);
       const aliceAfter = await program.account.player.fetch(playerPda(pool.pool, alice.keypair.publicKey));
-      expect(aliceAfter.entries.toString()).toBe("6940000");
+      expect(aliceAfter.entries.toString()).toBe("5940000");
       expect(aliceAfter.principal.toString()).toBe("5000000");
       await assertSolvent(pool);
     },

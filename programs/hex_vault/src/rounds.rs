@@ -325,13 +325,20 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
     let position = &ctx.accounts.position;
     let mut reward: u64 = 0;
     let mut refund: u64 = 0;
-    // Paid whatever epoch the Round ran in, as in `settle_round`.
+    // A stake from an earlier epoch is already back: `touch` reset Tickets to
+    // Principal, which a stake never lowers (ADR 0020). Such a settle credits
+    // only what the reset did not restore, so the winner's share and no stake.
+    // `Round.epoch_id` is the epoch the stake was placed in, since a round
+    // cannot take Positions after its epoch ends.
+    let restored = round.epoch_id < pool.current_epoch_id;
     if round.status == round_status::VOIDED {
         // ADR 0019: a void returns every stake whole, with no cut.
-        refund = position
-            .stake_per_tile
-            .checked_mul(utils::tile_count(position.tiles)?)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        if !restored {
+            refund = position
+                .stake_per_tile
+                .checked_mul(utils::tile_count(position.tiles)?)
+                .ok_or(HexVaultError::ArithmeticOverflow)?;
+        }
     } else if round.status == round_status::SETTLED
         && utils::tile_is_covered(position.tiles, round.winning_tile)
     {
@@ -341,7 +348,7 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
         let tile_total = round.tile_total(round.winning_tile)?;
         // The losers' pot less the House's `house_cut` (taken in
         // `settle_round`) is shared by stake on the winning tile, on top
-        // of every winner's own stake coming back whole.
+        // of every winner's own stake coming back whole, unless `restored`.
         let payable = round
             .pot
             .checked_sub(tile_total)
@@ -353,10 +360,15 @@ pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
             / u128::from(tile_total);
         // Integer division truncates towards zero; the remainder stays
         // unminted. Negligible dust, documented and accepted (spec §2.3).
-        reward = position
-            .stake_per_tile
-            .checked_add(u64::try_from(share).map_err(|_| HexVaultError::ArithmeticOverflow)?)
-            .ok_or(HexVaultError::ArithmeticOverflow)?;
+        let share = u64::try_from(share).map_err(|_| HexVaultError::ArithmeticOverflow)?;
+        reward = if restored {
+            share
+        } else {
+            position
+                .stake_per_tile
+                .checked_add(share)
+                .ok_or(HexVaultError::ArithmeticOverflow)?
+        };
     }
 
     let credit = reward

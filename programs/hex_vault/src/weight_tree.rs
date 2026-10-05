@@ -543,13 +543,17 @@ mod tests {
                     }
                 }
                 (65..=74, _) if !self.stakes.is_empty() => {
-                    // `settle_position`: touch, then the stake and a reward
-                    // come back as a plain delta, in whatever epoch is current
-                    // by then.
+                    // `settle_position`: touch, then a plain delta in whatever
+                    // epoch is current by then. A stake from an earlier epoch
+                    // is already back, so only the winner's share is credited.
                     let i = self.rng.below(self.stakes.len() as u64) as usize;
                     let (k, stake, epoch) = self.stakes.swap_remove(i);
-                    self.act(k, |p, rng| p.entries += stake + rng.upto(stake));
-                    if epoch == self.clock.current {
+                    let restored = epoch < self.clock.current;
+                    self.act(k, |p, rng| {
+                        let share = rng.upto(stake);
+                        p.entries += if restored { share } else { stake + share };
+                    });
+                    if !restored {
                         self.cov.settled_stakes += 1;
                     } else {
                         self.cov.stale_stakes += 1;
@@ -843,7 +847,8 @@ mod tests {
 
     /// A stake taken in epoch `e` is already back in epoch `e + 1`: the slot
     /// reset rebuilds the Tickets from `principal_sum`, which a stake never
-    /// lowers. A settle after the rollover is a plain delta on top of that.
+    /// lowers. `settle_position` credits only the winner's share after the
+    /// rollover, never the stake.
     #[test]
     fn a_stake_from_a_rolled_over_epoch_is_already_back() {
         let (mut tree, mut clock) = fresh(2);
@@ -861,7 +866,7 @@ mod tests {
         // No settle yet, and leaf 2 already holds its full Principal.
         assert_eq!(tickets(&tree, &clock, 2, 2), 1_000);
 
-        // A settle credited now lands above its Principal.
+        // Crediting the stake now would land above its Principal.
         update(&mut tree, 2, 0, 400, &clock).unwrap();
         assert_eq!(tickets(&tree, &clock, 2, 2), 1_400);
         assert_eq!(tickets(&tree, &clock, 2, 1), 600);

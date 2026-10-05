@@ -68,11 +68,13 @@ end after the current epoch ends. The stake leaves Tickets and the tree at `buy_
 back with the reward at `settle_position`, both as plain Ticket deltas. This replaces the
 time-based pre-credit. No round can outlive its epoch, so a stake can never fall between two draws.
 A round that ended inside its epoch can still settle after the epoch rolled. That settle runs `touch`
-first and credits its reward, refund or House share as a plain Ticket delta in the epoch now
-current, so the "credit only while the round's epoch is current" rule of ADR 0007 and ADR 0019 is
-gone and the program has no wrong-epoch branch left. The reset already put the stake back in
-Principal, so a winner settled after the roll holds the stake twice for that day, and a loser is not
-charged. Open question for the spec owner: credit only the winner's share after a roll instead.
+first, and the reset has already put every stake of the earlier epoch back into Tickets, because a
+stake never lowers Principal. So `settle_position` credits only what the reset did not restore. A
+winner gets the share of the losers' pot as a plain Ticket delta in the epoch now current, a void
+credits nothing, and a settle inside the round's own epoch still credits stake plus reward. The House
+credit in `settle_round` is the same in both cases, since the House never stakes. This replaces the
+"credit only while the round's epoch is current" rule of ADR 0007 and ADR 0019, so the program has no
+wrong-epoch branch left.
 
 The Prize is the one case of fresh Principal earning Tickets in the same epoch. It is added to the
 winner's Principal and Tickets at once. The winner already holds a ticketed balance, and holding the
