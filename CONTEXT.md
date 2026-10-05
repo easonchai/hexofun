@@ -23,11 +23,11 @@ A depositor's 1:1 claim on the USDC they deposited, tracked as a number in their
 _Avoid_: PT, principal token, receipt, balance
 
 **Withdraw**:
-Removing Principal from the pool with one request, `request_withdraw(amount)`, which needs Principal, less what is already queued, of at least the amount and splits it. The part up to the Player's Pending deposit never held a Ticket and refunds in the same transaction. It pays from free idle in the principal vault and redeems any gap from the venue in the same instruction. When the venue's free liquidity cannot cover the gap the whole request fails and changes nothing. The rest becomes a Pending withdrawal and pays after the epoch it was requested in ends, when anyone may push the transfer with `process_withdraw`. There is no instant exit for Principal that holds Tickets. A pause blocks neither part, and while the pool is Impaired both pay a Haircut.
+Removing Principal from the pool with one request, `request_withdraw(amount)`, which needs Principal, less what is already queued, of at least the amount and splits it. The part up to the Player's Pending deposit never held a Ticket and refunds in the same transaction. It pays from free idle in the principal vault and redeems any gap from the venue in the same instruction. When the venue's free liquidity cannot cover the gap the whole request fails and changes nothing. The rest becomes a Pending withdrawal and pays after the epoch it was requested in ends, when anyone may push the transfer with `process_withdraw`, unless the pool is Impaired, when only the owner may. There is no instant exit for Principal that holds Tickets. A pause blocks neither part, and while the pool is Impaired both pay a Haircut.
 _Avoid_: Unstake, redeem (a venue operation), cash out
 
 **Pending withdrawal**:
-The queued part of a withdrawal request, whose USDC has not moved yet. It lives on the Player as `pending_withdraw` and `pending_epoch`, and is summed across the pool as `Pool.pending_withdrawals`. It is a sub-balance of Principal and a reservation of idle USDC, not a second claim beside Principal. The Principal and Tickets behind it stay in place until it pays, so it stays in the draw and the game and keeps earning yield. The transfer happens on the first `process_withdraw` after `pending_epoch` ends, which takes the amount off Principal and Tickets, and fails with `InsufficientVaultLiquidity` while the vault is short. Several requests in one epoch merge into one.
+The queued part of a withdrawal request, whose USDC has not moved yet. It lives on the Player as `pending_withdraw` and `pending_epoch`, and is summed across the pool as `Pool.pending_withdrawals`. It is a sub-balance of Principal and a reservation of idle USDC, not a second claim beside Principal. The Principal and Tickets behind it stay in place until it pays, so it stays in the draw and the game and keeps earning yield. The transfer happens on the first `process_withdraw` after `pending_epoch` ends, which takes the amount off Principal and Tickets. It fails with `InsufficientVaultLiquidity` while the vault is short, and it fails while the Player has a Position open, so a stake cannot sit on the board while its Principal leaves (ADR 0021). Several requests in one epoch merge into one.
 _Avoid_: Queue, unbonding, escrow, claim, instant withdraw (retired)
 
 **Pending deposit**:
@@ -75,11 +75,11 @@ The permissionless instruction that redeems the Yield fee owed and the prize sha
 _Avoid_: Sync (which moves no USDC), claim, sweep, funding the jackpot
 
 **Impaired**:
-A pool state set when the venue position's value falls between two Syncs by more than the loss tolerance, 1 bps by default. The prize share owed absorbs the loss first, then the Yield fee owed; what remains is a recorded deficit. While Impaired, Harvest and deploy are refused and every withdrawal pays a Haircut. It clears when later gains or the permissionless `cover_deficit` bring the deficit to zero. The Yield index does not fall.
+A pool state set when the venue position's value falls between two Syncs by more than the loss tolerance, 1 bps by default. The prize share owed absorbs the loss first, then the Yield fee owed; what remains is a recorded deficit. While Impaired, Harvest, deploy and deposits are refused and every withdrawal pays a Haircut. A queued withdrawal and an Emergency withdraw then pay only with the owner's signature, so leaving at the Haircut is the depositor's choice (ADR 0021). `request_withdraw`, `recall` and `cover_deficit` still work. It clears when later gains or the permissionless `cover_deficit` bring the deficit to zero. The Yield index does not fall.
 _Avoid_: Paused (a separate switch), insolvent, frozen, default
 
 **Haircut**:
-What a withdrawal pays while the pool is Impaired: the amount times the pool's real value, `vault balance + venue value − owed amounts`, divided by `total_principal`, rounded down. A Pending withdrawal sits inside `total_principal`, so it is not counted a second time. Principal and Tickets still fall by the full amount, and a Player who leaves this way takes no part in a later recovery. The refund of a Pending deposit, a processed Pending withdrawal and Emergency withdraw all apply it, and a queued one applies it at the moment it pays.
+What a withdrawal pays while the pool is Impaired: the amount times the pool's real value, `vault balance + venue value − owed amounts`, divided by `total_principal`, rounded down. A Pending withdrawal sits inside `total_principal`, so it is not counted a second time. Principal and Tickets still fall by the full amount, and a Player who leaves this way takes no part in a later recovery. The refund of a Pending deposit, a processed Pending withdrawal and Emergency withdraw all apply it, and a queued one applies it at the moment it pays. While Impaired, only the Player's owner can trigger the queued and Emergency withdraw payments, so nobody else can realise a Haircut for them.
 _Avoid_: Loss (the venue's fall in value), slashing, penalty, exit fee
 
 ### Lottery
@@ -244,7 +244,7 @@ A per-deployment switch the team sets when the app is deployed that covers a fea
 _Avoid_: Pause (a pool switch), feature flag, hide
 
 **Emergency withdraw**:
-A permissionless crank, valid only once a pool is shut down, that pays one Player's whole Principal to their own wallet in one instruction (`emergency_withdraw`). Principal already holds the Pending deposit and the Pending withdrawal, so nothing is paid twice, and a Haircut applies while Impaired. Anyone may run it for any Player; the House is excluded, since its principal is protocol money and leaves through a Sweep instead.
+A crank, valid only once a pool is shut down, that pays one Player's whole Principal to their own wallet in one instruction (`emergency_withdraw`). Principal already holds the Pending deposit and the Pending withdrawal, so nothing is paid twice, and a Haircut applies while Impaired. Anyone may run it for any Player while the pool is not Impaired, and only the owner while it is. The House is excluded, since its principal is protocol money and leaves through a Sweep instead.
 _Avoid_: Force withdraw, bailout, rescue
 
 **Sweep**:

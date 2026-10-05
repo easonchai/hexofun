@@ -43,7 +43,7 @@
 
   Epochs chain: begin_epoch starts the next one at the previous ends_at. Before 2026-09-07 that held no matter how late, so a backend
   that came back after hours replayed the whole gap one epoch at a time (begin_epoch, request_draw, draw, payout, 20s to 40s each,
-  with a register and close_registration pair in front of the draw until the Fenwick draw removed them), paid the jackpot floor to
+  with two registration transactions in front of the draw until the Fenwick draw removed them), paid the jackpot floor to
   the players once per replayed epoch, and opened no Round until it caught up:
   tick step 7 needs a whole round_seconds to fit before the epoch's ends_at, and a replayed epoch has already ended. The UI said
   "no open round" the entire time. Now begin_epoch starts the next epoch at the latest point of the anchor grid it has reached, so
@@ -62,7 +62,7 @@
   the request, 4s to 7s for the draw, and the rest is margin. The web countdown ends at the close and the stage reads DRAWING
   until the settle lands, at which point the reveal fires, so a slow draw shows as a longer DRAWING rather than a timer stuck at
   zero. The operator sleeps until its next deadline, so the next Round opens a second after ends_at; a 60s safety tick and the
-  randomness subscription are what else wakes it. vrf_timeout (120s) bounds the ORAO tail.
+  randomness subscription are what else wakes it. vrf_timeout (180s, the program's floor) bounds the ORAO tail.
 
   Demo cadence (2026-09-10): epoch_seconds 86400, round_seconds 30, close_buffer 12, on the anchored pool bootstrapped with
   --epoch-anchor 2026-09-13T16:00:00Z. One draw a day, landing at 00:00 MYT. Rounds switch on the next Round, epochs on the next
@@ -207,7 +207,7 @@
          DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --close-buffer 12
 
        bootstrap takes no --close-buffer and no --vrf-timeout: create_pool always gets the
-       defaults from src/bootstrap/params.ts (close_buffer 5, vrf_timeout 120, min_deposit 1
+       defaults from src/bootstrap/params.ts (close_buffer 5, vrf_timeout 180, min_deposit 1
        hexUSDC). Only set-params changes them, which is why 12 is a second command. --house-cut-bps 600
 
        600 bps is the default, so pass the flag only for a different rate. stdout is a pasteable
@@ -374,6 +374,29 @@
   How admin-gated commands sign, locally, through a Ledger, or by printing a base58 transaction for a Squads vault to import, is in
   docs/ops/deploy.md ("Admin signing"). The fund commands themselves (fund-jackpot, shutdown, emergency-crank, sweep-house)
   are in docs/ops/funds.md.
+
+  Four more commands cover the rest of the Admin instructions. All four take the same local, Ledger or Squads signing as the others;
+  set `ADMIN_ADDRESS` to print the transaction for Squads instead of sending it.
+
+  - Bought tickets pause. Bootstrap sets it on mainnet, and `start-buy-tickets` is the only way to clear it. `pause-buy-tickets` sets
+    it again. Both are Admin only.
+
+      pnpm --filter @hexvault/backend admin start-buy-tickets
+
+  - Venue parameters. Send only the flags you want to change; the rest stay as they are. Every value except `--min-venue-move` is
+    in basis points, and `--min-venue-move` is raw atomic USDC. The program bounds each field and refuses a value outside its range.
+
+      pnpm --filter @hexvault/backend admin set-venue-params --yield-fee-bps 1000 --idle-target-bps 1000
+
+  - Treasury and Buyback reserve. Both must be token accounts of the pool's mint. `harvest` and `payout` pay to these addresses from
+    the next call on.
+
+      pnpm --filter @hexvault/backend admin set-treasury-accounts --treasury <TOKEN_ACCOUNT> --buyback-reserve <TOKEN_ACCOUNT>
+
+  - Cover a deficit. The program does not gate this on the Admin, so any funded key can run it. The signer pays from its own USDC
+    token account, and the program moves at most the deficit, so an amount above it is safe. Under a multisig the vault pays.
+
+      pnpm --filter @hexvault/backend admin cover-deficit --amount 5000000
 
   One gotcha that lives here because it is not really about signing: set-operator rotates `Pool.operator` but leaves the House
   Player's own `owner` on the retired key, so a Prize the House wins still pays into that key's USDC associated token account. Keep

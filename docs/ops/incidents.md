@@ -68,13 +68,13 @@ Starts with `ROUND_VOIDED_RECENTLY` or `EPOCH_ROLLED_OVER_RECENTLY`.
 2. Void and rollover fire on their own once the timeout passes: `void_round` once `vrf_timeout`
    passes a round's or a drawing epoch's request, `rollover_epoch` once `payout_timeout` passes a
    drawn epoch. Any signer may call either one after the timeout, as a backstop if the operator
-   itself is down. That is why the program floors both: `vrf_timeout` at 60s and `payout_timeout`
+   itself is down. That is why the program floors both: `vrf_timeout` at 180s and `payout_timeout`
    at 600s (`constants.rs`), so a stranger cannot void a merely slow fulfilment.
 3. Check ORAO's own status page or Discord for a network-wide outage, and whether other ORAO
    consumers on the same cluster are stuck too. A HexVault-only stall points at the operator or its
    RPC instead, see "Chain stall mid-round" above.
-4. Raise `vrf_timeout` if ORAO is consistently slower than the configured value (120s at
-   bootstrap), so an honest but slow draw stops voiding: `admin set-params --vrf-timeout N`.
+4. Raise `vrf_timeout` if ORAO is consistently slower than the configured value (180s at
+   bootstrap, which is also the program's floor, so you can only raise it), so an honest but slow draw stops voiding: `admin set-params --vrf-timeout N`.
 
 ## Suspected exploit
 
@@ -200,6 +200,35 @@ Starts with `POOL_IMPAIRED`.
    zero.
 2. Read `GET /status`'s `solvencyMargin` and the `ImpairedSet` event's `deficit`. Decide with the
    team whether to cover it.
+3. While the pool is Impaired it refuses deposits, and `process_withdraw` and `emergency_withdraw`
+   need the owner's signature (ADR 0021). The Operator's withdrawal crank skips, so queued
+   withdrawals stay queued until the owner pays their own or the deficit clears. Tell depositors
+   that waiting costs them nothing and that leaving now pays the Haircut value.
+
+## klend does not respond
+
+Starts with `OPERATOR_FAILING` and an operator `lastError` that names a klend or reserve refresh
+failure. There is no code of its own, and `RPC_DOWN` may stay quiet.
+
+1. Every instruction that syncs the venue calls klend to refresh the reserve and value the
+   position. If that call fails, the instruction fails. That covers `deposit`, `request_withdraw`,
+   `process_withdraw` and `emergency_withdraw`, so no depositor can leave, and harvest, deploy and
+   recall fail too. Nothing is lost. The pool's USDC is still at klend and in the vault.
+2. Check whether it is klend or the path to it. Read the operator's `lastError` in `GET /status`
+   and the backend logs for the failing instruction. Compare `reserveFreeLiquidity` and
+   `reserveUtilizationBps` with the previous values, check the reserve in Kamino's own app, and
+   test a plain read of the reserve account through a second RPC. A bad RPC is the common cause,
+   see "RPC provider down" above.
+3. If klend or its oracle is down for real, wait. There is no bypass before a program upgrade, and
+   the team accepted that for launch (ADR 0021). `pause` stops new deposits if you want no new
+   money in while exits are blocked. Do not `shutdown`. It does not skip the venue call, so it
+   would add nothing and could not be undone.
+4. Watch the queue. `WITHDRAW_FORECAST_SHORT` may fire because nothing can recall. Withdrawals
+   resume on their own once klend answers.
+5. If the outage runs for days, the fix is a program upgrade that adds an escape switch, Admin
+   only and Shutdown only, under which exits skip the venue call and share the idle USDC pro
+   rata. It is not built. Decide on it as a team before any upgrade, and ship it with
+   `scripts/deploy.sh <env> --upgrade` ([`docs/ops/deploy.md`](deploy.md#upgrading)).
 
 ## Deployment paused
 

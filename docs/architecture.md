@@ -3,7 +3,8 @@
 HexVault is one Anchor program (`hex_vault`), a NestJS backend that cranks it and mirrors it
 into Postgres, and a Vite/React frontend that only ever reads from the backend. See
 [`CONTEXT.md`](../CONTEXT.md) for vocabulary and [`docs/adr/`](adr/) for why things are shaped
-this way.
+this way. The money design is ADR 0017 (live yield), the draw is ADR 0018 (Fenwick tree) and
+ADR 0020 (Tickets count from the next epoch), the game is ADR 0019.
 
 ## Components
 
@@ -12,6 +13,7 @@ flowchart LR
     subgraph Chain["Solana"]
         Program["hex_vault program"]
         ORAO["ORAO VRF program"]
+        Klend["Kamino klend reserve"]
     end
 
     subgraph Backend["apps/backend (NestJS)"]
@@ -31,9 +33,10 @@ flowchart LR
     API -- "reads" --> DB
     Web -- "HTTP" --> API
     Web -- "wallet txs: deposit, withdraw, play" --> Program
-    Operator -- "cranks: epochs, rounds, payouts, close_round" --> Program
+    Operator -- "cranks: epochs, rounds, venue, payouts" --> Program
     Operator -- "requests randomness" --> ORAO
     ORAO -- "fulfils" --> Program
+    Program -- "CPI: refresh, deposit, redeem" --> Klend
     AdminCLI -- "admin-gated instructions" --> Program
     Ledger -. "signs" .-> AdminCLI
     Squads -. "admin key on mainnet" .-> Program
@@ -41,6 +44,169 @@ flowchart LR
 
 The operator's hot key also owns the House `Player`. The admin key (a Squads multisig on
 mainnet, a Ledger locally) never runs on the backend box.
+
+There is no separate adapter program. The venue is a module inside `hex_vault`
+(`venue.rs`, three operations: `value`, `deposit`, `redeem`), backed by klend in `klend.rs` and
+by a stub in `test_venue.rs` on localnet. The pool PDA holds the klend cTokens itself. Swapping
+or adding a venue means a new backing behind those three operations and a program upgrade,
+because the four klend addresses are pinned on the `Pool` at `create_pool` and no instruction
+changes them.
+
+## Fund flow
+
+```mermaid
+flowchart TD
+    User(["Depositor wallet"])
+    Funder(["Any funder"])
+
+    subgraph Prog["hex_vault program"]
+        PV[("Principal vault<br/>idle USDC, 5 to 10% of the pool")]
+        JV[("Jackpot vault<br/>the Prize")]
+        Venue["Venue module<br/>pool PDA holds cTokens"]
+    end
+
+    Klend[("Kamino klend<br/>USDC reserve")]
+    Treasury[("Treasury<br/>multisig token account")]
+    Buyback[("Buyback reserve<br/>multisig token account")]
+
+    User -- "deposit" --> PV
+    PV -- "request_withdraw: pending deposit, now" --> User
+    PV -- "process_withdraw: the rest, after the next epoch starts" --> User
+    PV -- "emergency_withdraw, shut down only" --> User
+
+    PV -- "deploy_to_venue: idle above the target" --> Venue
+    Venue -- "recall: idle under the floor" --> PV
+    Venue -- "redeem inside request_withdraw, when idle is short" --> PV
+    Venue <--> Klend
+
+    Venue -- "harvest: fee owed + prize owed" --> PV
+    PV -- "harvest: Yield fee" --> Treasury
+    PV -- "harvest: prize share" --> JV
+
+    User -- "buy_tickets" --> JV
+    Funder -- "fund_jackpot" --> JV
+    Funder -- "cover_deficit, after a venue loss" --> PV
+
+    JV -- "payout, a Player wins: compounds into Principal" --> PV
+    JV -- "payout, House wins: 50%" --> Buyback
+    JV -- "payout, House wins: 20%, 30% stays" --> Treasury
+    JV -- "sweep_house: surplus over jackpot_reserved, shut down only" --> Treasury
+```
+
+What the picture cannot show:
+
+- **Depositor yield never moves as its own transfer.** It stays in the venue and is credited
+  through `Pool.yield_index`. A Player's share lands in their `principal` the next time any
+  instruction touches them (settle). It leaves as USDC only inside a withdrawal.
+- **Harvest is one instruction.** It redeems the fee owed plus the prize share owed from the
+  venue into the principal vault and pays both out in the same transaction, so nothing rests
+  in the vault between the two hops.
+- **A Player's prize compounds.** `payout` moves the jackpot into the principal vault and adds
+  it to the winner's `principal` and Tickets at once. Nothing is sent to the winner's wallet.
+- **Deposit sends nothing back.** Tickets are a number on the `Player`, not a token (ADR 0001).
+- **The game moves no USDC.** Rounds move Tickets between Players and the House only.
+
+### How a venue gain is split
+
+Every instruction that touches money runs `sync` first. Sync values the cTokens at the
+reserve's exchange rate and compares that with `Pool.venue_value` from the last sync.
+
+```mermaid
+flowchart LR
+    Gain["Venue gain since the last sync"] --> Deficit{"Deficit recorded?"}
+    Deficit -- "yes: repay it first" --> Rest["What is left"]
+    Deficit -- "no" --> Rest
+    Rest -- "yield_fee_bps, default 10%, cap 20%" --> Fee["fee_owed, to the Treasury at harvest"]
+    Rest -- "up to base_rate_bps APR on total_principal" --> Dep["yield_owed, to depositors through yield_index"]
+    Rest -- "anything above that ceiling" --> Prize["prize_owed, to the jackpot vault at harvest"]
+```
+
+The depositor rate is variable with a ceiling. Depositors get what the venue paid after the
+fee, up to `base_rate_bps` as an APR. Whatever the venue pays above the ceiling is the prize.
+When the venue pays less than the ceiling the prize share is zero and the jackpot grows only
+from `buy_tickets`, `fund_jackpot` and the 30% a House win leaves behind.
+
+A fall in venue value past `loss_tolerance_bps` (1 bps) is a venue loss. `prize_owed` absorbs it
+first, then `fee_owed`, and what is left becomes `Pool.deficit` with `impaired = true`. While
+impaired, deploy, harvest and `deposit` are refused and every exit pays the Haircut,
+`amount x (vault + venue value - owed amounts) / total_principal`. `process_withdraw` and
+`emergency_withdraw` then need the owner's signature, so a stranger or the Operator's crank
+cannot realise a Haircut for someone who would rather wait. The Operator skips its withdrawal
+crank while the pool is impaired. `request_withdraw`, `recall` and `cover_deficit` still work,
+and a Prize paid while impaired still compounds. A later gain or `cover_deficit` repays the
+deficit and clears the flag (ADR 0021).
+
+### Idle band and deploy caps
+
+| Rule | Default | Bound | Where |
+| --- | --- | --- | --- |
+| Free idle = vault balance minus `pending_withdrawals` | | | `deploy_to_venue`, `recall`, `request_withdraw` |
+| Recall is allowed while free idle is under the target, and may not overshoot it | 10% | | `recall` |
+| The Operator recalls only once free idle is under the floor | 5% | floor <= target | `apps/backend/src/operator/venue.ts` |
+| Deploy only what sits above the target | 10% | target <= 50% | `deploy_to_venue` |
+| Pool's share of the reserve's supply | 5% | <= 20% | `check_deploy_caps` |
+| Free liquidity the reserve keeps after a deploy | 2x our position | 1x to 6x | `check_deploy_caps` |
+| Smallest deploy or recall | 100 USDC | <= 10,000 USDC | `min_venue_move` |
+
+`deploy_to_venue`, `recall` and `harvest` take no privileged signer. The program enforces the
+band and the caps, so the Operator runs them as a convenience and anyone else could.
+`set_deploy_pause` stops deploys (Admin or Operator sets it, only the Admin clears it).
+
+### The solvency invariant
+
+After every instruction, within rounding dust:
+
+```
+vault balance + venue value >= total_principal + yield_owed + fee_owed + prize_owed - deficit
+```
+
+`pending_withdrawals` is not a term. A queued withdrawal stays inside `total_principal` until
+it pays, so the queue is a reservation of idle USDC and not a second claim. `/status` reports
+the margin as `solvencyMargin` and alerts when it goes negative.
+
+## Tickets, deposits and withdrawals
+
+USDC a Player holds at the start of an epoch is their Tickets for that epoch (ADR 0020).
+
+```mermaid
+sequenceDiagram
+    participant U as Depositor
+    participant P as hex_vault
+    Note over P: Epoch N
+    U->>P: deposit 100
+    Note over P: principal +100, pending_deposit +100, Tickets unchanged
+    U->>P: request_withdraw 30
+    P-->>U: 30 USDC now (it never held a Ticket)
+    Note over P: begin_epoch, Epoch N+1
+    Note over P: first touch: Tickets = principal = 70, pending_deposit = 0
+    U->>P: request_withdraw 70
+    Note over P: pending_withdraw = 70. Still in the draw, the game and the yield
+    Note over P: begin_epoch, Epoch N+2
+    P-->>U: process_withdraw pays 70. Yield earned meanwhile stays as Principal
+```
+
+- **Principal** earns Tickets from the epoch after the deposit. Settled yield, Bought tickets,
+  Granted tickets, round rewards and the Prize credit Tickets at once.
+- **`request_withdraw(amount)`** is the only exit. The part up to `pending_deposit` refunds in
+  the same transaction, redeeming from the venue if free idle is short. The rest queues and
+  matures when `current_epoch_id` passes the request's epoch, or after `epoch_seconds` if the
+  Operator stops calling `begin_epoch`.
+- **`process_withdraw`** is permissionless and pays to the owner's own token account. It
+  lowers Principal, and Tickets with a floor at zero, so a Player who lost Tickets in the game
+  still gets every unit of Principal.
+- **`touch`** is the lazy reset. The first time anything touches a Player in a later epoch,
+  Tickets are set to Principal. Nothing sweeps Players at the boundary.
+
+### The Weight tree
+
+The draw selects over a Fenwick tree in one zero-copy account (`weight.rs`, `weight_tree.rs`).
+Each Player owns one Leaf, appended on their first deposit, and the depositor pays its rent.
+The House owns Leaf 1. A node is 56 bytes: `principal_sum` plus two epoch-parity slots, each a
+stamp, a base and a Ticket count. A write in epoch `e` uses slot `e % 2`, so the epoch that
+just ended stays readable until `begin_epoch` runs a second time. A Player who never acts needs
+no transaction: a read for epoch `p` takes the slot stamped `p`, else the base of the slot
+stamped `p + 1`, else the live `principal_sum`. The account tops out at 10 MiB,
+about 187,000 Leaves.
 
 ## Accounts and PDAs
 
@@ -53,93 +219,58 @@ All seeds are declared in `programs/hex_vault/src/constants.rs`. `pool_id`, `epo
 | Principal vault (token account) | `["principal", pool]` | `create_pool` |
 | Jackpot vault (token account) | `["jackpot", pool]` | `create_pool` |
 | `Player` (including the House) | `["player", pool, owner]` | `deposit` (`init_if_needed`); the House's own `Player` is created by `create_pool` with `params.operator` as `owner` |
+| `WeightTree` | none, a keypair account | a `system_program::create_account` in the `create_pool` transaction, then grown one node per first deposit |
 | `Epoch` | `["epoch", pool, epoch_id]` | `begin_epoch` |
 | `Round` | `["round", pool, round_id]` | `create_round` |
 | `Position` | `["position", round, owner]` | `buy_position` |
 
-`treasury` and `buyback_reserve` are plain token accounts passed into `create_pool`, not PDAs.
-On mainnet they are the admin multisig's own associated token accounts.
+`treasury` and `buyback_reserve` are plain token accounts passed into `create_pool` and changed
+by `set_treasury_accounts`. On mainnet they are the admin multisig's own associated token
+accounts. `klend_program`, `klend_market`, `klend_reserve` and `klend_ctoken` (the pool's cToken
+account) are pinned at `create_pool`, and every instruction that syncs checks the accounts it
+was handed against them.
 
-`Pool`, `Epoch` and `Player` each carry a `version: u8` and a `_reserved` byte array so a future
-field can land without changing any account's size (ADR 0013). `Round` and `Position` have no
-padding: they are short-lived and reclaimed by `close_round` / `settle_position`.
+`Pool`, `Player`, `Round` and `Position` are layout version 2 with their own discriminators
+(`HVPool02` and so on), so a version-1 account fails to load instead of being misread. Each
+carries a `version: u8` and a `_reserved` byte array for append-only growth (ADR 0013).
 
 ## Roles
 
-Signer is the account named `Signer<'info>` in the instruction's `Accounts` struct. "Anyone"
-means the instruction takes no signer for that role at all: the outcome is pinned to a specific
-account by seeds or an `address` constraint, so nobody can steer it by simply being the one who
-sends the transaction.
+"Anyone" means the instruction checks no role. Where the table says so there may still be a
+fee-paying signer, but the outcome is pinned by seeds or an `address` constraint, so nobody can
+steer it by being the one who sends the transaction.
 
 | Instruction | Who signs | Notes |
 | --- | --- | --- |
-| `create_pool` | payer | Bootstrap only, one time per pool |
-| `set_params` | admin | |
-| `set_pause(true)` | admin or operator | |
-| `set_pause(false)` | admin only | Refused while shut down |
+| `create_pool` | payer | Bootstrap only, one time per pool. Game and jackpot start paused |
+| `set_params`, `set_venue_params`, `set_treasury_accounts` | admin | Venue params are bounded by program constants |
+| `set_pause(true)`, `set_feature_pause(.., true)`, `set_deploy_pause(true)` | admin or operator | |
+| `set_pause(false)`, `set_feature_pause(.., false)`, `set_deploy_pause(false)` | admin only | Unpause is refused while shut down |
+| `set_buy_tickets_pause` | admin | Both directions |
 | `shutdown` | admin | Irreversible |
-| `set_operator` | admin | |
-| `propose_admin` | admin | |
+| `set_operator`, `propose_admin` | admin | |
 | `accept_admin` | the proposed `pending_admin` | Two-step handover |
-| `deposit` | owner | |
-| `request_withdraw` | owner | |
-| `process_withdraw` | anyone | Destination is pinned to `player.owner` |
-| `emergency_withdraw` | anyone | Only valid while shut down; destination pinned to `player.owner`; House excluded |
+| `deposit` | owner | Refused while paused, shut down or impaired |
+| `request_withdraw` | owner | Allowed while paused and while shut down |
+| `process_withdraw` | anyone, or the owner while impaired | Destination is pinned to `player.owner`. Fails while the Player has a Position open |
+| `emergency_withdraw` | anyone, or the owner while impaired | Only valid while shut down; destination pinned to `player.owner`; House excluded |
 | `sweep_house` | admin | Only valid while shut down |
-| `buy_tickets` | owner | |
-| `grant_tickets` | admin or operator | Operator path is capped; admin path is not |
-| `begin_epoch` | operator | |
+| `buy_tickets` | owner | Capped per epoch at the Player's Principal |
+| `grant_tickets` | admin or operator | Operator path is capped per Player and pool-wide; admin path is not |
+| `deploy_to_venue`, `recall`, `harvest` | anyone | Bounded by the idle band and the deploy caps |
+| `cover_deficit` | anyone (payer) | Capped at the recorded deficit |
+| `begin_epoch`, `request_draw` | operator | |
 | `fund_jackpot` | anyone (source authority) | Permissionless top-up |
-| `draw` | operator | |
-| `payout` | anyone | Winner and destination are both fixed on chain |
-| `rollover_epoch` | operator | |
+| `draw` | anyone | Reads the fulfilled ORAO account pinned by the epoch's seed |
+| `payout` | anyone | Winner is checked against the tree, destinations are pinned on the Pool |
+| `rollover_epoch` | anyone | Only after the relevant timeout |
 | `create_round` | operator | |
-| `buy_position` | owner | |
+| `buy_position` | owner | Refused if the round would end after the epoch ends |
 | `request_round_randomness` | anyone (pays the ORAO fee) | |
-| `settle_round` | operator | |
+| `settle_round` | anyone | The House credit is pinned to `pool.operator`'s Player |
 | `settle_position` | anyone | Rent returns to the Position's own owner |
-| `void_round` | operator | |
+| `void_round` | anyone | Only after `vrf_timeout` |
 | `close_round` | anyone | Rent returns to `pool.operator`; refuses while any Position is open |
-
-The live-yield rewrite removes `admin_withdraw` and `fund_yield` (ADR 0017) and `register` and
-`close_registration` (ADR 0018), so they are gone from this table. Deploy,
-recall, Harvest, `cover_deficit` and the new Admin setters join it as their tickets in
-`docs/plan/yield-claimer/` land. The epoch lifecycle and backend jobs below follow ticket 13;
-the fund flow still draws the pre-rewrite program until the doc ticket redraws it.
-
-## Fund flow
-
-```mermaid
-flowchart TD
-    Owner(["Depositor"])
-    PV[("Principal vault")]
-    JV[("Jackpot vault")]
-    Admin(["Admin"])
-    Treasury[("Treasury")]
-    Buyback[("Buyback reserve")]
-    Funder(["Any funder"])
-
-    Owner -- "deposit" --> PV
-    PV -- "process_withdraw" --> Owner
-    PV -- "emergency_withdraw, shut down only" --> Owner
-    PV -- "admin_withdraw: pull principal out" --> Admin
-    Admin -- "return-principal: plain SPL transfer" --> PV
-    Funder -- "fund_yield: tops up yield_budget" --> PV
-    Funder -- "fund_jackpot" --> JV
-    Owner -- "buy_tickets" --> JV
-    JV -- "payout: player wins, compounds" --> PV
-    JV -- "payout: House wins, 50%" --> Buyback
-    JV -- "payout: House wins, 20%" --> Treasury
-    JV -- "sweep_house: surplus over jackpot_reserved, shut down only" --> Treasury
-    PV -- "sweep_house: unspent yield_budget, shut down only" --> Treasury
-```
-
-Base yield never moves USDC: `register` credits `yield_budget` straight into a player's
-`principal` inside the vault, so the credit is an accounting entry against money already there.
-A House win keeps 30% of the jackpot in the vault for the next epoch; that is why `sweep_house`
-sweeps `jackpot_vault.amount - pool.jackpot_reserved`, never the raw balance (see the finding in
-`docs/plan/ops-and-envs/issues/16-security-review-before-mainnet.md`, and ADR 0013 for the
-upgrade that carried the fix).
 
 ## Epoch lifecycle
 
@@ -148,7 +279,7 @@ stateDiagram-v2
     [*] --> Open
     Open --> Ended: begin_epoch opens the next epoch
     Ended --> Drawing: request_draw
-    Ended --> RolledOver: request_draw, no Weight or jackpot under min_jackpot
+    Ended --> RolledOver: request_draw, no Tickets or jackpot under min_jackpot
     Ended --> RolledOver: rollover_epoch, nobody sent it to the draw
     Drawing --> Drawn: draw, VRF fulfilled
     Drawing --> RolledOver: rollover_epoch, vrf_timeout elapsed
@@ -158,8 +289,11 @@ stateDiagram-v2
     RolledOver --> [*]
 ```
 
-`payout` is refused for anything but a `Drawn` epoch, and `shutdown` refuses `draw`, so an epoch
-that has not drawn yet can never be paid after shutdown; one already `Drawn` still can.
+`request_draw` snapshots two things: the tree's root for the ended epoch, and the jackpot vault
+balance minus `jackpot_reserved`. It then adds the snapshot to `jackpot_reserved`, so the next
+epoch cannot promise the same USDC. `payout` and `rollover_epoch` release it. `request_draw` is
+refused after `shutdown`, but `draw` and `payout` are not, so an epoch already Drawing still
+reaches its winner.
 
 ## Round lifecycle
 
@@ -176,8 +310,11 @@ stateDiagram-v2
     Closed --> [*]
 ```
 
-`settle_position` closes each `Position` and decrements `Round.open_positions`; `close_round`
-refuses while that counter is nonzero, then closes the `Round` and returns its rent to
+A stake leaves the Player's Tickets at `buy_position` and comes back with the reward at
+`settle_position`. Winners split the losers' pot minus `house_cut_bps`, a forfeited pot goes to
+the House, a void refunds. A round always ends inside its epoch. A settle that lands after the
+epoch rolled credits only the winner's share, because the reset already restored the stake.
+`close_round` refuses while `Round.open_positions` is nonzero, then returns the rent to
 `pool.operator`.
 
 ## Backend jobs and the indexer read model
@@ -202,25 +339,24 @@ step:
 11. Open the next `Round`, if a whole one still fits before the epoch ends.
 
 Steps 4 through 7 and 11 stop once `pool.shutdown` is true, mirroring which instructions the
-program itself refuses (`begin_epoch`, `request_draw`, `draw`, `create_round`); deploy stops too,
-while recall and harvest keep running. Steps 1 through 3, 8 and 10 keep running: settling,
-closing and sweeping an already-open `Round`, `payout` of an epoch already `Drawn`, and matured
-withdrawals are all still allowed post-shutdown (`docs/ops/funds.md` covers what to do about the
-ones that were not). Every operator transaction
-carries a priority fee: the 75th percentile of `getRecentPrioritizationFees` over the
-transaction's writable accounts, capped at `PRIORITY_FEE_MAX_MICROLAMPORTS` (default 50,000).
+program itself refuses (`begin_epoch`, `request_draw`, `create_round`); deploy stops too, while
+recall and harvest keep running. Steps 1 through 3, 8 and 10 keep running: settling, closing and
+sweeping an already-open `Round`, `payout` of an epoch already `Drawn`, and matured withdrawals
+are all still allowed post-shutdown (`docs/ops/funds.md` covers what to do about the ones that
+were not). Every operator transaction carries a priority fee: the 75th percentile of
+`getRecentPrioritizationFees` over the transaction's writable accounts, capped at
+`PRIORITY_FEE_MAX_MICROLAMPORTS` (default 50,000).
 
 The indexer (`apps/backend/src/indexer`) mirrors `Pool`, `Epoch`, `Round`, `Player` and
 `Position` accounts plus finalized events into Postgres (ADR 0008); it is the only read path the
 browser has; there is no chain fallback. A `Round` row keeps its last mirrored state after
 `close_round` closes the account on chain instead of being deleted. The indexer also tracks
-invite codes and redemptions, referral qualification, faucet claims and its own cursor. It
-indexes `Pool.shutdown` and `Pool.version`, and the `PoolShutdown`, `EmergencyWithdrawn`,
-`HouseSwept` and `RoundClosed` events.
+invite codes and redemptions, referral qualification, faucet claims and its own cursor.
 
-`GET /status` reports `shutdown` and `principalOut` (`total_principal + pending_withdrawals +
-yield_budget - vault.amount`, floored at 0). `GET /healthz` reports the operator's SOL balance
-and turns `degraded` below `OPERATOR_SOL_WARN` (default 0.5 SOL).
+`GET /status` reports the solvency margin, free idle against the band, the impaired and
+deploy-paused switches, the tree's used capacity and the count of pending deposits waiting to
+activate. `GET /healthz` reports the operator's SOL balance and turns `degraded` below
+`OPERATOR_SOL_WARN` (default 0.5 SOL).
 
 See [`docs/ops/deploy.md`](ops/deploy.md), [`docs/ops/funds.md`](ops/funds.md) and
 [`docs/ops/environments.md`](ops/environments.md) for running and operating this.

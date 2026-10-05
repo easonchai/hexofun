@@ -1,6 +1,6 @@
 # Depositors earn what the venue paid through a live Yield index, and withdraw at once
 
-Superseded in part by ADR 0020: the instant withdraw and its Tickets rule are removed; the Yield index, Idle band, deploy, recall, harvest and venue loss stand.
+Superseded in part by ADR 0020: the instant withdraw and its Tickets rule are removed; the Yield index, Idle band, deploy, recall, harvest and venue loss stand. Amended by ADR 0021: the Impaired rules for deposits and Haircut exits, and the solvency formula.
 
 Until now yield worked in three manual steps. The Admin pulled USDC out of the principal vault with
 `admin_withdraw` and lent it at Kamino off the program (ADR 0010). The Admin funded a Yield budget
@@ -59,10 +59,13 @@ restored later. Whatever is left is the deficit, and while it stands every withd
 Haircut of `principal × (vault balance + venue value − Pending − owed) ÷ total_principal`, rounded
 down, while Principal and Tickets fall by the full amount requested. A Haircut withdrawal realises
 the loss and takes no part in a later recovery. Harvest and deploy are refused while Impaired;
-deposit, both withdraw paths and recall still work. Impaired clears when later gains or the
+deposit, both withdraw paths and recall still work. Amended by ADR 0021: deposits are refused
+while Impaired, and a Haircut exit needs the owner's signature. Impaired clears when later gains or the
 permissionless `cover_deficit` bring the deficit to zero. One invariant ties it together and holds
 after every instruction: `vault balance + venue value ≥ total_principal + Pending withdrawals +
-yield owed + fee owed + prize share owed − recorded deficit`, within rounding dust.
+yield owed + fee owed + prize share owed − recorded deficit`, within rounding dust. Corrected by
+ADR 0020 and ADR 0021: the Pending withdrawals term is wrong, because a queued withdrawal stays
+inside `total_principal`. The Haircut formula above loses the same term.
 
 Each rejected option from the three superseded ADRs is reopened for a stated reason.
 
