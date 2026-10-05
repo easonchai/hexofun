@@ -601,6 +601,8 @@ describe("playerRow", () => {
     bonusGranted: new BN(0),
     yieldIndex: new BN(0),
     leafIndex: 0,
+    pendingDeposit: new BN(0),
+    pendingDepositEpoch: new BN(0),
     ...overrides,
   });
 
@@ -639,6 +641,15 @@ describe("playerRow", () => {
     expect(playerRow(player, POOL)).toMatchObject({
       yieldIndex: "18446744073709551617",
       leafIndex: 9,
+    });
+  });
+
+  // Ticket 20: the Read model folds the pending deposit by its epoch.
+  it("carries the pending deposit and the epoch it was made in", () => {
+    const player = decodedPlayer({ pendingDeposit: new BN(2_000_000), pendingDepositEpoch: new BN(4) });
+    expect(playerRow(player, POOL)).toMatchObject({
+      pendingDeposit: 2_000_000n,
+      pendingDepositEpoch: 4n,
     });
   });
 });

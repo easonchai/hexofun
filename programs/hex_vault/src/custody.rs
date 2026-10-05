@@ -534,16 +534,19 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         .principal
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    player.entries = player
-        .entries
+    // The deposit earns no Ticket in this epoch (ADR 0020): Tickets stay as
+    // they are and the tree gets a Principal delta only. The next epoch's reset
+    // folds it in, on a touch or lazily from the tree's `principal_sum`.
+    player.pending_deposit = player
+        .pending_deposit
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    player.pending_deposit_epoch = pool.current_epoch_id;
     pool.total_principal = pool
         .total_principal
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     change.principal(i128::from(amount))?;
-    change.tickets(i128::from(amount))?;
     weight::apply(&a.weight_tree, pool, player, change)?;
 
     emit!(Deposited {
@@ -596,6 +599,9 @@ pub fn request_withdraw<'info>(
         .principal
         .checked_sub(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    // A pending deposit is part of Principal, so it cannot outlast it. Ticket 22
+    // splits the amount, pending part first.
+    player.pending_deposit = player.pending_deposit.min(player.principal);
     // No `entries >= amount` rule: the payout lands after the boundary where
     // Entries would have reset to Principal anyway, so a player who lost
     // every Entry in rounds is not locked out for an extra epoch. Entries
@@ -807,6 +813,9 @@ pub fn instant_withdraw<'info>(
         .entries
         .checked_sub(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    // Pending is part of Principal, so it cannot outlast it. Ticket 22 removes
+    // this instruction.
+    a.player.pending_deposit = a.player.pending_deposit.min(a.player.principal);
     a.pool.total_principal = a
         .pool
         .total_principal
@@ -1334,6 +1343,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
     weight::apply(&a.weight_tree, pool, player, change)?;
     player.principal = 0;
     player.entries = 0;
+    player.pending_deposit = 0;
     player.pending_withdraw = 0;
     pool.total_principal = pool
         .total_principal

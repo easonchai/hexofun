@@ -18,6 +18,7 @@ import {
   epochPda,
   fetchTree,
   findEvent,
+  grantTicketsAsAdmin,
   fulfillRandomness,
   onChainNowSeconds,
   playerPda,
@@ -56,7 +57,17 @@ const fetchPlayer = (ctx: PoolCtx, owner: Wallet) =>
 const balance = async (account: PublicKey): Promise<bigint> =>
   BigInt((await provider.connection.getTokenAccountBalance(account)).value.amount);
 
+// A deposit earns no Ticket until the next epoch (ADR 0020), and an instant
+// withdraw needs Tickets of at least the amount, so `deposit` has the Admin
+// grant the Tickets a player would hold from yesterday. `depositOnly` is the
+// bare instruction. Ticket 22 removes the instant withdraw and this suite.
 async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
+  const signature = await depositOnly(ctx, owner, amount);
+  await grantTicketsAsAdmin(ctx, owner.keypair.publicKey, amount);
+  return signature;
+}
+
+async function depositOnly(ctx: PoolCtx, owner: Wallet, amount: bigint) {
   const signature = await program.methods
     .deposit(new BN(amount.toString()))
     .accountsPartial({
@@ -435,12 +446,15 @@ describe("instant withdraw", () => {
       await instantWithdraw(ctx, a, 4n * USDC);
       await refused(ctx, instantMethod(ctx, a, 1n * USDC).rpc(), /InsufficientTickets/);
 
-      // Depositing the 4 back gives 4 fresh Tickets, so A holds 4 against the
-      // 5 it held before the round: never more.
-      await deposit(ctx, a, 4n * USDC);
+      // Depositing the 4 back gives no Ticket today (it is pending until the
+      // next epoch), so A holds none against the 4 it just took out.
+      await depositOnly(ctx, a, 4n * USDC);
       const again = await fetchPlayer(ctx, a);
       expect(big(again.principal)).toBe(5n * USDC);
-      expect(big(again.entries)).toBe(4n * USDC);
+      expect(big(again.entries)).toBe(0n);
+      // The first deposit's pending amount is still there, clamped to what
+      // Principal the instant exit left (1), plus these 4.
+      expect(big(again.pendingDeposit)).toBe(5n * USDC);
 
       // The queued request still takes the Principal that has no Ticket.
       await requestWithdraw(ctx, a, 1n * USDC);

@@ -11,7 +11,11 @@ const player = (overrides: Partial<PlayerDto> = {}): PlayerDto => ({
   isHouse: false,
   pendingWithdraw: "0",
   pendingEpoch: "0",
+  pendingDeposit: "0",
+  pendingDepositEpoch: "0",
   weight: "1000",
+  pendingTickets: "0",
+  pendingActivatesEpoch: null,
   odds: "50.00",
   ...overrides,
 });

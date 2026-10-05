@@ -22,10 +22,12 @@ import { prefixWeights, readNodes } from "../operator/weight-tree";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeReserve,
+  effectiveTickets,
   estimatedRateBps,
   freeIdle,
   haircutFactor,
   instantWithdrawCoverable,
+  pendingTickets,
   solvencyMargin,
   supplyRateBps,
   trailingRate,
@@ -128,11 +130,12 @@ export function oddsPercent(weight: bigint, total: bigint): string {
 
 interface LiveWeight {
   player: Player;
-  /** The Player's Weight in the current epoch, read from the Weight tree.
-   *  Every Ticket change credits the rest of the epoch up front, so this is
-   *  already what the draw will use unless the Player acts again. Null when
-   *  the tree could not be read. */
-  weight: bigint | null;
+  /** The Player's Tickets in the current epoch, with the lazy reset and the
+   *  pending fold applied (`effectiveTickets`): exactly what the draw counts
+   *  for them. */
+  weight: bigint;
+  /** Principal that earns no Ticket until the next epoch. */
+  pending: bigint;
 }
 
 interface RpcHealth {
@@ -565,13 +568,13 @@ export class ApiService {
       this.chain.priorityFeeMicroLamports(hotWritableAccounts),
     ]);
 
-    // Ticket 05: no Epoch yet means no Weight has ever started accruing, so
-    // the Player's Weight is 0 rather than undefined.
+    // Ticket 05: no Epoch yet means the draw has no Tickets at all, so the
+    // total is 0 and the tree is not read.
     const { weights, total } =
       player === null
         ? { weights: [], total: 0n }
         : epoch === null
-          ? { weights: [{ player, weight: 0n }], total: 0n }
+          ? { weights: weightsFrom([player], pool.currentEpochId), total: 0n }
           : await this.weightsFor(pool, [player], epoch);
     const mine = weights[0];
 
@@ -617,8 +620,7 @@ export class ApiService {
         // returned, which is not guaranteed stable across requests. House
         // always sorts last among ties; real players break ties by owner
         // so the order is deterministic and the test is stable.
-        const [aw, bw] = [a.weight ?? 0n, b.weight ?? 0n];
-        if (bw !== aw) return bw > aw ? 1 : -1;
+        if (b.weight !== a.weight) return b.weight > a.weight ? 1 : -1;
         if (a.player.isHouse !== b.player.isHouse) return a.player.isHouse ? 1 : -1;
         return a.player.owner < b.player.owner ? -1 : a.player.owner > b.player.owner ? 1 : 0;
       })
@@ -788,12 +790,15 @@ export class ApiService {
   }
 
   /**
-   * `players`' Weight in the current epoch, read from the Weight tree, and
-   * the tree's root. `epoch` is the current Epoch when the caller has it.
+   * `players`' Tickets in the current epoch, from their rows, and the draw's
+   * total, the Weight tree's root. The two sides come from different places on
+   * purpose: the root is what the draw selects over, and a Player's share of it
+   * is their Tickets over it. `epoch` is the current Epoch when the caller has
+   * it.
    *
-   * ponytail: the whole tree account per call, cached for
+   * ponytail: the whole tree account per call for the root, cached for
    * `TREE_TTL_MS`, parsed in memory. 56 bytes a Player, so a few thousand
-   * Players is a couple hundred KB; read the leaf's O(log n) nodes with
+   * Players is a couple hundred KB; read the root's O(log n) nodes with
    * `dataSlice` once that matters.
    */
   private async weightsFor(
@@ -812,8 +817,11 @@ export class ApiService {
       );
     }
     const data = await this.cachedTree(pool.weightTree);
-    if (data === null) return weightsFrom(players, null);
-    return weightsFrom(players, prefixWeights(readNodes(data), current.id));
+    const prefix = data === null ? null : prefixWeights(readNodes(data), current.id);
+    return {
+      weights: weightsFrom(players, pool.currentEpochId),
+      total: prefix === null ? null : (prefix[prefix.length - 1] as bigint),
+    };
   }
 
   /** The tree account, or null when the read failed (logged), so Weight and
@@ -1099,36 +1107,29 @@ function statusFrom(
   };
 }
 
-/** Each player's Weight in the epoch `prefix` was read for, and the root.
- *  `prefix` is `prefixWeights`' output; null (tree unreadable) makes every
- *  Weight and the total null. A Player with no leaf yet reads 0. */
-function weightsFrom(
-  players: readonly Player[],
-  prefix: readonly bigint[] | null,
-): { weights: LiveWeight[]; total: bigint | null } {
-  const leaf = (index: number): bigint =>
-    prefix === null || index < 1 || index >= prefix.length
-      ? 0n
-      : (prefix[index] as bigint) - (prefix[index - 1] as bigint);
-  return {
-    weights: players.map((player) => ({
-      player,
-      weight: prefix === null ? null : leaf(player.leafIndex),
-    })),
-    total: prefix === null ? null : (prefix[prefix.length - 1] as bigint),
-  };
+/** Each player's Tickets and pending deposit in the epoch `currentEpochId`. */
+function weightsFrom(players: readonly Player[], currentEpochId: bigint): LiveWeight[] {
+  return players.map((player) => ({
+    player,
+    weight: effectiveTickets(player, currentEpochId),
+    pending: pendingTickets(player, currentEpochId),
+  }));
 }
 
 /** `oddsPercent`, or null while the tree is unreadable. */
-function oddsOf(weight: bigint | null, total: bigint | null): string | null {
-  return weight === null || total === null ? null : oddsPercent(weight, total);
+function oddsOf(weight: bigint, total: bigint | null): string | null {
+  return total === null ? null : oddsPercent(weight, total);
 }
 
-/** A weighted entry as `/players/:owner` and `/state` return it. */
+/** A weighted entry as `/players/:owner` and `/state` return it. `weight` is
+ *  the Player's active Tickets, `pendingTickets` the Principal that starts
+ *  earning them in `pendingActivatesEpoch` (null when nothing is pending). */
 function playerDto(entry: LiveWeight, total: bigint | null) {
   return {
     ...entry.player,
     weight: entry.weight,
+    pendingTickets: entry.pending,
+    pendingActivatesEpoch: entry.pending > 0n ? entry.player.pendingDepositEpoch + 1n : null,
     odds: oddsOf(entry.weight, total),
   };
 }

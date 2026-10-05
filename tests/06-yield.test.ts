@@ -34,6 +34,7 @@ import {
   sleepUntilOnChain,
   stubVenueValue,
   testSyncMethod,
+  ticketsOf,
   waitPastLastSync,
   type PoolCtx,
 } from "./helpers/hx.js";
@@ -162,7 +163,9 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       await deposit(ctx, b, 1_000_000n);
       player = await fetchPlayer(ctx, b);
       expect(big(player.principal)).toBe(MILLION + 1_000_000n);
-      expect(big(player.entries)).toBe(MILLION + 1_000_000n);
+      // Both deposits are still pending: no Tickets until the next epoch.
+      expect(big(player.entries)).toBe(0n);
+      expect(big(player.pendingDeposit)).toBe(MILLION + 1_000_000n);
       expect(big((await fetchPool(ctx)).yieldOwed)).toBe(depositor);
 
       // A settles all of it.
@@ -222,6 +225,10 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
   it(
     "settled yield lands in Principal, total Principal and Tickets, and leaves the Pool's total claims unchanged",
     async () => {
+      // A's whole million is a pending deposit, so it holds no Ticket at all.
+      // The yield it earns still credits live Tickets (ADR 0020, accepted
+      // drift): 16,200 here, because a few seconds earn 1.62% on this
+      // fixture. At a real rate it is cents a day.
       const { ctx, a, gain } = await earningPool();
       const owed = depositorShare(gain); // A is the only holder: all of it
 
@@ -237,7 +244,12 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       const after = await fetchPool(ctx);
       const playerAfter = await fetchPlayer(ctx, a);
       expect(big(playerAfter.principal)).toBe(MILLION + owed - 1n);
-      expect(big(playerAfter.entries)).toBe(MILLION + owed - 1n);
+      expect(owed).toBe(16_200n);
+      expect(big(playerAfter.entries)).toBe(owed - 1n);
+      expect(big(playerAfter.pendingDeposit)).toBe(MILLION);
+      // The tree agrees: the settled yield is in this epoch's Tickets, and the
+      // pending million is not.
+      expect(await ticketsOf(ctx, a.keypair.publicKey, 0n)).toBe(owed - 1n);
       expect(big(playerAfter.pendingWithdraw)).toBe(1n);
       expect(big(after.totalPrincipal)).toBe(MILLION + owed - 1n);
       expect(big(after.yieldOwed)).toBe(0n);
@@ -308,7 +320,8 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       let player = await fetchPlayer(ctx, c);
       expect(owedFor(1_000_000n, big(pool.yieldIndex) - startIndex)).toBe(0n);
       expect(big(player.principal)).toBe(999_999n);
-      expect(big(player.entries)).toBe(999_999n);
+      expect(big(player.entries)).toBe(0n); // the deposit is still pending
+      expect(big(player.pendingDeposit)).toBe(999_999n);
       expect(big(player.yieldIndex)).toBe(startIndex);
 
       // Let the rise add up past one unit (999,999 units at 100% APR earn 1
@@ -425,7 +438,7 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
   );
 
   it(
-    "after an epoch boundary, touch resets Tickets to Principal and the settled yield joins both",
+    "after an epoch boundary, touch folds the pending deposit into Tickets and the settled yield joins both",
     async () => {
       const ctx = await newPool({ epochSeconds: 5 });
       const a = await ctx.fundedWallet(MILLION * 2n);
@@ -440,7 +453,10 @@ describe("settle through deposit, request withdraw and emergency withdraw", () =
       const player = await fetchPlayer(ctx, a);
       expect(big(player.epochId)).toBe(2n);
       expect(big(player.principal)).toBe(MILLION + owed + 1_000_000n);
-      expect(big(player.entries)).toBe(big(player.principal));
+      // The first million folded in at the touch and the yield joined it. The
+      // second deposit is pending until epoch 3.
+      expect(big(player.entries)).toBe(MILLION + owed);
+      expect(big(player.pendingDeposit)).toBe(1_000_000n);
     },
     TIMEOUT,
   );

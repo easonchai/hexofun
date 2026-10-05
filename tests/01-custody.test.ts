@@ -177,16 +177,21 @@ async function shutdown(pool: PoolCtx) {
 
 describe("custody", () => {
   it(
-    "deposit mints equal principal and entries",
+    "deposit raises principal and the pending deposit, and no Tickets",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
 
       await deposit(pool, owner, 4_000_000n);
+      await deposit(pool, owner, 1_000_000n);
 
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      expect(player.principal.toString()).toBe("4000000");
-      expect(player.entries.toString()).toBe("4000000");
+      // Principal includes the pending amount, which earns Tickets from the
+      // next epoch (ADR 0020). Epoch 0 has not ended, so it is still pending.
+      expect(player.principal.toString()).toBe("5000000");
+      expect(player.entries.toString()).toBe("0");
+      expect(player.pendingDeposit.toString()).toBe("5000000");
+      expect(player.pendingDepositEpoch.toString()).toBe("0");
     },
     TIMEOUT,
   );

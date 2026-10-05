@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { decodeErrorCode, decodeSendFailure, thrownCode } from "./playerErrors.js";
 import {
   afterHaircut,
-  effectiveTickets,
   INSUFFICIENT_TICKETS_CODE,
   instantLimit,
   offersQueue,
@@ -67,12 +66,6 @@ describe("Tickets rule", () => {
   it("limits an instant withdrawal to the smaller of Principal and Tickets", () => {
     expect(instantLimit(500n, 400n)).toBe(400n);
     expect(instantLimit(400n, 500n)).toBe(400n);
-  });
-
-  it("reads Tickets as Principal once the Player's epoch is stale", () => {
-    expect(effectiveTickets(500n, 100n, 3n, 4n)).toBe(500n);
-    expect(effectiveTickets(500n, 100n, 4n, 4n)).toBe(100n);
-    expect(effectiveTickets(500n, 100n, 4n, null)).toBe(100n);
   });
 });
 

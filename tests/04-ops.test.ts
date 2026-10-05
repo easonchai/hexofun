@@ -14,6 +14,7 @@ import {
   epochPda,
   findEvent,
   fulfillRandomness,
+  grantTicketsAsAdmin,
   onChainNowSeconds,
   playerPda,
   positionPda,
@@ -745,6 +746,8 @@ describe("close_round", () => {
       const pool = await setupPool({ roundSeconds: 4, closeBuffer: 1 });
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 5_000_000n);
+      // The deposit holds no Ticket until the next epoch (ADR 0020).
+      await grantTicketsAsAdmin(pool, owner.keypair.publicKey, 5_000_000n);
 
       const roundId = 1n;
       const startsAt = await onChainNowSeconds();

@@ -949,6 +949,23 @@ export async function ticketsOf(ctx: PoolCtx, owner: PublicKey, e: bigint): Prom
   return leafTickets(tree, e)[player.leafIndex - 1] as bigint;
 }
 
+/**
+ * `grant_tickets` signed by the pool's Admin: playable Tickets with no cap and
+ * no Principal behind them. A deposit earns no Ticket until the next epoch
+ * (ADR 0020), so a suite that needs Tickets on day one grants them.
+ */
+export function grantTicketsAsAdmin(ctx: PoolCtx, owner: PublicKey, amount: bigint) {
+  return program.methods
+    .grantTickets(new BN(amount.toString()))
+    .accountsPartial({
+      signer: ctx.admin.publicKey,
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, owner),
+    })
+    .signers([ctx.admin])
+    .rpc();
+}
+
 /** The owner of the leaf that holds epoch `e`'s drawn target. */
 export async function drawnWinner(
   ctx: PoolCtx,

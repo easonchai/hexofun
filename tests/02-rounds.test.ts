@@ -17,6 +17,7 @@ import {
   epochPda,
   fetchTree,
   fulfillRandomness,
+  grantTicketsAsAdmin,
   leafTickets,
   playerPda,
   positionPda,
@@ -58,12 +59,17 @@ function depositAccounts(pool: PoolCtx, owner: Wallet) {
   };
 }
 
+// A deposit earns no Ticket until the next epoch (ADR 0020), and every test
+// here stakes on the day it deposits, so the Admin grants the Tickets a player
+// needs. Principal and Tickets then match one for one, as they did before.
 async function deposit(pool: PoolCtx, owner: Wallet, amount: bigint) {
-  return program.methods
+  const signature = await program.methods
     .deposit(new BN(amount.toString()))
     .accountsPartial(depositAccounts(pool, owner))
     .signers([owner.keypair])
     .rpc();
+  await grantTicketsAsAdmin(pool, owner.keypair.publicKey, amount);
+  return signature;
 }
 
 async function setHouseCutBps(pool: PoolCtx, houseCutBps: number) {

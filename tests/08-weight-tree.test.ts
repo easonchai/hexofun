@@ -1,8 +1,9 @@
-// Fenwick weight tree (yield-claimer tickets 08 and 19, ADR 0018): a Player's
-// leaf grows with their first deposit, every Ticket change keeps the tree equal
-// to an eager count of each Player's Tickets, a deposit counts the same at the
-// first second and at the last of an epoch, and the draw's target lands in
-// exactly one leaf. The last test measures compute at 16,384 nodes.
+// Fenwick weight tree (yield-claimer tickets 08, 19 and 20, ADR 0018 and 0020):
+// a Player's leaf grows with their first deposit, every Ticket change keeps the
+// tree equal to an eager count of each Player's Tickets, a deposit counts from
+// the next epoch whether it lands at the first second of an epoch or the last,
+// and the draw's target lands in exactly one leaf. The last test measures
+// compute at 16,384 nodes.
 //
 // Epochs here run a few tens of seconds so a test can live through two or
 // three of them against a real localnet validator.
@@ -18,6 +19,7 @@ import {
   fetchTree,
   findEvent,
   fulfillRandomness,
+  grantTicketsAsAdmin,
   leafTickets,
   onChainNowSeconds,
   playerPda,
@@ -266,6 +268,8 @@ const big = (n: { toString(): string }): bigint => BigInt(n.toString());
 class Eager {
   principal = 0n;
   entries = 0n;
+  /** The part of `principal` deposited in `epochId`: no Tickets until the next epoch. */
+  pending = 0n;
   epochId: bigint;
   frozenTickets = 0n;
   frozenEpoch = 0n;
@@ -283,7 +287,21 @@ class Eager {
     this.frozenTickets = this.epochId === previous ? this.entries : this.principal;
     this.frozenEpoch = previous;
     this.entries = this.principal;
+    this.pending = 0n;
     this.epochId = c.current;
+  }
+
+  /** `deposit`: Principal and the pending amount rise, Tickets do not. */
+  deposit(amount: bigint): void {
+    this.principal += amount;
+    this.pending += amount;
+  }
+
+  /** What `request_withdraw` does to the balances, Tickets saturating. */
+  withdraw(amount: bigint): void {
+    this.principal -= amount;
+    this.entries = this.entries > amount ? this.entries - amount : 0n;
+    if (this.pending > this.principal) this.pending = this.principal;
   }
 
   /** Tickets held at the end of epoch `e`. */
@@ -408,9 +426,7 @@ describe("weight tree", () => {
 
       // Epoch 0: `a` deposits before the first epoch begins.
       await deposit(pool, wallets.a, 5_000_000n);
-      const ma0 = await join("a");
-      ma0.principal += 5_000_000n;
-      ma0.entries += 5_000_000n;
+      (await join("a")).deposit(5_000_000n);
       await check("a deposits before epoch 1");
 
       await beginEpoch(pool, 0n); // epoch 1
@@ -421,8 +437,7 @@ describe("weight tree", () => {
         await deposit(pool, wallets[name], amount);
         const m = await join(name);
         m.touch(await clock());
-        m.principal += amount;
-        m.entries += amount;
+        m.deposit(amount);
         await check(`${name} deposits`);
       }
       await buyTickets(pool, wallets.b, 1_000_000n);
@@ -432,6 +447,11 @@ describe("weight tree", () => {
       await grantTickets(pool, owners.a, 2_000_000n);
       (await touched("a")).entries += 2_000_000n;
       await check("a is granted tickets");
+
+      // `c` holds no Ticket yet, so it buys some to stake.
+      await buyTickets(pool, wallets.c, 100_000n);
+      (await touched("c")).entries += 100_000n * BigInt(pool.ticketsPerUsdc);
+      await check("c buys tickets");
 
       // A round: three stakes, tile 0 wins, so `a` collects from the pot and
       // the House takes its cut.
@@ -461,9 +481,7 @@ describe("weight tree", () => {
       }
 
       await requestWithdraw(pool, wallets.c, 1_000_000n);
-      const mc = await touched("c");
-      mc.principal -= 1_000_000n;
-      mc.entries = mc.entries > 1_000_000n ? mc.entries - 1_000_000n : 0n;
+      (await touched("c")).withdraw(1_000_000n);
       await check("c requests a withdrawal");
 
       // Epoch 2: epoch 1 stays readable behind it.
@@ -471,15 +489,11 @@ describe("weight tree", () => {
       await check("epoch 2 begins");
 
       await deposit(pool, wallets.a, 1_000_000n);
-      const ma = await touched("a");
-      ma.principal += 1_000_000n;
-      ma.entries += 1_000_000n;
+      (await touched("a")).deposit(1_000_000n);
       await check("a deposits in epoch 2");
 
       await requestWithdraw(pool, wallets.b, 2_000_000n);
-      const mb = await touched("b");
-      mb.principal -= 2_000_000n;
-      mb.entries = mb.entries > 2_000_000n ? mb.entries - 2_000_000n : 0n;
+      (await touched("b")).withdraw(2_000_000n);
       await check("b requests a withdrawal in epoch 2");
 
       // Epoch 3: epoch 1 is gone, epoch 2 is the previous one, and `c`, idle
@@ -497,13 +511,16 @@ describe("weight tree", () => {
   );
 
   it(
-    "a deposit at the first second and one at the last second of an epoch show the same Tickets, and the ended epoch's root is the sum of every Player's",
+    "a deposit at the first second and one at the last second of an epoch earn the same Tickets for the next epoch, and the ended epoch's root is the sum of every Player's",
     async () => {
       const pool = await setupPool({ epochSeconds: 12 });
+      const anchor = await pool.fundedWallet(10_000_000n);
       const early = await pool.fundedWallet(10_000_000n);
       const late = await pool.fundedWallet(10_000_000n);
       const gap = await pool.fundedWallet(10_000_000n);
       const funder = await pool.fundedWallet(10_000_000n);
+      // Deposited before epoch 1 begins, so it is the one holder in epoch 1.
+      await deposit(pool, anchor, 6_000_000n);
       await beginEpoch(pool, 0n);
       await deposit(pool, early, 4_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
@@ -513,24 +530,30 @@ describe("weight tree", () => {
       await sleepUntilOnChain(endsAt - 1);
       await deposit(pool, late, 4_000_000n);
       const tickets = async (w: Wallet, e: bigint) => ticketsOf(pool, w.keypair.publicKey, e);
-      expect(await tickets(late, 1n)).toBe(4_000_000n);
-      expect(await tickets(late, 1n)).toBe(await tickets(early, 1n));
+      // Neither deposit holds a Ticket in epoch 1, whatever second it landed at.
+      expect(await tickets(early, 1n)).toBe(0n);
+      expect(await tickets(late, 1n)).toBe(0n);
+      expect(await tickets(anchor, 1n)).toBe(6_000_000n);
 
-      // Epoch 1 has ended and nobody has called begin_epoch yet. A change in
-      // that gap lands in the epoch still current, which is epoch 1.
+      // Epoch 1 has ended and nobody has called begin_epoch yet. A deposit in
+      // that gap is stamped with the epoch still current, so it is not
+      // backdated into epoch 1's draw either.
       await sleepUntilOnChain(endsAt + 1);
       await deposit(pool, gap, 5_000_000n);
-      expect(await tickets(gap, 1n)).toBe(5_000_000n);
+      expect(await tickets(gap, 1n)).toBe(0n);
 
       await beginEpoch(pool, 1n);
-      // Epoch 2 holds every Principal in full, deposited early or late.
+      // Epoch 2 holds every Principal in full, deposited early or late, and
+      // nobody touched an account to get there.
       expect(await tickets(early, 2n)).toBe(4_000_000n);
       expect(await tickets(late, 2n)).toBe(4_000_000n);
       expect(await tickets(gap, 2n)).toBe(5_000_000n);
+      expect(await tickets(anchor, 2n)).toBe(6_000_000n);
+      expect(big((await fetchPlayer(pool, early.keypair.publicKey)).entries)).toBe(0n);
 
       // The draw for epoch 1 snapshots what was there when it ended.
       await requestDrawMethod(pool, 1n).rpc();
-      expect(big((await fetchEpoch(pool, 1n)).registeredWeight)).toBe(13_000_000n);
+      expect(big((await fetchEpoch(pool, 1n)).registeredWeight)).toBe(6_000_000n);
     },
     TIMEOUT,
   );
@@ -590,6 +613,7 @@ describe("weight tree", () => {
       const pool = await setupPool({ roundSeconds: 5, closeBuffer: 1 });
       const a = await pool.fundedWallet(10_000_000n);
       await deposit(pool, a, 5_000_000n);
+      await grantTicketsAsAdmin(pool, a.keypair.publicKey, 5_000_000n);
       await createRound(pool, 0n, 1n, 5);
       await buyPosition(pool, a, 1n, 1n, 1_000_000n);
 

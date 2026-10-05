@@ -166,11 +166,20 @@ export interface PlayerDto {
   pendingWithdraw: string;
   /** Epoch the pending amount was requested in; it pays out after that one ends. */
   pendingEpoch: string;
-  /** The Player's Weight in the current epoch, read from the Weight tree.
-   *  Null while the backend cannot read the tree. */
-  weight: string | null;
-  /** Share of the epoch's weight as a percentage, two decimals: "12.34".
-   *  Null while the backend cannot read the tree. */
+  /** The Principal deposited in `pendingDepositEpoch`, which earns no Ticket
+   *  until the next epoch. Already inside `principal`. */
+  pendingDeposit: string;
+  pendingDepositEpoch: string;
+  /** The Player's active Tickets in the current epoch: what the draw counts.
+   *  Equal to `entries` unless a later epoch has begun since the Player last
+   *  acted, when the Player holds their whole Principal. */
+  weight: string;
+  /** `pendingDeposit` while its epoch is current, "0" once it has folded. */
+  pendingTickets: string;
+  /** The epoch `pendingTickets` start counting in; null with nothing pending. */
+  pendingActivatesEpoch: string | null;
+  /** Share of the draw's Tickets as a percentage, two decimals: "12.34".
+   *  Null while the backend cannot read the Weight tree's root. */
   odds: string | null;
 }
 

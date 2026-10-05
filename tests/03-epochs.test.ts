@@ -27,6 +27,7 @@ import {
   playerPda,
   positionPda,
   program,
+  grantTicketsAsAdmin,
   randomnessFor,
   randomnessForTarget,
   randomnessPda,
@@ -82,7 +83,18 @@ function depositAccounts(pool: PoolCtx, owner: Wallet) {
   };
 }
 
+// A deposit earns no Ticket until the next epoch (ADR 0020). Most tests here
+// are about the draw, the rounds and the withdrawal queue, and need the Tickets
+// a depositor holds from the day after, so `deposit` has the Admin grant them
+// at once. `depositOnly` is the bare instruction, and 11-next-epoch-tickets
+// holds the next-epoch rule itself.
 async function deposit(pool: PoolCtx, owner: Wallet, amount: bigint) {
+  const signature = await depositOnly(pool, owner, amount);
+  await grantTicketsAsAdmin(pool, owner.keypair.publicKey, amount);
+  return signature;
+}
+
+async function depositOnly(pool: PoolCtx, owner: Wallet, amount: bigint) {
   return program.methods
     .deposit(new BN(amount.toString()))
     .accountsPartial(depositAccounts(pool, owner))
@@ -445,7 +457,7 @@ async function fetchEpoch(pool: PoolCtx, epochId: bigint) {
 
 describe("epochs", () => {
   it(
-    "B depositing at half the epoch holds the same Tickets as A",
+    "B depositing at half the epoch holds the same Tickets as A, from the next epoch",
     async () => {
       const pool = await setupPool({ epochSeconds: 12 });
       // Wallet setup (airdrop, mint, ATA) is real wall-clock work; done
@@ -463,16 +475,18 @@ describe("epochs", () => {
       const endsAtSec = Number(epoch1Open.endsAt.toString());
       const midpointSec = Math.floor((startsAtSec + endsAtSec) / 2);
 
-      await deposit(pool, a, 5_000_000n);
+      await depositOnly(pool, a, 5_000_000n);
       await sleepUntilOnChain(midpointSec);
-      await deposit(pool, b, 5_000_000n);
+      await depositOnly(pool, b, 5_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
 
-      // The draw selects over Tickets held at the epoch's end, so the second
-      // a deposit lands in makes no difference.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(5_000_000n);
-      expect(await ticketsOf(pool, b.keypair.publicKey, 1n)).toBe(5_000_000n);
+      // Neither holds a Ticket in epoch 1, and both hold their whole deposit
+      // in epoch 2: the second a deposit lands in makes no difference.
+      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(0n);
+      expect(await ticketsOf(pool, b.keypair.publicKey, 1n)).toBe(0n);
+      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(5_000_000n);
+      expect(await ticketsOf(pool, b.keypair.publicKey, 2n)).toBe(5_000_000n);
     },
     TIMEOUT,
   );

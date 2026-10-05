@@ -231,7 +231,10 @@ export function App() {
   }, [engine.takeover]);
 
   const principal = player ? BigInt(player.principal) : 0n;
-  const entries = player ? BigInt(player.entries) : 0n;
+  // The read model's `weight` is the Player's Tickets today: `entries` with the
+  // lazy reset applied. The raw row still says 0 for yesterday's deposit until
+  // the Player's next transaction touches it, and today the draw counts it.
+  const entries = player ? BigInt(player.weight) : 0n;
   const pendingWithdraw = player ? BigInt(player.pendingWithdraw) : 0n;
   const pendingEpoch = player ? BigInt(player.pendingEpoch) : 0n;
   const fmt = useCallback((value: bigint) => formatAtomic2(value, DECIMALS), []);

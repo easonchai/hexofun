@@ -163,6 +163,10 @@ model Player {
   yieldIndex         Decimal @default(0) @db.Decimal(40, 0)
   /// This Player's leaf in the Weight tree, 1-based.
   leafIndex          Int     @default(0)
+  /// The part of principal deposited in pendingDepositEpoch, which earns no
+  /// Ticket until the next epoch. Already inside principal.
+  pendingDeposit      BigInt @default(0)
+  pendingDepositEpoch BigInt @default(0)
   /// The epoch boughtAmount is counted against.
   boughtEpoch        BigInt
   /// USDC spent in buy_tickets so far in boughtEpoch, capped at principal.

@@ -244,6 +244,10 @@ export interface DecodedPlayer {
   yieldIndex: BN;
   /** This Player's leaf in the Weight tree, 1-based. */
   leafIndex: number;
+  /** The part of `principal` deposited in `pendingDepositEpoch`. Its Tickets
+   *  count from the next epoch. */
+  pendingDeposit: BN;
+  pendingDepositEpoch: BN;
 }
 
 export interface DecodedPosition {
@@ -362,6 +366,8 @@ export function playerRow(player: DecodedPlayer, poolAddress: string): Prisma.Pl
     bonusGranted: big(player.bonusGranted),
     yieldIndex: player.yieldIndex.toString(),
     leafIndex: player.leafIndex,
+    pendingDeposit: big(player.pendingDeposit),
+    pendingDepositEpoch: big(player.pendingDepositEpoch),
   };
 }
 

@@ -15,6 +15,7 @@ import type { PoolLike } from "../apps/web/src/read.js";
 import {
   assertSolvent,
   deployToVenue,
+  grantTicketsAsAdmin,
   PROGRAM_ID,
   program,
   provider,
@@ -85,6 +86,9 @@ describe("web transactions on a local validator", () => {
       const pool = poolLike(ctx);
 
       expect(await webDeposit(web, signer, pool, 1_000n * USDC)).toMatchObject({ kind: "landed" });
+      // The deposit holds no Ticket until the next epoch (ADR 0020), and an
+      // instant withdraw needs Tickets of at least the amount.
+      await grantTicketsAsAdmin(ctx, owner.keypair.publicKey, 1_000n * USDC);
       await waitPastLastSync(ctx);
       await deployToVenue(ctx, 900n * USDC);
       expect(await balance(ctx.principalVault)).toBe(100n * USDC);
@@ -118,6 +122,7 @@ describe("web transactions on a local validator", () => {
       const signer = { publicKey: owner.keypair.publicKey };
       const pool = poolLike(ctx);
       expect(await webDeposit(web, signer, pool, 1_000n * USDC)).toMatchObject({ kind: "landed" });
+      await grantTicketsAsAdmin(ctx, owner.keypair.publicKey, 1_000n * USDC);
       await waitPastLastSync(ctx);
       await deployToVenue(ctx, 900n * USDC);
       // The venue triples on paper but its USDC stays at 900.

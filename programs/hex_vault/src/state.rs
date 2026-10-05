@@ -261,8 +261,8 @@ pub struct Player {
     /// Tickets: lottery weight units, moved between players by the game.
     pub entries: u64,
     /// The epoch `entries` belongs to. [`crate::touch::touch`] resets
-    /// `entries` to `principal` the first time the Player is touched in a
-    /// later epoch. The Weight tree holds range sums, not per-Player stamps,
+    /// `entries` to `principal` (pending deposit included) the first time the
+    /// Player is touched in a later epoch. The Weight tree holds range sums, not per-Player stamps,
     /// so this lazy reset still lives here (ticket 02's progress note).
     pub epoch_id: u64,
     pub is_house: bool,
@@ -300,10 +300,17 @@ pub struct Player {
     /// Set to [`LAYOUT_VERSION`] by `Player::init_if_fresh` and
     /// `create_pool`. See `Pool::version`.
     pub version: u8,
+    /// Principal deposited in `pending_deposit_epoch` that has earned no Ticket
+    /// yet. A sub-balance of `principal`, not an addition to it. [`crate::touch::touch`]
+    /// folds it into `entries` and zeroes it on the first touch in a later epoch
+    /// (ADR 0020).
+    pub pending_deposit: u64,
+    /// The epoch of the latest deposit. Its Tickets count from the next one.
+    pub pending_deposit_epoch: u64,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013. Smaller
     /// than `Pool`'s: Player rent is paid by the depositor.
-    pub _reserved: [u8; 64],
+    pub _reserved: [u8; 48],
 }
 
 /// A Player's single immutable placement in one round.
@@ -452,7 +459,9 @@ mod tests {
         assert_eq!(player(|p| p.yield_index = 1), 122);
         assert_eq!(player(|p| p.leaf_index = 1), 138);
         assert_eq!(player(|p| p.version = 1), 142);
-        assert_eq!(player(|p| p._reserved[0] = 1), 143);
+        assert_eq!(player(|p| p.pending_deposit = 1), 143);
+        assert_eq!(player(|p| p.pending_deposit_epoch = 1), 151);
+        assert_eq!(player(|p| p._reserved[0] = 1), 159);
 
         let round = |set: fn(&mut Round)| offset(Round::INIT_SPACE, set);
         assert_eq!(round(|r| r.open_positions = 1), 387);

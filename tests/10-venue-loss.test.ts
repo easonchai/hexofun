@@ -23,6 +23,7 @@ import {
   deployMethod,
   deployToVenue,
   findEvent,
+  grantTicketsAsAdmin,
   harvestMethod,
   playerPda,
   program,
@@ -72,6 +73,7 @@ async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
     })
     .signers([owner.keypair])
     .rpc();
+  await grantTicketsAsAdmin(ctx, owner.keypair.publicKey, amount);
   await assertSolvent(ctx);
   return signature;
 }

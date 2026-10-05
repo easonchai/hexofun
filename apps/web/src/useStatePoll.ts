@@ -34,9 +34,9 @@ export interface StatePollResult {
 
 /**
  * Only the parts a transaction moves. Chain time and the operator heartbeat
- * change on every poll by themselves, and so do the Player's Weight and odds,
- * which accrue with chain time: comparing those would call a deposit landed
- * one poll after it was sent, whatever the chain did.
+ * change on every poll by themselves, and so do the Player's odds, which move
+ * with every other Player's deposit: comparing those would call a deposit
+ * landed one poll after it was sent, whatever the chain did.
  *
  * Every write the UI can send has to land in here or `pending` never clears:
  * deposit and request_withdraw move `principal`, process_withdraw moves only

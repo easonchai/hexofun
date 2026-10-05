@@ -8,16 +8,19 @@
 //!
 //! The per-Player Weight accrual and the freeze that fed `register` were
 //! removed by the layout rewrite (yield-claimer ticket 04). The Fenwick tree
-//! keeps a Ticket count per epoch instead (tickets 08 and 19).
+//! keeps a Ticket count per epoch instead (tickets 08 and 19). A deposit leaves
+//! Tickets alone and the next epoch's reset picks it up (ticket 20).
 
 use crate::state::{Player, Pool};
 
 /// Resets `entries` to `principal` the first time `player` is touched in an
-/// epoch later than the one its Tickets belong to. A no-op within an epoch,
-/// and before the first epoch begins.
+/// epoch later than the one its Tickets belong to. Principal includes the
+/// pending deposit, so the reset folds it into Tickets and zeroes it (ADR
+/// 0020). A no-op within an epoch, and before the first epoch begins.
 pub fn touch(player: &mut Player, pool: &Pool) {
     if player.epoch_id < pool.current_epoch_id {
         player.entries = player.principal;
+        player.pending_deposit = 0;
         player.epoch_id = pool.current_epoch_id;
     }
 }
@@ -58,6 +61,17 @@ pub(crate) mod tests {
         let mut p = player(100, 300, 3);
         touch(&mut p, &pool_in(5));
         assert_eq!((p.entries, p.epoch_id), (100, 5));
+    }
+
+    #[test]
+    fn a_pending_deposit_folds_in_the_next_epoch_and_not_before() {
+        let mut p = player(300, 100, 3);
+        p.pending_deposit = 200;
+        p.pending_deposit_epoch = 3;
+        touch(&mut p, &pool_in(3));
+        assert_eq!((p.entries, p.pending_deposit), (100, 200));
+        touch(&mut p, &pool_in(4));
+        assert_eq!((p.entries, p.pending_deposit, p.principal), (300, 0, 300));
     }
 
     #[test]

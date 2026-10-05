@@ -284,14 +284,17 @@ mod tests {
     }
 
     /// A Player's Ticket fields, driven by a transcription of
-    /// `touch.rs::touch`: Tickets reset to Principal the first time the
-    /// Player acts in a later epoch. `frozen_*` remembers what the Player held
+    /// `touch.rs::touch`: Tickets reset to Principal, pending deposit
+    /// included, the first time the Player acts in a later epoch. `frozen_*` remembers what the Player held
     /// at the end of the epoch before the reset, which is what the tree must
     /// still report for it.
     #[derive(Clone, Debug, Default)]
     struct Eager {
         principal: u64,
         entries: u64,
+        /// The part of `principal` deposited in `epoch_id`, which earns no
+        /// Ticket until the next epoch.
+        pending: u64,
         epoch_id: u64,
         frozen_tickets: u64,
         frozen_epoch: u64,
@@ -321,7 +324,14 @@ mod tests {
             };
             self.frozen_epoch = previous;
             self.entries = self.principal;
+            self.pending = 0;
             self.epoch_id = clock.current;
+        }
+
+        /// `deposit`: Principal and the pending amount rise, Tickets do not.
+        fn deposit(&mut self, a: u64) {
+            self.principal += a;
+            self.pending += a;
         }
 
         /// Tickets held at the end of epoch `e`, which the tree must report.
@@ -364,6 +374,8 @@ mod tests {
         settled_stakes: u64,
         stale_stakes: u64,
         untouched_tree: u64,
+        deposits: u64,
+        pending_folds: u64,
     }
 
     /// One pool: the tree and the eager model side by side. Player `k` sits
@@ -448,6 +460,9 @@ mod tests {
         fn act<R>(&mut self, k: usize, op: impl FnOnce(&mut Eager, &mut Rng) -> R) -> R {
             let clock = self.clock;
             let p = &mut self.players[k];
+            if p.epoch_id < clock.current && p.pending > 0 {
+                self.cov.pending_folds += 1;
+            }
             p.touch(&clock);
             let (p0, t0) = (p.principal, p.entries);
             let out = op(p, &mut self.rng);
@@ -478,15 +493,15 @@ mod tests {
             match (roll, target) {
                 (0..=7, _) if self.players.len() < MAX_PLAYERS => {
                     let k = self.new_player();
-                    self.act(k, |p, rng| {
-                        let a = 1 + rng.below(MAX_AMOUNT);
-                        p.principal += a;
-                        p.entries += a;
-                    });
+                    self.act(k, |p, rng| p.deposit(1 + rng.below(MAX_AMOUNT)));
                 }
-                (8..=32, Some(k)) => self.act(k, |p, rng| {
-                    // A deposit, settled yield or a Prize: all add Principal
-                    // and Tickets one for one.
+                (8..=19, Some(k)) => {
+                    self.act(k, |p, rng| p.deposit(1 + rng.below(MAX_AMOUNT)));
+                    self.cov.deposits += 1;
+                }
+                (20..=32, Some(k)) => self.act(k, |p, rng| {
+                    // Settled yield or a Prize: Principal and Tickets one for
+                    // one, at once. A pending deposit stays pending.
                     let a = 1 + rng.below(MAX_AMOUNT);
                     p.principal += a;
                     p.entries += a;
@@ -496,17 +511,20 @@ mod tests {
                     let a = rng.upto(p.principal.min(p.entries));
                     p.principal -= a;
                     p.entries -= a;
+                    p.pending = p.pending.min(p.principal);
                 }),
                 (45..=50, Some(k)) => self.act(k, |p, rng| {
                     // `request_withdraw`: Entries saturate.
                     let a = rng.upto(p.principal);
                     p.principal -= a;
                     p.entries = p.entries.saturating_sub(a);
+                    p.pending = p.pending.min(p.principal);
                 }),
                 (51..=52, Some(k)) => self.act(k, |p, _| {
                     // `emergency_withdraw`.
                     p.principal = 0;
                     p.entries = 0;
+                    p.pending = 0;
                 }),
                 (53..=64, Some(k)) => {
                     // `buy_position`: the stake leaves Entries and the tree.
@@ -560,6 +578,7 @@ mod tests {
             for (e, tree_t) in self.readable_tickets() {
                 let is_current = e == clock.current;
                 for (k, p) in self.players.iter().enumerate() {
+                    assert!(p.pending <= p.principal, "Player {k}");
                     assert_eq!(
                         tree_t[k],
                         p.tickets(e),
@@ -623,8 +642,8 @@ mod tests {
 
     /// Same Tickets per Player as `touch` gives, to the unit, in the current
     /// epoch and in the previous one while the current is written, over random
-    /// sequences of deposits, settles, round moves, Bought tickets and
-    /// withdrawals.
+    /// sequences of deposits that activate next epoch, settles, round moves,
+    /// Bought tickets and withdrawals.
     #[test]
     fn matches_the_eager_ticket_count_over_random_sequences() {
         const SEQUENCES: u64 = 1_000;
@@ -655,6 +674,8 @@ mod tests {
             all.settled_stakes += c.settled_stakes;
             all.stale_stakes += c.stale_stakes;
             all.untouched_tree += c.untouched_tree;
+            all.deposits += c.deposits;
+            all.pending_folds += c.pending_folds;
         }
         // The generator must actually reach every case it claims to cover.
         let Coverage {
@@ -667,6 +688,8 @@ mod tests {
             settled_stakes,
             stale_stakes,
             untouched_tree,
+            deposits,
+            pending_folds,
             ..
         } = all;
         for (name, n) in [
@@ -679,6 +702,8 @@ mod tests {
             ("settled stakes", settled_stakes),
             ("stale stakes", stale_stakes),
             ("touches that leave the tree alone", untouched_tree),
+            ("deposits into an existing Player", deposits),
+            ("touches that fold a pending deposit", pending_folds),
         ] {
             assert!(n > 0, "never exercised: {name}");
         }
@@ -729,17 +754,32 @@ mod tests {
         assert_eq!(tickets(&tree, &clock, 2, 3), 1_300);
     }
 
-    /// The root of an ended epoch is the sum of every leaf's Tickets in it,
-    /// whenever each of them deposited.
+    /// A deposit moves `principal_sum` only. It adds no Ticket in its own epoch
+    /// and the whole amount in the next, with no touch in between, so a
+    /// depositor who never comes back is still drawable.
     #[test]
-    fn a_deposit_counts_in_full_whenever_it_lands() {
-        let (mut tree, clock) = fresh(3);
+    fn a_deposit_counts_from_the_next_epoch_without_a_touch() {
+        let (mut tree, mut clock) = fresh(3);
+        let pending = |tree: &mut [Node], clock: &Clock, leaf, a: u64| {
+            update(tree, leaf, i128::from(a), 0, clock).unwrap()
+        };
         deposit(&mut tree, &clock, 1, 100);
-        deposit(&mut tree, &clock, 2, 100);
-        deposit(&mut tree, &clock, 2, 100);
+        pending(&mut tree, &clock, 2, 100);
+        pending(&mut tree, &clock, 2, 50);
         assert_eq!(tickets(&tree, &clock, 1, 1), 100);
-        assert_eq!(tickets(&tree, &clock, 2, 1), 200);
-        assert_eq!(prefix(&tree, 3, 1, &clock), Ok(300));
+        assert_eq!(tickets(&tree, &clock, 2, 1), 0);
+        assert_eq!(prefix(&tree, 3, 1, &clock), Ok(100));
+
+        // Epoch 2: nobody touches, and the root already holds the deposit.
+        clock.current = 2;
+        assert_eq!(tickets(&tree, &clock, 2, 2), 150);
+        assert_eq!(prefix(&tree, 3, 2, &clock), Ok(250));
+        // Epoch 1 stays as it ended while epoch 2 is written.
+        pending(&mut tree, &clock, 3, 70);
+        assert_eq!(prefix(&tree, 3, 1, &clock), Ok(100));
+        assert_eq!(prefix(&tree, 3, 2, &clock), Ok(250));
+        clock.current = 3;
+        assert_eq!(prefix(&tree, 3, 3, &clock), Ok(320));
     }
 
     /// Appending leaves every existing Ticket count unchanged, with a

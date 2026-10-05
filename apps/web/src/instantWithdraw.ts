@@ -35,21 +35,6 @@ export interface WithdrawPlan {
   ticketsAfter: bigint;
 }
 
-/**
- * The Tickets the program will see at the next instruction. `touch` resets
- * stale Tickets to Principal the first time a Player acts in a later epoch,
- * so a Player who has not acted today holds Tickets equal to Principal.
- */
-export function effectiveTickets(
-  principal: bigint,
-  entries: bigint,
-  playerEpoch: bigint | null,
-  currentEpoch: bigint | null,
-): bigint {
-  const stale = playerEpoch !== null && currentEpoch !== null && playerEpoch < currentEpoch;
-  return stale ? principal : entries;
-}
-
 /** The most an instant withdrawal can take: the smaller of Principal and Tickets. */
 export const instantLimit = (principal: bigint, tickets: bigint): bigint =>
   principal < tickets ? principal : tickets;
@@ -64,7 +49,7 @@ export function afterHaircut(amount: bigint, factor: number | null): bigint {
 export interface PlanInput {
   amount: bigint;
   principal: bigint;
-  /** Tickets as the program will see them (`effectiveTickets`). */
+  /** Tickets as the program will see them (`effectiveTickets` in lib/money). */
   tickets: bigint;
   /** `/pool?withdraw=` answer for this amount; null when unknown. */
   coverable: boolean | null;

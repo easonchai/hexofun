@@ -1,8 +1,9 @@
 # HEXO
 
 A no-loss savings app on Solana with a game bolted on. Deposit USDC, keep your principal, and
-earn a fixed Base yield on it. Your time-weighted Tickets, topped up by depositing, buying extra
-with USDC, or a referral bonus, are your odds in the daily draw for the pool's prize. Between
+earn a fixed Base yield on it. Your Tickets, which a deposit earns from the next day on and which
+buying extra with USDC or a referral bonus top up at once, are your odds in the daily draw for the
+pool's prize. Between
 draws, put Tickets on a 36-tile hex board. When your tile is drawn, the House takes a
 configurable cut, 6% by default, and the rest of the pot splits among whoever covered it.
 Nothing in the game or the draw can take your principal. The worst round you can have costs

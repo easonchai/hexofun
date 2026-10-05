@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 import {
   INDEX_SCALE,
   decodeReserve,
+  effectiveTickets,
   estimatedRateBps,
   freeIdle,
   haircutFactor,
   instantWithdrawCoverable,
+  pendingTickets,
   solvencyMargin,
   supplyRateBps,
   trailingRate,
@@ -19,6 +21,32 @@ import {
 const DAY = 86_400n;
 const YEAR = 31_536_000n;
 const ONE_PERCENT = INDEX_SCALE / 100n;
+
+describe("effectiveTickets and pendingTickets", () => {
+  // 300 of Principal, 200 of it deposited in epoch 4, so 100 Tickets are active.
+  const player = {
+    principal: 300n,
+    entries: 100n,
+    epochId: 4n,
+    pendingDeposit: 200n,
+    pendingDepositEpoch: 4n,
+  };
+
+  it("counts the active Tickets and holds the deposit pending in the epoch it was made", () => {
+    expect(effectiveTickets(player, 4n)).toBe(100n);
+    expect(pendingTickets(player, 4n)).toBe(200n);
+  });
+
+  it("folds the pending deposit into Tickets from the next epoch, without a touch", () => {
+    expect(effectiveTickets(player, 5n)).toBe(300n);
+    expect(pendingTickets(player, 5n)).toBe(0n);
+    expect(effectiveTickets(player, 9n)).toBe(300n);
+  });
+
+  it("reads zero pending for a Player who never deposited", () => {
+    expect(pendingTickets({ pendingDeposit: 0n, pendingDepositEpoch: 0n }, 3n)).toBe(0n);
+  });
+});
 
 describe("unsettledYield", () => {
   it("is principal times the index rise since the last settle, rounded down", () => {

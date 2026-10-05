@@ -41,19 +41,16 @@ import {
   type LiveYieldDto,
 } from "../api.js";
 import { LogoCog } from "../arena/Arena.js";
-import {
-  effectiveTickets,
-  instantLimit,
-  offersQueue,
-  planWithdraw,
-} from "../instantWithdraw.js";
+import { instantLimit, offersQueue, planWithdraw } from "../instantWithdraw.js";
 import { CLUSTER, type HexVaultProgram } from "../chain.js";
 import {
   addCapped,
   clampDecimals,
+  effectiveTickets,
   formatAtomic,
   formatAtomic2,
   parseAtomic,
+  pendingTickets,
   pendingWithdrawal,
   previewWithdraw,
 } from "../lib/money.js";
@@ -314,6 +311,17 @@ export function Vault(props: VaultScreenProps) {
     playerExtras.data ? BigInt(playerExtras.data.epochId) : null,
     currentEpochId,
   );
+  // ADR 0020: a deposit earns no Ticket until the next epoch. The read model
+  // sends the row, and the same lazy fold `touch` does runs here against the
+  // epoch the screen already holds.
+  const pendingNow = playerExtras.data
+    ? pendingTickets(
+        BigInt(playerExtras.data.pendingDeposit),
+        BigInt(playerExtras.data.pendingDepositEpoch),
+        currentEpochId,
+      )
+    : 0n;
+  const odds = playerExtras.data?.odds ?? null;
   /** The most `instant_withdraw` takes: the smaller of Principal and Tickets. */
   const instantMax = instantLimit(principal, tickets);
   const live = cover.data?.live ?? null;
@@ -490,9 +498,18 @@ export function Vault(props: VaultScreenProps) {
             <dl className="vault-rows">
               {mode === "deposit" ? (
                 <>
-                  <div className="vault-line">
+                  <div className="vault-line" data-testid="vault-tickets">
                     <dt>Tickets</dt>
-                    <dd>{fmt2(amount ?? 0n)}</dd>
+                    <dd>{fmt2(tickets)}</dd>
+                  </div>
+                  {pendingNow > 0n ? (
+                    <div className="vault-line" data-testid="vault-tickets-pending">
+                      <dt>+{fmt2(pendingNow)} from tomorrow&apos;s draw</dt>
+                    </div>
+                  ) : null}
+                  <div className="vault-line" data-testid="vault-odds">
+                    <dt>Odds</dt>
+                    <dd>{odds === null ? "—" : `${odds}%`}</dd>
                   </div>
                 </>
               ) : (
@@ -663,7 +680,7 @@ export function Vault(props: VaultScreenProps) {
       {confirmed !== null ? (
         <DepositConfirmed
           amount={`$${fmt2(confirmed)} ${SYMBOL}`}
-          tickets={fmt2(entries)}
+          tickets={fmt2(confirmed)}
           onClose={() => setConfirmed(null)}
           onPlay={onPlay}
         />
@@ -674,7 +691,7 @@ export function Vault(props: VaultScreenProps) {
 
 interface DepositConfirmedProps {
   amount: string;
-  /** Live Tickets balance; refreshes in place once the chain read lands. */
+  /** What the deposit adds from tomorrow's draw. */
   tickets: string;
   onClose: () => void;
   onPlay: () => void;
@@ -729,7 +746,7 @@ function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmed
           {amount}
         </p>
         <p className="deposit-modal-sub">
-          You have <strong>{tickets} Tickets</strong> to play
+          <strong>+{tickets} Tickets</strong> from tomorrow&apos;s draw
         </p>
         <button
           type="button"

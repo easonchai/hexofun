@@ -126,8 +126,8 @@ const ALICE_YIELD_INDEX = E18;
 /** klend's reserve: 500k USDC free of 5M, 90% utilised. */
 const RESERVE_AVAILABLE = 500_000_000_000n;
 const RESERVE_BORROWED = 4_500_000_000_000n;
-/** Alice holds the whole draw: 1,000,000 Principal for the 86,400 s epoch. */
-const ALICE_WEIGHT = 1_000_000n * EPOCH_LENGTH;
+/** Alice holds the whole draw: her 1,000,000 Tickets, one per Principal unit. */
+const ALICE_WEIGHT = 1_000_000n;
 const WEIGHT_TREE = Keypair.generate().publicKey;
 const RESERVE = Keypair.generate().publicKey;
 
@@ -666,6 +666,8 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     // Read from the tree: she holds the whole epoch, so all of the odds.
     expect(body.weight).toBe(ALICE_WEIGHT.toString());
     expect(body.odds).toBe("100.00");
+    expect(body.pendingTickets).toBe("0");
+    expect(body.pendingActivatesEpoch).toBeNull();
     expect(body.leafIndex).toBe(1);
     // None of the registration or Base yield fields are left.
     for (const gone of ["weightAcc", "regStart", "frozenWeight", "yieldEpoch", "yieldToDate"]) {
@@ -706,6 +708,37 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(body.weight).toBe("0");
     expect(body.odds).toBe("0.00");
     expect(body.unsettledYield).toBe("0");
+  });
+
+  // Ticket 20: a deposit made today is Principal with no Tickets until the
+  // next epoch, and the read folds it the way `touch` does, row untouched.
+  it("GET /players/:owner shows a pending deposit as pending Tickets, then folds it from the next epoch", async () => {
+    const seed = (epochId: bigint, entries: bigint, pendingDepositEpoch: bigint) =>
+      prisma.player.update({
+        where: activePlayer(BOB),
+        data: { principal: 500_000n, entries, epochId, pendingDeposit: 500_000n, pendingDepositEpoch },
+      });
+    try {
+      await seed(CURRENT_EPOCH, 0n, CURRENT_EPOCH);
+      const today = (await http.get(`/players/${BOB}`).expect(200)).body;
+      expect(today.weight).toBe("0");
+      expect(today.pendingTickets).toBe("500000");
+      expect(today.pendingActivatesEpoch).toBe((CURRENT_EPOCH + 1n).toString());
+      expect(today.odds).toBe("0.00");
+
+      // Deposited in epoch 6 and never touched since: Principal is the Tickets.
+      await seed(CURRENT_EPOCH - 1n, 0n, CURRENT_EPOCH - 1n);
+      const later = (await http.get(`/players/${BOB}`).expect(200)).body;
+      expect(later.weight).toBe("500000");
+      expect(later.pendingTickets).toBe("0");
+      expect(later.pendingActivatesEpoch).toBeNull();
+      expect(later.odds).toBe("50.00");
+    } finally {
+      await prisma.player.update({
+        where: activePlayer(BOB),
+        data: { principal: 0n, entries: 0n, epochId: CURRENT_EPOCH, pendingDeposit: 0n, pendingDepositEpoch: 0n },
+      });
+    }
   });
 
   it("GET /players/:owner is 400 for a bad address and 404 for an unknown wallet", async () => {
@@ -1119,7 +1152,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         await quiet();
         await prisma.weightTreeState.update({
           where: { poolAddress: POOL_ADDRESS },
-          data: { nodeCount: 131_100n },
+          data: { nodeCount: 168_600n },
         });
         try {
           const { body } = await http.get("/alerts").expect(503);
@@ -1318,14 +1351,15 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(treeReads).toBe(before + 2);
     });
 
-    it("reports Weight and odds as unknown when the tree cannot be read, without caching that", async () => {
+    it("reports odds as unknown when the tree cannot be read, without caching that", async () => {
       vi.setSystemTime(Date.now() + TREE_TTL_MS + 1);
       const before = treeReads;
       failNextTreeRead = true;
 
       const failed = await http.get(`/players/${ALICE}`).expect(200);
-      // Null, not "0": a failed read is not evidence Alice holds no Weight.
-      expect(failed.body.weight).toBeNull();
+      // Her Tickets come from her row and stay. The odds need the root, and
+      // null is not "0": a failed read is not evidence the draw is empty.
+      expect(failed.body.weight).toBe(ALICE_WEIGHT.toString());
       expect(failed.body.odds).toBeNull();
       // Principal and the settle figures come from Postgres and stay.
       expect(failed.body.principal).toBe("1000000");
@@ -1334,7 +1368,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       // Still inside the window the failed read opened: the slot was cleared,
       // so this retries the chain.
       const recovered = await http.get(`/players/${ALICE}`).expect(200);
-      expect(recovered.body.weight).toBe(ALICE_WEIGHT.toString());
+      expect(recovered.body.odds).toBe("100.00");
       expect(treeReads).toBe(before + 2);
     });
 

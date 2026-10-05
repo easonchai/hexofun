@@ -3,11 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   addCapped,
   clampDecimals,
+  effectiveTickets,
   formatAddress,
   formatAtomic,
   formatAtomic2,
   formatMoney2,
   parseAtomic,
+  pendingTickets,
   pendingWithdrawal,
   previewWithdraw,
 } from "./money.js";
@@ -140,5 +142,24 @@ describe("pending withdrawal row", () => {
       amount: 5_000_000n,
       epoch: 7n,
     });
+  });
+});
+
+// ADR 0020: a deposit earns Tickets from the next epoch. 500 of Principal, 400
+// of it deposited in epoch 4, so 100 Tickets are active in epoch 4.
+describe("tickets and the pending deposit", () => {
+  it("holds the deposit pending and out of Tickets in the epoch it was made", () => {
+    expect(effectiveTickets(500n, 100n, 4n, 4n)).toBe(100n);
+    expect(pendingTickets(400n, 4n, 4n)).toBe(400n);
+  });
+
+  it("folds the deposit into Tickets from the next epoch, with no transaction", () => {
+    expect(effectiveTickets(500n, 100n, 4n, 5n)).toBe(500n);
+    expect(pendingTickets(400n, 4n, 5n)).toBe(0n);
+  });
+
+  it("reads the row as it is while the epoch is unknown", () => {
+    expect(effectiveTickets(500n, 100n, 4n, null)).toBe(100n);
+    expect(pendingTickets(400n, 4n, null)).toBe(400n);
   });
 });
