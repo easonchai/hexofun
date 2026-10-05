@@ -40,6 +40,7 @@ let indexer: IndexerService;
 
 const OWNER = Keypair.generate().publicKey;
 const STRANGER = Keypair.generate().publicKey;
+const WEIGHT_TREE = Keypair.generate().publicKey;
 
 // Wrapped in one top-level describe, rather than adding `.skipIf` to each of
 // the six describes below, because they share this file's beforeAll/afterAll/
@@ -99,6 +100,8 @@ async function wipe(): Promise<void> {
     prisma.player.deleteMany(),
     prisma.round.deleteMany(),
     prisma.epoch.deleteMany(),
+    prisma.yieldIndexPoint.deleteMany(),
+    prisma.weightTreeState.deleteMany(),
     prisma.referral.deleteMany(),
     prisma.referralGrantShare.deleteMany(),
     prisma.referralGrant.deleteMany(),
@@ -140,10 +143,8 @@ const poolRecord = (overrides: object = {}) => ({
   totalPrincipal: 100_000_000_000n, // 100,000 USDC: ample, no pool cap bind
   pendingWithdrawals: 0n,
   minJackpot: 1_000_000n,
-  carryPot: 0n,
   houseCutBps: 600,
   baseRateBps: 0,
-  yieldBudget: 0n,
   ticketsPerUsdc: 10,
   bonusCapBps: 10_000, // 100%: no pool cap bind unless a test overrides it
   bonusEpoch: 0n,
@@ -194,15 +195,23 @@ const poolAccount = (overrides: object = {}) => ({
   previousEpochEndsAt: bn(0),
   nextRoundId: bn(2),
   openRoundId: bn(1),
-  carryPot: bn(7),
   totalPrincipal: bn(3_000_000),
   bump: 255,
   principalVaultBump: 254,
   jackpotVaultBump: 253,
   pendingWithdrawals: bn(0),
   minJackpot: bn(1_000_000),
-  registrationWindow: bn(0),
   payoutTimeout: bn(86_400),
+  // Ticket 14: the venue and the Weight tree. The tree is not in the fake
+  // RPC's accounts unless a test puts it there, so the mirror reads nothing.
+  weightTree: WEIGHT_TREE,
+  klendProgram: STRANGER,
+  klendMarket: STRANGER,
+  klendReserve: STRANGER,
+  klendCtoken: STRANGER,
+  yieldIndex: bn(0),
+  venueValue: bn(0),
+  lastSyncAt: bn(0),
   ...overrides,
 });
 
@@ -211,8 +220,6 @@ const epochAccount = (overrides: object = {}) => ({
   startsAt: bn(1_000),
   endsAt: bn(2_000),
   status: 1,
-  registeredWeight: bn(500),
-  registeredCount: 2,
   jackpotAmount: bn(10_000_000),
   vrfSeed: zeros(32),
   requestedAt: bn(0),
@@ -241,14 +248,7 @@ const playerAccount = (owner: PublicKey, overrides: object = {}) => ({
   owner,
   principal: bn(3_000_000),
   entries: bn(2_500_000),
-  weightAcc: bn(1_234),
-  lastUpdate: bn(1_500),
   epochId: bn(1),
-  frozenWeight: bn(0),
-  frozenEpoch: bn(0),
-  regEpoch: bn(0),
-  regStart: bn(0),
-  regEnd: bn(0),
   isHouse: false,
   bump: 255,
   pendingWithdraw: bn(0),
@@ -279,14 +279,13 @@ describe("account sync", () => {
       .toMatchObject({
         poolId: POOL_ID,
         totalPrincipal: 3_000_000n,
-        carryPot: 7n,
         currentEpochId: 1n,
         paused: false,
         updatedSlot: 100n,
       });
 
     const epoch = await prisma.epoch.findUniqueOrThrow({ where: byId(1n) });
-    expect(epoch.registeredWeight.toFixed(0)).toBe("500");
+    expect(epoch.jackpotAmount).toBe(10_000_000n);
     // Pubkey::default means payout has not run; the column stays null.
     expect(epoch.winner).toBeNull();
 
@@ -403,7 +402,7 @@ describe("account sync", () => {
     // Simulate the RPC reporting only the Pool as changed; Round and Position
     // are unchanged and so absent from this result.
     connection.clearAccounts();
-    await put("pool", chain.poolAddress(), poolAccount({ carryPot: bn(999) }));
+    await put("pool", chain.poolAddress(), poolAccount({ totalPrincipal: bn(999) }));
     await indexer.syncAccounts();
 
     expect(connection.callsTo("getProgramAccountsV2")).toBe(1);
@@ -411,7 +410,7 @@ describe("account sync", () => {
     const [, config] = connection.lastParams("getProgramAccountsV2") as [string, { changedSinceSlot?: number }];
     expect(config.changedSinceSlot).toBe(Number(syncedSlot));
 
-    expect((await prisma.pool.findUniqueOrThrow({ where: { address: chain.poolAddress().toBase58() } })).carryPot)
+    expect((await prisma.pool.findUniqueOrThrow({ where: { address: chain.poolAddress().toBase58() } })).totalPrincipal)
       .toBe(999n);
     // The old absence-based delete would have wiped these; they must survive.
     expect(await prisma.round.count()).toBe(1);
@@ -696,12 +695,12 @@ const roundOpened = dataLine("RoundOpened", {
   epochId: bn(2),
   startsAt: bn(1_000),
   endsAt: bn(1_060),
-  carryIn: bn(0),
 });
 const positionSettled = dataLine("PositionSettled", {
   roundId: bn(1),
   owner: OWNER,
   reward: bn(0),
+  refund: bn(0),
 });
 const roundClosed = dataLine("RoundClosed", {
   round: Keypair.generate().publicKey,
@@ -719,8 +718,19 @@ const withdrawRequestedFor = (owner: PublicKey, amount: number, pending: number,
     pending: bn(pending),
     pendingEpoch: bn(pendingEpoch),
   });
-const yieldCreditedFor = (owner: PublicKey, amount: number, epochId = 1, shortfall = 0) =>
-  dataLine("YieldCredited", { epochId: bn(epochId), owner, amount: bn(amount), shortfall: bn(shortfall) });
+// Live yield settles inside the money instructions and emits no event of its
+// own; an instant withdrawal carries the Principal left, which is what the
+// referral tracker needs.
+const instantWithdrawnFor = (owner: PublicKey, amount: number, principal: number) =>
+  dataLine("InstantWithdrawn", {
+    owner,
+    amount: bn(amount),
+    redeemed: bn(0),
+    settled: bn(7),
+    principal: bn(principal),
+    entries: bn(principal),
+    paid: bn(amount),
+  });
 const jackpotPaidFor = (
   winner: PublicKey,
   amount: number,
@@ -1050,8 +1060,6 @@ describe("live account refresh", () => {
       startsAt: 0n,
       endsAt: 1n,
       status: 4,
-      registeredWeight: "0",
-      registeredCount: 0,
       jackpotAmount: 5n,
       target: "0",
     };
@@ -1188,6 +1196,249 @@ describe("live account refresh", () => {
   });
 });
 
+// ------------------------------------------------ live yield (ticket 14)
+
+/** A Weight tree account holding `nodes`, the layout weight_tree.rs reads:
+ *  a 56-byte header with the node count at byte 16, then 72-byte nodes. A
+ *  node is its `principal_sum` and two slots of stamp, base and a u128 weight.
+ *  Epoch 1 is odd, so it lives in the second slot. */
+function weightTreeAccount(
+  nodes: { principalSum: bigint; slot: { base: bigint; weight: bigint } | null }[],
+): Buffer {
+  const data = Buffer.alloc(56 + nodes.length * 72);
+  data.writeBigUInt64LE(BigInt(nodes.length), 16);
+  nodes.forEach((node, i) => {
+    const at = 56 + i * 72;
+    data.writeBigUInt64LE(node.principalSum, at);
+    if (node.slot === null) return;
+    data.writeBigUInt64LE(1n, at + 40);
+    data.writeBigUInt64LE(node.slot.base, at + 48);
+    data.writeBigUInt64LE(node.slot.weight, at + 56);
+  });
+  return data;
+}
+
+describe("live yield mirror", () => {
+  const fire = async (logs: string[], slot: number): Promise<void> => {
+    indexer["subscribeToSync"]();
+    connection.fireLogs(
+      chain.poolAddress(),
+      "confirmed",
+      { err: null, signature: `sig-${slot}`, logs: batch(`sig-${slot}`, BigInt(slot), logs).logs },
+      slot,
+    );
+    await indexer["queue"];
+  };
+  const E18 = 10n ** 18n;
+
+  it("mirrors the new Pool fields and the Player's yield index and leaf", async () => {
+    await put(
+      "pool",
+      chain.poolAddress(),
+      poolAccount({
+        yieldIndex: bn(E18 + E18 / 20n),
+        venueValue: bn(40_000_000),
+        lastSyncAt: bn(1_700_000_000),
+        yieldOwed: bn(11),
+        feeOwed: bn(12),
+        prizeOwed: bn(13),
+        deficit: bn(14),
+        yieldFeeBps: 1_000,
+        idleFloorBps: 500,
+        idleTargetBps: 1_000,
+        reserveShareCapBps: 500,
+        reserveLiquidityFloorBps: 20_000,
+        minVenueMove: bn(100_000_000),
+        lossToleranceBps: 1,
+        deployPaused: true,
+        impaired: true,
+        buyTicketsPaused: true,
+      }),
+    );
+    await put(
+      "player",
+      chain.playerAddress(OWNER),
+      playerAccount(OWNER, { yieldIndex: bn(E18), leafIndex: 3 }),
+    );
+
+    await indexer.syncAccounts();
+
+    expect(await prisma.pool.findUniqueOrThrow({ where: { address: active() } })).toMatchObject({
+      weightTree: WEIGHT_TREE.toBase58(),
+      klendReserve: STRANGER.toBase58(),
+      venueValue: 40_000_000n,
+      lastSyncAt: 1_700_000_000n,
+      yieldOwed: 11n,
+      feeOwed: 12n,
+      prizeOwed: 13n,
+      deficit: 14n,
+      yieldFeeBps: 1_000,
+      idleFloorBps: 500,
+      idleTargetBps: 1_000,
+      reserveShareCapBps: 500,
+      reserveLiquidityFloorBps: 20_000,
+      minVenueMove: 100_000_000n,
+      lossToleranceBps: 1,
+      deployPaused: true,
+      impaired: true,
+      buyTicketsPaused: true,
+    });
+    const pool = await prisma.pool.findUniqueOrThrow({ where: { address: active() } });
+    expect(pool.yieldIndex.toFixed(0)).toBe((E18 + E18 / 20n).toString());
+    const player = await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) });
+    expect(player.yieldIndex.toFixed(0)).toBe(E18.toString());
+    expect(player.leafIndex).toBe(3);
+  });
+
+  it("stores a Yield index point for each sync, thinned to one a minute", async () => {
+    const sync = async (index: bigint, at: number): Promise<void> => {
+      await put("pool", chain.poolAddress(), poolAccount({ yieldIndex: bn(index), lastSyncAt: bn(at) }));
+      await indexer.syncAccounts();
+    };
+    // A pool that never synced has no index worth a point.
+    await sync(0n, 0);
+    expect(await prisma.yieldIndexPoint.count()).toBe(0);
+
+    await sync(E18, 1_000);
+    await sync(E18 + 1n, 1_030); // 30 s after the last point: thinned out
+    await sync(E18 + 2n, 1_060); // a minute after: stored
+    await sync(E18 + 2n, 1_060); // the same sync seen again: no duplicate
+    await sync(E18 + 3n, 1_100); // 40 s after the 1,060 point: thinned out
+
+    const points = await prisma.yieldIndexPoint.findMany({ orderBy: { at: "asc" } });
+    expect(points.map((point) => [point.poolAddress, point.at, point.yieldIndex.toFixed(0)])).toEqual([
+      [active(), 1_000n, E18.toString()],
+      [active(), 1_060n, (E18 + 2n).toString()],
+    ]);
+  });
+
+  it("writes the Yield index point from a live log too", async () => {
+    await put("pool", chain.poolAddress(), poolAccount({ yieldIndex: bn(E18), lastSyncAt: bn(5_000) }));
+    await fire([], 400);
+    expect((await prisma.yieldIndexPoint.findMany()).map((point) => point.at)).toEqual([5_000n]);
+  });
+
+  it("mirrors the Weight tree's header and the root of the current epoch", async () => {
+    // Epoch 1 runs 1,000 s. Leaf 1 sat idle at Principal 7 (7 x 1,000 = 7,000);
+    // Fenwick node 2 holds leaves 1 and 2 together: 7,000 + 2,500.
+    connection.setAccount(
+      WEIGHT_TREE,
+      weightTreeAccount([
+        { principalSum: 7n, slot: null },
+        { principalSum: 9n, slot: { base: 9n, weight: 9_500n } },
+      ]),
+    );
+    await put("pool", chain.poolAddress(), poolAccount());
+
+    await indexer.syncAccounts();
+
+    expect(await prisma.weightTreeState.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({
+      nodeCount: 2n,
+      epochId: 1n,
+    });
+    expect(
+      (await prisma.weightTreeState.findUniqueOrThrow({ where: { poolAddress: active() } })).rootWeight.toFixed(0),
+    ).toBe("9500");
+  });
+
+  it("still mirrors the Pool when the tree account cannot be read, and keeps the last tree state", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    await indexer.syncAccounts();
+
+    expect(await prisma.pool.count()).toBe(1);
+    expect(await prisma.weightTreeState.count()).toBe(0);
+  });
+
+  it("stores each live-yield event under the Active pool, with its figures exact", async () => {
+    const pool = chain.poolAddress();
+    const lines = [
+      dataLine("Synced", {
+        pool,
+        gain: bn(1_000),
+        fee: bn(100),
+        depositorShare: bn(700),
+        prizeShare: bn(150),
+        yieldIndex: bn(E18 * 4n),
+        venueValue: bn(40_000_000),
+        deficitRepaid: bn(50),
+      }),
+      dataLine("InstantWithdrawn", {
+        owner: OWNER,
+        amount: bn(500),
+        redeemed: bn(200),
+        settled: bn(7),
+        principal: bn(2_500),
+        entries: bn(2_400),
+        paid: bn(480),
+      }),
+      dataLine("VenueDeployed", { pool, amount: bn(40_000_000), venueValue: bn(40_000_100) }),
+      dataLine("VenueRecalled", { pool, amount: bn(5_000_000), venueValue: bn(35_000_100) }),
+      dataLine("Harvested", {
+        pool,
+        gain: bn(1_000),
+        fee: bn(100),
+        depositorShare: bn(700),
+        prizeShare: bn(150),
+        feePaid: bn(99),
+        prizePaid: bn(150),
+      }),
+      dataLine("ImpairedSet", {
+        pool,
+        loss: bn(900),
+        prizeAbsorbed: bn(300),
+        feeAbsorbed: bn(100),
+        deficit: bn(500),
+      }),
+      dataLine("ImpairedCleared", { pool, deficit: bn(500), cause: 1 }),
+      dataLine("PositionSettled", { roundId: bn(1), owner: OWNER, reward: bn(0), refund: bn(250) }),
+    ];
+    await seedActivePool();
+
+    expect(await indexer.ingestLogs(batch("sig-live", 40n, lines))).toBe(lines.length);
+
+    const events = await prisma.event.findMany({ orderBy: { index: "asc" } });
+    expect(events.map((event) => [event.poolAddress, event.name])).toEqual(
+      [
+        "Synced",
+        "InstantWithdrawn",
+        "VenueDeployed",
+        "VenueRecalled",
+        "Harvested",
+        "ImpairedSet",
+        "ImpairedCleared",
+        "PositionSettled",
+      ].map((name) => [active(), name]),
+    );
+    expect(events[0]?.data).toMatchObject({ yieldIndex: (E18 * 4n).toString(), depositorShare: "700" });
+    expect(events[1]?.data).toMatchObject({ settled: "7", paid: "480", principal: "2500" });
+    expect(events[7]?.data).toMatchObject({ refund: "250", reward: "0" });
+  });
+
+  it("re-reads the Player an InstantWithdrawn names, without a sweep", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER, { principal: bn(2_500) }));
+
+    await fire(
+      [
+        dataLine("InstantWithdrawn", {
+          owner: OWNER,
+          amount: bn(500),
+          redeemed: bn(0),
+          settled: bn(0),
+          principal: bn(2_500),
+          entries: bn(2_500),
+          paid: bn(500),
+        }),
+      ],
+      410,
+    );
+
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) })).toMatchObject({
+      principal: 2_500n,
+    });
+  });
+});
+
 // -------------------------------------------------------- operator reads
 
 describe("operator queries", () => {
@@ -1201,20 +1452,10 @@ describe("operator queries", () => {
     owner,
     principal: 0n,
     entries: 0n,
-    weightAcc: "0",
-    lastUpdate: 1_000n,
     epochId: 5n,
-    frozenWeight: "0",
-    frozenEpoch: 0n,
-    regEpoch: 0n,
-    regStart: "0",
-    regEnd: "0",
     isHouse: false,
     pendingWithdraw: 0n,
     pendingEpoch: 0n,
-    principalAcc: "0",
-    frozenPrincipalAcc: "0",
-    yieldEpoch: 0n,
     boughtEpoch: 0n,
     boughtAmount: 0n,
     bonusEpoch: 0n,
@@ -1231,17 +1472,15 @@ describe("operator queries", () => {
         startsAt: 1_000n,
         endsAt: 2_000n,
         status: 1,
-        registeredWeight: "0",
-        registeredCount: 0,
         jackpotAmount: 0n,
         target: "0",
       },
     });
     await prisma.player.createMany({
       data: [
-        player(ALICE, { entries: 3n, weightAcc: "500", lastUpdate: 1_400n }),
+        player(ALICE, { entries: 3n }),
         player(BOB),
-        player(CAROL, { entries: 9n, regEpoch: 5n }),
+        player(CAROL, { entries: 9n }),
         player(DAVE, { epochId: 3n, principal: 2n }),
       ],
     });
@@ -1311,8 +1550,6 @@ describe("operator queries", () => {
         startsAt: 0n,
         endsAt: 1n,
         status: 1,
-        registeredWeight: "0",
-        registeredCount: 0,
         jackpotAmount: 0n,
         target: "0",
       },
@@ -1387,12 +1624,14 @@ describe("referral qualification", () => {
     expect(row.aboveSince).toBeNull();
   });
 
-  it("yield pushing Principal over the line sets aboveSince", async () => {
-    await seedReferral({ principal: 49_999_999n });
-    await indexer.ingestLogs(batch("sig-yield", 1n, [yieldCreditedFor(OWNER, 1)]));
+  it("an instant withdrawal takes Principal to the figure it carries, and below 50 USDC clears aboveSince", async () => {
+    await seedReferral({ principal: 60_000_000n, aboveSince: 1_600_000_000n });
+    await indexer.ingestLogs(
+      batch("sig-instant", 1n, [instantWithdrawnFor(OWNER, 20_000_000, 40_000_007)]),
+    );
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
-    expect(row.principal).toBe(50_000_000n);
-    expect(row.aboveSince).toBe(1_700_000_000n);
+    expect(row.principal).toBe(40_000_007n);
+    expect(row.aboveSince).toBeNull();
   });
 
   it("a compounded JackpotPaid adds to Principal; an uncompounded one is ignored", async () => {
@@ -1568,20 +1807,10 @@ describe("referral bonus job (ticket 08)", () => {
     owner,
     principal: 1_000_000_000_000n, // ample, so the referrer's own 1x cap never binds
     entries: 0n,
-    weightAcc: "0",
-    lastUpdate: 0n,
     epochId: 0n,
-    frozenWeight: "0",
-    frozenEpoch: 0n,
-    regEpoch: 0n,
-    regStart: "0",
-    regEnd: "0",
     isHouse: false,
     pendingWithdraw: 0n,
     pendingEpoch: 0n,
-    principalAcc: "0",
-    frozenPrincipalAcc: "0",
-    yieldEpoch: 0n,
     boughtEpoch: 0n,
     boughtAmount: 0n,
     bonusEpoch: 0n,

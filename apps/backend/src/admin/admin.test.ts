@@ -88,7 +88,6 @@ const poolFields = {
   previousEpochEndsAt: bn(0),
   nextRoundId: bn(1),
   openRoundId: bn(0),
-  carryPot: bn(0),
   totalPrincipal: bn(0),
   bump: 255,
   principalVaultBump: 254,
@@ -632,7 +631,6 @@ describe("admin run", () => {
       pool: {
         totalPrincipal: new BN(1_000_000),
         pendingWithdrawals: new BN(0),
-        yieldBudget: new BN(0),
       },
       vaultBalance: 500_000n,
       players: [{ owner: alice, principal: 1_000_000n, pendingWithdraw: 0n }],

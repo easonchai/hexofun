@@ -25,8 +25,8 @@ describe("nextPrincipal", () => {
     expect(nextPrincipal(10n, { kind: "WithdrawRequested", amount: 40n })).toBe(0n);
   });
 
-  it("YieldCredited adds the credited amount", () => {
-    expect(nextPrincipal(100n, { kind: "YieldCredited", amount: 5n })).toBe(105n);
+  it("InstantWithdrawn sets the Principal it carries", () => {
+    expect(nextPrincipal(100n, { kind: "InstantWithdrawn", principal: 60n })).toBe(60n);
   });
 
   it("JackpotPaid adds the compounded prize", () => {
@@ -64,7 +64,7 @@ describe("applyReferralEvent", () => {
       principal: 49_999_999n,
       aboveSince: null,
     };
-    const next = applyReferralEvent(almost, { kind: "YieldCredited", amount: 1n }, T0);
+    const next = applyReferralEvent(almost, { kind: "JackpotPaid", amount: 1n }, T0);
     expect(next).toEqual({ principal: REFERRAL_QUALIFY_PRINCIPAL, aboveSince: T0 });
   });
 
@@ -87,12 +87,12 @@ describe("applyReferralEvent", () => {
 
   it("staying above does not restart the clock", () => {
     const above: ReferralQualificationState = { principal: 60_000_000n, aboveSince: T0 };
-    const next = applyReferralEvent(above, { kind: "YieldCredited", amount: 1_000n }, T0 + 999n);
+    const next = applyReferralEvent(above, { kind: "JackpotPaid", amount: 1_000n }, T0 + 999n);
     expect(next).toEqual({ principal: 60_001_000n, aboveSince: T0 });
   });
 
   it("staying below leaves aboveSince null", () => {
-    const next = applyReferralEvent(below, { kind: "YieldCredited", amount: 1n }, T0);
+    const next = applyReferralEvent(below, { kind: "JackpotPaid", amount: 1n }, T0);
     expect(next).toEqual({ principal: 10_000_001n, aboveSince: null });
   });
 

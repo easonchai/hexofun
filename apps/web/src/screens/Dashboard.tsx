@@ -352,7 +352,7 @@ export function Dashboard(props: DashboardScreenProps) {
               <span>
                 Your Odds:{" "}
                 <span className="dash-lime">
-                  {player ? `${player.odds}%` : "—"}
+                  {player?.odds != null ? `${player.odds}%` : "—"}
                 </span>
               </span>
             </h3>

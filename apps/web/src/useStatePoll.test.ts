@@ -7,18 +7,11 @@ const player = (overrides: Partial<PlayerDto> = {}): PlayerDto => ({
   owner: "Ai1ce",
   principal: "1000000",
   entries: "1000000",
-  weightAcc: "0",
-  lastUpdate: "1800000000",
   epochId: "7",
-  frozenWeight: "0",
-  frozenEpoch: "0",
-  regEpoch: "0",
-  regStart: "0",
-  regEnd: "0",
   isHouse: false,
   pendingWithdraw: "0",
   pendingEpoch: "0",
-  liveWeight: "1000",
+  weight: "1000",
   odds: "50.00",
   ...overrides,
 });
@@ -44,7 +37,7 @@ describe("snapshot", () => {
     const later = state({
       chainTime: "1800000012",
       status: { operator: { lastTickAt: "2026-09-14T00:00:12.000Z" } } as StateDto["status"],
-      player: player({ liveWeight: "13000", odds: "51.20" }),
+      player: player({ weight: "13000", odds: "51.20" }),
     });
     expect(snapshot(later)).toBe(snapshot(before));
   });
@@ -52,11 +45,6 @@ describe("snapshot", () => {
   it("notices a deposit landing", () => {
     const deposited = state({ player: player({ principal: "3000000", entries: "3000000" }) });
     expect(snapshot(deposited)).not.toBe(snapshot(state()));
-  });
-
-  it("notices a register, which moves nothing else on the Player", () => {
-    const registered = state({ player: player({ regEpoch: "7", regStart: "0", regEnd: "1000" }) });
-    expect(snapshot(registered)).not.toBe(snapshot(state()));
   });
 
   it("notices a process_withdraw paying out, which moves nothing else", () => {

@@ -4,11 +4,18 @@ import {
   evaluateAlerts,
   NEAR_CLOSE_SECONDS,
   OPERATOR_FAILING_SECONDS,
+  SOLVENCY_DUST,
+  TREE_NEARLY_FULL_BPS,
   type AlertInputs,
   type AlertThresholds,
 } from "./alerts.controller";
 
-const THRESHOLDS: AlertThresholds = { tickStaleSeconds: 300, indexerStaleSeconds: 600 };
+const THRESHOLDS: AlertThresholds = {
+  tickStaleSeconds: 300,
+  indexerStaleSeconds: 600,
+  idleLowSeconds: 3600,
+  reserveFreeMin: 1_000_000n,
+};
 
 /** Every condition off: what a healthy pool reports. */
 const HEALTHY: AlertInputs = {
@@ -22,18 +29,21 @@ const HEALTHY: AlertInputs = {
   roundVoidedRecently: false,
   epochRolledOverRecently: false,
   withdrawSkippedCount: 0,
-  registrationIndexerStale: false,
   operatorFailingSeconds: null,
   epochNoProgress: false,
   drawnUnpaid: false,
-  yieldBudgetLow: false,
   sparringSolLow: false,
   secondsToEpochClose: 7 * 24 * 60 * 60,
   jackpotAmount: 5_000_000n,
   minJackpot: 1_000_000n,
-  principalOut: 0n,
   pendingWithdrawals: 0n,
   vaultLiquidity: 10_000_000n,
+  solvencyMargin: 0n,
+  freeIdleLowSeconds: null,
+  reserveFreeLiquidity: 5_000_000n,
+  impaired: false,
+  deployPaused: false,
+  treeUsedBps: 100,
 };
 
 describe("evaluateAlerts", () => {
@@ -125,12 +135,6 @@ describe("evaluateAlerts", () => {
     expect(evaluateAlerts({ ...HEALTHY, withdrawSkippedCount: 0 }, THRESHOLDS)).toEqual([]);
   });
 
-  it("REGISTRATION_INDEXER_STALE fires while close_registration is withheld", () => {
-    expect(evaluateAlerts({ ...HEALTHY, registrationIndexerStale: true }, THRESHOLDS)).toEqual([
-      { code: "REGISTRATION_INDEXER_STALE", message: expect.any(String) },
-    ]);
-  });
-
   it("OPERATOR_SOL_READ_FAILED fires on a failed read rather than reading as healthy", () => {
     expect(evaluateAlerts({ ...HEALTHY, operatorSolLow: null }, THRESHOLDS)).toEqual([
       { code: "OPERATOR_SOL_READ_FAILED", message: expect.any(String) },
@@ -170,12 +174,6 @@ describe("evaluateAlerts", () => {
     ]);
   });
 
-  it("YIELD_BUDGET_LOW mirrors /status's own yieldBudgetLow figure", () => {
-    expect(evaluateAlerts({ ...HEALTHY, yieldBudgetLow: true }, THRESHOLDS)).toEqual([
-      { code: "YIELD_BUDGET_LOW", message: expect.any(String) },
-    ]);
-  });
-
   it("SPARRING_SOL_LOW fires only on a true reading, not an unknown or disabled one", () => {
     expect(evaluateAlerts({ ...HEALTHY, sparringSolLow: true }, THRESHOLDS)).toEqual([
       { code: "SPARRING_SOL_LOW", message: expect.any(String) },
@@ -205,20 +203,47 @@ describe("evaluateAlerts", () => {
     ).toEqual([]);
   });
 
-  it("PRINCIPAL_OUT_NEAR_CLOSE fires only inside the last hour before close", () => {
-    expect(
-      evaluateAlerts(
-        { ...HEALTHY, secondsToEpochClose: NEAR_CLOSE_SECONDS, principalOut: 1n },
-        THRESHOLDS,
-      ),
-    ).toEqual([{ code: "PRINCIPAL_OUT_NEAR_CLOSE", message: expect.any(String) }]);
-    expect(evaluateAlerts({ ...HEALTHY, principalOut: 1n }, THRESHOLDS)).toEqual([]);
-    expect(
-      evaluateAlerts(
-        { ...HEALTHY, secondsToEpochClose: NEAR_CLOSE_SECONDS, principalOut: null },
-        THRESHOLDS,
-      ),
-    ).toEqual([]);
+  // Yield-claimer ticket 14: the live-yield conditions.
+  it("SOLVENCY_NEGATIVE fires on a negative margin past rounding dust, not on an unknown one", () => {
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: -SOLVENCY_DUST - 1n }, THRESHOLDS)).toEqual([
+      { code: "SOLVENCY_NEGATIVE", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: -SOLVENCY_DUST }, THRESHOLDS)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: 5n }, THRESHOLDS)).toEqual([]);
+    // A failed vault read is not evidence of insolvency.
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: null }, THRESHOLDS)).toEqual([]);
+  });
+
+  it("FREE_IDLE_LOW fires only once free idle has been under the floor longer than the window", () => {
+    expect(evaluateAlerts({ ...HEALTHY, freeIdleLowSeconds: 3601 }, THRESHOLDS)).toEqual([
+      { code: "FREE_IDLE_LOW", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, freeIdleLowSeconds: 3600 }, THRESHOLDS)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, freeIdleLowSeconds: null }, THRESHOLDS)).toEqual([]);
+  });
+
+  it("RESERVE_LIQUIDITY_LOW fires under the set amount, not on an unreadable reserve", () => {
+    expect(evaluateAlerts({ ...HEALTHY, reserveFreeLiquidity: 999_999n }, THRESHOLDS)).toEqual([
+      { code: "RESERVE_LIQUIDITY_LOW", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, reserveFreeLiquidity: 1_000_000n }, THRESHOLDS)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, reserveFreeLiquidity: null }, THRESHOLDS)).toEqual([]);
+  });
+
+  it("POOL_IMPAIRED and DEPLOY_PAUSED fire while their switch is set", () => {
+    expect(evaluateAlerts({ ...HEALTHY, impaired: true }, THRESHOLDS)).toEqual([
+      { code: "POOL_IMPAIRED", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, deployPaused: true }, THRESHOLDS)).toEqual([
+      { code: "DEPLOY_PAUSED", message: expect.any(String) },
+    ]);
+  });
+
+  it("WEIGHT_TREE_NEARLY_FULL fires over 90% of capacity", () => {
+    expect(evaluateAlerts({ ...HEALTHY, treeUsedBps: TREE_NEARLY_FULL_BPS + 1 }, THRESHOLDS)).toEqual([
+      { code: "WEIGHT_TREE_NEARLY_FULL", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, treeUsedBps: TREE_NEARLY_FULL_BPS }, THRESHOLDS)).toEqual([]);
   });
 
   it("WITHDRAW_FORECAST_SHORT fires when the total owed outruns vault liquidity", () => {
@@ -256,18 +281,21 @@ describe("evaluateAlerts", () => {
         roundVoidedRecently: true,
         epochRolledOverRecently: true,
         withdrawSkippedCount: 1,
-        registrationIndexerStale: true,
         operatorFailingSeconds: null,
         epochNoProgress: true,
         drawnUnpaid: true,
-        yieldBudgetLow: true,
         sparringSolLow: true,
         secondsToEpochClose: NEAR_CLOSE_SECONDS,
         jackpotAmount: 0n,
         minJackpot: 1_000_000n,
-        principalOut: 1n,
         pendingWithdrawals: 2n,
         vaultLiquidity: 1n,
+        solvencyMargin: -100n,
+        freeIdleLowSeconds: 7_200,
+        reserveFreeLiquidity: 0n,
+        impaired: true,
+        deployPaused: true,
+        treeUsedBps: 9_500,
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -281,14 +309,17 @@ describe("evaluateAlerts", () => {
       "ROUND_VOIDED_RECENTLY",
       "EPOCH_ROLLED_OVER_RECENTLY",
       "WITHDRAW_OWNERS_SKIPPED",
-      "REGISTRATION_INDEXER_STALE",
       "EPOCH_NO_PROGRESS",
       "DRAWN_UNPAID",
-      "YIELD_BUDGET_LOW",
       "SPARRING_SOL_LOW",
       "JACKPOT_LOW_NEAR_CLOSE",
-      "PRINCIPAL_OUT_NEAR_CLOSE",
       "WITHDRAW_FORECAST_SHORT",
+      "SOLVENCY_NEGATIVE",
+      "FREE_IDLE_LOW",
+      "RESERVE_LIQUIDITY_LOW",
+      "POOL_IMPAIRED",
+      "DEPLOY_PAUSED",
+      "WEIGHT_TREE_NEARLY_FULL",
     ]);
   });
 });

@@ -160,13 +160,61 @@ Starts with `DRAWN_UNPAID`.
    quietly; if `payout` keeps failing, check the backend logs for the send error before
    `payout_timeout` passes and a real winner loses their prize to a rollover.
 
-## Yield budget running low
+## Pool not covering its balances
 
-Starts with `YIELD_BUDGET_LOW`.
+Starts with `SOLVENCY_NEGATIVE`.
 
-1. First check: `GET /status`'s `yieldBudget` against `yieldShortfall`. Top up the yield budget
-   account before Base yield stops crediting; see [`docs/ops/funds.md`](funds.md) for the funding
-   command.
+1. First check: `GET /status`'s `solvencyMargin`. It is the vault plus the venue position, as of
+   the last sync, less principal, queued withdrawals and everything owed, plus the recorded
+   deficit. Under zero by more than a few base units of rounding dust means the pool holds less
+   than it owes. Interest earned since the last sync is not in the figure, so a pool that is only
+   slightly short may read healthy after the next deposit or harvest syncs it.
+2. Check `impaired` in the same response and the logs for an `ImpairedSet` event. A venue loss sets
+   `impaired`, which pays exits a haircut; see "Venue loss" below. A negative margin with `impaired`
+   off is not expected: treat it as a program bug, `pause` the pool (see "Suspected exploit"
+   below) and stop.
+
+## Free idle or reserve liquidity running low
+
+Starts with `FREE_IDLE_LOW` or `RESERVE_LIQUIDITY_LOW`.
+
+1. `FREE_IDLE_LOW` means free idle (the vault less queued withdrawals) has sat under the idle floor
+   for longer than `ALERT_IDLE_LOW_S`. The operator recalls from the venue when it falls under the
+   floor, so this fires when that is not happening. Check `GET /status`'s `freeIdle`,
+   `freeIdleBps`, `reserveFreeLiquidity` and the operator's `lastError`. A recall the reserve cannot
+   pay (`VenueIlliquid`) is the usual cause, and means instant withdrawals past free idle will fail
+   until the reserve has liquidity again; queued withdrawals still work.
+2. `RESERVE_LIQUIDITY_LOW` means klend's reserve has less free liquidity than
+   `ALERT_RESERVE_FREE_MIN` atomic USDC. The pool's own position can only be recalled as far as the
+   reserve can pay, so check `reserveUtilizationBps` and consider `admin pause-deploy` to stop adding
+   to a reserve that is running dry.
+
+## Venue loss
+
+Starts with `POOL_IMPAIRED`.
+
+1. The venue reported a loss past the tolerance. Deploy and harvest are refused, and exits pay a
+   haircut (`GET /pool`'s `live.haircutFactor`). The prize share and the fee owed absorbed the loss
+   first. `impaired` clears when later gains or a `cover_deficit` bring the recorded deficit to
+   zero.
+2. Read `GET /status`'s `solvencyMargin` and the `ImpairedSet` event's `deficit`. Decide with the
+   team whether to cover it.
+
+## Deployment paused
+
+Starts with `DEPLOY_PAUSED`.
+
+1. Either key can pause deployment; only the Admin can restart it. The alert holds for as long as
+   the pause does, so a deliberate pause keeps paging until it is lifted. Idle USDC above the band
+   stays idle and earns nothing, which lowers the rate for everyone.
+
+## Weight tree filling up
+
+Starts with `WEIGHT_TREE_NEARLY_FULL`.
+
+1. `GET /status`'s `treeNodeCount` against `treeCapacity` (145,634 Players). Past the capacity
+   deposits from a new wallet fail with `WeightTreeFull`. A second tree is out of scope for the
+   current program, so this needs a design decision well before the last leaf is taken.
 
 ## Sparring player out of SOL
 
@@ -176,19 +224,19 @@ Starts with `SPARRING_SOL_LOW`.
    `SPARRING_KEYPAIR`'s pubkey. Top up with a plain transfer, same as "Operator out of SOL" above;
    a lone human otherwise has no one to play against.
 
-## Jackpot or principal short before close
+## Jackpot short before close
 
-Starts with `JACKPOT_LOW_NEAR_CLOSE` or `PRINCIPAL_OUT_NEAR_CLOSE`.
+Starts with `JACKPOT_LOW_NEAR_CLOSE`.
 
-1. First check: `GET /status`'s `jackpotAmount` against `minJackpot`, and `principalOut`, all
-   against `epochEndsAt`. Both only fire inside the last hour before an epoch's registration
-   closes, so there is a real window to fund the jackpot vault or return outstanding principal
-   before `payout` or a withdrawal needs it.
+1. First check: `GET /status`'s `jackpotAmount` against `minJackpot` and `epochEndsAt`. It only
+   fires inside the last hour before an epoch closes, so there is a real window to fund the jackpot
+   vault (the operator's `harvest` pays the prize share into it) before `request_draw` snapshots it.
 
 ## Withdrawals outrunning vault liquidity
 
 Starts with `WITHDRAW_FORECAST_SHORT`.
 
-1. First check: `GET /status`'s `pendingWithdrawals` against `vaultLiquidity`. Return principal
-   before the next `payout` attempt, rather than after it fails
+1. First check: `GET /status`'s `pendingWithdrawals` against `vaultLiquidity`. The operator recalls
+   from the venue when the vault is short of what is queued; if it cannot, see "Free idle or
+   reserve liquidity running low" above
    ([`docs/ops/funds.md`](funds.md#shutdown-and-the-emergency-exits)).

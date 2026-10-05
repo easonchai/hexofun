@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest";
 import { INVITE_CIRCULATION_CAP, INVITE_REDEEM_GRANT_COUNT } from "../api/invite-code";
 import { DEFAULT_REFERRAL_QUALIFY_SECONDS } from "../api/referral";
 import {
+  DEFAULT_ALERT_IDLE_LOW_S,
   DEFAULT_ALERT_INDEXER_STALE_S,
+  DEFAULT_ALERT_RESERVE_FREE_MIN,
   DEFAULT_ALERT_TICK_STALE_S,
   DEFAULT_OPERATOR_SOL_WARN,
   DEFAULT_RPC_TIMEOUT_MS,
@@ -167,6 +169,27 @@ describe("validateEnv", () => {
     expect(() =>
       validateEnv({ ...base, ACCEPTED_MINT: MINT, ALERT_INDEXER_STALE_S: "1.5" }),
     ).toThrow(/ALERT_INDEXER_STALE_S/);
+  });
+
+  // Yield-claimer ticket 14: the free idle and reserve liquidity thresholds.
+  it("defaults the live-yield alert thresholds and fails the boot on a bad one", () => {
+    const env = validateEnv({ ...base, ACCEPTED_MINT: MINT });
+    expect(env.ALERT_IDLE_LOW_S).toBe(DEFAULT_ALERT_IDLE_LOW_S);
+    expect(env.ALERT_RESERVE_FREE_MIN).toBe(DEFAULT_ALERT_RESERVE_FREE_MIN);
+    const set = validateEnv({
+      ...base,
+      ACCEPTED_MINT: MINT,
+      ALERT_IDLE_LOW_S: "600",
+      ALERT_RESERVE_FREE_MIN: "5000000",
+    });
+    expect(set.ALERT_IDLE_LOW_S).toBe(600);
+    expect(set.ALERT_RESERVE_FREE_MIN).toBe(5_000_000);
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, ALERT_IDLE_LOW_S: "-1" }),
+    ).toThrow(/ALERT_IDLE_LOW_S/);
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, ALERT_RESERVE_FREE_MIN: "1.5" }),
+    ).toThrow(/ALERT_RESERVE_FREE_MIN/);
   });
 
   // ticket 10: a mainnet stack must never crank a devnet Pool because

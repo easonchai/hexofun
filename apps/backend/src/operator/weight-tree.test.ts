@@ -5,7 +5,7 @@ import { PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
 import { EPOCH_STATUS, type EpochState } from "./chain-state";
-import { leafHoldingTarget, readNodes } from "./weight-tree";
+import { leafHoldingTarget, nodeCount, prefixWeights, readNodes } from "./weight-tree";
 
 const HEADER = 56;
 const NODE = 72;
@@ -83,6 +83,19 @@ describe("leafHoldingTarget", () => {
     const big = tree([{ principalSum: 1n, slot: { stamp: 1n, base: 1n, weight: 1n << 70n } }]);
     expect(leafHoldingTarget(readNodes(big), epoch((1n << 70n) - 1n))).toBe(1);
     expect(leafHoldingTarget(readNodes(big), epoch(1n << 70n))).toBeNull();
+  });
+
+  // The read model's Player Weight is `prefix[i] - prefix[i - 1]` and the
+  // root is the last entry (ticket 14).
+  it("gives prefix sums, so a leaf is a difference and the root is the last entry", () => {
+    const prefix = prefixWeights(nodes, 1n, 100n);
+    expect(prefix).toEqual([0n, 700n, 720n, 750n]);
+    expect((prefix[2] as bigint) - (prefix[1] as bigint)).toBe(20n);
+  });
+
+  it("reads the node count from the header alone", () => {
+    expect(nodeCount(data.subarray(0, HEADER))).toBe(3);
+    expect(() => nodeCount(data.subarray(0, 10))).toThrow(/truncated/);
   });
 
   it("refuses an account shorter than its node count says", () => {

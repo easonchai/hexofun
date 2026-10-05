@@ -17,16 +17,19 @@ export type AlertCode =
   | "ROUND_VOIDED_RECENTLY"
   | "EPOCH_ROLLED_OVER_RECENTLY"
   | "WITHDRAW_OWNERS_SKIPPED"
-  | "REGISTRATION_INDEXER_STALE"
   | "OPERATOR_SOL_READ_FAILED"
   | "OPERATOR_FAILING"
   | "EPOCH_NO_PROGRESS"
   | "DRAWN_UNPAID"
-  | "YIELD_BUDGET_LOW"
   | "SPARRING_SOL_LOW"
   | "JACKPOT_LOW_NEAR_CLOSE"
-  | "PRINCIPAL_OUT_NEAR_CLOSE"
-  | "WITHDRAW_FORECAST_SHORT";
+  | "WITHDRAW_FORECAST_SHORT"
+  | "SOLVENCY_NEGATIVE"
+  | "FREE_IDLE_LOW"
+  | "RESERVE_LIQUIDITY_LOW"
+  | "POOL_IMPAIRED"
+  | "DEPLOY_PAUSED"
+  | "WEIGHT_TREE_NEARLY_FULL";
 
 export interface Alert {
   code: AlertCode;
@@ -44,6 +47,12 @@ export const OPERATOR_FAILING_SECONDS = 5 * 60;
 /** Ticket 09: "inside the last hour before close" for the jackpot and
  *  principal-out conditions, straight from spec.md's own wording. */
 export const NEAR_CLOSE_SECONDS = 60 * 60;
+/** Yield-claimer ticket 14: the Weight tree alerts above this share of its
+ *  capacity, in basis points (90%). */
+export const TREE_NEARLY_FULL_BPS = 9_000;
+/** A negative solvency margin smaller than this is rounding dust from a
+ *  redeem, which the program charges to the fee owed (spec "Sync"). */
+export const SOLVENCY_DUST = 10n;
 
 /** Everything `evaluateAlerts` needs, already resolved to plain values so it
  *  stays DB- and chain-free and is cheap to seed from a test. */
@@ -71,8 +80,6 @@ export interface AlertInputs {
   /** Ticket 06: OperatorState.withdrawSkippedCount, 0 for "never checked"
    *  and "none skipped" alike. */
   withdrawSkippedCount: number;
-  /** Ticket 07: OperatorState.registrationIndexerStale. */
-  registrationIndexerStale: boolean;
   /** Ticket 09: seconds since the operator's last successful tick, while the
    *  current one is still failing; null when the last tick did not fail
    *  (OperatorState.lastError is null). `Infinity` stands for "never
@@ -82,8 +89,6 @@ export interface AlertInputs {
   epochNoProgress: boolean;
   /** Ticket 09: OperatorState.drawnUnpaid. */
   drawnUnpaid: boolean;
-  /** Ticket 09: ApiService's `yieldBudgetLow`, already computed for /status. */
-  yieldBudgetLow: boolean;
   /** Ticket 09: null when the sparring player is not configured, or its
    *  balance read failed; both read as "nothing to warn about" the same way
    *  a failed operator SOL read does not itself mean the operator is low. */
@@ -96,17 +101,29 @@ export interface AlertInputs {
   jackpotAmount: bigint | null;
   /** Ticket 09: `Pool.minJackpot`; 0 before a pool is indexed. */
   minJackpot: bigint;
-  /** Ticket 09: `/status`'s `principalOut`; null when unknown. */
-  principalOut: bigint | null;
   /** Ticket 09: `Pool.pendingWithdrawals`, the total still owed. */
   pendingWithdrawals: bigint;
   /** Ticket 09: `/status`'s `vaultLiquidity`; null when the read failed. */
   vaultLiquidity: bigint | null;
+  /** Ticket 14: `/status`'s `solvencyMargin`; null when the vault read failed. */
+  solvencyMargin: bigint | null;
+  /** Seconds free idle has been under the idle floor; null while it is not. */
+  freeIdleLowSeconds: number | null;
+  /** `/status`'s `reserveFreeLiquidity`; null when the reserve is unreadable. */
+  reserveFreeLiquidity: bigint | null;
+  impaired: boolean;
+  deployPaused: boolean;
+  /** `/status`'s `treeUsedBps`. */
+  treeUsedBps: number;
 }
 
 export interface AlertThresholds {
   tickStaleSeconds: number;
   indexerStaleSeconds: number;
+  /** Seconds free idle may stay under the floor. */
+  idleLowSeconds: number;
+  /** Atomic USDC of reserve free liquidity below which `RESERVE_LIQUIDITY_LOW` fires. */
+  reserveFreeMin: bigint;
 }
 
 /**
@@ -190,12 +207,6 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: `${inputs.withdrawSkippedCount} owner(s) skipped after repeated withdrawal failures this epoch.`,
     });
   }
-  if (inputs.registrationIndexerStale) {
-    alerts.push({
-      code: "REGISTRATION_INDEXER_STALE",
-      message: "close_registration is withheld: the indexer cursor is stale or behind the epoch's end.",
-    });
-  }
   if (inputs.epochNoProgress) {
     alerts.push({
       code: "EPOCH_NO_PROGRESS",
@@ -206,12 +217,6 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
     alerts.push({
       code: "DRAWN_UNPAID",
       message: "The epoch drew a winner more than a few minutes ago and it is still unpaid.",
-    });
-  }
-  if (inputs.yieldBudgetLow) {
-    alerts.push({
-      code: "YIELD_BUDGET_LOW",
-      message: "The yield budget is below the cost of one epoch's Base yield.",
     });
   }
   if (inputs.sparringSolLow === true) {
@@ -230,16 +235,43 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The jackpot vault is below min_jackpot inside the last hour before close.",
     });
   }
-  if (nearClose && inputs.principalOut !== null && inputs.principalOut > 0n) {
-    alerts.push({
-      code: "PRINCIPAL_OUT_NEAR_CLOSE",
-      message: "Principal is still out of the vault inside the last hour before close.",
-    });
-  }
   if (inputs.vaultLiquidity !== null && inputs.pendingWithdrawals > inputs.vaultLiquidity) {
     alerts.push({
       code: "WITHDRAW_FORECAST_SHORT",
       message: "Due pending withdrawals are forecast to exceed vault liquidity.",
+    });
+  }
+  if (inputs.solvencyMargin !== null && inputs.solvencyMargin < -SOLVENCY_DUST) {
+    alerts.push({
+      code: "SOLVENCY_NEGATIVE",
+      message: "The vault plus the venue position no longer covers every balance.",
+    });
+  }
+  if (inputs.freeIdleLowSeconds !== null && inputs.freeIdleLowSeconds > thresholds.idleLowSeconds) {
+    alerts.push({
+      code: "FREE_IDLE_LOW",
+      message: `Free idle has been under the idle floor for over ${thresholds.idleLowSeconds}s.`,
+    });
+  }
+  if (inputs.reserveFreeLiquidity !== null && inputs.reserveFreeLiquidity < thresholds.reserveFreeMin) {
+    alerts.push({
+      code: "RESERVE_LIQUIDITY_LOW",
+      message: "The klend reserve's free liquidity is under ALERT_RESERVE_FREE_MIN.",
+    });
+  }
+  if (inputs.impaired) {
+    alerts.push({
+      code: "POOL_IMPAIRED",
+      message: "The venue reported a loss: exits pay a haircut and deploy and harvest are refused.",
+    });
+  }
+  if (inputs.deployPaused) {
+    alerts.push({ code: "DEPLOY_PAUSED", message: "Deployment to the venue is paused." });
+  }
+  if (inputs.treeUsedBps > TREE_NEARLY_FULL_BPS) {
+    alerts.push({
+      code: "WEIGHT_TREE_NEARLY_FULL",
+      message: "The Weight tree is over 90% of its capacity.",
     });
   }
   return alerts;
@@ -260,6 +292,15 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
 export class AlertsController {
   private readonly tickStaleSeconds: number;
   private readonly indexerStaleSeconds: number;
+  private readonly idleLowSeconds: number;
+  private readonly reserveFreeMin: bigint;
+  /**
+   * Wall-clock seconds `/status` first reported free idle under the floor, or
+   * null while it is not. Kept in memory: a restart restarts the clock, which
+   * only delays the alert by one window. ponytail: persist it in
+   * OperatorState if restarts during a real shortfall turn out to matter.
+   */
+  private idleLowSince: number | null = null;
 
   constructor(
     private readonly api: ApiService,
@@ -268,6 +309,8 @@ export class AlertsController {
   ) {
     this.tickStaleSeconds = config.get("ALERT_TICK_STALE_S", { infer: true });
     this.indexerStaleSeconds = config.get("ALERT_INDEXER_STALE_S", { infer: true });
+    this.idleLowSeconds = config.get("ALERT_IDLE_LOW_S", { infer: true });
+    this.reserveFreeMin = BigInt(config.get("ALERT_RESERVE_FREE_MIN", { infer: true }));
   }
 
   @Get("alerts")
@@ -293,6 +336,11 @@ export class AlertsController {
       status.epochStatus === EPOCH_OPEN && status.epochEndsAt !== null
         ? Number(status.epochEndsAt - BigInt(nowSeconds))
         : null;
+    // A null reading (vault unknown) leaves the clock as it was: a failed read
+    // is not evidence that idle recovered.
+    if (status.freeIdleBelowFloor === false) this.idleLowSince = null;
+    else if (status.freeIdleBelowFloor === true) this.idleLowSince ??= nowSeconds;
+    const freeIdleLowSeconds = this.idleLowSince === null ? null : nowSeconds - this.idleLowSince;
     const alerts = evaluateAlerts(
       {
         operatorSolLow: status.operatorSolLow,
@@ -306,20 +354,28 @@ export class AlertsController {
         roundVoidedRecently: recent.roundVoidedRecently,
         epochRolledOverRecently: recent.epochRolledOverRecently,
         withdrawSkippedCount: status.withdrawSkippedCount,
-        registrationIndexerStale: status.registrationIndexerStale,
         operatorFailingSeconds,
         epochNoProgress: status.operator?.epochNoProgress ?? false,
         drawnUnpaid: status.operator?.drawnUnpaid ?? false,
-        yieldBudgetLow: status.yieldBudgetLow,
         sparringSolLow: status.sparringSolLow,
         secondsToEpochClose,
         jackpotAmount: status.jackpotAmount,
         minJackpot: status.minJackpot,
-        principalOut: status.principalOut,
         pendingWithdrawals: status.pendingWithdrawals,
         vaultLiquidity: status.vaultLiquidity,
+        solvencyMargin: status.solvencyMargin,
+        freeIdleLowSeconds,
+        reserveFreeLiquidity: status.reserveFreeLiquidity,
+        impaired: status.impaired,
+        deployPaused: status.deployPaused,
+        treeUsedBps: status.treeUsedBps,
       },
-      { tickStaleSeconds: this.tickStaleSeconds, indexerStaleSeconds: this.indexerStaleSeconds },
+      {
+        tickStaleSeconds: this.tickStaleSeconds,
+        indexerStaleSeconds: this.indexerStaleSeconds,
+        idleLowSeconds: this.idleLowSeconds,
+        reserveFreeMin: this.reserveFreeMin,
+      },
     );
     if (alerts.length > 0) {
       // Nest serializes an HttpException's first argument as the body

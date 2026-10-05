@@ -114,7 +114,6 @@ export interface PoolDto {
   currentEpochEndsAt: string;
   previousEpochEndsAt: string;
   totalPrincipal: string;
-  carryPot: string;
   updatedSlot: string;
 }
 
@@ -123,8 +122,6 @@ export interface EpochDto {
   startsAt: string;
   endsAt: string;
   status: StatusValue;
-  registeredWeight: string;
-  registeredCount: number;
   jackpotAmount: string;
   target: string;
   winner: string | null;
@@ -154,29 +151,24 @@ export interface PlayerDto {
   owner: string;
   principal: string;
   entries: string;
-  weightAcc: string;
-  lastUpdate: string;
   epochId: string;
-  frozenWeight: string;
-  frozenEpoch: string;
-  regEpoch: string;
-  regStart: string;
-  regEnd: string;
   isHouse: boolean;
   /** Requested but unpaid Principal, atomic units. "0" when nothing is pending. */
   pendingWithdraw: string;
   /** Epoch the pending amount was requested in; it pays out after that one ends. */
   pendingEpoch: string;
-  /** weightAcc + entries × (now − lastUpdate). */
-  liveWeight: string;
-  /** Share of the epoch's live weight as a percentage, two decimals: "12.34". */
-  odds: string;
+  /** The Player's Weight in the current epoch, read from the Weight tree.
+   *  Null while the backend cannot read the tree. */
+  weight: string | null;
+  /** Share of the epoch's weight as a percentage, two decimals: "12.34".
+   *  Null while the backend cannot read the tree. */
+  odds: string | null;
 }
 
 /** `GET /leaderboard` sends a subset of the Player row, not the whole thing. */
 export type LeaderboardRowDto = Pick<
   PlayerDto,
-  "owner" | "principal" | "entries" | "isHouse" | "liveWeight" | "odds"
+  "owner" | "principal" | "entries" | "isHouse" | "weight" | "odds"
 >;
 
 /**
@@ -185,10 +177,10 @@ export type LeaderboardRowDto = Pick<
  * and `grantedToday`; unmodeled here, since nothing in the web app reads them.
  */
 export type PlayerExtrasDto = PlayerDto & {
-  /** What `register` credited this owner in the epoch it last credited. */
-  yieldLastEpoch: string;
-  /** Every Base yield credit this owner has ever received. */
-  yieldToDate: string;
+  /** Yield earned since the last settle, as of the pool's last sync. */
+  unsettledYield: string;
+  /** Chain unix seconds of that sync. */
+  syncedAt: string;
   /** USDC still spendable in `buy_tickets` today, capped at Principal. */
   buyAllowanceLeft: string;
 };
@@ -221,8 +213,6 @@ export interface OperatorStateDto {
    *  api.service.ts), never the raw error text. `status.ts` maps it to
    *  generic copy for the pill. */
   lastError: string | null;
-  registeredCount: number | null;
-  registeredTotal: number | null;
 }
 
 export interface StatusDto {
@@ -239,9 +229,6 @@ export interface StatusDto {
   /** Irreversible once true (ops-and-envs ticket 08); false before the pool
    *  is indexed. See `shutdown.ts` for what the web does with this. */
   shutdown: boolean;
-  /** Principal pulled out and not yet returned; null when the pool or the
-   *  vault balance is not known yet. Not surfaced in this app's UI. */
-  principalOut: string | null;
   /** Ticket 05: the deposit-only launch week's `LAUNCH_AT`, ISO, while the
    *  pool has no Epoch yet; null once an Epoch exists or none is configured. */
   launchAt: string | null;
@@ -253,16 +240,14 @@ export interface PoolSummaryDto {
   openRound: RoundSummaryDto | null;
 }
 
-/** Registration and draw progress for the epoch that just ended. */
+/** Draw progress for the epoch that just ended. */
 export interface DrawingProgressDto {
   epochId: string;
-  registeredCount: number;
-  eligible: number;
   status: StatusValue;
 }
 
 export type CurrentEpochDto = EpochDto & {
-  /** Null unless the previous epoch is Registering or Drawing. */
+  /** Null unless the previous epoch is Ended or Drawing. */
   drawing: DrawingProgressDto | null;
 };
 

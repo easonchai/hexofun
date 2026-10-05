@@ -28,13 +28,15 @@ export interface ReferralQualificationState {
   aboveSince: bigint | null;
 }
 
-/** The four Principal-changing events spec.md "Qualification" lists.
- *  Deposited carries the absolute new Principal; the other three carry a
- *  delta applied to whatever Principal was immediately before them. */
+/** The four Principal-changing events spec.md "Qualification" lists, with
+ *  `InstantWithdrawn` in place of the retired `YieldCredited` (live yield
+ *  settles inside the money instructions and emits no event of its own).
+ *  Deposited and InstantWithdrawn carry the absolute new Principal; the other
+ *  two carry a delta applied to whatever Principal was immediately before. */
 export type ReferralPrincipalEvent =
   | { kind: "Deposited"; principal: bigint }
   | { kind: "WithdrawRequested"; amount: bigint }
-  | { kind: "YieldCredited"; amount: bigint }
+  | { kind: "InstantWithdrawn"; principal: bigint }
   | { kind: "JackpotPaid"; amount: bigint };
 
 /** The referee's Principal immediately after `event`, given it was
@@ -44,12 +46,12 @@ export type ReferralPrincipalEvent =
 export function nextPrincipal(previous: bigint, event: ReferralPrincipalEvent): bigint {
   switch (event.kind) {
     case "Deposited":
+    case "InstantWithdrawn":
       return event.principal;
     case "WithdrawRequested": {
       const next = previous - event.amount;
       return next > 0n ? next : 0n;
     }
-    case "YieldCredited":
     case "JackpotPaid":
       return previous + event.amount;
   }

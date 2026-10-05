@@ -1,6 +1,5 @@
 // Pure translation between the chain's shapes and Postgres rows: Anchor
-// decoded accounts to Prisma inputs, `Program data:` log lines to event rows,
-// and the `register` weight rule from spec §2.3 that the operator asks for.
+// decoded accounts to Prisma inputs and `Program data:` log lines to event rows.
 //
 // Nothing here touches the network or Prisma, so every rule is unit-testable
 // without a validator.
@@ -11,7 +10,7 @@ import { PublicKey } from "@solana/web3.js";
 /** `Epoch::status` and `Round::status`, mirroring constants.rs. */
 export const EPOCH_STATUS = {
   OPEN: 0,
-  REGISTERING: 1,
+  ENDED: 1,
   DRAWING: 2,
   DRAWN: 3,
   PAID: 4,
@@ -150,14 +149,12 @@ export interface DecodedPool {
   houseCutBps: number;
   paused: boolean;
   currentEpochId: BN;
+  currentEpochStart: BN;
   currentEpochEndsAt: BN;
   previousEpochEndsAt: BN;
   totalPrincipal: BN;
-  carryPot: BN;
-  /** Base yield's APR on time-weighted Principal, in basis points. */
+  /** The depositors' ceiling rate (APR, basis points). */
   baseRateBps: number;
-  /** USDC in the principal vault earmarked for Base yield, not yet credited. */
-  yieldBudget: BN;
   /** Tickets credited per USDC spent in `buy_tickets`. */
   ticketsPerUsdc: number;
   /** Share of `total_principal`, in basis points, an operator `grant_tickets`
@@ -178,6 +175,30 @@ export interface DecodedPool {
   /** Jackpot pause (game-jackpot-pause ticket 02): no new epoch, ticket
    *  purchase, grant or registration close. */
   jackpotPaused: boolean;
+  /** Live yield (yield-claimer): the Weight tree, the pinned klend accounts,
+   *  the Yield index and its owed amounts, and the venue settings. */
+  weightTree: PublicKey;
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
+  yieldIndex: BN;
+  venueValue: BN;
+  lastSyncAt: BN;
+  yieldOwed: BN;
+  feeOwed: BN;
+  prizeOwed: BN;
+  deficit: BN;
+  yieldFeeBps: number;
+  idleFloorBps: number;
+  idleTargetBps: number;
+  reserveShareCapBps: number;
+  reserveLiquidityFloorBps: number;
+  minVenueMove: BN;
+  lossToleranceBps: number;
+  deployPaused: boolean;
+  impaired: boolean;
+  buyTicketsPaused: boolean;
 }
 
 export interface DecodedEpoch {
@@ -185,8 +206,6 @@ export interface DecodedEpoch {
   startsAt: BN;
   endsAt: BN;
   status: number;
-  registeredWeight: BN;
-  registeredCount: number;
   jackpotAmount: BN;
   target: BN;
   winner: PublicKey;
@@ -208,24 +227,10 @@ export interface DecodedPlayer {
   owner: PublicKey;
   principal: BN;
   entries: BN;
-  weightAcc: BN;
-  lastUpdate: BN;
   epochId: BN;
-  frozenWeight: BN;
-  frozenEpoch: BN;
-  regEpoch: BN;
-  regStart: BN;
-  regEnd: BN;
   isHouse: boolean;
   pendingWithdraw: BN;
   pendingEpoch: BN;
-  /** Σ principal × seconds within `epochId`. Mirrors `weightAcc` with
-   *  Principal in place of Entries. */
-  principalAcc: BN;
-  /** Final principal-seconds for `frozenEpoch`, set alongside `frozenWeight`. */
-  frozenPrincipalAcc: BN;
-  /** The epoch Base yield was last credited for. */
-  yieldEpoch: BN;
   /** The epoch `boughtAmount` is counted against. */
   boughtEpoch: BN;
   /** USDC spent in `buy_tickets` so far in `boughtEpoch`, capped at `principal`. */
@@ -235,6 +240,10 @@ export interface DecodedPlayer {
   /** Tickets an operator `grant_tickets` call has credited this Player so
    *  far in `bonusEpoch`. */
   bonusGranted: BN;
+  /** The pool's Yield index at this Player's last settle, scaled by 1e18. */
+  yieldIndex: BN;
+  /** This Player's leaf in the Weight tree, 1-based. */
+  leafIndex: number;
 }
 
 export interface DecodedPosition {
@@ -270,9 +279,7 @@ export function poolRow(
     currentEpochEndsAt: big(pool.currentEpochEndsAt),
     previousEpochEndsAt: big(pool.previousEpochEndsAt),
     totalPrincipal: big(pool.totalPrincipal),
-    carryPot: big(pool.carryPot),
     baseRateBps: pool.baseRateBps,
-    yieldBudget: big(pool.yieldBudget),
     ticketsPerUsdc: pool.ticketsPerUsdc,
     bonusCapBps: pool.bonusCapBps,
     bonusEpoch: big(pool.bonusEpoch),
@@ -281,6 +288,28 @@ export function poolRow(
     shutdown: pool.shutdown,
     gamePaused: pool.gamePaused,
     jackpotPaused: pool.jackpotPaused,
+    weightTree: pool.weightTree.toBase58(),
+    klendProgram: pool.klendProgram.toBase58(),
+    klendMarket: pool.klendMarket.toBase58(),
+    klendReserve: pool.klendReserve.toBase58(),
+    klendCtoken: pool.klendCtoken.toBase58(),
+    yieldIndex: pool.yieldIndex.toString(),
+    venueValue: big(pool.venueValue),
+    lastSyncAt: big(pool.lastSyncAt),
+    yieldOwed: big(pool.yieldOwed),
+    feeOwed: big(pool.feeOwed),
+    prizeOwed: big(pool.prizeOwed),
+    deficit: big(pool.deficit),
+    yieldFeeBps: pool.yieldFeeBps,
+    idleFloorBps: pool.idleFloorBps,
+    idleTargetBps: pool.idleTargetBps,
+    reserveShareCapBps: pool.reserveShareCapBps,
+    reserveLiquidityFloorBps: pool.reserveLiquidityFloorBps,
+    minVenueMove: big(pool.minVenueMove),
+    lossToleranceBps: pool.lossToleranceBps,
+    deployPaused: pool.deployPaused,
+    impaired: pool.impaired,
+    buyTicketsPaused: pool.buyTicketsPaused,
     updatedSlot: slot,
   };
 }
@@ -294,8 +323,6 @@ export function epochRow(epoch: DecodedEpoch, poolAddress: string): Prisma.Epoch
     startsAt: big(epoch.startsAt),
     endsAt: big(epoch.endsAt),
     status: epoch.status,
-    registeredWeight: epoch.registeredWeight.toString(),
-    registeredCount: epoch.registeredCount,
     jackpotAmount: big(epoch.jackpotAmount),
     target: epoch.target.toString(),
     // Written only by `payout`; the default key means "no winner yet".
@@ -325,24 +352,16 @@ export function playerRow(player: DecodedPlayer, poolAddress: string): Prisma.Pl
     owner: player.owner.toBase58(),
     principal: big(player.principal),
     entries: big(player.entries),
-    weightAcc: player.weightAcc.toString(),
-    lastUpdate: big(player.lastUpdate),
     epochId: big(player.epochId),
-    frozenWeight: player.frozenWeight.toString(),
-    frozenEpoch: big(player.frozenEpoch),
-    regEpoch: big(player.regEpoch),
-    regStart: player.regStart.toString(),
-    regEnd: player.regEnd.toString(),
     isHouse: player.isHouse,
     pendingWithdraw: big(player.pendingWithdraw),
     pendingEpoch: big(player.pendingEpoch),
-    principalAcc: player.principalAcc.toString(),
-    frozenPrincipalAcc: player.frozenPrincipalAcc.toString(),
-    yieldEpoch: big(player.yieldEpoch),
     boughtEpoch: big(player.boughtEpoch),
     boughtAmount: big(player.boughtAmount),
     bonusEpoch: big(player.bonusEpoch),
     bonusGranted: big(player.bonusGranted),
+    yieldIndex: player.yieldIndex.toString(),
+    leafIndex: player.leafIndex,
   };
 }
 
@@ -361,47 +380,3 @@ export function positionRow(
     stakePerTile: big(position.stakePerTile),
   };
 }
-
-/** Decimal(40, 0) columns are integers; `toFixed` never goes exponential. */
-const fromDecimal = (value: { toFixed(places: number): string }): bigint =>
-  BigInt(value.toFixed(0));
-
-export interface RegistrationPlayer {
-  epochId: bigint;
-  weightAcc: { toFixed(places: number): string };
-  entries: bigint;
-  lastUpdate: bigint;
-  principal: bigint;
-  frozenWeight: { toFixed(places: number): string };
-  frozenEpoch: bigint;
-}
-
-export interface RegistrationEpoch {
-  id: bigint;
-  startsAt: bigint;
-  endsAt: bigint;
-}
-
-/**
- * The weight `register` would record for this player in this epoch, spec §2.3.
- * The operator skips a player whose weight is 0, because the program returns
- * Ok without registering and the transaction would be wasted.
- *
- * Clamped at 0: a negative span can only come from a row that drifted from the
- * chain, and a negative weight would make an ineligible player look eligible.
- */
-export function registrationWeight(
-  player: RegistrationPlayer,
-  epoch: RegistrationEpoch,
-): bigint {
-  if (player.epochId === epoch.id) {
-    const span = epoch.endsAt - player.lastUpdate;
-    return max0(fromDecimal(player.weightAcc) + player.entries * max0(span));
-  }
-  if (player.epochId > epoch.id) {
-    return player.frozenEpoch === epoch.id ? max0(fromDecimal(player.frozenWeight)) : 0n;
-  }
-  return max0(player.principal * max0(epoch.endsAt - epoch.startsAt));
-}
-
-const max0 = (value: bigint): bigint => (value > 0n ? value : 0n);

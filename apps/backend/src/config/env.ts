@@ -51,6 +51,16 @@ export const DEFAULT_ALERT_TICK_STALE_S = 300;
  *  cursor last advanced before it counts as stuck. */
 export const DEFAULT_ALERT_INDEXER_STALE_S = 600;
 
+/** `GET /alerts`' `FREE_IDLE_LOW` threshold (yield-claimer ticket 14): seconds
+ *  free idle may sit under the idle floor before it counts. The Operator
+ *  recalls within a tick or two, so an hour means the recall is not working. */
+export const DEFAULT_ALERT_IDLE_LOW_S = 3600;
+
+/** `GET /alerts`' `RESERVE_LIQUIDITY_LOW` threshold: atomic USDC of free
+ *  liquidity the pinned klend reserve may fall to. 100,000 USDC is a few
+ *  times the pool's own position at the default caps. */
+export const DEFAULT_ALERT_RESERVE_FREE_MIN = 100_000_000_000;
+
 export interface HexVaultEnv {
   DATABASE_URL: string;
   RPC_URL: string;
@@ -90,6 +100,10 @@ export interface HexVaultEnv {
   ALERT_TICK_STALE_S: number;
   /** `GET /alerts`' `INDEXER_STALE` threshold, in seconds. */
   ALERT_INDEXER_STALE_S: number;
+  /** `GET /alerts`' `FREE_IDLE_LOW` threshold, in seconds. */
+  ALERT_IDLE_LOW_S: number;
+  /** `GET /alerts`' `RESERVE_LIQUIDITY_LOW` threshold, atomic USDC. */
+  ALERT_RESERVE_FREE_MIN: number;
   /** Most remaining Invite code uses allowed in circulation before a redeem
    *  stops granting the redeemer codes of its own (invite-code.ts). */
   INVITE_CIRCULATION_CAP: number;
@@ -294,6 +308,12 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     REFERRAL_QUALIFY_SECONDS: referralQualifySeconds(env.REFERRAL_QUALIFY_SECONDS),
     ALERT_TICK_STALE_S: alertTickStaleSeconds(env.ALERT_TICK_STALE_S),
     ALERT_INDEXER_STALE_S: alertIndexerStaleSeconds(env.ALERT_INDEXER_STALE_S),
+    ALERT_IDLE_LOW_S: wholeNumber("ALERT_IDLE_LOW_S", env.ALERT_IDLE_LOW_S, DEFAULT_ALERT_IDLE_LOW_S),
+    ALERT_RESERVE_FREE_MIN: wholeNumber(
+      "ALERT_RESERVE_FREE_MIN",
+      env.ALERT_RESERVE_FREE_MIN,
+      DEFAULT_ALERT_RESERVE_FREE_MIN,
+    ),
     INVITE_CIRCULATION_CAP: wholeNumber(
       "INVITE_CIRCULATION_CAP",
       env.INVITE_CIRCULATION_CAP,

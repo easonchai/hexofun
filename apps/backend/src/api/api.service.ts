@@ -8,6 +8,7 @@ import {
   type Player,
   type Pool,
   type Round,
+  type WeightTreeState,
 } from "@prisma/client";
 import { unpackAccount } from "@solana/spl-token";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
@@ -17,11 +18,26 @@ import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { clockUnixTimestamp } from "../operator/chain-state";
+import { prefixWeights, readNodes } from "../operator/weight-tree";
 import { PrismaService } from "../prisma/prisma.service";
+import {
+  decodeReserve,
+  estimatedRateBps,
+  freeIdle,
+  haircutFactor,
+  instantWithdrawCoverable,
+  solvencyMargin,
+  supplyRateBps,
+  trailingRate,
+  unsettledYield,
+  type IndexPoint,
+  type ReserveStats,
+  type TrailingRate,
+} from "./live-yield";
 
 /** Mirrors programs/hex_vault/src/constants.rs `epoch_status`. */
 export const EPOCH_OPEN = 0;
-export const EPOCH_REGISTERING = 1;
+export const EPOCH_ENDED = 1;
 export const EPOCH_DRAWING = 2;
 
 /** Mirrors programs/hex_vault/src/constants.rs `round_status`. */
@@ -32,6 +48,7 @@ export const ROUND_REQUESTED = 1;
 const FEED_NAMES = [
   "Deposited",
   "Withdrawn",
+  "InstantWithdrawn",
   "PositionBought",
   "RoundSettled",
   "JackpotPaid",
@@ -70,35 +87,18 @@ export const JACKPOT_BALANCE_TTL_MS = 15_000;
  */
 export const BALANCES_TTL_MS = 15_000;
 
+/** How long the Weight tree account read behind a Player's Weight answers
+ *  for. The tree moves on every Ticket change, but the odds a viewer reads
+ *  only need to be about right. */
+export const TREE_TTL_MS = 15_000;
+
+/** Most Players one tree holds: (10 MiB - 56-byte header) / 72-byte node, as
+ *  in weight_tree.rs. Past it deposits fail with `WeightTreeFull`. */
+export const TREE_CAPACITY = 145_634;
+
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
 const toBigInt = (value: Prisma.Decimal): bigint => BigInt(value.toFixed());
-
-/**
- * A player's Weight for one epoch at instant `at`, following the touch rule in
- * spec.md §2.2 without needing the player to have been touched. Four cases:
- * the epoch is already frozen, the player is accruing in it, the player last
- * acted before it (so Entries equalled Principal throughout), or the player
- * has already moved past it without freezing it, which is zero.
- */
-export function weightAt(
-  player: Player,
-  epochId: bigint,
-  epochStart: bigint,
-  at: bigint,
-): bigint {
-  if (player.frozenEpoch === epochId) return toBigInt(player.frozenWeight);
-  if (player.epochId === epochId) {
-    const elapsed = at - player.lastUpdate;
-    if (elapsed <= 0n) return toBigInt(player.weightAcc);
-    return toBigInt(player.weightAcc) + player.entries * elapsed;
-  }
-  if (player.epochId < epochId) {
-    const elapsed = at - epochStart;
-    return elapsed <= 0n ? 0n : player.principal * elapsed;
-  }
-  return 0n;
-}
 
 /**
  * `bought_epoch`/`bought_amount`, `bonus_epoch`/`bonus_granted` and
@@ -111,50 +111,10 @@ function ifCurrentEpoch(counterEpoch: bigint, currentEpochId: bigint, value: big
   return counterEpoch === currentEpochId ? value : 0n;
 }
 
-/**
- * Atomic USDC one day of Base yield would cost the whole pool at the
- * current rate: `total_principal × base_rate_bps / (10_000 × 365)`. Same
- * per-second rate `register` applies (`10_000 × 31_536_000` seconds in a
- * year), and 31_536_000 / 86_400 is exactly 365, so a full epoch's cost
- * scales by 365 rather than the longer seconds-per-year fraction.
- */
-export function oneDayYieldCost(totalPrincipal: bigint, baseRateBps: number): bigint {
-  return (totalPrincipal * BigInt(baseRateBps)) / (10_000n * 365n);
-}
-
 /** Pool-wide `grant_tickets` cap for one epoch, mirroring the on-chain
  *  `pool_bonus_cap`. */
 export function poolBonusCap(totalPrincipal: bigint, bonusCapBps: number): bigint {
   return (totalPrincipal * BigInt(bonusCapBps)) / 10_000n;
-}
-
-export interface PrincipalOutInputs {
-  readonly totalPrincipal: bigint;
-  readonly pendingWithdrawals: bigint;
-  readonly yieldBudget: bigint;
-  readonly vaultAmount: bigint;
-}
-
-/**
- * How much Principal is out of the pool (ops-and-envs ticket 08): absent an
- * `admin_withdraw` deployment, `sweep_house`'s own invariant is that the
- * principal vault holds exactly `total_principal + pending_withdrawals +
- * yield_budget`. Whatever the vault falls short of that by is principal
- * pulled out and not yet returned. Shared by `/status` and the admin CLI's
- * `principal-out`/`return-principal` commands, so both report the same
- * figure off the same rule.
- *
- * Clamped at 0: a vault that holds more than this (say, a deposit landed
- * after `vaultAmount` was read) is not principal out, just a stale read.
- */
-export function principalOut({
-  totalPrincipal,
-  pendingWithdrawals,
-  yieldBudget,
-  vaultAmount,
-}: PrincipalOutInputs): bigint {
-  const owed = totalPrincipal + pendingWithdrawals + yieldBudget;
-  return owed > vaultAmount ? owed - vaultAmount : 0n;
 }
 
 /** Share of the total as a percentage with two decimals, e.g. "12.34". */
@@ -168,16 +128,11 @@ export function oddsPercent(weight: bigint, total: bigint): string {
 
 interface LiveWeight {
   player: Player;
-  /** Weight accrued so far this epoch. */
-  liveWeight: bigint;
-  /**
-   * Weight the player will hold at the draw if nobody touches their account
-   * again. Odds come from this share, not the live one: the live share
-   * crawls every second as late depositors catch up (a 22.57% that reads
-   * 22.64% a minute later), while this one only moves when someone
-   * deposits, withdraws or plays.
-   */
-  drawWeight: bigint;
+  /** The Player's Weight in the current epoch, read from the Weight tree.
+   *  Every Ticket change credits the rest of the epoch up front, so this is
+   *  already what the draw will use unless the Player acts again. Null when
+   *  the tree could not be read. */
+  weight: bigint | null;
 }
 
 interface RpcHealth {
@@ -201,6 +156,9 @@ interface RpcHealth {
  */
 interface ChainBalances {
   vaultLiquidity: bigint | null;
+  /** The pinned klend reserve, decoded. Null when the pool has none, the read
+   *  failed, or the account is not klend's (a test-venue stub). */
+  reserve: ReserveStats | null;
   operatorSol: number | null;
   /** Ticket 09: the sparring player's SOL, null when either `SPARRING_KEYPAIR`
    *  is not configured (the service is off) or the read failed — both read
@@ -249,6 +207,7 @@ export class ApiService {
   private clock: CachedRead<ClockReading> | undefined;
   private jackpotBalance: CachedRead<bigint> | undefined;
   private balances: CachedRead<ChainBalances> | undefined;
+  private tree: CachedRead<Buffer | null> | undefined;
 
   /**
    * The highest chain time `getState` has served. The Clock sysvar runs a
@@ -301,10 +260,17 @@ export class ApiService {
       : null;
   }
 
-  async getPool() {
+  /**
+   * The Pool row, current Epoch and open Round, plus `live` (ticket 14): the
+   * 24-hour and 7-day paid rates, the estimated current rate, the ceiling,
+   * the fee, the Bought Tickets switch, and the haircut while impaired.
+   * `withdraw`, when given, adds whether an instant withdrawal of that many
+   * atomic units can be paid.
+   */
+  async getPool(withdraw?: bigint) {
     const pool = await this.requirePool();
     const poolAddress = this.poolAddress;
-    const [currentEpoch, openRound] = await Promise.all([
+    const [currentEpoch, openRound, balances] = await Promise.all([
       this.prisma.epoch.findUnique({
         where: { poolAddress_id: { poolAddress, id: pool.currentEpochId } },
       }),
@@ -312,11 +278,71 @@ export class ApiService {
         where: { poolAddress, status: { in: [ROUND_OPEN, ROUND_REQUESTED] } },
         orderBy: { id: "desc" },
       }),
+      this.chainBalances(pool.klendReserve),
     ]);
     return {
       pool,
       currentEpoch,
       openRound: openRound === null ? null : summarizeRound(openRound),
+      live: await this.liveYield(pool, balances, withdraw),
+    };
+  }
+
+  /**
+   * ponytail: two history lookups per window per request. The history is one
+   * row a minute, indexed on (poolAddress, at); cache the answer for a minute
+   * if /pool polling ever shows up in the database's bill.
+   */
+  private async trailing(latest: IndexPoint, window: number): Promise<TrailingRate> {
+    if (latest.at <= 0n) return trailingRate(latest, null, window);
+    const poolAddress = this.poolAddress;
+    const row =
+      (await this.prisma.yieldIndexPoint.findFirst({
+        where: { poolAddress, at: { lte: latest.at - BigInt(window) } },
+        orderBy: { at: "desc" },
+      })) ??
+      (await this.prisma.yieldIndexPoint.findFirst({ where: { poolAddress }, orderBy: { at: "asc" } }));
+    return trailingRate(
+      latest,
+      row === null ? null : { at: row.at, yieldIndex: toBigInt(row.yieldIndex) },
+      window,
+    );
+  }
+
+  private async liveYield(pool: Pool, balances: ChainBalances, withdraw: bigint | undefined) {
+    // The window ends at the pool's own last sync, not at the newest history
+    // row, which the one-a-minute thinning can leave up to a minute behind.
+    const latest = { at: pool.lastSyncAt, yieldIndex: toBigInt(pool.yieldIndex) };
+    const [trailing24h, trailing7d] = await Promise.all([
+      this.trailing(latest, 86_400),
+      this.trailing(latest, 7 * 86_400),
+    ]);
+    const idle =
+      balances.vaultLiquidity === null
+        ? null
+        : freeIdle(balances.vaultLiquidity, pool.pendingWithdrawals);
+    const estimatedBps = estimatedRateBps({
+      supplyRateBps: balances.reserve === null ? null : supplyRateBps(balances.reserve),
+      venueValue: pool.venueValue,
+      freeIdle: idle,
+      yieldFeeBps: pool.yieldFeeBps,
+      ceilingBps: pool.baseRateBps,
+    });
+    return {
+      rates: { trailing24h, trailing7d, estimatedBps, ceilingBps: pool.baseRateBps },
+      yieldFeeBps: pool.yieldFeeBps,
+      buyTicketsPaused: pool.buyTicketsPaused,
+      freeIdle: idle,
+      /** Null when `?withdraw=` is absent or the vault or reserve is unreadable. */
+      instantWithdrawCoverable:
+        withdraw === undefined || idle === null || balances.reserve === null
+          ? null
+          : instantWithdrawCoverable(withdraw, idle, pool.venueValue, balances.reserve.available),
+      /** The share of a withdrawal the pool pays, while impaired; else null. */
+      haircutFactor:
+        pool.impaired && balances.vaultLiquidity !== null
+          ? haircutFactor(pool, balances.vaultLiquidity)
+          : null,
     };
   }
 
@@ -412,53 +438,30 @@ export class ApiService {
     return round;
   }
 
+  /**
+   * Principal, the yield earned since the last settle as of the pool's last
+   * sync (`unsettledYield`, `syncedAt`), and the Weight the tree holds for the
+   * Player in the current epoch.
+   */
   async getPlayer(owner: string) {
-    const { weights, total } = await this.liveWeights();
-    const mine = weights.find((entry) => entry.player.owner === owner);
-    if (mine === undefined) {
+    const [pool, player] = await Promise.all([
+      this.requirePool(),
+      this.prisma.player.findUnique({
+        where: { poolAddress_owner: { poolAddress: this.poolAddress, owner } },
+      }),
+    ]);
+    if (player === null) {
       throw new NotFoundException(
         "No Player account for that wallet yet. Deposit to open one.",
       );
     }
-    const [pool, yieldStats] = await Promise.all([
-      this.requirePool(),
-      this.playerYieldStats(owner, mine.player.yieldEpoch),
-    ]);
+    const { weights, total } = await this.weightsFor(pool, [player]);
+    const mine = weights[0] as LiveWeight;
     return {
       ...playerDto(mine, total),
-      ...playerTicketExtras(mine.player, pool.currentEpochId),
-      ...yieldStats,
-    };
-  }
-
-  /**
-   * `yieldLastEpoch` (what `register` credited this owner in
-   * `player.yieldEpoch`, the most recent epoch a credit landed) and
-   * `yieldToDate` (every credit ever), summed from the `YieldCredited`
-   * event log the same way `getPositionCounts` sums `PositionBought`. Active
-   * pool only: epoch ids restart per pool, so a retired pool's rows would
-   * collide with `yieldEpoch` (ADR 0016).
-   */
-  private async playerYieldStats(
-    owner: string,
-    yieldEpoch: bigint,
-  ): Promise<{ yieldToDate: bigint; yieldLastEpoch: bigint }> {
-    const rows = await this.prisma.$queryRaw<
-      { yieldToDate: string; yieldLastEpoch: string }[]
-    >`
-      SELECT
-        COALESCE(SUM((data->>'amount')::numeric), 0)::text AS "yieldToDate",
-        COALESCE(SUM((data->>'amount')::numeric) FILTER (
-          WHERE (data->>'epochId')::bigint = ${yieldEpoch}
-        ), 0)::text AS "yieldLastEpoch"
-      FROM "Event"
-      WHERE "poolAddress" = ${this.poolAddress}
-        AND name = 'YieldCredited' AND data->>'owner' = ${owner}
-    `;
-    const row = rows[0];
-    return {
-      yieldToDate: BigInt(row?.yieldToDate ?? "0"),
-      yieldLastEpoch: BigInt(row?.yieldLastEpoch ?? "0"),
+      ...playerTicketExtras(player, pool.currentEpochId),
+      unsettledYield: unsettledYield(player.principal, toBigInt(pool.yieldIndex), toBigInt(player.yieldIndex)),
+      syncedAt: pool.lastSyncAt,
     };
   }
 
@@ -482,7 +485,7 @@ export class ApiService {
    * no known id yet still gets a Position for whatever Round is open.
    */
   async getState(owner?: string, roundId?: bigint) {
-    const { pool, epoch, previousEpoch, openRound, operator, cursor, players, round, position } =
+    const { pool, epoch, previousEpoch, openRound, operator, cursor, player, round, position } =
       await this.prisma.$transaction(
         async (tx) => {
           const poolAddress = this.poolAddress;
@@ -508,14 +511,11 @@ export class ApiService {
             tx.operatorState.findUnique({ where: { poolAddress } }),
             tx.cursor.findUnique({ where: { poolAddress } }),
           ]);
-          const needsPlayers =
-            owner !== undefined ||
-            (previousEpoch !== null &&
-              (previousEpoch.status === EPOCH_REGISTERING ||
-                previousEpoch.status === EPOCH_DRAWING));
           const trackedRoundId = roundId ?? openRound?.id;
-          const [players, round, position] = await Promise.all([
-            needsPlayers ? tx.player.findMany({ where: { poolAddress } }) : Promise.resolve([]),
+          const [player, round, position] = await Promise.all([
+            owner === undefined
+              ? Promise.resolve(null)
+              : tx.player.findUnique({ where: { poolAddress_owner: { poolAddress, owner } } }),
             trackedRoundId === undefined
               ? Promise.resolve(null)
               : tx.round.findUnique({
@@ -527,7 +527,7 @@ export class ApiService {
                   where: { poolAddress, owner, roundId: trackedRoundId },
                 }),
           ]);
-          return { pool, epoch, previousEpoch, openRound, operator, cursor, players, round, position };
+          return { pool, epoch, previousEpoch, openRound, operator, cursor, player, round, position };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
       );
@@ -561,25 +561,19 @@ export class ApiService {
       epoch === null ? Promise.resolve(0n) : this.liveJackpot(epoch),
       this.rpcHealth(),
       this.extrapolatedChainNow(),
-      this.chainBalances(),
+      this.chainBalances(pool.klendReserve),
       this.chain.priorityFeeMicroLamports(hotWritableAccounts),
     ]);
 
-    // Same extrapolated instant for the response's chainTime and for the
-    // Player's liveWeight, so the two never disagree by the clock's TTL.
     // Ticket 05: no Epoch yet means no Weight has ever started accruing, so
-    // every player's live and draw weight is 0 rather than undefined.
+    // the Player's Weight is 0 rather than undefined.
     const { weights, total } =
-      epoch === null ? { weights: [], total: 0n } : weightsFrom(players, epoch, chainTime);
-    const mine =
-      owner === undefined
-        ? undefined
-        : (weights.find((entry) => entry.player.owner === owner) ??
-          (epoch === null
-            ? players
-                .filter((player) => player.owner === owner)
-                .map((player) => ({ player, liveWeight: 0n, drawWeight: 0n }))[0]
-            : undefined));
+      player === null
+        ? { weights: [], total: 0n }
+        : epoch === null
+          ? { weights: [{ player, weight: 0n }], total: 0n }
+          : await this.weightsFor(pool, [player], epoch);
+    const mine = weights[0];
 
     return {
       pool,
@@ -589,7 +583,7 @@ export class ApiService {
           : {
               ...epoch,
               jackpotAmount,
-              drawing: drawingProgressFrom(previousEpoch, players),
+              drawing: drawingProgressFrom(previousEpoch),
             },
       openRound: openRound === null ? null : summarizeRound(openRound),
       round,
@@ -609,7 +603,12 @@ export class ApiService {
   }
 
   async getLeaderboard(limit: number) {
-    const { weights, total } = await this.liveWeights();
+    // ponytail: every Player row and the whole tree per request, for the odds
+    // denominator. Fine at beta scale; page it off the mirrored root if the
+    // Player count grows into the thousands.
+    const pool = await this.requirePool();
+    const players = await this.prisma.player.findMany({ where: { poolAddress: this.poolAddress } });
+    const { weights, total } = await this.weightsFor(pool, players);
     return weights
       .slice()
       .sort((a, b) => {
@@ -618,18 +617,19 @@ export class ApiService {
         // returned, which is not guaranteed stable across requests. House
         // always sorts last among ties; real players break ties by owner
         // so the order is deterministic and the test is stable.
-        if (b.drawWeight !== a.drawWeight) return b.drawWeight > a.drawWeight ? 1 : -1;
+        const [aw, bw] = [a.weight ?? 0n, b.weight ?? 0n];
+        if (bw !== aw) return bw > aw ? 1 : -1;
         if (a.player.isHouse !== b.player.isHouse) return a.player.isHouse ? 1 : -1;
         return a.player.owner < b.player.owner ? -1 : a.player.owner > b.player.owner ? 1 : 0;
       })
       .slice(0, limit)
-      .map(({ player, liveWeight, drawWeight }) => ({
+      .map(({ player, weight }) => ({
         owner: player.owner,
         principal: player.principal,
         entries: player.entries,
         isHouse: player.isHouse,
-        liveWeight,
-        odds: oddsPercent(drawWeight, total),
+        weight,
+        odds: oddsOf(weight, total),
       }));
   }
 
@@ -653,7 +653,8 @@ export class ApiService {
       FROM "Event"
       WHERE "poolAddress" = ${this.poolAddress}
         AND (name IN (${Prisma.join(FEED_NAMES)})
-         OR (name = 'PositionSettled' AND data->>'reward' ~ '^[1-9][0-9]*$'))
+         OR (name = 'PositionSettled'
+             AND (data->>'reward' ~ '^[1-9][0-9]*$' OR data->>'refund' ~ '^[1-9][0-9]*$')))
       ${ownerFilter}
       ORDER BY slot DESC, "index" DESC
       LIMIT ${limit}
@@ -693,13 +694,14 @@ export class ApiService {
     // A freshly cut-over pool has no OperatorState or Cursor row until its
     // first tick and sync; statusFrom reads those nulls as "never ran"
     // rather than showing the retired pool's (ADR 0016).
-    const [operator, cursor, pool, rpc, balances] = await Promise.all([
+    const [operator, cursor, pool, rpc, tree] = await Promise.all([
       this.prisma.operatorState.findUnique({ where: { poolAddress } }),
       this.prisma.cursor.findUnique({ where: { poolAddress } }),
       this.prisma.pool.findUnique({ where: { address: poolAddress } }),
       this.rpcHealth(),
-      this.chainBalances(),
+      this.prisma.weightTreeState.findUnique({ where: { poolAddress } }),
     ]);
+    const balances = await this.chainBalances(pool?.klendReserve);
     // Ticket 09: the current epoch's own close deadline and jackpot, for the
     // near-close alert conditions. One extra row read, gated on a pool
     // actually being indexed, same tolerance as the rest of this method.
@@ -711,7 +713,7 @@ export class ApiService {
           });
     return {
       ...statusFrom(operator, cursor, rpc, pool, balances, this.operatorSolWarn),
-      ...(await this.yieldStatus(pool)),
+      ...this.yieldStatus(pool, balances, tree),
       // Ticket 05: null once the Pool has an Epoch, or when `LAUNCH_AT` is
       // unset — the same rule `/state`'s `launchAt` follows.
       launchAt: pool !== null && pool.currentEpochId > 0n ? null : this.launchAt,
@@ -723,53 +725,46 @@ export class ApiService {
   }
 
   /**
-   * `yieldBudget`, `yieldShortfall` (the last ended epoch's uncredited Base
-   * yield), `bonusGrantedToday`, `bonusCap`, and `yieldBudgetLow` for
-   * GET /status (ticket 05). Null pool (not indexed yet) reads as every
-   * figure being 0/false rather than throwing, matching the rest of
-   * `getStatus`, which already tolerates a missing pool row.
+   * Live yield's half of GET /status (ticket 14): the solvency invariant as a
+   * signed margin, free idle against the band, the reserve's utilisation and
+   * free liquidity, the two switches, the Weight tree's fill, and the
+   * referral bonus counters. A null pool (not indexed yet) reads as zeros and
+   * false, like the rest of `getStatus`; a figure that needs the vault or the
+   * reserve is null when that read failed, never a made-up zero.
    */
-  private async yieldStatus(pool: Pool | null): Promise<{
-    yieldBudget: bigint;
-    yieldShortfall: bigint;
-    bonusGrantedToday: bigint;
-    bonusCap: bigint;
-    yieldBudgetLow: boolean;
-  }> {
-    if (pool === null) {
-      return {
-        yieldBudget: 0n,
-        yieldShortfall: 0n,
-        bonusGrantedToday: 0n,
-        bonusCap: 0n,
-        yieldBudgetLow: false,
-      };
-    }
+  private yieldStatus(pool: Pool | null, balances: ChainBalances, tree: WeightTreeState | null) {
+    const vault = balances.vaultLiquidity;
+    const idle = pool === null || vault === null ? null : freeIdle(vault, pool.pendingWithdrawals);
+    const reserve = balances.reserve;
+    const nodeCount = tree?.nodeCount ?? 0n;
+    // The band is measured against free idle plus the venue position, as the
+    // program measures it; `freeIdleBps` is the share of Principal.
+    const band = pool === null || idle === null ? 0n : idle + pool.venueValue;
     return {
-      yieldBudget: pool.yieldBudget,
-      yieldShortfall: await this.lastEpochYieldShortfall(pool.currentEpochId),
-      bonusGrantedToday: ifCurrentEpoch(pool.bonusEpoch, pool.currentEpochId, pool.bonusGranted),
-      bonusCap: poolBonusCap(pool.totalPrincipal, pool.bonusCapBps),
-      yieldBudgetLow: pool.yieldBudget < oneDayYieldCost(pool.totalPrincipal, pool.baseRateBps),
+      bonusGrantedToday:
+        pool === null ? 0n : ifCurrentEpoch(pool.bonusEpoch, pool.currentEpochId, pool.bonusGranted),
+      bonusCap: pool === null ? 0n : poolBonusCap(pool.totalPrincipal, pool.bonusCapBps),
+      solvencyMargin: pool === null || vault === null ? null : solvencyMargin(pool, vault),
+      freeIdle: idle,
+      freeIdleBps:
+        pool === null || idle === null || pool.totalPrincipal === 0n
+          ? null
+          : Number((idle * 10_000n) / pool.totalPrincipal),
+      idleFloorBps: pool?.idleFloorBps ?? 0,
+      idleTargetBps: pool?.idleTargetBps ?? 0,
+      freeIdleBelowFloor:
+        pool === null || idle === null ? null : band > 0n && idle * 10_000n < band * BigInt(pool.idleFloorBps),
+      reserveUtilizationBps:
+        reserve === null || reserve.available + reserve.borrowed === 0n
+          ? null
+          : Number((reserve.borrowed * 10_000n) / (reserve.available + reserve.borrowed)),
+      reserveFreeLiquidity: reserve?.available ?? null,
+      impaired: pool?.impaired ?? false,
+      deployPaused: pool?.deployPaused ?? false,
+      treeNodeCount: nodeCount,
+      treeCapacity: TREE_CAPACITY,
+      treeUsedBps: Number((nodeCount * 10_000n) / BigInt(TREE_CAPACITY)),
     };
-  }
-
-  /**
-   * Σ `YieldCredited.shortfall` for the epoch `register` last credited
-   * (`currentEpochId - 1`, "yesterday" in spec.md's words), from the event
-   * log the same way `getPositionCounts` sums `PositionBought`. 0 before the
-   * pool has completed a first epoch.
-   */
-  private async lastEpochYieldShortfall(currentEpochId: bigint): Promise<bigint> {
-    if (currentEpochId <= 0n) return 0n;
-    const lastEpoch = currentEpochId - 1n;
-    const rows = await this.prisma.$queryRaw<{ shortfall: string }[]>`
-      SELECT COALESCE(SUM((data->>'shortfall')::numeric), 0)::text AS shortfall
-      FROM "Event"
-      WHERE "poolAddress" = ${this.poolAddress}
-        AND name = 'YieldCredited' AND (data->>'epochId')::bigint = ${lastEpoch}
-    `;
-    return BigInt(rows[0]?.shortfall ?? "0");
   }
 
   private async requirePool(): Promise<Pool> {
@@ -782,41 +777,64 @@ export class ApiService {
     return pool;
   }
 
-  /**
-   * Registration and draw progress for the epoch that just ended, so the
-   * Jackpot screen can show a bar instead of a spinner.
-   */
+  /** Draw progress for the epoch that just ended, so the Jackpot screen can
+   *  show it is waiting on the draw instead of a spinner. */
   private async drawingProgress(pool: Pool) {
     if (pool.currentEpochId <= 0n) return null;
-    const poolAddress = this.poolAddress;
     const previous = await this.prisma.epoch.findUnique({
-      where: { poolAddress_id: { poolAddress, id: pool.currentEpochId - 1n } },
+      where: { poolAddress_id: { poolAddress: this.poolAddress, id: pool.currentEpochId - 1n } },
     });
-    const needsPlayers =
-      previous !== null &&
-      (previous.status === EPOCH_REGISTERING || previous.status === EPOCH_DRAWING);
-    const players = needsPlayers ? await this.prisma.player.findMany({ where: { poolAddress } }) : [];
-    return drawingProgressFrom(previous, players);
+    return drawingProgressFrom(previous);
   }
 
   /**
-   * ponytail: scans every Player row per request to get the odds denominator.
-   * Fine for one demo pool; cache the total per epoch tick if it grows.
+   * `players`' Weight in the current epoch, read from the Weight tree, and
+   * the tree's root. `epoch` is the current Epoch when the caller has it.
+   *
+   * ponytail: the whole tree account per call, cached for
+   * `TREE_TTL_MS`, parsed in memory. 72 bytes a Player, so a few thousand
+   * Players is a few hundred KB; read the leaf's O(log n) nodes with
+   * `dataSlice` once that matters.
    */
-  private async liveWeights(): Promise<{ weights: LiveWeight[]; total: bigint }> {
-    const poolAddress = this.poolAddress;
-    const pool = await this.requirePool();
-    const epoch = await this.prisma.epoch.findUnique({
-      where: { poolAddress_id: { poolAddress, id: pool.currentEpochId } },
-    });
-    if (epoch === null) {
+  private async weightsFor(
+    pool: Pool,
+    players: readonly Player[],
+    epoch?: Epoch,
+  ): Promise<{ weights: LiveWeight[]; total: bigint | null }> {
+    const current =
+      epoch ??
+      (await this.prisma.epoch.findUnique({
+        where: { poolAddress_id: { poolAddress: this.poolAddress, id: pool.currentEpochId } },
+      }));
+    if (current === null) {
       throw new NotFoundException(
         "The current epoch is not indexed yet. Try again in a few seconds.",
       );
     }
-    const at = await this.chainNow();
-    const players = await this.prisma.player.findMany({ where: { poolAddress } });
-    return weightsFrom(players, epoch, at);
+    const data = await this.cachedTree(pool.weightTree);
+    if (data === null) return weightsFrom(players, null);
+    const length = current.endsAt > current.startsAt ? current.endsAt - current.startsAt : 0n;
+    return weightsFrom(players, prefixWeights(readNodes(data), current.id, length));
+  }
+
+  /** The tree account, or null when the read failed (logged), so Weight and
+   *  odds go out as null rather than as a made-up zero. */
+  private cachedTree(address: string): Promise<Buffer | null> {
+    this.tree = this.cached(this.tree, TREE_TTL_MS, async () => {
+      try {
+        const info = await this.chain.connection.getAccountInfo(new PublicKey(address));
+        if (info === null) throw new Error("the account does not exist");
+        return info.data;
+      } catch (cause) {
+        this.logger.warn(
+          `weight tree read failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        // Not cached: the next request retries the chain.
+        this.tree = undefined;
+        return null;
+      }
+    });
+    return this.tree.result;
   }
 
   /**
@@ -864,16 +882,16 @@ export class ApiService {
    * account is the same unknown, while a missing operator account is a real
    * zero, because an unfunded system account holds no lamports.
    */
-  private async chainBalances(): Promise<ChainBalances> {
+  private async chainBalances(klendReserve?: string): Promise<ChainBalances> {
     try {
-      return await this.cachedBalances();
+      return await this.cachedBalances(klendReserve);
     } catch (cause) {
       // Computed off the failed promise, so it never becomes the cached
       // value: `cachedBalances` has already cleared the slot.
       this.logger.warn(
         `balance read failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
-      return { vaultLiquidity: null, operatorSol: null, sparringSol: null };
+      return { vaultLiquidity: null, reserve: null, operatorSol: null, sparringSol: null };
     }
   }
 
@@ -885,24 +903,34 @@ export class ApiService {
    * sitting in it, so the next request retries the chain rather than
    * serving the same "unknown" for the rest of the window.
    */
-  private cachedBalances(): Promise<ChainBalances> {
+  private cachedBalances(klendReserve: string | undefined): Promise<ChainBalances> {
     if (
       this.balances === undefined ||
       Date.now() - this.balances.at > BALANCES_TTL_MS
     ) {
       const principalVault = this.chain.principalVaultAddress();
+      // The reserve rides in the same call. A pool row not indexed yet has no
+      // reserve (an empty string), and the key slot is kept so the indexes
+      // below stay fixed.
+      const reserveKey = klendReserve ? new PublicKey(klendReserve) : null;
       const accounts = [
         principalVault,
         this.chain.keypair.publicKey,
+        ...(reserveKey ? [reserveKey] : []),
         ...(this.sparringPubkey ? [this.sparringPubkey] : []),
       ];
       const result = this.chain.connection
         .getMultipleAccountsInfo(accounts)
-        .then(([vault, fees, sparring]) => ({
-          vaultLiquidity: vault ? unpackAccount(principalVault, vault).amount : null,
-          operatorSol: fees ? fees.lamports / LAMPORTS_PER_SOL : 0,
-          sparringSol: this.sparringPubkey === null ? null : sparring ? sparring.lamports / LAMPORTS_PER_SOL : 0,
-        }));
+        .then(([vault, fees, ...rest]) => {
+          const reserve = reserveKey ? rest.shift() : null;
+          const sparring = rest[0];
+          return {
+            vaultLiquidity: vault ? unpackAccount(principalVault, vault).amount : null,
+            reserve: reserve ? readReserve(reserve.data) : null,
+            operatorSol: fees ? fees.lamports / LAMPORTS_PER_SOL : 0,
+            sparringSol: this.sparringPubkey === null ? null : sparring ? sparring.lamports / LAMPORTS_PER_SOL : 0,
+          };
+        });
       const entry: CachedRead<ChainBalances> = { at: Date.now(), result };
       this.balances = entry;
       result.catch(() => {
@@ -988,24 +1016,23 @@ const summarizeRound = (round: Round) => ({
   houseCut: round.houseCut,
 });
 
-/** Draw progress for the epoch that just ended, from rows already read.
- *  Null unless `previous` is Registering or Drawing. */
-function drawingProgressFrom(previous: Epoch | null, players: Player[]) {
-  if (
-    previous === null ||
-    (previous.status !== EPOCH_REGISTERING && previous.status !== EPOCH_DRAWING)
-  ) {
+/** Draw progress for the epoch that just ended, from the row already read.
+ *  Null unless `previous` is Ended (waiting for the draw) or Drawing. */
+function drawingProgressFrom(previous: Epoch | null) {
+  if (previous === null || (previous.status !== EPOCH_ENDED && previous.status !== EPOCH_DRAWING)) {
     return null;
   }
-  const eligible = players.filter(
-    (player) => weightAt(player, previous.id, previous.startsAt, previous.endsAt) > 0n,
-  ).length;
-  return {
-    epochId: previous.id,
-    registeredCount: previous.registeredCount,
-    eligible,
-    status: previous.status,
-  };
+  return { epochId: previous.id, status: previous.status };
+}
+
+/** A klend reserve's decoded figures, or null when the account is not one
+ *  (a test-venue pool pins a stub), logged nowhere: that is a pool fact. */
+function readReserve(data: Buffer): ReserveStats | null {
+  try {
+    return decodeReserve(data);
+  } catch {
+    return null;
+  }
 }
 
 /** GET /status's shape, from rows and balances already read. */
@@ -1053,7 +1080,6 @@ function statusFrom(
     // Ticket 06/07: 0/false until a tick has looked, same treatment as
     // `withdrawShortfall` above.
     withdrawSkippedCount: operator?.withdrawSkippedCount ?? 0,
-    registrationIndexerStale: operator?.registrationIndexerStale ?? false,
     operatorSol: balances.operatorSol,
     // Null, not false, when the balance is unknown: a failed read is not
     // evidence that the operator still has fees.
@@ -1071,41 +1097,40 @@ function statusFrom(
     // before the pool is indexed, matching every other pool-derived figure
     // above.
     shutdown: pool?.shutdown ?? false,
-    // Null rather than a wrong number when either half of the sum is
-    // unknown: no pool indexed yet, or the vault balance read failed.
-    principalOut:
-      pool === null || balances.vaultLiquidity === null
-        ? null
-        : principalOut({
-            totalPrincipal: pool.totalPrincipal,
-            pendingWithdrawals: pool.pendingWithdrawals,
-            yieldBudget: pool.yieldBudget,
-            vaultAmount: balances.vaultLiquidity,
-          }),
   };
 }
 
-/** Each player's Weight at instant `at`, plus the epoch total, from rows already read. */
+/** Each player's Weight in the epoch `prefix` was read for, and the root.
+ *  `prefix` is `prefixWeights`' output; null (tree unreadable) makes every
+ *  Weight and the total null. A Player with no leaf yet reads 0. */
 function weightsFrom(
-  players: Player[],
-  epoch: Epoch,
-  at: bigint,
-): { weights: LiveWeight[]; total: bigint } {
-  const weights = players.map((player) => ({
-    player,
-    liveWeight: weightAt(player, epoch.id, epoch.startsAt, at),
-    drawWeight: weightAt(player, epoch.id, epoch.startsAt, epoch.endsAt),
-  }));
-  const total = weights.reduce((sum, entry) => sum + entry.drawWeight, 0n);
-  return { weights, total };
+  players: readonly Player[],
+  prefix: readonly bigint[] | null,
+): { weights: LiveWeight[]; total: bigint | null } {
+  const leaf = (index: number): bigint =>
+    prefix === null || index < 1 || index >= prefix.length
+      ? 0n
+      : (prefix[index] as bigint) - (prefix[index - 1] as bigint);
+  return {
+    weights: players.map((player) => ({
+      player,
+      weight: prefix === null ? null : leaf(player.leafIndex),
+    })),
+    total: prefix === null ? null : (prefix[prefix.length - 1] as bigint),
+  };
+}
+
+/** `oddsPercent`, or null while the tree is unreadable. */
+function oddsOf(weight: bigint | null, total: bigint | null): string | null {
+  return weight === null || total === null ? null : oddsPercent(weight, total);
 }
 
 /** A weighted entry as `/players/:owner` and `/state` return it. */
-function playerDto(entry: LiveWeight, total: bigint) {
+function playerDto(entry: LiveWeight, total: bigint | null) {
   return {
     ...entry.player,
-    liveWeight: entry.liveWeight,
-    odds: oddsPercent(entry.drawWeight, total),
+    weight: entry.weight,
+    odds: oddsOf(entry.weight, total),
   };
 }
 

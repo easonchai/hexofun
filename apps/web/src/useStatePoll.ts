@@ -40,9 +40,8 @@ export interface StatePollResult {
  *
  * Every write the UI can send has to land in here or `pending` never clears:
  * deposit and request_withdraw move `principal`, process_withdraw moves only
- * `pendingWithdraw`, buy_position moves `entries` and `position`, and
- * `register` (the Daily Draw screen's one write) moves `regEpoch` and nothing
- * else. The faucet moves none of them — it mints to
+ * `pendingWithdraw`, and buy_position moves `entries` and `position`. The
+ * faucet moves none of them — it mints to
  * the wallet, which `/state` does not carry — so it refreshes the balance
  * directly instead of arming this watch (see App.tsx `onFunded`).
  */
@@ -52,7 +51,6 @@ export function snapshot(data: StateDto): string {
     principal: player?.principal ?? null,
     entries: player?.entries ?? null,
     pendingWithdraw: player?.pendingWithdraw ?? null,
-    regEpoch: player?.regEpoch ?? null,
     position: data.position,
     round: data.round,
     openRound: data.openRound,

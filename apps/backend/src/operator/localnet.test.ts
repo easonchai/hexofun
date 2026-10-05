@@ -173,6 +173,8 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
         REFERRAL_QUALIFY_SECONDS: 604_800,
         ALERT_TICK_STALE_S: 300,
         ALERT_INDEXER_STALE_S: 600,
+        ALERT_IDLE_LOW_S: 3600,
+        ALERT_RESERVE_FREE_MIN: 100_000_000_000,
         INVITE_CIRCULATION_CAP: 50,
         INVITE_REDEEM_GRANT_COUNT: 2,
         CORS_ORIGIN: "http://localhost",

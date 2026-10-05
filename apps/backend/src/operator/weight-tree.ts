@@ -56,6 +56,26 @@ function nodeWeight(node: Node, e: bigint, length: bigint): bigint {
   return base * length;
 }
 
+/** The Fenwick tree's header: how many leaves it holds. */
+export function nodeCount(data: Buffer): number {
+  if (data.length < TREE_HEADER) throw new Error("weight tree account is truncated");
+  return Number(data.readBigUInt64LE(NODE_COUNT_AT));
+}
+
+/**
+ * `prefix[i]` is the Weight of leaves 1..i in epoch `epochId` of `length`
+ * seconds, `prefix[0]` is 0, and the last entry is the root. Leaf `i` is
+ * `prefix[i] - prefix[i - 1]`.
+ */
+export function prefixWeights(nodes: readonly Node[], epochId: bigint, length: bigint): bigint[] {
+  const prefix: bigint[] = [0n];
+  for (let i = 1; i <= nodes.length; i += 1) {
+    const low = i & -i;
+    prefix.push((prefix[i - low] as bigint) + nodeWeight(nodes[i - 1] as Node, epochId, length));
+  }
+  return prefix;
+}
+
 /**
  * The 1-based leaf whose range holds `epoch.target`, or null when none does.
  * `epoch` must still be readable on chain, which a Drawn epoch always is.
@@ -66,11 +86,7 @@ function nodeWeight(node: Node, e: bigint, length: bigint): bigint {
  */
 export function leafHoldingTarget(nodes: readonly Node[], epoch: EpochState): number | null {
   const length = epoch.endsAt > epoch.startsAt ? epoch.endsAt - epoch.startsAt : 0n;
-  const prefix: bigint[] = [0n];
-  for (let i = 1; i <= nodes.length; i += 1) {
-    const low = i & -i;
-    prefix.push((prefix[i - low] as bigint) + nodeWeight(nodes[i - 1] as Node, epoch.epochId, length));
-  }
+  const prefix = prefixWeights(nodes, epoch.epochId, length);
   let start = 0n;
   for (let i = 1; i <= nodes.length; i += 1) {
     const end = prefix[i] as bigint;

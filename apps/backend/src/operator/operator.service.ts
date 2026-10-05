@@ -580,10 +580,6 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       ...(outcome.withdrawState === undefined
         ? {}
         : { withdrawSkippedCount: outcome.withdrawState.skipped.size }),
-      // The stale-indexer hold is gone (ticket 13), so nothing sets this any
-      // more. Written false so a flag an older build left on cannot keep
-      // `/alerts` firing; ticket 14 drops the column and its alert.
-      registrationIndexerStale: false,
       // Ticket 09: present on every tick that reaches decide(), so these
       // always reflect the freshest read.
       ...(outcome.epochNoProgress === undefined ? {} : { epochNoProgress: outcome.epochNoProgress }),

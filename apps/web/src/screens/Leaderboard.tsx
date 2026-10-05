@@ -62,8 +62,8 @@ export function Leaderboard({ owner }: LeaderboardScreenProps) {
                       : formatAddress(row.owner)}
                 </span>
                 <span>{atomicShort(row.entries)}</span>
-                <span>{atomicShort(row.liveWeight)}</span>
-                <span>{row.odds}%</span>
+                <span>{row.weight === null ? "—" : atomicShort(row.weight)}</span>
+                <span>{row.odds === null ? "—" : `${row.odds}%`}</span>
               </div>
             ))}
           </div>

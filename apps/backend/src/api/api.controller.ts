@@ -25,6 +25,13 @@ const parseRoundId = (raw: string): bigint => {
   return BigInt(raw);
 };
 
+const parseAmount = (raw: string): bigint => {
+  if (!/^\d{1,20}$/.test(raw)) {
+    throw new BadRequestException("`withdraw` is a whole number of atomic USDC, for example 2500000.");
+  }
+  return BigInt(raw);
+};
+
 const parseOwner = (raw: string): string => {
   try {
     return new PublicKey(raw).toBase58();
@@ -52,9 +59,11 @@ const parseOwners = (raw: string | undefined): string[] => {
 export class ApiController {
   constructor(private readonly api: ApiService) {}
 
+  /** `withdraw`, in atomic USDC, asks whether an instant withdrawal of that
+   *  amount can be paid (`live.instantWithdrawCoverable`). */
   @Get("pool")
-  getPool() {
-    return this.api.getPool();
+  getPool(@Query("withdraw") withdraw?: string) {
+    return this.api.getPool(withdraw === undefined ? undefined : parseAmount(withdraw));
   }
 
   @Get("epochs")

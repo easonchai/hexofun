@@ -28,6 +28,7 @@ import {
 import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
+import { nodeCount, prefixWeights, readNodes } from "../operator/weight-tree";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   closedRound,
@@ -76,7 +77,9 @@ function eventBool(event: DecodedEvent, key: string): boolean | undefined {
 
 /**
  * The Principal-changing events ticket 07's `Referral.aboveSince` tracker
- * needs, paired with their owner, in the batch's own emission order (a dip
+ * needs (live yield settles inside the money instructions, so an
+ * InstantWithdrawn, which carries the Principal left, stands where
+ * YieldCredited did), paired with their owner, in the batch's own emission order (a dip
  * and a restore in one batch must be applied as two separate crossings, not
  * collapsed into one net delta). JackpotPaid only counts when `compounded`:
  * a House win never compounds, and an uncompounded win pays a token account
@@ -99,10 +102,11 @@ function referralPrincipalEvents(
       if (owner !== undefined && amount !== undefined) {
         result.push({ owner, event: { kind: "WithdrawRequested", amount: BigInt(amount) } });
       }
-    } else if (event.name === "YieldCredited") {
+    } else if (event.name === "InstantWithdrawn") {
       const owner = eventField(event, "owner");
-      if (owner !== undefined && amount !== undefined) {
-        result.push({ owner, event: { kind: "YieldCredited", amount: BigInt(amount) } });
+      const principal = eventField(event, "principal");
+      if (owner !== undefined && principal !== undefined) {
+        result.push({ owner, event: { kind: "InstantWithdrawn", principal: BigInt(principal) } });
       }
     } else if (event.name === "JackpotPaid" && eventBool(event, "compounded") === true) {
       // JackpotPaid names its player `winner`, not `owner` (see refreshFromLogs).
@@ -134,6 +138,9 @@ const V2_UNSUPPORTED_RESET_MS = 60 * 60 * 1000;
 // with `before` past as many of these as the backlog since the cursor takes,
 // so a long outage no longer loses anything older than one page.
 const SIGNATURE_PAGE = 1_000;
+
+/** The Yield index history keeps at most one point a minute (spec "Backend"). */
+const YIELD_INDEX_MIN_GAP_S = 60n;
 
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
@@ -723,8 +730,10 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     const poolAddress = this.activePool;
     switch (wanted.kind) {
       case "pool": {
-        const row = poolRow(pubkey, coder.decode<DecodedPool>(ACCOUNT.pool, data), slot);
+        const pool = coder.decode<DecodedPool>(ACCOUNT.pool, data);
+        const row = poolRow(pubkey, pool, slot);
         await this.prisma.pool.upsert({ where: { address: row.address }, create: row, update: row });
+        await this.mirrorLiveYield(row, pool);
         break;
       }
       case "epoch": {
@@ -770,6 +779,53 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       }
     }
     this.freshWrites.set(address, slot);
+  }
+
+  /**
+   * What a changed Pool implies besides its own row (ticket 14). One Yield
+   * index point, at most one a minute, stamped with the pool's own sync time;
+   * and the Weight tree's header and the root Weight of the current epoch.
+   *
+   * ponytail: the tree read is the whole account, about 72 bytes a Player, so
+   * 10,000 Players is 720 KB per Pool change. Read the header and the
+   * root's O(log n) nodes with `dataSlice` instead once that shows in the RPC
+   * bill. A failed read leaves the last mirrored state and is logged, so a
+   * tree the RPC cannot serve never stops the Pool row itself.
+   */
+  private async mirrorLiveYield(row: Prisma.PoolCreateInput, pool: DecodedPool): Promise<void> {
+    const poolAddress = row.address;
+    const at = BigInt(pool.lastSyncAt.toString());
+    if (at > 0n) {
+      const latest = await this.prisma.yieldIndexPoint.findFirst({
+        where: { poolAddress },
+        orderBy: { at: "desc" },
+      });
+      if (latest === null || at >= latest.at + YIELD_INDEX_MIN_GAP_S) {
+        await this.prisma.yieldIndexPoint.createMany({
+          data: [{ poolAddress, at, yieldIndex: pool.yieldIndex.toString() }],
+          skipDuplicates: true,
+        });
+      }
+    }
+    try {
+      const info = await this.chain.connection.getAccountInfo(pool.weightTree);
+      if (info === null) return;
+      const epochId = BigInt(pool.currentEpochId.toString());
+      const length = BigInt(pool.currentEpochEndsAt.toString()) - BigInt(pool.currentEpochStart.toString());
+      const prefix = prefixWeights(readNodes(info.data), epochId, length > 0n ? length : 0n);
+      const state = {
+        nodeCount: BigInt(nodeCount(info.data)),
+        epochId,
+        rootWeight: (prefix[prefix.length - 1] as bigint).toString(),
+      };
+      await this.prisma.weightTreeState.upsert({
+        where: { poolAddress },
+        create: { poolAddress, ...state },
+        update: state,
+      });
+    } catch (error) {
+      this.noteFailure("weight tree mirror failed", error);
+    }
   }
 
   /** True when the log path already wrote this address from a slot the
@@ -847,6 +903,9 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           });
         }),
     );
+    for (const { pubkey, account } of pools) {
+      await this.mirrorLiveYield(poolRow(pubkey, account, slot), account);
+    }
 
     const epochs = accounts.get<DecodedEpoch>(ACCOUNT.epoch);
     await this.prisma.$transaction(

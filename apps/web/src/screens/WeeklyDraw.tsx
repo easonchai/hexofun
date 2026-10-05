@@ -132,7 +132,9 @@ export function WeeklyDraw(props: WeeklyDrawScreenProps) {
             label="Your weight"
             value={
               player
-                ? atomicShort(player.liveWeight)
+                ? player.weight === null
+                  ? "—"
+                  : atomicShort(player.weight)
                 : ownerBase58
                   ? "—"
                   : "connect a wallet"
@@ -141,7 +143,7 @@ export function WeeklyDraw(props: WeeklyDrawScreenProps) {
           />
           <Stat
             label="Your odds"
-            value={player ? `${player.odds}%` : "—"}
+            value={player?.odds != null ? `${player.odds}%` : "—"}
             testid="your-odds"
           />
           <Stat label="Day" value={currentEpoch ? `#${currentEpoch.id}` : "—"} small />
@@ -150,10 +152,7 @@ export function WeeklyDraw(props: WeeklyDrawScreenProps) {
 
       {drawing ? (
         <PanelCard wide title={`DRAWING DAY ${drawing.epochId}`}>
-          <p className="screen-copy">
-            registered {drawing.registeredCount} of {drawing.eligible} eligible
-            players
-          </p>
+          <p className="screen-copy">The draw for day {drawing.epochId} is under way.</p>
           <button
             type="button"
             className="btn-deploy ghost"
