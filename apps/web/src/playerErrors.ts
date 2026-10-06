@@ -67,7 +67,7 @@ function firstGroup(pattern: RegExp, text: string): string | null {
  * `custom program error: 0x...`. Returns null when none of those show up,
  * e.g. a network error or a wallet rejection.
  */
-function extractCode(text: string): number | null {
+export function extractCode(text: string): number | null {
   const byNumber = firstGroup(/error number:\s*(\d+)/i, text);
   if (byNumber) return Number(byNumber);
   const byCustom = firstGroup(/"custom":\s*(\d+)/i, text);
