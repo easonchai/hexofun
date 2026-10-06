@@ -2,6 +2,7 @@
 // have none and fail the boot if missing — all of them at once, not one at a
 // time, so a fresh checkout tells you everything it needs in one error.
 import { Logger } from "@nestjs/common";
+import { PublicKey } from "@solana/web3.js";
 
 import { INVITE_CIRCULATION_CAP, INVITE_REDEEM_GRANT_COUNT } from "../api/invite-code";
 import { DEFAULT_REFERRAL_QUALIFY_SECONDS } from "../api/referral";
@@ -120,6 +121,9 @@ export interface HexVaultEnv {
   /** Shared secret for `POST /access/invites`, sent as `x-admin-key`. Absent
    *  switches the route off (404). At least 32 characters when set. */
   INVITE_ADMIN_KEY?: string;
+  /** Wallets allowed to call `POST /ops/fast-pause` (ops-console ticket 06),
+   *  canonical base58. Empty switches the route off (404). */
+  OPS_WALLETS?: string[];
   /** Beta-launch-fixes ticket 05: an ISO timestamp holding back the
    *  Operator's first `begin_epoch` while the Pool has no Epoch yet, so
    *  deposits can open days before the first Draw. Absent behaves as before:
@@ -245,6 +249,23 @@ function launchAt(raw: unknown): string | undefined {
   return value;
 }
 
+/** Comma separated public keys. Unset or blank is an empty list; one bad
+ *  entry fails the boot, since a typo would silently lock a teammate out. */
+function opsWallets(raw: unknown): string[] {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return [];
+  return String(raw)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      try {
+        return new PublicKey(entry).toBase58();
+      } catch {
+        throw new Error(`OPS_WALLETS must be comma separated Solana public keys, got "${entry}"`);
+      }
+    });
+}
+
 /** `CLUSTER` must be one of `CLUSTERS`; there is no default, since a wrong
  *  guess is worse than a boot failure. */
 function cluster(raw: unknown): Cluster {
@@ -326,6 +347,7 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     ),
     CORS_ORIGIN: String(env.CORS_ORIGIN),
     PORT: String(env.PORT ?? "8080"),
+    OPS_WALLETS: opsWallets(env.OPS_WALLETS),
     SPARRING_ENABLED: offByDefaultSwitch("SPARRING_ENABLED", env.SPARRING_ENABLED),
     // Spread rather than assigned: under `exactOptionalPropertyTypes` an
     // optional key cannot be set to `undefined`, and "absent" is the switch.

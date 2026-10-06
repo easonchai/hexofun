@@ -502,6 +502,33 @@ export class OperatorInstructions {
     ];
   }
 
+  /**
+   * Fast pause (ops-console ticket 06). The Operator may only turn a switch
+   * on, so these three hardcode `true`: no argument can pass `false`.
+   */
+  async setPauseOn(pool: PublicKey): Promise<TransactionInstruction> {
+    return this.method("setPause", true)
+      .accountsPartial({ signer: this.operator, pool })
+      .instruction();
+  }
+
+  async setFeaturePauseOn(
+    pool: PublicKey,
+    feature: "game" | "jackpot",
+  ): Promise<TransactionInstruction> {
+    // Anchor encodes a unit enum variant as `{ variantName: {} }`.
+    const variant = feature === "game" ? { game: {} } : { jackpot: {} };
+    return this.method("setFeaturePause", variant, true)
+      .accountsPartial({ signer: this.operator, pool })
+      .instruction();
+  }
+
+  async setDeployPauseOn(pool: PublicKey): Promise<TransactionInstruction> {
+    return this.method("setDeployPause", true)
+      .accountsPartial({ signer: this.operator, pool })
+      .instruction();
+  }
+
   /** Pays the fee owed to `pool.treasury` and the prize share owed to the
    *  jackpot vault. */
   async harvest(pool: PoolState): Promise<TransactionInstruction[]> {

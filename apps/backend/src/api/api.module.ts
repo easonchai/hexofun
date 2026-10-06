@@ -8,6 +8,7 @@ import { AlertsController } from "./alerts.controller";
 import { ApiController } from "./api.controller";
 import { ApiService } from "./api.service";
 import { ErrorReportController } from "./error-report.controller";
+import { FastPauseController } from "./fast-pause.controller";
 import { FaucetController } from "./faucet.controller";
 import { ReferralsController } from "./referrals.controller";
 import { SerializationInterceptor } from "./serialization.interceptor";
@@ -32,7 +33,13 @@ import { SerializationInterceptor } from "./serialization.interceptor";
         limit: 10,
         skipIf: (context) => {
           const controller = context.getClass();
-          if (controller === FaucetController || controller === AccessController) return false;
+          if (
+            controller === FaucetController ||
+            controller === AccessController ||
+            controller === FastPauseController
+          ) {
+            return false;
+          }
           return !(
             controller === ReferralsController &&
             context.getHandler() === ReferralsController.prototype.applyReferral
@@ -46,6 +53,7 @@ import { SerializationInterceptor } from "./serialization.interceptor";
     AlertsController,
     FaucetController,
     AccessController,
+    FastPauseController,
     ReferralsController,
     ErrorReportController,
   ],
