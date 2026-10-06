@@ -26,7 +26,7 @@ import idl from "../../target/idl/hex_vault.json";
 const secret = Uint8Array.from(
   JSON.parse(readFileSync(process.env.ANCHOR_WALLET as string, "utf8")),
 );
-const connection = new Connection(process.env.ANCHOR_PROVIDER_URL as string, "confirmed");
+export const connection = new Connection(process.env.ANCHOR_PROVIDER_URL as string, "confirmed");
 
 export const provider = new AnchorProvider(connection, new Wallet(Keypair.fromSecretKey(secret)), {
   commitment: "confirmed",
@@ -139,7 +139,7 @@ export const WEIGHT_TREE_SPACE = 8 + 48;
  * same transaction: a fresh program-owned account sized for the Weight tree
  * header. Sign the transaction with `keypair` as well as `payer`.
  */
-async function weightTreeAccount(
+export async function weightTreeAccount(
   payer: PublicKey,
 ): Promise<{ keypair: Keypair; ix: TransactionInstruction }> {
   const keypair = Keypair.generate();
@@ -416,7 +416,7 @@ export async function findEvent<T = unknown>(
   return undefined;
 }
 
-async function airdrop(to: PublicKey, sol: number): Promise<void> {
+export async function airdrop(to: PublicKey, sol: number): Promise<void> {
   const sig = await connection.requestAirdrop(to, sol * LAMPORTS_PER_SOL);
   await connection.confirmTransaction(sig, "confirmed");
 }
@@ -472,7 +472,7 @@ export interface PoolParamsOverrides {
 }
 
 // Spec §7 defaults.
-const DEFAULT_PARAMS = {
+export const DEFAULT_PARAMS = {
   epochSeconds: 86_400,
   roundSeconds: 60,
   closeBuffer: 5,
@@ -525,6 +525,9 @@ export interface PoolCtx {
  */
 export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<PoolCtx> {
   const params = { ...DEFAULT_PARAMS, ...overrides };
+  // create_pool wants payout_timeout < epoch_seconds, so a short-epoch test
+  // that does not name one gets the longest timeout that fits.
+  params.payoutTimeout = overrides.payoutTimeout ?? Math.min(DEFAULT_PARAMS.payoutTimeout, params.epochSeconds - 1);
   const poolId = nextPoolId();
 
   const admin = Keypair.generate();

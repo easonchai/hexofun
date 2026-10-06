@@ -1017,7 +1017,7 @@ describe("create_pool guards", () => {
     minDeposit: new BN(1_000_000),
     houseCutBps: 600,
     minJackpot: new BN(0),
-    payoutTimeout: new BN(86_400),
+    payoutTimeout: new BN(82_800),
     baseRateBps: 488,
     ticketsPerUsdc: 10,
     bonusCapBps: 500,
@@ -1138,8 +1138,8 @@ describe("create_pool guards", () => {
       await expect(attempt(0)).rejects.toThrow(/InvalidParameter/);
       // The account arrives header-sized and create_pool grows it by the
       // House's leaf, so one that already holds a node is refused.
-      await expect(attempt(86_400, WEIGHT_TREE_SPACE + 56)).rejects.toThrow(/InvalidParameter/);
-      await attempt(86_400);
+      await expect(attempt(82_800, WEIGHT_TREE_SPACE + 56)).rejects.toThrow(/InvalidParameter/);
+      await attempt(82_800);
     },
     TIMEOUT,
   );

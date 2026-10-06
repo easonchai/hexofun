@@ -7,6 +7,7 @@
 //! handler decides.
 
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_pack::Pack;
 use anchor_spl::token::spl_token;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
@@ -147,6 +148,30 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
             && klend_market != Pubkey::default()
             && klend_reserve != Pubkey::default()
             && klend_ctoken != Pubkey::default(),
+        HexVaultError::InvalidParameter
+    );
+    // Every deploy sends cTokens here and every redeem draws them back, so
+    // an account the pool PDA does not own strands the lot. The mint is
+    // still checked against the reserve at the first sync.
+    // The stub venue's vault is a PDA that `test_venue_init` creates after
+    // this instruction, so a pool pinned to the stub (klend_program is this
+    // program) skips the check. Only test-venue builds compile that skip.
+    #[cfg(feature = "test-venue")]
+    let stub_venue = klend_program == crate::ID;
+    #[cfg(not(feature = "test-venue"))]
+    let stub_venue = false;
+    if !stub_venue {
+        let ctoken_info = ctx.accounts.klend_ctoken.to_account_info();
+        require!(
+            ctoken_info.owner == &spl_token::ID
+                && spl_token::state::Account::unpack(&ctoken_info.try_borrow_data()?)
+                    .map_or(false, |a| a.owner == ctx.accounts.pool.key()),
+            HexVaultError::InvalidParameter
+        );
+    }
+    // Same bound `set_params` holds.
+    require!(
+        params.payout_timeout < params.epoch_seconds,
         HexVaultError::InvalidParameter
     );
 

@@ -200,7 +200,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         // parameter is what this suite is about, and both would otherwise
         // change its timing.
         registrationWindow: new BN(0),
-        payoutTimeout: new BN(86_400),
+        payoutTimeout: new BN(3_000),
         // Base yield and grant-tickets are off (0), same reasoning as the
         // operator localnet suite: neither is what this suite is about.
         // `ticketsPerUsdc` only has to be positive to pass `create_pool`'s
