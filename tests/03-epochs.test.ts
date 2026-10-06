@@ -1500,6 +1500,7 @@ describe("epochs", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 3_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
 
       await buyTickets(pool, owner, 2_000_000n);
       await buyTickets(pool, owner, 1_000_000n); // lands exactly on the cap
@@ -1509,12 +1510,12 @@ describe("epochs", () => {
 
       await expect(buyTickets(pool, owner, 1n)).rejects.toThrow(/DailyBuyCapExceeded/);
 
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2 open
+      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3 open
       await buyTickets(pool, owner, 3_000_000n); // fresh cap, same Principal
 
       const afterReset = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(afterReset.boughtAmount.toString()).toBe("3000000");
-      expect(afterReset.boughtEpoch.toString()).toBe("2");
+      expect(afterReset.boughtEpoch.toString()).toBe("3");
     },
     TIMEOUT,
   );
@@ -1601,22 +1602,20 @@ describe("epochs", () => {
   );
 
   it(
-    "a request_withdraw before buying only tightens the same-epoch cap, never bypasses it",
+    "refunding a pending deposit before buying takes its room away, never bypasses the cap",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open: buy_tickets requires one
       await deposit(pool, owner, 5_000_000n);
 
-      // Principal drops from 5M to 2M; bought_amount is still 0, so nothing
-      // carried over gives back the room this just took away.
+      // The 3M refunds at once, leaving 2M of Principal that is all still
+      // pending, so no locked Principal is left to buy against.
       await requestWithdraw(pool, owner, 3_000_000n);
       expect(
         (await fetchPlayer(pool, owner.keypair.publicKey)).principal.toString(),
       ).toBe("2000000");
 
-      await expect(buyTickets(pool, owner, 2_000_001n)).rejects.toThrow(/DailyBuyCapExceeded/);
-      await buyTickets(pool, owner, 2_000_000n); // exactly what's left, not the original 5M
       await expect(buyTickets(pool, owner, 1n)).rejects.toThrow(/DailyBuyCapExceeded/);
     },
     TIMEOUT,
@@ -1629,18 +1628,19 @@ describe("epochs", () => {
       const owner = await pool.fundedWallet(20_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 4_000_000n);
-      await buyTickets(pool, owner, 4_000_000n); // caps epoch 1's spend
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
+      await buyTickets(pool, owner, 4_000_000n); // caps epoch 2's spend
 
-      // Epoch 1 has ended and is not drawn yet; the pool's current epoch is
-      // already 2 the instant this lands.
-      await retryUntilOk(() => beginEpoch(pool, 1n));
+      // Epoch 2 has ended and is not drawn yet; the pool's current epoch is
+      // already 3 the instant this lands.
+      await retryUntilOk(() => beginEpoch(pool, 2n));
 
       const sig = await buyTickets(pool, owner, 4_000_000n);
       const event = await findEvent<{ epochId: BN }>(sig, "ticketsBought");
-      expect(event?.epochId.toString()).toBe("2");
+      expect(event?.epochId.toString()).toBe("3");
 
       const player = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(player.boughtEpoch.toString()).toBe("2");
+      expect(player.boughtEpoch.toString()).toBe("3");
       expect(player.boughtAmount.toString()).toBe("4000000");
     },
     TIMEOUT,
@@ -1653,13 +1653,14 @@ describe("epochs", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 1_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
       await buyTickets(pool, owner, 500_000n); // +5_000_000 entries at the default rate
 
       const beforeStake = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(beforeStake.entries.toString()).toBe("6000000");
 
       const startsAt = await onChainNowSeconds();
-      await createRound(pool, 1n, 1n, startsAt, startsAt + 30);
+      await createRound(pool, 2n, 1n, startsAt, startsAt + 30);
       // Stakes more than bare Principal (1_000_000) would cover; only clears
       // because the bought Tickets are ordinary Entries.
       await buyPosition(pool, owner, 1n, 0b11n, 2_500_000n);
@@ -1667,12 +1668,14 @@ describe("epochs", () => {
       const afterStake = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(afterStake.entries.toString()).toBe("1000000"); // 6_000_000 - 5_000_000 staked
 
-      // The deposit is still pending, so asking for it back refunds it. It held
-      // no Ticket, so the 1M of bought Tickets that remain are untouched.
+      // A second deposit is pending, so asking for it back refunds it. It held
+      // no Ticket, so the 1M of Tickets that remain are untouched.
+      await deposit(pool, owner, 1_000_000n); // the helper also grants 1M Tickets
+      const beforeRefund = await fetchPlayer(pool, owner.keypair.publicKey);
       await requestWithdraw(pool, owner, 1_000_000n);
       const afterWithdraw = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(afterWithdraw.entries.toString()).toBe("1000000");
-      expect(afterWithdraw.principal.toString()).toBe("0");
+      expect(afterWithdraw.entries.toString()).toBe(beforeRefund.entries.toString());
+      expect(afterWithdraw.principal.toString()).toBe("1000000");
     },
     TIMEOUT,
   );
@@ -1687,9 +1690,11 @@ describe("epochs", () => {
       // bonusCapBps: 10_000 (100%) so the pool-wide cap, which a
       // single-depositor pool would otherwise hit first (it is a share of
       // this same Principal), does not shadow the Player cap under test.
-      const pool = await setupPool({ bonusCapBps: 10_000 });
+      const pool = await setupPool({ epochSeconds: 5, bonusCapBps: 10_000 });
       const owner = await pool.fundedWallet(10_000_000n);
+      await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 1_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
 
       const sig = await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n);
 
@@ -1697,7 +1702,7 @@ describe("epochs", () => {
       expect(player.principal.toString()).toBe("1000000"); // unaffected: only entries move
       expect(player.entries.toString()).toBe("2000000"); // deposit + grant
       expect(player.bonusGranted.toString()).toBe("1000000");
-      expect(player.bonusEpoch.toString()).toBe("0");
+      expect(player.bonusEpoch.toString()).toBe("2");
 
       const event = await findEvent<{
         owner: PublicKey;
@@ -1706,7 +1711,7 @@ describe("epochs", () => {
         byAdmin: boolean;
       }>(sig, "ticketsGranted");
       expect(event?.owner.toString()).toBe(owner.keypair.publicKey.toString());
-      expect(event?.epochId.toString()).toBe("0");
+      expect(event?.epochId.toString()).toBe("2");
       expect(event?.amount.toString()).toBe("1000000");
       expect(event?.byAdmin).toBe(false);
 
@@ -1720,11 +1725,13 @@ describe("epochs", () => {
   it(
     "the pool-wide cap binds even when a large player's own cap has plenty of headroom",
     async () => {
-      const pool = await setupPool(); // default bonusCapBps: 500 (5%)
+      const pool = await setupPool({ epochSeconds: 5 }); // default bonusCapBps: 500 (5%)
       const owner = await pool.fundedWallet(20_000_000n);
+      await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 10_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
 
-      // Player cap is 10_000_000; the pool cap (5% of total_principal) is
+      // Player cap is 10_000_000; the pool cap (5% of the epoch-start total) is
       // 500_000, far tighter, so hitting it here cannot be the player cap.
       await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
       await expect(
@@ -1737,11 +1744,13 @@ describe("epochs", () => {
   it(
     "a small player's own cap binds independently of a generous pool-wide cap",
     async () => {
-      const pool = await setupPool({ minDeposit: 1 });
+      const pool = await setupPool({ epochSeconds: 5, minDeposit: 1 });
       const small = await pool.fundedWallet(1_000_000n);
       const big = await pool.fundedWallet(20_000_000n);
+      await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, small, 100_000n);
       await deposit(pool, big, 10_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: both are locked
 
       // Pool cap is 5% of 10_100_000 = 505_000, well above small's own
       // 100_000 cap.
@@ -1880,8 +1889,9 @@ describe("epochs", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 1_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
 
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n); // caps epoch 1
+      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n); // caps epoch 2
       expect((await fetchPlayer(pool, owner.keypair.publicKey)).bonusGranted.toString()).toBe(
         "1000000",
       );
@@ -1889,15 +1899,15 @@ describe("epochs", () => {
         "1000000",
       );
 
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2 open
+      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3 open
       await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n); // fresh cap
 
       const player = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(player.bonusGranted.toString()).toBe("1000000");
-      expect(player.bonusEpoch.toString()).toBe("2");
+      expect(player.bonusEpoch.toString()).toBe("3");
       const poolAfter = await program.account.pool.fetch(pool.pool);
       expect(poolAfter.bonusGranted.toString()).toBe("1000000");
-      expect(poolAfter.bonusEpoch.toString()).toBe("2");
+      expect(poolAfter.bonusEpoch.toString()).toBe("3");
     },
     TIMEOUT,
   );
@@ -1914,13 +1924,14 @@ describe("epochs", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 1_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
       await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
 
       const beforeStake = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(beforeStake.entries.toString()).toBe("1500000");
 
       const startsAt = await onChainNowSeconds();
-      await createRound(pool, 1n, 1n, startsAt, startsAt + 30);
+      await createRound(pool, 2n, 1n, startsAt, startsAt + 30);
       // One tile at the full 1_500_000 stake: more than bare Principal
       // (1_000_000) would cover; only clears because the granted Tickets
       // are ordinary Entries.
@@ -1939,12 +1950,13 @@ describe("epochs", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open
       await deposit(pool, owner, 1_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
       await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
       expect((await fetchPlayer(pool, owner.keypair.publicKey)).entries.toString()).toBe(
         "1500000",
       );
 
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2 open
+      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3 open
       // Any touch (here a further deposit) resets Entries to Principal
       // first, discarding the grant like any other Entries at the
       // boundary, then adds the new deposit on top of that reset base.

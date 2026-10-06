@@ -1464,7 +1464,8 @@ pub fn sweep_house(ctx: Context<SweepHouse>) -> Result<()> {
 }
 
 /// Resets `bought_amount` to 0 when `bought_epoch` is not `current_epoch_id`,
-/// adds `amount`, and checks the result against `principal`. Returns the new
+/// adds `amount`, and checks the result against `principal` (the caller passes
+/// the locked Principal, Pending deposit excluded). Returns the new
 /// `bought_amount`; the caller still owns stamping `bought_epoch`.
 fn bought_amount_after(
     bought_epoch: u64,
@@ -1492,7 +1493,7 @@ fn bought_amount_after(
 /// tickets"). The USDC goes to the jackpot vault and is never returned; the
 /// Tickets are ordinary Entries from the moment they land.
 ///
-/// Capped per Player per epoch at `principal`, checked against the live
+/// Capped per Player per epoch at locked Principal, checked against the live
 /// balance at call time rather than a start-of-day snapshot. `principal` only
 /// falls when a refund pays or a queued withdrawal is processed, so a
 /// `request_withdraw` before a `buy_tickets` can only tighten this player's remaining allowance for the
@@ -1523,7 +1524,7 @@ pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         player.bought_epoch,
         player.bought_amount,
         pool.current_epoch_id,
-        player.principal,
+        player.locked_principal(pool.current_epoch_id),
         amount,
     )?;
     player.bought_epoch = pool.current_epoch_id;
@@ -1590,7 +1591,7 @@ fn bonus_after(
     Ok(total)
 }
 
-/// `total_principal * bonus_cap_bps / 10_000`, the pool-wide operator grant
+/// `epoch_start_principal * bonus_cap_bps / 10_000`, the pool-wide operator grant
 /// cap for the current epoch. Widens to u128 first, like `yield_for`, since
 /// `total_principal * bonus_cap_bps` can overflow u64.
 fn pool_bonus_cap(total_principal: u64, bonus_cap_bps: u16) -> Result<u64> {
@@ -1606,8 +1607,8 @@ fn pool_bonus_cap(total_principal: u64, bonus_cap_bps: u16) -> Result<u64> {
 /// Credits playable Tickets to a Player by hand (spec "Granted tickets"),
 /// signed by `pool.operator` or `pool.admin`.
 ///
-/// The operator path is capped per Player per epoch at `principal` and
-/// pool-wide per epoch at `total_principal * bonus_cap_bps / 10_000`, tracked
+/// The operator path is capped per Player per epoch at locked Principal and
+/// pool-wide per epoch at `epoch_start_principal * bonus_cap_bps / 10_000`, tracked
 /// by their own `bonus_epoch`/`bonus_granted` counters (separate from
 /// `bought_epoch`/`bought_amount` so a grant and a purchase don't share a
 /// cap), and refuses the House. The admin path is uncapped, allows the
@@ -1639,11 +1640,11 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
             player.bonus_epoch,
             player.bonus_granted,
             pool.current_epoch_id,
-            player.principal,
+            player.locked_principal(pool.current_epoch_id),
             amount,
             HexVaultError::DailyPlayerGrantCapExceeded,
         )?;
-        let pool_cap = pool_bonus_cap(pool.total_principal, pool.bonus_cap_bps)?;
+        let pool_cap = pool_bonus_cap(pool.epoch_start_principal, pool.bonus_cap_bps)?;
         let pool_bonus = bonus_after(
             pool.bonus_epoch,
             pool.bonus_granted,
@@ -2480,6 +2481,41 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("exceed today's cap"));
+    }
+
+    fn player_with(principal: u64, pending_deposit: u64) -> Player {
+        let data = vec![0u8; Player::INIT_SPACE];
+        let mut p = Player::deserialize(&mut &data[..]).expect("zeroed player");
+        p.principal = principal;
+        p.pending_deposit = pending_deposit;
+        p.pending_deposit_epoch = 1;
+        p
+    }
+
+    #[test]
+    fn a_pending_deposit_gives_no_buy_or_grant_room() {
+        // Deposit 1_000 today with nothing locked: the flash sequence buys 1_000
+        // against a cap of 0 and is refused.
+        let p = player_with(1_000, 1_000);
+        assert_eq!(p.locked_principal(1), 0);
+        assert!(bought_amount_after(1, 0, 1, p.locked_principal(1), 1).is_err());
+        assert!(bonus_after(
+            1, 0, 1, p.locked_principal(1), 1, HexVaultError::DailyPlayerGrantCapExceeded
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_stale_pending_deposit_is_already_locked() {
+        assert_eq!(player_with(1_000, 400).locked_principal(2), 1_000);
+    }
+
+    #[test]
+    fn locked_principal_keeps_the_room_from_earlier_epochs() {
+        let p = player_with(1_500, 500);
+        assert_eq!(p.locked_principal(1), 1_000);
+        assert_eq!(bought_amount_after(1, 0, 1, p.locked_principal(1), 1_000).expect("at cap"), 1_000);
+        assert!(bought_amount_after(1, 0, 1, p.locked_principal(1), 1_001).is_err());
     }
 
     // --- `bonus_after` / `pool_bonus_cap` (grant_tickets, hexo-referrals

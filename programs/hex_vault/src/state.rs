@@ -179,9 +179,14 @@ pub struct Pool {
     pub harvest_fee: u64,
     pub harvest_depositor: u64,
     pub harvest_prize: u64,
+    /// `total_principal` as it stood when `begin_epoch` opened the current
+    /// epoch. The pool-wide cap on operator grants reads it, so a deposit made
+    /// mid-epoch cannot widen the cap. Zero before epoch 1, which refuses
+    /// operator grants until an epoch exists.
+    pub epoch_start_principal: u64,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.
-    pub _reserved: [u8; 96],
+    pub _reserved: [u8; 88],
 }
 
 /// One lottery cycle. Contiguous: the next opens the moment this one ends.
@@ -363,6 +368,18 @@ pub struct WeightTree {
 }
 
 impl Player {
+    /// Principal less the Pending deposit: what has been in the pool since
+    /// before this epoch. The Bought and Granted ticket caps count this, since
+    /// a Pending deposit refunds on request and so cannot back a cap. One from
+    /// an earlier epoch is already locked, whether or not `touch` has folded it.
+    pub fn locked_principal(&self, current_epoch_id: u64) -> u64 {
+        if self.pending_deposit_epoch >= current_epoch_id {
+            self.principal.saturating_sub(self.pending_deposit)
+        } else {
+            self.principal
+        }
+    }
+
     /// Fills a freshly `init_if_needed`ed account. A no-op on an existing
     /// one, so callers can run it unconditionally before `touch`.
     ///
@@ -458,7 +475,8 @@ mod tests {
         assert_eq!(pool(|p| p.harvest_fee = 1), 767);
         assert_eq!(pool(|p| p.harvest_depositor = 1), 775);
         assert_eq!(pool(|p| p.harvest_prize = 1), 783);
-        assert_eq!(pool(|p| p._reserved[0] = 1), 791);
+        assert_eq!(pool(|p| p.epoch_start_principal = 1), 791);
+        assert_eq!(pool(|p| p._reserved[0] = 1), 799);
 
         let player = |set: fn(&mut Player)| offset(Player::INIT_SPACE, set);
         // `owner` at 8 is what the indexer's per-owner memcmp filters on.

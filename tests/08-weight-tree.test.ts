@@ -470,18 +470,22 @@ describe("weight tree", () => {
         m.deposit(amount);
         await check(`${name} deposits`);
       }
-      await buyTickets(pool, wallets.b, 1_000_000n);
-      (await touched("b")).entries += 1_000_000n * BigInt(pool.ticketsPerUsdc);
-      await check("b buys tickets");
+      // Only `a`'s Principal is locked in epoch 1, so only `a` may buy.
+      await buyTickets(pool, wallets.a, 1_000_000n);
+      (await touched("a")).entries += 1_000_000n * BigInt(pool.ticketsPerUsdc);
+      await check("a buys tickets");
 
       await grantTickets(pool, owners.a, 2_000_000n);
       (await touched("a")).entries += 2_000_000n;
       await check("a is granted tickets");
 
-      // `c` holds no Ticket yet, so it buys some to stake.
-      await buyTickets(pool, wallets.c, 100_000n);
-      (await touched("c")).entries += 100_000n * BigInt(pool.ticketsPerUsdc);
-      await check("c buys tickets");
+      // `b` and `c` hold no Ticket yet, so the Admin grants them some to stake.
+      for (const [name, amount] of [["b", 1_000_000n], ["c", 100_000n]] as const) {
+        const tickets = amount * BigInt(pool.ticketsPerUsdc);
+        await grantTicketsAsAdmin(pool, owners[name], tickets);
+        (await touched(name)).entries += tickets;
+        await check(`${name} is granted tickets`);
+      }
 
       // A round: three stakes, tile 0 wins, so `a` collects from the pot and
       // the House takes its cut.

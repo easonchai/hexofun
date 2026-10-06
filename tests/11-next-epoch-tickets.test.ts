@@ -237,25 +237,30 @@ describe("deposits earn Tickets from the next epoch", () => {
   );
 
   it(
-    "counts Bought and Granted tickets in the epoch they land, with both caps reading Principal including the pending deposit",
+    "counts Bought and Granted tickets in the epoch they land, with both caps reading locked Principal and the pending deposit refused",
     async () => {
-      const pool = await setupPool({ epochSeconds: 20, bonusCapBps: 10_000 });
+      const pool = await setupPool({ epochSeconds: 8, bonusCapBps: 10_000 });
       const a = await pool.fundedWallet(10_000_000n);
       const owner = a.keypair.publicKey;
       await beginEpoch(pool, 0n); // epoch 1
       await deposit(pool, a, 3_000_000n);
       expect(await ticketsOf(pool, owner, 1n)).toBe(0n);
 
-      // The grant cap is Principal, all of it pending, and one more is refused.
+      // All of it is pending, so nothing is locked to buy or be granted against.
+      await expect(grantTickets(pool, owner, 1n)).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
+      await expect(buyTickets(pool, a, 1n)).rejects.toThrow(/DailyBuyCapExceeded/);
+
+      // From epoch 2 the deposit is locked, and the pool cap is the total at its start.
+      await retryUntilOk(() => beginEpoch(pool, 1n));
       await expect(grantTickets(pool, owner, 3_000_001n)).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
       await grantTickets(pool, owner, 3_000_000n);
-      expect(await ticketsOf(pool, owner, 1n)).toBe(3_000_000n);
+      expect(await ticketsOf(pool, owner, 2n)).toBe(6_000_000n);
 
-      // The buy cap is Principal too, and these Tickets count at once.
+      // The buy cap is locked Principal too, and these Tickets count at once.
       await buyTickets(pool, a, 1_000_000n);
       const bought = 1_000_000n * BigInt(pool.ticketsPerUsdc);
-      expect(await ticketsOf(pool, owner, 1n)).toBe(3_000_000n + bought);
-      expect(big((await fetchPlayer(pool, owner)).entries)).toBe(3_000_000n + bought);
+      expect(await ticketsOf(pool, owner, 2n)).toBe(6_000_000n + bought);
+      expect(big((await fetchPlayer(pool, owner)).entries)).toBe(6_000_000n + bought);
       await assertPrincipalSums(pool, [owner, pool.operator.publicKey]);
     },
     TIMEOUT,

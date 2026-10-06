@@ -117,6 +117,7 @@ pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
         .current_epoch_id
         .checked_add(1)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
+    pool.epoch_start_principal = pool.total_principal;
 
     let new_epoch = &mut ctx.accounts.new_epoch;
     new_epoch.epoch_id = pool.current_epoch_id;
