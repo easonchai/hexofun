@@ -151,7 +151,27 @@ body.ops #root {
   grid-column: 1 / -1;
 }
 
+/* Fast pause sits above the grid; two buttons a row on a phone. */
+.ops-page > [data-testid="panel-fast-pause"] {
+  margin-bottom: 16px;
+}
+
+.ops-fast-pause {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.ops-fast-pause button {
+  min-height: 44px;
+}
+
 @media (max-width: 640px) {
+  .ops-fast-pause {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .ops-grid {
     grid-template-columns: minmax(0, 1fr);
   }

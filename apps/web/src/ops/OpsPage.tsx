@@ -2,6 +2,7 @@ import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 
 import { POOL_ID } from "../chain.js";
 import { AlertsBanner } from "./AlertsBanner.js";
+import { FastPausePanel } from "./FastPausePanel.js";
 import { PoolPanel } from "./PoolPanel.js";
 import { RateChartPanel } from "./RateChartPanel.js";
 import { useOps } from "./useOps.js";
@@ -27,7 +28,7 @@ export function OpsPage() {
         </p>
       )}
 
-      {/* Slot, ticket 07: <FastPausePanel />. Above the fold on a phone, so it goes first. */}
+      <FastPausePanel />
 
       <div className="ops-grid">
         <PoolPanel />
