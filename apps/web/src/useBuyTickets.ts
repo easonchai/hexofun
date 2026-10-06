@@ -7,7 +7,7 @@ import { useCallback, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import { awaitSendResult, buyTickets, type TxSigner } from "./actions.js";
-import { buyDisabledReason, ticketsFromUsdc } from "./buyTickets.js";
+import { buyDisabledReason, pendingDepositNote, ticketsFromUsdc } from "./buyTickets.js";
 import type { HexVaultProgram } from "./chain.js";
 import { parseAtomic } from "./lib/money.js";
 import { decodePlayerError, decodeSendFailure } from "./playerErrors.js";
@@ -25,6 +25,8 @@ export interface UseBuyTicketsOptions {
   /** ticket 11: `buy_tickets` refuses outright once the pool is shut down. */
   shutdown: boolean;
   principal: bigint;
+  /** The player's `pendingTickets`: a deposit that is not locked Principal yet. */
+  pendingDeposit: bigint;
   /** Null until `GET /players/:owner` has answered once. */
   allowanceLeft: bigint | null;
   onDone: () => void;
@@ -36,6 +38,8 @@ export interface BuyTicketsState {
   amount: bigint | null;
   tickets: bigint;
   allowanceLeft: bigint | null;
+  /** One line to show beside the allowance, or null. */
+  allowanceNote: string | null;
   /** Reason the button is disabled, or null when it can be pressed. */
   disabledReason: string | null;
   busy: boolean;
@@ -53,6 +57,7 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
     paused,
     shutdown,
     principal,
+    pendingDeposit,
     allowanceLeft,
     onDone,
   } = options;
@@ -114,6 +119,7 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
     amount,
     tickets,
     allowanceLeft,
+    allowanceNote: pendingDepositNote(pendingDeposit),
     disabledReason,
     busy,
     error,

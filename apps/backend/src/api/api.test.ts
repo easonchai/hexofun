@@ -424,6 +424,34 @@ describe("playerTicketExtras", () => {
         .buyAllowanceLeft,
     ).toBe(0n);
   });
+
+  it("leaves the Pending deposit out of the allowance", () => {
+    const extras = playerTicketExtras(
+      player({ pendingDeposit: 400_000n, pendingDepositEpoch: 7n }),
+      7n,
+    );
+    expect(extras.buyAllowanceLeft).toBe(600_000n);
+  });
+
+  it("takes the Pending deposit and what was bought off Principal together, floored at zero", () => {
+    const pending = { pendingDeposit: 400_000n, pendingDepositEpoch: 7n };
+    expect(
+      playerTicketExtras(player({ ...pending, boughtEpoch: 7n, boughtAmount: 100_000n }), 7n)
+        .buyAllowanceLeft,
+    ).toBe(500_000n);
+    expect(
+      playerTicketExtras(player({ ...pending, boughtEpoch: 7n, boughtAmount: 700_000n }), 7n)
+        .buyAllowanceLeft,
+    ).toBe(0n);
+  });
+
+  it("counts a Pending deposit from an earlier epoch as locked again", () => {
+    const extras = playerTicketExtras(
+      player({ pendingDeposit: 400_000n, pendingDepositEpoch: 6n }),
+      7n,
+    );
+    expect(extras.buyAllowanceLeft).toBe(1_000_000n);
+  });
 });
 
 describe("operatorErrorCode", () => {

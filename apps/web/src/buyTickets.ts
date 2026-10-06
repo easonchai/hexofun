@@ -30,6 +30,11 @@ export function buyDisabledReason(opts: {
   return null;
 }
 
+/** The line under the allowance while a Pending deposit is not yet locked
+ *  Principal, or null with none. */
+export const pendingDepositNote = (pendingDeposit: bigint): string | null =>
+  pendingDeposit > 0n ? "Your new deposit counts from the next epoch." : null;
+
 /** The Bought Tickets entry shows only when neither the Vercel gate nor the
  *  on-chain pause says no. `onChainPaused` is null until `/pool` answers, and
  *  an unknown pause hides the entry rather than guess. */

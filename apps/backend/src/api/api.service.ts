@@ -1150,13 +1150,15 @@ function playerDto(entry: LiveWeight, total: bigint | null) {
  * `boughtToday`, `buyAllowanceLeft` and `grantedToday` for `/players/:owner`,
  * from the epoch-gated counters `buy_tickets`/`grant_tickets` keep on the
  * Player (see `ifCurrentEpoch`). `buyAllowanceLeft` mirrors the on-chain
- * cap check in `bought_amount_after`: spend is capped at Principal per day.
+ * cap check in `bought_amount_after`: spend is capped at locked Principal
+ * (Principal less the Pending deposit) per day.
  */
 export function playerTicketExtras(player: Player, currentEpochId: bigint) {
   const boughtToday = ifCurrentEpoch(player.boughtEpoch, currentEpochId, player.boughtAmount);
+  const locked = player.principal - pendingTickets(player, currentEpochId);
   return {
     boughtToday,
-    buyAllowanceLeft: player.principal > boughtToday ? player.principal - boughtToday : 0n,
+    buyAllowanceLeft: locked > boughtToday ? locked - boughtToday : 0n,
     grantedToday: ifCurrentEpoch(player.bonusEpoch, currentEpochId, player.bonusGranted),
   };
 }

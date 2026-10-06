@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buyDisabledReason, buyTicketsVisible, ticketsFromUsdc } from "./buyTickets.js";
+import {
+  buyDisabledReason,
+  buyTicketsVisible,
+  pendingDepositNote,
+  ticketsFromUsdc,
+} from "./buyTickets.js";
 
 describe("ticketsFromUsdc", () => {
   it("multiplies by the pool's tickets-per-USDC rate", () => {
@@ -55,5 +60,15 @@ describe("buyDisabledReason", () => {
     expect(buyDisabledReason({ ...base, allowanceLeft: 0n })).toBe(
       "today's buy allowance is spent",
     );
+  });
+});
+
+describe("pendingDepositNote", () => {
+  it("is absent with no Pending deposit", () => {
+    expect(pendingDepositNote(0n)).toBeNull();
+  });
+
+  it("says the new deposit counts from the next epoch", () => {
+    expect(pendingDepositNote(1n)).toBe("Your new deposit counts from the next epoch.");
   });
 });
