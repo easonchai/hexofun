@@ -200,7 +200,7 @@ test("about you works without X and stores the answers", { skip }, async () => {
   const ok = await call(claim, { id, body: { id: "about_you", answers: ANSWERS } });
   assert.equal(ok.status, 200);
   assert.equal(quest(ok.body, "about_you").done, true);
-  assert.equal(ok.body.points, 5);
+  assert.equal(ok.body.points, 10);
   const { rows: got } = await pool.query(
     "select answers from waitlist_points where waitlist_id = $1 and ref = 'about_you'",
     [id],

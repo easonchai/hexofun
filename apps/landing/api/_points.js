@@ -32,5 +32,5 @@ export const QUESTS = [
     check: "honor",
     proof: true,
   },
-  { id: ABOUT_YOU, title: "Tell us about you", points: 5, check: "form", form: ABOUT },
+  { id: ABOUT_YOU, title: "Tell us about you", points: 10, check: "form", form: ABOUT },
 ];
