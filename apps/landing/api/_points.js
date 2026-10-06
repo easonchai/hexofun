@@ -1,7 +1,8 @@
 /** The only place a point value lives. An award stores the value at write
  *  time, so a change applies to new awards. `referral` goes to the
- *  referrer, `referred` to the invitee. */
-export const POINTS = { x_connect: 10, referred: 10, referral: 40 };
+ *  referrer, `referred` to the invitee, `early` to signups from before Privy
+ *  sign-in (scripts/award-early.js). */
+export const POINTS = { x_connect: 10, referred: 10, referral: 40, early: 5 };
 
 /** `check`: `oauth` is granted by its own flow, `honor` by the claim route.
  *  Honor quests need X connected. A `proof` quest's claim carries the link to
