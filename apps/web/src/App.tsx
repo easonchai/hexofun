@@ -724,7 +724,6 @@ export function App() {
             sendTransaction={sendTransaction}
             pool={pool}
             principal={principal}
-            entries={entries}
             walletBalance={walletBalance}
             solBalance={solBalance}
             paused={pool?.paused ?? false}

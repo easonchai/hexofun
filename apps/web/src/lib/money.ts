@@ -91,25 +91,9 @@ export function addCapped(current: bigint, step: bigint, cap: bigint | null): bi
 }
 
 /**
- * The Tickets the program will see at the next instruction. `touch` resets
- * stale Tickets to Principal the first time a Player acts in a later epoch.
- * Principal includes the pending deposit (ADR 0020), so that reset is also the
- * fold: a Player who has not acted today holds their whole Principal.
- */
-export function effectiveTickets(
-  principal: bigint,
-  entries: bigint,
-  playerEpoch: bigint | null,
-  currentEpoch: bigint | null,
-): bigint {
-  const stale = playerEpoch !== null && currentEpoch !== null && playerEpoch < currentEpoch;
-  return stale ? principal : entries;
-}
-
-/**
  * The part of Principal that earns no Ticket yet: the deposit made in
  * `depositEpoch` while that epoch is still current, nothing once a later one
- * has begun (the same fold `effectiveTickets` applies).
+ * has begun.
  */
 export function pendingTickets(
   pendingDeposit: bigint,

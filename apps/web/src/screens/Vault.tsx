@@ -12,9 +12,8 @@
  * of a duplicate `/epochs/current` poll of its own; `onDone` tightens that
  * poll (see `useStatePoll.ts` `kick`) instead of triggering a chain re-read.
  *
- * Yield-claimer ticket 15: the balance (Principal plus unsettled yield,
- * ticking) and the "up to X%" rate sit in `YieldBalance.tsx`, which polls
- * `GET /players/:owner` and `GET /pool` itself. Buy Tickets is hidden for
+ * Estimated yield is a year at the pool's base rate, shown as "~" because the
+ * venue's real rate floats under that ceiling. Buy Tickets is hidden for
  * now; its markup was removed but buyTickets.ts and useBuyTickets.ts stay, so
  * bringing it back is markup only, behind `buyTicketsVisible`.
  */
@@ -33,12 +32,12 @@ import {
 import { track } from "../analytics.js";
 import { apiBaseUrl, fetchPlayer, type CurrentEpochDto } from "../api.js";
 import { LogoCog } from "../arena/Arena.js";
+import { InfoTip } from "../InfoTip.js";
 import { CLUSTER, type HexVaultProgram } from "../chain.js";
 import {
   addCapped,
   clampDecimals,
   depositOpen,
-  effectiveTickets,
   formatAtomic,
   formatAtomic2,
   haircutValue,
@@ -59,7 +58,6 @@ import { solRentWarning, type PoolLike } from "../read.js";
 import { SHUTDOWN_BANNER } from "../shutdown.js";
 import { useApiPoll } from "../useApiPoll.js";
 import { useLivePool } from "../useLiveYield.js";
-import { YieldBalance } from "../YieldBalance.js";
 import { GlyphRow } from "./Home.js";
 
 const DECIMALS = 6;
@@ -73,6 +71,22 @@ const ONE = 10n ** BigInt(DECIMALS);
 const INPUT_DECIMALS = 2;
 /** The Figma quick pills: each adds this many whole USDC. */
 const QUICK_ADDS = [50n, 100n, 500n] as const;
+
+/** ADR 0020: a deposit earns no Ticket until the next epoch. */
+const TICKETS_TIP = ["Tickets from this deposit join the draw from tomorrow."];
+
+const YIELD_TIP = [
+  "Base yield is paid into your deposit once a day, so it compounds. The estimate is a year at today's rate.",
+];
+
+/** `base_rate_bps` APR compounded daily, as a percentage: 488 bps is about 5%. */
+const apyFromBaseRateBps = (baseRateBps: number): number =>
+  ((1 + baseRateBps / 10_000 / 365) ** 365 - 1) * 100;
+
+/** A year of compounded Base yield on `amount` at `apy` percent, in atomic
+ *  units. Display only: floats are fine at these magnitudes. */
+const yearlyYield = (amount: bigint, apy: number): bigint =>
+  BigInt(Math.floor((Number(amount) * apy) / 100));
 
 /**
  * `NothingPending` (playerErrors.ts, ticket 09 — this used to be this file's
@@ -107,7 +121,6 @@ export interface VaultScreenProps {
   sendTransaction?: TxSigner["sendTransaction"] | undefined;
   pool: PoolLike | null;
   principal: bigint;
-  entries: bigint;
   /** Null when the chain read failed (ticket 15): a stuttering RPC must
    *  never look like an empty wallet and block a deposit as over balance. */
   walletBalance: bigint | null;
@@ -141,7 +154,6 @@ export function Vault(props: VaultScreenProps) {
     sendTransaction,
     pool,
     principal,
-    entries,
     walletBalance,
     solBalance,
     paused,
@@ -280,13 +292,8 @@ export function Vault(props: VaultScreenProps) {
   const overCap = connected && amount !== null && cap !== null && amount > cap;
   const underMin =
     mode === "deposit" && pool !== null && amount !== null && amount < pool.minDeposit;
+  const apy = pool ? apyFromBaseRateBps(pool.baseRateBps) : null;
   const currentEpochId = currentEpoch ? BigInt(currentEpoch.id) : null;
-  const tickets = effectiveTickets(
-    principal,
-    entries,
-    playerExtras.data ? BigInt(playerExtras.data.epochId) : null,
-    currentEpochId,
-  );
   // ADR 0020: a deposit earns no Ticket until the next epoch. The read model
   // sends the row, and the same lazy fold `touch` does runs here against the
   // epoch the screen already holds.
@@ -297,7 +304,6 @@ export function Vault(props: VaultScreenProps) {
         currentEpochId,
       )
     : 0n;
-  const odds = playerExtras.data?.odds ?? null;
   // The refund part pays in the transaction; at Shutdown the whole amount does.
   const split =
     mode === "withdraw" && amount !== null && amount > 0n
@@ -417,7 +423,6 @@ export function Vault(props: VaultScreenProps) {
           </div>
 
           <div className="vault-body">
-            <YieldBalance owner={owner} principal={principal} />
             <label className="vault-amount">
               <span className="vault-amount-dollar" aria-hidden="true">
                 $
@@ -471,17 +476,22 @@ export function Vault(props: VaultScreenProps) {
               {mode === "deposit" ? (
                 <>
                   <div className="vault-line" data-testid="vault-tickets">
-                    <dt>Tickets</dt>
-                    <dd>{fmt2(tickets)}</dd>
+                    <dt className="vault-line-label">
+                      Tickets
+                      <InfoTip id="tickets-tip" paragraphs={TICKETS_TIP} />
+                    </dt>
+                    <dd>{fmt2(amount ?? 0n)}</dd>
                   </div>
-                  {pendingNow > 0n ? (
-                    <div className="vault-line" data-testid="vault-tickets-pending">
-                      <dt>+{fmt2(pendingNow)} from tomorrow&apos;s draw</dt>
-                    </div>
-                  ) : null}
-                  <div className="vault-line" data-testid="vault-odds">
-                    <dt>Odds</dt>
-                    <dd>{odds === null ? "—" : `${odds}%`}</dd>
+                  <div className="vault-line" data-testid="estimated-yield">
+                    <dt className="vault-line-label">
+                      Estimated yield
+                      <InfoTip id="estimated-yield-tip" paragraphs={YIELD_TIP} />
+                    </dt>
+                    <dd>
+                      {apy === null
+                        ? "—"
+                        : `$${fmt2(yearlyYield(amount ?? 0n, apy))} (~${Number(apy.toFixed(2))}% APY)`}
+                    </dd>
                   </div>
                 </>
               ) : (
