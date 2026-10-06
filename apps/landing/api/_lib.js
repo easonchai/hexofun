@@ -66,6 +66,7 @@ export function ensureSchema() {
       )
     `;
     await sql`alter table waitlist_points add column if not exists proof text`;
+    await sql`alter table waitlist_points add column if not exists answers jsonb`;
     await awardReferrals();
   })().catch((err) => {
     ready = undefined; // let the next request retry rather than cache a failure
@@ -159,7 +160,7 @@ async function loadMemberWhere(id, code) {
   const quests = QUESTS.map((q) => ({
     ...q,
     done: got.includes(q.check === "oauth" ? `${q.id}:` : `quest:${q.id}`),
-    locked: q.check !== "oauth" && !x,
+    locked: q.check === "honor" && !x,
   }));
   return {
     ...member,
