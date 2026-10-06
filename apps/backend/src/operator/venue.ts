@@ -104,6 +104,16 @@ export function idleTarget(pool: PoolState, vaultBalance: bigint): bigint {
   return (bandBase(pool, vaultBalance) * BigInt(pool.idleTargetBps) + BPS - 1n) / BPS;
 }
 
+/**
+ * Held back from a deploy. `deploy_to_venue` syncs before it checks the
+ * amount, and the sync books the yield earned since `venueValue` was last
+ * written, which raises the idle target by the target's share of that gain.
+ * An exact-fit amount then fails with DeployExceedsIdle every time once the
+ * venue holds anything. 1 bp of the position covers a gain of 0.1% at a 10%
+ * target: about a week at a 5% supply rate.
+ */
+const deployMargin = (pool: PoolState): bigint => pool.venueValue / 10_000n;
+
 function idleFloor(pool: PoolState, vaultBalance: bigint): bigint {
   return (bandBase(pool, vaultBalance) * BigInt(pool.idleFloorBps)) / BPS;
 }
@@ -183,7 +193,7 @@ export function decideVenue(input: {
     !pool.impaired &&
     !pool.shutdown
   ) {
-    const amount = free - idleTarget(pool, vaultBalance);
+    const amount = free - idleTarget(pool, vaultBalance) - deployMargin(pool);
     if (amount > 0n && amount >= pool.minVenueMove) return { kind: "deploy", amount };
   }
   return null;

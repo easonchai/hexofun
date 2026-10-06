@@ -1549,12 +1549,27 @@ describe("venue cranks (ticket 13)", () => {
 
   it("counts the venue position and the queued withdrawals when sizing the target", async () => {
     // Free idle 4,000 (5,000 less 1,000 queued), venue 6,000: total 10,000,
-    // target 1,000, so 3,000 is the excess.
+    // target 1,000, so 3,000 is the excess, less the 0.6 margin (1 bp of 6,000).
     const { ctx, sent } = venueTick(5_000n * U, {
       pool: venuePool({ pendingWithdrawals: 1_000n * U, venueValue: 6_000n * U }),
     });
     await runTick(ctx);
-    expect(amountSent(sent)).toBe((3_000n * U).toString());
+    expect(amountSent(sent)).toBe((3_000n * U - 600_000n).toString());
+  });
+
+  it("leaves room for the gain deploy_to_venue books at its sync", async () => {
+    // The surf fork's numbers: an exact fit failed once the program's sync
+    // added the yield since the last write to venue_value.
+    const pool = venuePool({ venueValue: 3_150_011_610n });
+    const vault = 4_350_000_001n;
+    const { ctx, sent } = venueTick(vault, { pool });
+    await runTick(ctx);
+    const amount = BigInt(amountSent(sent));
+
+    // What the program allows after a sync that found `gain` more in the venue.
+    const allowed = (gain: bigint) => vault - ((vault + pool.venueValue + gain) * 1_000n + 9_999n) / 10_000n;
+    expect(amount).toBeLessThan(allowed(0n));
+    expect(amount).toBeLessThanOrEqual(allowed(3_150_000n)); // a 0.1% gain still fits
   });
 
   it("recalls up to the target when free idle is under the floor", async () => {
