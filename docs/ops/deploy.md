@@ -261,7 +261,7 @@ one yet. The path, when it happens:
 ## Vercel
 
 Two feature gates live only on the Vercel project, never on chain or in a committed env file:
-`VITE_GATE_GAME` and `VITE_GATE_JACKPOT` (see `CONTEXT.md`, "Feature gate"). Set to `off`, a gate covers
+`VITE_GATE_GAME` and `VITE_GATE_JACKPOT` (see `GLOSSARY.md`, "Feature gate"). Set to `off`, a gate covers
 its feature with a "COMING SOON" card of the same size; unset, or any other value, the feature shows.
 Both are Vite build-time variables, so a change only reaches the site on the next build.
 

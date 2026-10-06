@@ -16,7 +16,7 @@ says what that means if you deposit.
 
 HEXO is the product name. `hex_vault` is the on-chain program, and `@hexvault/*` are the
 package names; both stay as they are. The screens say **Tickets**; the code, the API and the
-program say **entries**. Same thing. [`CONTEXT.md`](CONTEXT.md) is the arbiter.
+program say **entries**. Same thing. [`GLOSSARY.md`](GLOSSARY.md) is the arbiter.
 
 ![HEXO home screen](docs/images/home.png)
 
@@ -91,7 +91,7 @@ What that means if you deposit:
   lift it. The game and the jackpot also pause on their own, and a new pool starts with both
   paused until the admin starts them.
 - Inviting a friend who deposits and keeps at least 50 USDC in for 7 straight days earns you a
-  daily Tickets bonus; see [`CONTEXT.md`](CONTEXT.md) for exact tiers. The invite code your
+  daily Tickets bonus; see [`GLOSSARY.md`](GLOSSARY.md) for exact tiers. The invite code your
   friend redeems, and every referral tie, is tracked in the app, not the program.
 - The admin can shut the pool down for good: deposits, tickets and the game stop, and a
   withdrawal completes in one step, `emergency_withdraw`, with no epoch wait. See
@@ -133,7 +133,7 @@ answers, so a slow draw shows as a longer DRAWING rather than a timer stuck at z
 
 ## Read first
 
-- [`CONTEXT.md`](CONTEXT.md): the vocabulary. Use these words and no others.
+- [`GLOSSARY.md`](GLOSSARY.md): the vocabulary. Use these words and no others.
 - [`docs/architecture.md`](docs/architecture.md): components, accounts and PDAs, roles, fund
   flow, the epoch and round lifecycle, and the backend's jobs and read model.
 - [`runbook.md`](runbook.md): running it locally day to day.

@@ -3,7 +3,7 @@
  * Ticket 09 (production-hardening): every screen that used to show
  * `error.message` goes through `decodePlayerError` instead, and ticket 08's
  * send helper will hand `decodeErrorCode` the numeric code from its own
- * `failed(code)` result directly. Copy uses the screen's words (CONTEXT.md):
+ * `failed(code)` result directly. Copy uses the screen's words (GLOSSARY.md):
  * "day" not epoch, "Tickets" not entries.
  */
 import { currentPage, reportError } from "./errorReport.js";

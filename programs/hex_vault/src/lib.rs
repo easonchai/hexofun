@@ -1,4 +1,4 @@
-//! HexVault: a no-loss lottery with zero-sum hex rounds (see `CONTEXT.md`
+//! HexVault: a no-loss lottery with zero-sum hex rounds (see `GLOSSARY.md`
 //! and `docs/plan/rebuild/spec.md`).
 //!
 //! This module only declares instructions and delegates to their owning

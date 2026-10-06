@@ -2,7 +2,7 @@
 
 HexVault is one Anchor program (`hex_vault`), a NestJS backend that cranks it and mirrors it
 into Postgres, and a Vite/React frontend that only ever reads from the backend. See
-[`CONTEXT.md`](../CONTEXT.md) for vocabulary and [`docs/adr/`](adr/) for why things are shaped
+[`GLOSSARY.md`](../GLOSSARY.md) for vocabulary and [`docs/adr/`](adr/) for why things are shaped
 this way. The money design is ADR 0017 (live yield), the draw is ADR 0018 (Fenwick tree) and
 ADR 0020 (Tickets count from the next epoch), the game is ADR 0019.
 

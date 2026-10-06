@@ -3,7 +3,7 @@
 // tracker and ticket 08's daily bonus job can both import it without pulling
 // in Prisma.
 //
-// CONTEXT.md "Qualified referral": a wallet whose Referrer is set and whose
+// GLOSSARY.md "Qualified referral": a wallet whose Referrer is set and whose
 // Principal has stayed at or above 50 USDC for the last 7 days without a
 // break. Dropping below ends it at once; it restarts from zero.
 
