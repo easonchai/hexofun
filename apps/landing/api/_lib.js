@@ -106,9 +106,9 @@ export function str(v, max) {
  *  and the routes stay unchanged. Rank is position by total points descending,
  *  then earlier signup, then id so it is always a strict order.
  *
- *  Only rows with a `privy_did` have joined. Rows from the typed-email form
- *  stay in the table so a Privy login with the same email can take them over,
- *  but until then they have no rank, no board slot and no referral pay. */
+ *  Rows from the typed-email form have no `privy_did` until a Privy login with
+ *  the same email takes them over. They hold a rank and a board slot like any
+ *  other row, but no referral pay until then. */
 export const loadMember = (id) => loadMemberWhere(id, null);
 
 /** The same body by share code, for the public card and link routes. */
@@ -128,7 +128,6 @@ async function loadMemberWhere(id, code) {
         (lag(coalesce(sum(p.points), 0)) over board)::int as above
       from waitlist w
       left join waitlist_points p on p.waitlist_id = w.id
-      where w.privy_did is not null
       group by w.id
       window board as (order by coalesce(sum(p.points), 0) desc, w.created_at asc, w.id asc)
     ),
@@ -198,7 +197,6 @@ export async function loadLeaderboard() {
       coalesce(sum(p.points), 0)::int as points
     from waitlist w
     left join waitlist_points p on p.waitlist_id = w.id
-    where w.privy_did is not null
     group by w.id
     order by rank
     limit 100
