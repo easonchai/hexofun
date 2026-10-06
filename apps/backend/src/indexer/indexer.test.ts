@@ -790,6 +790,14 @@ describe("event ingest", () => {
   });
 
 
+  it("stores an event once when the live path reports it at a later slot", async () => {
+    // Surfpool's finalized log notification carries a slot ~31 past the
+    // transaction's own, which the catch-up poll reports.
+    expect(await indexer.ingestLogs(batch("sig1", 10n, [deposited]))).toBe(1);
+    expect(await indexer.ingestLogs(batch("sig1", 41n, [deposited]))).toBe(0);
+    expect(await prisma.event.count()).toBe(1);
+  });
+
   it("stores each event once and leaves the cursor on the newest batch", async () => {
     const first = batch("sig1", 10n, [deposited, epochBegan]);
     const second = batch("sig2", 11n, [roundOpened]);

@@ -213,7 +213,10 @@ model Event {
   data        Json
   blockTime   BigInt?
 
-  @@id([slot, signature, index])
+  // Not keyed on slot: the live path stamps the slot its notification came
+  // in, which a fork (and any RPC that notifies late) reports past the
+  // transaction's own, so a slot in the key stored one event twice.
+  @@id([signature, index])
   @@index([poolAddress, slot])
 }
 
