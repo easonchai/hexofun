@@ -11,12 +11,14 @@
 
   Shut down with down in place of up -d.
 
-  Pushing runs a pre-push hook (check-deployable.sh plus pnpm test:unit, no CI); skip it once with git push --no-verify.
+  Pushing runs a pre-push hook (check-deployable.sh, pnpm check:sh, pnpm test:unit, pnpm check; no CI); skip it
+  once with git push --no-verify.
 
   `pnpm test:unit` only gives a real signal once `pnpm --filter @hexvault/backend test:db` has created and migrated
-  the five per-suite databases on the 5433 test Postgres (`docker run -p 5433:5432 postgres:16-alpine` or
-  `docker-compose.dev.yml`'s postgres service). Without it, every DB-backed suite skips itself and prints a
-  warning naming the database it could not reach; a green run without those warnings is the only one that counts.
+  the per-suite databases on the 5433 test Postgres. That script starts the `hexvault-test-pg` container itself
+  when nothing answers on 5433; `docker-compose.dev.yml`'s postgres is the dev database on 5432, not this one.
+  Without it, every DB-backed suite skips itself and prints a warning naming the database it could not reach; a
+  green run without those warnings is the only one that counts.
 
   See also: docs/architecture.md (components, accounts, roles, fund flow), docs/ops/deploy.md
   (deploying and upgrading), docs/ops/funds.md (pulling and returning principal, shutdown),

@@ -14,7 +14,7 @@
     "check": "pnpm -r --if-present check",
     "lint": "pnpm -r --if-present lint",
     "test:unit": "pnpm -r --if-present test",
-    "format:check": "prettier --check .",
+    "check:sh": "shellcheck -S warning -e SC1007,SC1090 scripts/*.sh apps/*/scripts/*.sh .husky/pre-push",
     "prepare": "husky"
   },
   "devDependencies": {

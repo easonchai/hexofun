@@ -79,10 +79,9 @@ const activePlayer = (owner: string) => ({
   poolAddress_owner: { poolAddress: POOL_ADDRESS, owner },
 });
 
-// Both sit past 2^53, so a route that leaked a JSON number would round the
-// value rather than return these digits. u64 columns cannot take the u128 one.
+// Past 2^53, so a route that leaked a JSON number would round the value
+// rather than return these digits.
 const HUGE_U64 = "9007199254740993";
-const HUGE_U128 = "123456789012345678901234567890";
 
 const FAKE_SIGNATURE = "FakeSignature1111111111111111111111111111111";
 /** What the fake RPC says sits in the jackpot vault while epoch 7 is open. */

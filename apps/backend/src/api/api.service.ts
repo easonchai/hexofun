@@ -424,7 +424,7 @@ export class ApiService {
   }
 
   /**
-   * The chain call `liveJackpot` caches. Unlike `chainNow`/`rpcHealth`
+   * The chain call `liveJackpot` caches. Unlike `chainClock`/`rpcHealth`
    * below, a failed read clears the slot instead of sitting in it for the
    * rest of the window: the next call retries the chain rather than
    * repeating the same failure, and `liveJackpot`'s fallback is computed
@@ -891,19 +891,8 @@ export class ApiService {
   }
 
   /**
-   * The Clock sysvar's `unix_timestamp`, read the same way the operator reads
-   * it (see `operator/chain-state.ts`), so Weight and odds here agree with
-   * what the draw uses instead of drifting from wall time. Cached for
-   * `CHAIN_CLOCK_TTL_MS` so /players and /leaderboard polling does not turn
-   * into a chain read per viewer.
-   */
-  private async chainNow(): Promise<bigint> {
-    return (await this.chainClock()).value;
-  }
-
-  /**
-   * Chain time as of right now: the cached Clock sysvar value (shared with
-   * `chainNow` above, so this spends no extra call) advanced by the wall
+   * Chain time as of right now: the cached Clock sysvar value (see
+   * `chainClock` below, so this spends no extra call) advanced by the wall
    * time elapsed since it was observed, so a cache hit never serves a
    * second that is already stale. Used only by `getState` (ticket 06).
    *
@@ -919,7 +908,12 @@ export class ApiService {
     return this.lastServedChainTime;
   }
 
-  /** `chainNow`/`extrapolatedChainNow`'s shared cache. */
+  /**
+   * The Clock sysvar's `unix_timestamp`, read the same way the operator reads
+   * it (see `operator/chain-state.ts`), so Weight and odds here agree with
+   * what the draw uses instead of drifting from wall time. Cached for
+   * `CHAIN_CLOCK_TTL_MS` so polling does not turn into a chain read per viewer.
+   */
   private chainClock(): Promise<ClockReading> {
     this.clock = this.cached(this.clock, CHAIN_CLOCK_TTL_MS, async () => {
       const info = await this.chain.connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY);
@@ -1003,7 +997,7 @@ export class ApiService {
    * Serves `fetch()` from `cache` for `ttlMs`, replacing it with a fresh call
    * once the window lapses. Returns the new cache entry; the caller stores
    * it back on its own field since a shared private field would mix values
-   * of different types across `chainNow` and `rpcHealth` above.
+   * of different types across `chainClock` and `rpcHealth` above.
    * `cachedJackpotBalance` below needs a failed read to clear its slot
    * instead of sitting cached for the window, so it keeps its own copy of
    * this check rather than reusing this helper.
