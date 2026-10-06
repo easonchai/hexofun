@@ -14,8 +14,10 @@ set -eu
 #   scripts/surf.sh warp-epoch [minutes-before-end]   default 8, inside the harvest window
 #   scripts/surf.sh vrf on|off             pause the fake fulfiller to test timeouts
 #   scripts/surf.sh admin <cmd> [flags]    admin CLI, signed by keys/surf/admin.json
+#   scripts/surf.sh web [vite flags]       web dev server against the fork (vite --mode surf)
+#   scripts/surf.sh logs [fork|simnet|vrf|backend] [lines]   default fork 100; backend drops Nest boot noise
 #
-# Env: HEXVAULT_FORK_DATASOURCE (keyed mainnet RPC; never written to a file),
+# Env: HEXVAULT_FORK_DATASOURCE (keyed mainnet RPC; redacted in surfpool.log),
 # SURF_PORT (default 9499, websocket +1, studio +2), HEXVAULT_SKIP_BUILD=1.
 # Keys live in keys/surf/ and survive every mode. The fork reports mainnet's
 # genesis hash, so bootstrap, the backend and the web all treat it as mainnet.
@@ -36,6 +38,11 @@ token_program=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
 klend_accounts="D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59 Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6 B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D"
 
 die() { echo "surf: $*" >&2; exit 1; }
+
+# Line-buffered so the log stays live. Strips colour codes and RPC keys.
+redact() {
+  awk '{ gsub(/\033\[[0-9;]*m/, ""); gsub(/api-key=[A-Za-z0-9_-]+/, "api-key=REDACTED"); print; fflush() }'
+}
 
 rpc_call() {
   out=$(curl -sS --max-time 30 "$rpc" -H 'content-type: application/json' \
@@ -83,12 +90,17 @@ start_surfpool() {
   fi
   # Surfpool writes .surfpool/ into its working directory, so run it in .surf/.
   # The datasource goes in by environment so a keyed URL never shows in `ps`.
+  # Surfpool prints the full datasource URL in fetch errors, so its output goes
+  # through redact on a FIFO; a plain pipe would make $! the filter's pid.
+  fifo="$surf_dir/surfpool.fifo"
+  rm -f "$fifo" && mkfifo "$fifo"
+  redact <"$fifo" >>"$surf_dir/surfpool.log" &
   (
     cd "$surf_dir"
     SURFPOOL_DATASOURCE_RPC_URL="$datasource" exec surfpool start \
       --port "$port" --ws-port $((port + 1)) --studio-port $((port + 2)) \
       --db "$surf_dir/state.sqlite" --no-tui --no-deploy -y
-  ) >>"$surf_dir/surfpool.log" 2>&1 &
+  ) >"$fifo" 2>&1 &
   surfpool_pid=$!
   for _ in $(seq 1 90); do
     fork_up && return 0
@@ -103,6 +115,12 @@ cleanup() {
   kill -9 "${surfpool_pid:-}" 2>/dev/null || true
   kill "${vrf_pid:-}" 2>/dev/null || true
   wait "${surfpool_pid:-}" "${vrf_pid:-}" 2>/dev/null || true
+  rm -f "$surf_dir/surfpool.fifo"
+  # Surfpool's own simnet logs carry the keyed URL too and cannot be piped, so
+  # they are scrubbed once it stops; `logs simnet` redacts them while it runs.
+  for log in "$surf_dir"/.surfpool/logs/*.log; do
+    [ -f "$log" ] && redact <"$log" >"$log.tmp" && mv "$log.tmp" "$log"
+  done
 }
 
 build() {
@@ -241,9 +259,9 @@ Fork up on $rpc (studio http://127.0.0.1:$((port + 2))). Ctrl-C stops it.
 Logs: .surf/surfpool.log, .surf/vrf.log. Keys: keys/surf/.
 
 Backend:  docker compose -p hexvault-surf --env-file .env.surf -f docker-compose.dev.yml up -d --build
-Web:      pnpm --filter @hexvault/web exec vite build --mode surf && pnpm --filter @hexvault/web exec vite preview --mode surf
-          (dev server: pnpm --filter @hexvault/web exec vite --mode surf)
+Web:      scripts/surf.sh web
 Launch:   scripts/surf.sh admin start-jackpot && scripts/surf.sh admin start-game
+Logs:     scripts/surf.sh logs fork|simnet|vrf|backend
 EOF
   wait "$surfpool_pid"
 }
@@ -273,5 +291,16 @@ case "$command" in
       *) die "usage: vrf on|off" ;;
     esac ;;
   admin) admin_cli "$@" ;;
-  *) die "unknown command $command; up | fund | warp | warp-epoch | vrf | admin" ;;
+  web) cd "$root/apps/web" && exec pnpm exec vite --mode surf "$@" ;;
+  logs)
+    lines="${2:-100}"
+    case "${1:-fork}" in
+      fork) tail -n "$lines" "$surf_dir/surfpool.log" | redact ;;
+      vrf) tail -n "$lines" "$surf_dir/vrf.log" | redact ;;
+      simnet) tail -n "$lines" "$(ls -t "$surf_dir"/.surfpool/logs/*.log | head -1)" | redact ;;
+      backend) compose logs --no-color --tail "$lines" backend 2>&1 \
+        | grep -vE 'RouterExplorer|RoutesResolver|InstanceLoader' | redact ;;
+      *) die "usage: logs [fork|simnet|vrf|backend] [lines]" ;;
+    esac ;;
+  *) die "unknown command $command; up | fund | warp | warp-epoch | vrf | admin | web | logs" ;;
 esac
