@@ -18,6 +18,17 @@ const parseLimit = (raw: string | undefined, fallback: number): number => {
   return Math.min(value, MAX_LIMIT);
 };
 
+const MAX_DAYS = 365;
+
+const parseDays = (raw: string | undefined): number => {
+  if (raw === undefined) return 30;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || value < 1) {
+    throw new BadRequestException("`days` must be a whole number of 1 or more.");
+  }
+  return Math.min(value, MAX_DAYS);
+};
+
 const parseRoundId = (raw: string): bigint => {
   if (!/^\d+$/.test(raw)) {
     throw new BadRequestException("A round id is a whole number, for example 12.");
@@ -95,6 +106,11 @@ export class ApiController {
   @Get("positions/counts")
   getPositionCounts(@Query("owners") owners?: string) {
     return this.api.getPositionCounts(parseOwners(owners));
+  }
+
+  @Get("rates/daily")
+  getDailyPaidRates(@Query("days") days?: string) {
+    return this.api.getDailyPaidRates(parseDays(days));
   }
 
   @Get("status")

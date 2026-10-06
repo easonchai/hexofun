@@ -81,6 +81,44 @@ export function trailingRate(
   };
 }
 
+export const SECONDS_PER_DAY = 86_400n;
+
+export interface DailyRate {
+  /** UTC day number: unix seconds / 86400. */
+  day: bigint;
+  /** APR in basis points between this day's closing point and the previous
+   *  closing point; null when the day has no point or there is none before. */
+  aprBps: number | null;
+}
+
+/**
+ * One paid rate per UTC day for `count` days from `firstDay`. `points` are
+ * Yield index points ascending by time; only the last point of each day
+ * counts as its close. A day's rate runs from the previous close, however many
+ * days back, over the seconds actually between them. Points before `firstDay`
+ * only supply that previous close.
+ */
+export function dailyPaidRates(points: readonly IndexPoint[], firstDay: bigint, count: number): DailyRate[] {
+  const rates: DailyRate[] = [];
+  let prev: IndexPoint | null = null;
+  let i = 0;
+  for (let n = 0; n < count; n += 1) {
+    const day = firstDay + BigInt(n);
+    let close: IndexPoint | null = null;
+    for (; i < points.length; i += 1) {
+      const point = points[i];
+      if (point === undefined || point.at / SECONDS_PER_DAY > day) break;
+      if (point.at / SECONDS_PER_DAY === day) close = point;
+      else prev = point;
+    }
+    // A point earlier in the day than `close` is not a close, so it never
+    // becomes `prev`; only `close` does.
+    rates.push({ day, aprBps: close === null ? null : trailingRate(close, prev, 0).aprBps });
+    if (close !== null) prev = close;
+  }
+  return rates;
+}
+
 /** The fields of klend's `Reserve` the rate and liquidity figures need. */
 export interface ReserveStats {
   /** Free liquidity: what a redeem can pay out now. */

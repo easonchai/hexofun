@@ -22,8 +22,10 @@ import { prefixWeights, readNodes } from "../operator/weight-tree";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeReserve,
+  dailyPaidRates,
   effectiveTickets,
   estimatedRateBps,
+  SECONDS_PER_DAY,
   freeIdle,
   haircutFactor,
   pendingTickets,
@@ -307,6 +309,38 @@ export class ApiService {
       row === null ? null : { at: row.at, yieldIndex: toBigInt(row.yieldIndex) },
       window,
     );
+  }
+
+  /**
+   * The rate depositors were paid for each of the last `days` UTC days, today
+   * included, oldest first. Reads one row per day (the day's last point) plus
+   * the newest point before the range, which a first day with no point of its
+   * own needs as its start.
+   */
+  async getDailyPaidRates(days: number) {
+    const poolAddress = this.poolAddress;
+    const firstDay = nowSeconds() / SECONDS_PER_DAY - BigInt(days - 1);
+    const from = firstDay * SECONDS_PER_DAY;
+    const [before, closes] = await Promise.all([
+      this.prisma.yieldIndexPoint.findFirst({
+        where: { poolAddress, at: { lt: from } },
+        orderBy: { at: "desc" },
+      }),
+      this.prisma.$queryRaw<{ at: bigint; yieldIndex: Prisma.Decimal }[]>`
+        SELECT DISTINCT ON ("at" / 86400) "at", "yieldIndex"
+        FROM "YieldIndexPoint"
+        WHERE "poolAddress" = ${poolAddress} AND "at" >= ${from}
+        ORDER BY "at" / 86400, "at" DESC
+      `,
+    ]);
+    const points = [...(before === null ? [] : [before]), ...closes].map((row) => ({
+      at: row.at,
+      yieldIndex: toBigInt(row.yieldIndex),
+    }));
+    return dailyPaidRates(points, firstDay, days).map(({ day, aprBps }) => ({
+      day: new Date(Number(day) * 86_400_000).toISOString().slice(0, 10),
+      aprBps,
+    }));
   }
 
   private async liveYield(pool: Pool, balances: ChainBalances) {

@@ -344,6 +344,20 @@ export const fetchPoolSummary = (
   signal?: AbortSignal,
 ): Promise<ApiResult<PoolSummaryDto>> => get<PoolSummaryDto>(baseUrl, "/pool", signal);
 
+/** One UTC day of `GET /rates/daily`: APR in bps, null for a day with no point. */
+export interface DailyRateDto {
+  /** UTC date, `YYYY-MM-DD`. */
+  day: string;
+  aprBps: number | null;
+}
+
+export const fetchDailyRates = (
+  baseUrl: string,
+  days: number,
+  signal?: AbortSignal,
+): Promise<ApiResult<DailyRateDto[]>> =>
+  get<DailyRateDto[]>(baseUrl, `/rates/daily?days=${days}`, signal);
+
 export const fetchEpochs = (
   baseUrl: string,
   limit: number,

@@ -631,6 +631,92 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     });
   });
 
+  describe("GET /rates/daily", () => {
+    const TODAY = NOW / 86_400n;
+    const at = (daysAgo: bigint, hour: bigint) => (TODAY - daysAgo) * 86_400n + hour * 3_600n;
+    // 1% of rise per day is 36,500 bps a year.
+    const index = (pct: bigint) => ((E18 * (100n + pct)) / 100n).toString();
+
+    /** Swaps the history for `points`, runs `body`, then restores it. */
+    const withHistory = async (
+      points: { at: bigint; yieldIndex: string }[],
+      body: () => Promise<void>,
+    ) => {
+      const kept = await prisma.yieldIndexPoint.findMany({ where: { poolAddress: POOL_ADDRESS } });
+      await prisma.yieldIndexPoint.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+      await prisma.yieldIndexPoint.createMany({
+        data: points.map((p) => ({ ...p, poolAddress: POOL_ADDRESS })),
+      });
+      try {
+        await body();
+      } finally {
+        await prisma.yieldIndexPoint.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+        await prisma.yieldIndexPoint.createMany({ data: kept });
+      }
+    };
+
+    it("rates every day from the previous day's last point, using one close per day", async () => {
+      await withHistory(
+        [
+          { at: at(3n, 23n), yieldIndex: index(0n) },
+          // Two points on day 2: only the later one closes the day.
+          { at: at(2n, 5n), yieldIndex: index(9n) },
+          { at: at(2n, 23n), yieldIndex: index(1n) },
+          { at: at(1n, 23n), yieldIndex: index(2n) },
+          { at: at(0n, 0n), yieldIndex: index(3n) },
+        ],
+        async () => {
+          const { body } = await http.get("/rates/daily?days=3").expect(200);
+          expect(body).toHaveLength(3);
+          expect(body.map((d: { aprBps: number | null }) => d.aprBps)).toEqual([
+            36_500,
+            36_500,
+            // 1% in the single hour since the previous close.
+            876_000,
+          ]);
+        },
+      );
+    });
+
+    it("returns null for days without a point, then spans the gap", async () => {
+      await withHistory(
+        [
+          { at: at(5n, 23n), yieldIndex: index(0n) },
+          { at: at(1n, 23n), yieldIndex: index(4n) },
+        ],
+        async () => {
+          const { body } = await http.get("/rates/daily?days=4").expect(200);
+          const rates = body.map((d: { aprBps: number | null }) => d.aprBps);
+          // Days 3, 2 and today: no point. Day 1 spans four days: 1% a day.
+          expect(rates).toEqual([null, null, 36_500, null]);
+          expect(body[0].day).toBe(new Date(Number(TODAY - 3n) * 86_400_000).toISOString().slice(0, 10));
+        },
+      );
+    });
+
+    it("is null everywhere with one point or an empty table", async () => {
+      await withHistory([{ at: at(1n, 3n), yieldIndex: index(1n) }], async () => {
+        const { body } = await http.get("/rates/daily?days=3").expect(200);
+        expect(body.map((d: { aprBps: number | null }) => d.aprBps)).toEqual([null, null, null]);
+      });
+      await withHistory([], async () => {
+        const { body } = await http.get("/rates/daily").expect(200);
+        expect(body).toHaveLength(30);
+        expect(body.every((d: { aprBps: number | null }) => d.aprBps === null)).toBe(true);
+      });
+    });
+
+    it("caps days at 365 and rejects anything but a positive whole number", async () => {
+      await withHistory([], async () => {
+        const { body } = await http.get("/rates/daily?days=9999").expect(200);
+        expect(body).toHaveLength(365);
+      });
+      for (const bad of ["0", "-1", "1.5", "abc", ""]) {
+        await http.get(`/rates/daily?days=${bad}`).expect(400);
+      }
+    });
+  });
+
   it("GET /epochs returns newest first and honours limit", async () => {
     const { body } = await http.get("/epochs?limit=1").expect(200);
     expect(body).toHaveLength(1);

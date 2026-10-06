@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   INDEX_SCALE,
+  dailyPaidRates,
   decodeReserve,
   effectiveTickets,
   estimatedRateBps,
@@ -95,6 +96,40 @@ describe("trailingRate", () => {
       shortHistory: true,
     });
     expect(trailingRate(latest, latest, Number(DAY)).aprBps).toBeNull();
+  });
+});
+
+describe("dailyPaidRates", () => {
+  const D = 20_000n; // a UTC day number
+  // A point `hours` into a day; 1% of index rise a day is 36,500 bps a year.
+  const close = (day: bigint, hours: bigint, pct: bigint) => ({
+    at: day * DAY + hours * 3_600n,
+    yieldIndex: INDEX_SCALE + ONE_PERCENT * pct,
+  });
+
+  it("takes each day's rise from the previous closing point, over the real seconds", () => {
+    const closes = [close(D - 1n, 23n, 0n), close(D, 23n, 1n), close(D + 1n, 23n, 2n)];
+    expect(dailyPaidRates(closes, D, 2)).toEqual([
+      { day: D, aprBps: 36_500 },
+      { day: D + 1n, aprBps: 36_500 },
+    ]);
+  });
+
+  it("is null for a day with no point, and the next day spans the whole gap", () => {
+    const closes = [close(D - 1n, 23n, 0n), close(D + 2n, 23n, 3n)];
+    const rates = dailyPaidRates(closes, D, 3);
+    expect(rates.map((r) => r.aprBps)).toEqual([null, null, 36_500]);
+  });
+
+  it("uses a point's own time, not a whole day, when the close is early", () => {
+    // 12 hours between the two closes, 1% rise: twice the one-day annual rate.
+    const closes = [close(D - 1n, 23n, 0n), close(D, 11n, 1n)];
+    expect(dailyPaidRates(closes, D, 1)[0]?.aprBps).toBe(73_000);
+  });
+
+  it("is null with a single point, or none", () => {
+    expect(dailyPaidRates([close(D, 5n, 1n)], D, 2).map((r) => r.aprBps)).toEqual([null, null]);
+    expect(dailyPaidRates([], D, 2).map((r) => r.aprBps)).toEqual([null, null]);
   });
 });
 
