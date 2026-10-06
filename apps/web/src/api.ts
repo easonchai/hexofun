@@ -339,6 +339,57 @@ export interface StateDto {
   launchAt: string | null;
 }
 
+/** The Round or epoch a permissionless crank would accept right now. */
+export interface StuckItemDto {
+  id: string;
+  status: number;
+}
+
+/** `GET /ops/summary`: the `/status` payload plus what the Ops console shows.
+ *  Amounts are atomic USDC strings; nulls mean unknown or not indexed. */
+export interface OpsSummaryDto extends StatusDto {
+  pendingWithdrawals: string;
+  /** The principal vault's balance; null when the read failed. */
+  vaultLiquidity: string | null;
+  solvencyMargin: string | null;
+  freeIdle: string | null;
+  freeIdleBps: number | null;
+  freeIdleBelowFloor: boolean | null;
+  reserveUtilizationBps: number | null;
+  reserveFreeLiquidity: string | null;
+  impaired: boolean;
+  deployPaused: boolean;
+  totalPrincipal: string;
+  venueValue: string;
+  feeOwed: string;
+  prizeOwed: string;
+  yieldOwed: string;
+  deficit: string;
+  /** Chain unix seconds of the last Sync; "0" before the pool is indexed. */
+  lastSyncAt: string;
+  admin: string | null;
+  venueParams: {
+    yieldFeeBps: number;
+    idleFloorBps: number;
+    idleTargetBps: number;
+    reserveShareCapBps: number;
+    reserveLiquidityFloorBps: number;
+    minVenueMove: string;
+    lossToleranceBps: number;
+  } | null;
+  /** klend's supply rate in bps; null when the reserve cannot be read. */
+  supplyRateBps: number | null;
+  harvestedToTreasury: string;
+  harvestedToJackpot: string;
+  /** Null when the backend's chain read failed: unknown, not clean. */
+  stuck: { round: StuckItemDto | null; epoch: StuckItemDto | null } | null;
+}
+
+export const fetchOpsSummary = (
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<ApiResult<OpsSummaryDto>> => get<OpsSummaryDto>(baseUrl, "/ops/summary", signal);
+
 export const fetchPoolSummary = (
   baseUrl: string,
   signal?: AbortSignal,

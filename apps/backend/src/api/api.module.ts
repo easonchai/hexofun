@@ -10,6 +10,8 @@ import { ApiService } from "./api.service";
 import { ErrorReportController } from "./error-report.controller";
 import { FastPauseController } from "./fast-pause.controller";
 import { FaucetController } from "./faucet.controller";
+import { OpsController } from "./ops.controller";
+import { OpsSummaryService } from "./ops-summary";
 import { ReferralsController } from "./referrals.controller";
 import { SerializationInterceptor } from "./serialization.interceptor";
 
@@ -50,6 +52,7 @@ import { SerializationInterceptor } from "./serialization.interceptor";
   ],
   controllers: [
     ApiController,
+    OpsController,
     AlertsController,
     FaucetController,
     AccessController,
@@ -59,6 +62,7 @@ import { SerializationInterceptor } from "./serialization.interceptor";
   ],
   providers: [
     ApiService,
+    OpsSummaryService,
     { provide: APP_INTERCEPTOR, useClass: SerializationInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],

@@ -16,7 +16,7 @@ port="${PGPORT:-5433}"
 user="${PGUSER:-hexvault}"
 export PGPASSWORD="${PGPASSWORD:-hexvault}"
 
-for db in hexvault_api hexvault_access hexvault_referrals hexvault_indexer hexvault_operator hexvault_error_reports; do
+for db in hexvault_api hexvault_access hexvault_referrals hexvault_indexer hexvault_operator hexvault_error_reports hexvault_ops; do
   exists=$(psql -h "$host" -p "$port" -U "$user" -d postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname = '$db'")
   if [ "$exists" != "1" ]; then

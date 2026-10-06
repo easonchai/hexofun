@@ -158,7 +158,7 @@ interface RpcHealth {
  * account is not that case: a system account nobody has funded holds exactly
  * 0 lamports, so `operatorSol` reports 0 there.
  */
-interface ChainBalances {
+export interface ChainBalances {
   vaultLiquidity: bigint | null;
   /** The pinned klend reserve, decoded. Null when the pool has none, the read
    *  failed, or the account is not klend's (a test-venue stub). */
@@ -935,7 +935,7 @@ export class ApiService {
    * account is the same unknown, while a missing operator account is a real
    * zero, because an unfunded system account holds no lamports.
    */
-  private async chainBalances(klendReserve?: string): Promise<ChainBalances> {
+  async chainBalances(klendReserve?: string): Promise<ChainBalances> {
     try {
       return await this.cachedBalances(klendReserve);
     } catch (cause) {
