@@ -15,16 +15,23 @@ set -eu
 #   scripts/surf.sh vrf on|off             pause the fake fulfiller to test timeouts
 #   scripts/surf.sh admin <cmd> [flags]    admin CLI, signed by keys/surf/admin.json
 #   scripts/surf.sh web [vite flags]       web dev server against the fork (vite --mode surf)
-#   scripts/surf.sh logs [fork|simnet|vrf|backend] [lines]   default fork 100; backend drops Nest boot noise
+#   scripts/surf.sh logs [fork|simnet|vrf|relay|backend] [lines]   default fork 100; backend drops Nest boot noise
 #
-# Env: HEXVAULT_FORK_DATASOURCE (keyed mainnet RPC; redacted in surfpool.log),
-# SURF_PORT (default 9499, websocket +1, studio +2), HEXVAULT_SKIP_BUILD=1.
+# Env: HEXVAULT_FORK_DATASOURCE (keyed mainnet RPC; Surfpool only sees the
+# local relay in front of it, tests/fork/relay.mjs),
+# SURF_PORT (default 9499, websocket +1, studio +2, relay +3), HEXVAULT_SKIP_BUILD=1,
+# HEXVAULT_FORK_OFFLINE=1 (up --resume only: no datasource, so a hung remote
+# fetch can never freeze the fork for its 30s timeout),
+# HEXVAULT_FORK_LOG_LEVEL (Surfpool's simnet log level, default info; debug
+# logs each datasource request; read it with `logs simnet`).
 # Keys live in keys/surf/ and survive every mode. The fork reports mainnet's
 # genesis hash, so bootstrap, the backend and the web all treat it as mainnet.
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 port="${SURF_PORT:-9499}"
 rpc="http://127.0.0.1:$port"
+relay_port=$((port + 3))
+relay_url="http://127.0.0.1:$relay_port"
 surf_dir="$root/.surf"
 keys="$root/keys/surf"
 wallet="${ANCHOR_WALLET:-$HOME/.config/solana/id.json}"
@@ -39,9 +46,17 @@ klend_accounts="D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59 Bgq7trRgVMeq33yt235
 
 die() { echo "surf: $*" >&2; exit 1; }
 
-# Line-buffered so the log stays live. Strips colour codes and RPC keys.
+# Line-buffered so the log stays live. Strips colour codes and everything after
+# a URL's host: Helius keys sit in the query, Chainstack keys in the path.
 redact() {
-  awk '{ gsub(/\033\[[0-9;]*m/, ""); gsub(/api-key=[A-Za-z0-9_-]+/, "api-key=REDACTED"); print; fflush() }'
+  awk '{
+    gsub(/\033\[[0-9;]*m/, "")
+    while (match($0, /:\/\/[A-Za-z0-9.-]+\/[^ )"<][^ )"]*/)) {
+      host_end = RSTART + index(substr($0, RSTART + 3), "/") + 2
+      $0 = substr($0, 1, host_end) "<redacted>" substr($0, RSTART + RLENGTH)
+    }
+    print; fflush()
+  }'
 }
 
 rpc_call() {
@@ -51,6 +66,9 @@ rpc_call() {
 }
 
 fork_up() { solana --url "$rpc" cluster-version >/dev/null 2>&1; }
+
+# Any HTTP answer, even the relay's 405 to a GET, means it is listening.
+relay_up() { curl -s -o /dev/null --max-time 1 "$relay_url"; }
 
 keypair() {
   [ -f "$keys/$1.json" ] || solana-keygen new --no-bip39-passphrase --silent --outfile "$keys/$1.json" >/dev/null
@@ -84,9 +102,29 @@ compose() {
 
 start_surfpool() {
   datasource="${HEXVAULT_FORK_DATASOURCE:-}"
-  if [ -z "$datasource" ]; then
+  # Offline only on resume: bootstrap needs remote accounts a fresh fork lacks.
+  offline=""
+  if [ "${HEXVAULT_FORK_OFFLINE:-}" = 1 ]; then
+    [ "$1" = resume ] || die "HEXVAULT_FORK_OFFLINE=1 needs up --resume; a fresh fork must fetch mainnet accounts"
+    offline=--offline
+    datasource=""
+    echo "surf: offline, no datasource; a transaction touching an account the fork never fetched fails" >&2
+  elif [ -z "$datasource" ]; then
     echo "surf: HEXVAULT_FORK_DATASOURCE unset, forking through the public mainnet RPC (slow, rate-limited)" >&2
     datasource=https://api.mainnet-beta.solana.com
+  fi
+  # Surfpool talks to the datasource through tests/fork/relay.mjs, which never
+  # reuses a connection the network may have dropped (a 30s fork freeze).
+  if [ -n "$datasource" ]; then
+    relay_up && die "something already answers on $relay_url; stop it or set SURF_PORT"
+    HEXVAULT_FORK_DATASOURCE="$datasource" node "$root/tests/fork/relay.mjs" "$relay_port" \
+      >>"$surf_dir/relay.log" 2>&1 &
+    relay_pid=$!
+    until relay_up; do
+      kill -0 "$relay_pid" 2>/dev/null || die "relay exited; see .surf/relay.log"
+      sleep 0.2
+    done
+    datasource="$relay_url"
   fi
   # Surfpool writes .surfpool/ into its working directory, so run it in .surf/.
   # The datasource goes in by environment so a keyed URL never shows in `ps`.
@@ -97,7 +135,14 @@ start_surfpool() {
   redact <"$fifo" >>"$surf_dir/surfpool.log" &
   (
     cd "$surf_dir"
-    SURFPOOL_DATASOURCE_RPC_URL="$datasource" exec surfpool start \
+    if [ -n "$datasource" ]; then
+      export SURFPOOL_DATASOURCE_RPC_URL="$datasource"
+    else
+      unset SURFPOOL_DATASOURCE_RPC_URL
+    fi
+    # $offline is unquoted on purpose: empty means no flag at all.
+    # shellcheck disable=SC2086
+    exec surfpool start $offline --log-level "${HEXVAULT_FORK_LOG_LEVEL:-info}" \
       --port "$port" --ws-port $((port + 1)) --studio-port $((port + 2)) \
       --db "$surf_dir/state.sqlite" --no-tui --no-deploy -y
   ) >"$fifo" 2>&1 &
@@ -113,8 +158,8 @@ start_surfpool() {
 cleanup() {
   # Surfpool ignores SIGTERM.
   kill -9 "${surfpool_pid:-}" 2>/dev/null || true
-  kill "${vrf_pid:-}" 2>/dev/null || true
-  wait "${surfpool_pid:-}" "${vrf_pid:-}" 2>/dev/null || true
+  kill "${vrf_pid:-}" "${relay_pid:-}" 2>/dev/null || true
+  wait "${surfpool_pid:-}" "${vrf_pid:-}" "${relay_pid:-}" 2>/dev/null || true
   rm -f "$surf_dir/surfpool.fifo"
   # Surfpool's own simnet logs carry the keyed URL too and cannot be piped, so
   # they are scrubbed once it stops; `logs simnet` redacts them while it runs.
@@ -189,7 +234,7 @@ up_fresh() {
     compose down -v >/dev/null 2>&1 || echo "surf: docker compose down -v failed (docker not running?); stale DB may remain" >&2
   fi
   rm -f "$surf_dir"/state.sqlite* "$surf_dir/vrf-off" "$surf_dir/bootstrap.out" "$surf_dir/chain-time"
-  start_surfpool
+  start_surfpool fresh
 
   solana --url "$rpc" program deploy "$root/target/deploy/hex_vault.so" \
     --program-id "$root/target/deploy/hex_vault-keypair.json" \
@@ -233,7 +278,7 @@ up_resume() {
   [ -f "$surf_dir/state.sqlite" ] || die "no .surf/state.sqlite to resume; run scripts/surf.sh up"
   [ -f "$env_file" ] && [ -f "$idl" ] || die ".env.surf or .surf/hex_vault.json missing; run scripts/surf.sh up"
   program_id=$(sed -n 's/^PROGRAM_ID=//p' "$env_file")
-  start_surfpool
+  start_surfpool resume
   solana --url "$rpc" program show "$program_id" >/dev/null 2>&1 \
     || die "program $program_id is not on the resumed fork; run scripts/surf.sh up"
   # Surfpool restores accounts but restarts the clock at wall time.
@@ -256,12 +301,12 @@ up() {
   cat <<EOF
 
 Fork up on $rpc (studio http://127.0.0.1:$((port + 2))). Ctrl-C stops it.
-Logs: .surf/surfpool.log, .surf/vrf.log. Keys: keys/surf/.
+Logs: .surf/surfpool.log, .surf/vrf.log, .surf/relay.log. Keys: keys/surf/.
 
 Backend:  docker compose -p hexvault-surf --env-file .env.surf -f docker-compose.dev.yml up -d --build
 Web:      scripts/surf.sh web
 Launch:   scripts/surf.sh admin start-jackpot && scripts/surf.sh admin start-game
-Logs:     scripts/surf.sh logs fork|simnet|vrf|backend
+Logs:     scripts/surf.sh logs fork|simnet|vrf|relay|backend
 EOF
   wait "$surfpool_pid"
 }
@@ -297,10 +342,11 @@ case "$command" in
     case "${1:-fork}" in
       fork) tail -n "$lines" "$surf_dir/surfpool.log" | redact ;;
       vrf) tail -n "$lines" "$surf_dir/vrf.log" | redact ;;
+      relay) tail -n "$lines" "$surf_dir/relay.log" | redact ;;
       simnet) tail -n "$lines" "$(ls -t "$surf_dir"/.surfpool/logs/*.log | head -1)" | redact ;;
       backend) compose logs --no-color --tail "$lines" backend 2>&1 \
         | grep -vE 'RouterExplorer|RoutesResolver|InstanceLoader' | redact ;;
-      *) die "usage: logs [fork|simnet|vrf|backend] [lines]" ;;
+      *) die "usage: logs [fork|simnet|vrf|relay|backend] [lines]" ;;
     esac ;;
   *) die "unknown command $command; up | fund | warp | warp-epoch | vrf | admin | web | logs" ;;
 esac
