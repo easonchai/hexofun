@@ -17,6 +17,7 @@ playwright-report/
 !.env*.example
 *.keypair.json
 keys/
+.surf/
 
 # Editor / OS
 .DS_Store
