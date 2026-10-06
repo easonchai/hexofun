@@ -1,6 +1,8 @@
 /* Ops console. Tokens come from ../styles.css; this file only lays them out.
    styles.css pins html and body to one non-scrolling screen for the game, so
-   the console undoes that under body.ops. */
+   the console undoes that under body.ops. html needs it too: its own
+   overflow: hidden is what the viewport scrolls by. */
+html:has(body.ops),
 body.ops,
 body.ops #root {
   height: auto;
