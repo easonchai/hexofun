@@ -4422,6 +4422,11 @@
       "code": 6087,
       "name": "OwnerSignatureRequired",
       "msg": "the pool is impaired; the player's owner must sign this exit"
+    },
+    {
+      "code": 6088,
+      "name": "RoundEpochNotCurrent",
+      "msg": "the round belongs to an earlier epoch and takes no new positions"
     }
   ],
   "types": [
@@ -5805,6 +5810,16 @@
             "type": "u64"
           },
           {
+            "name": "epoch_start_principal",
+            "docs": [
+              "`total_principal` as it stood when `begin_epoch` opened the current",
+              "epoch. The pool-wide cap on operator grants reads it, so a deposit made",
+              "mid-epoch cannot widen the cap. Zero before epoch 1, which refuses",
+              "operator grants until an epoch exists."
+            ],
+            "type": "u64"
+          },
+          {
             "name": "_reserved",
             "docs": [
               "Take new fields from here. Their zero value must be the safe default,",
@@ -5813,7 +5828,7 @@
             "type": {
               "array": [
                 "u8",
-                96
+                88
               ]
             }
           }
