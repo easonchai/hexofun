@@ -30,6 +30,7 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
+  type TransactionInstruction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -53,6 +54,8 @@ const DEPOSIT = 5_000_000n;
 const STAKE = 1_000_000n;
 /** Bit 0 of the tile mask: the position covers tile 0 and nothing else. */
 const TILE_ZERO = 1n;
+/** `create_pool`'s Weight tree: discriminator plus the zero-copy header. */
+const WEIGHT_TREE_SPACE = 8 + 48;
 
 /**
  * `Program<Idl>` types every instruction as possibly undefined, because which
@@ -62,13 +65,16 @@ const TILE_ZERO = 1n;
 interface MethodBuilder {
   accountsPartial(accounts: Record<string, PublicKey>): MethodBuilder;
   signers(signers: Keypair[]): MethodBuilder;
+  preInstructions(instructions: TransactionInstruction[]): MethodBuilder;
   rpc(): Promise<string>;
 }
 type Instruction =
   | "createPool"
+  | "testVenueInit"
   | "setFeaturePause"
   | "beginEpoch"
   | "deposit"
+  | "grantTickets"
   | "createRound"
   | "buyPosition"
   | "requestRoundRandomness"
@@ -101,6 +107,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
   const authority = Keypair.generate();
   const depositor = Keypair.generate();
   const poolId = BigInt(Date.now());
+  const weightTree = Keypair.generate();
 
   let round: PublicKey;
   let position: PublicKey;
@@ -181,6 +188,20 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     );
 
     const pool = chain.poolAddress();
+    // `test-venue` pins this program as klend, the pool as the market and
+    // two PDAs of its own as the reserve and the position's token account.
+    const venue = {
+      klendProgram: chain.programId,
+      klendMarket: pool,
+      klendReserve: PublicKey.findProgramAddressSync(
+        [Buffer.from("test-venue-reserve"), pool.toBuffer()],
+        chain.programId,
+      )[0],
+      klendCtoken: PublicKey.findProgramAddressSync(
+        [Buffer.from("test-venue-vault"), pool.toBuffer()],
+        chain.programId,
+      )[0],
+    };
     await methods
       .createPool({
         poolId: new BN(poolId.toString()),
@@ -196,10 +217,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         minDeposit: new BN(1_000_000),
         houseCutBps: 600,
         minJackpot: new BN(1),
-        // No window and a payout timeout far past this run: neither
-        // parameter is what this suite is about, and both would otherwise
-        // change its timing.
-        registrationWindow: new BN(0),
+        // Far past this run, and under the epoch length as create_pool requires.
         payoutTimeout: new BN(3_000),
         // Base yield and grant-tickets are off (0), same reasoning as the
         // operator localnet suite: neither is what this suite is about.
@@ -216,8 +234,32 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         principalVault: chain.principalVaultAddress(),
         jackpotVault: chain.jackpotVaultAddress(),
         house: chain.playerAddress(authority.publicKey),
+        weightTree: weightTree.publicKey,
         treasury,
         buybackReserve,
+        ...venue,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions([
+        SystemProgram.createAccount({
+          fromPubkey: authority.publicKey,
+          newAccountPubkey: weightTree.publicKey,
+          space: WEIGHT_TREE_SPACE,
+          lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
+          programId: chain.programId,
+        }),
+      ])
+      .signers([authority, weightTree])
+      .rpc();
+    await methods
+      .testVenueInit()
+      .accountsPartial({
+        payer: authority.publicKey,
+        pool,
+        acceptedMint: mint,
+        reserve: venue.klendReserve,
+        venueVault: venue.klendCtoken,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
@@ -236,6 +278,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         operator: authority.publicKey,
         pool,
         currentEpoch: chain.epochAddress(0n),
+        epochTwoBehind: chain.epochAddress(0n),
         newEpoch: chain.epochAddress(1n),
         systemProgram: SystemProgram.programId,
       })
@@ -255,13 +298,26 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         owner: depositor.publicKey,
         pool,
         player: chain.playerAddress(depositor.publicKey),
+        weightTree: weightTree.publicKey,
         acceptedMint: mint,
         ownerToken: ata.address,
         principalVault: chain.principalVaultAddress(),
+        ...venue,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
       .signers([depositor])
+      .rpc();
+    // A deposit holds no Ticket until the next epoch (ADR 0020), so the admin
+    // grants the Tickets a depositor from yesterday would hold.
+    await methods
+      .grantTickets(new BN(DEPOSIT.toString()))
+      .accountsPartial({
+        signer: authority.publicKey,
+        pool,
+        player: chain.playerAddress(depositor.publicKey),
+        weightTree: weightTree.publicKey,
+      })
       .rpc();
 
     const startsAt = await chainNow();
@@ -285,6 +341,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         owner: depositor.publicKey,
         pool,
         player: chain.playerAddress(depositor.publicKey),
+        weightTree: weightTree.publicKey,
         round,
         position,
         systemProgram: SystemProgram.programId,
@@ -382,8 +439,8 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       })
       .rpc();
 
-    // Leading LE u64 zero, so tile 0 wins: the tile this position covers, so
-    // settle_position takes the reward path rather than the empty one.
+    // Any randomness will do: the tile comes from `vrf::unbiased_u64`, and the
+    // Position row goes once settle_position closes the account, win or lose.
     const drawn = new Uint8Array(64).fill(0);
     await methods
       .testFulfill(Array.from(seed), Array.from(drawn))
@@ -402,6 +459,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         round,
         randomness,
         house: chain.playerAddress(authority.publicKey),
+        weightTree: weightTree.publicKey,
       })
       .rpc();
 
@@ -412,7 +470,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
           await prisma.round.findUnique({
             where: { poolAddress_id: { poolAddress: chain.poolAddress().toBase58(), id: 1n } },
           })
-        )?.winningTile === 0,
+        )?.winningTile != null,
       8_000,
     );
 
@@ -420,6 +478,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       .settlePosition()
       .accountsPartial({
         pool: chain.poolAddress(),
+        weightTree: weightTree.publicKey,
         round,
         player: chain.playerAddress(depositor.publicKey),
         owner: depositor.publicKey,
@@ -472,6 +531,8 @@ async function wipe(prisma: PrismaService): Promise<void> {
     prisma.referralGrantShare.deleteMany(),
     prisma.referralGrant.deleteMany(),
     prisma.operatorState.deleteMany(),
+    prisma.yieldIndexPoint.deleteMany(),
+    prisma.weightTreeState.deleteMany(),
     prisma.pool.deleteMany(),
   ]);
 }
