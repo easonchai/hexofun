@@ -85,11 +85,11 @@ _Avoid_: Loss (the venue's fall in value), slashing, penalty, exit fee
 ### Lottery
 
 **Bought tickets**:
-Tickets a depositor pays USDC for, at a pool-set number of Tickets per USDC, up to their Principal in USDC per epoch. The USDC goes to the jackpot vault and is never returned. Bought tickets are ordinary Tickets from the moment they land. `buy_tickets` is refused while the pool's on-chain buy-tickets pause is set, which only the Admin changes and which is on at mainnet launch.
+Tickets a depositor pays USDC for, at a pool-set number of Tickets per USDC, up to their locked Principal (the Pending deposit excluded) in USDC per epoch. The USDC goes to the jackpot vault and is never returned. Bought tickets are ordinary Tickets from the moment they land. `buy_tickets` is refused while the pool's on-chain buy-tickets pause is set, which only the Admin changes and which is on at mainnet launch.
 _Avoid_: Purchased entries, deposit (a bought ticket is not Principal)
 
 **Granted tickets**:
-Tickets credited to a Player by the Operator key or the Admin rather than earned by depositing, buying or playing. Operator grants are capped per Player and per pool per epoch; Admin grants are not. Ordinary Tickets once credited.
+Tickets credited to a Player by the Operator key or the Admin rather than earned by depositing, buying or playing. Operator grants are capped per Player at their locked Principal (the Pending deposit excluded) and per pool at the Principal total as the epoch began; Admin grants are not. Ordinary Tickets once credited.
 _Avoid_: Minted tickets, airdrop, free tickets (those are the daily reset)
 
 **Referral bonus**:
