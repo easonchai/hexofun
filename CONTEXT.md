@@ -211,6 +211,14 @@ _Avoid_: Authority keypair, pool authority, admin key, hot wallet
 The backend service that advances the protocol: opens epochs and rounds, requests randomness, settles rounds and positions, deploys to and recalls from the venue to keep the Idle band, runs Harvest once per epoch, pays the winner, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
 _Avoid_: Bot, cron, CLI, admin (a separate role), authority (the removed program role)
 
+**Ops console**:
+The team's page for watching one pool and acting on it. It shows the pool's balances and switches, the venue position, and the rate depositors were paid over time, and it has buttons for the permissionless cranks, the pauses and the parameter changes. It holds no key. A crank signs with whichever wallet is connected. An Admin action signs only when that wallet is the Admin, and otherwise the page hands back a transaction for the multisig to import.
+_Avoid_: Dashboard (the EARN screen), admin page, admin panel, back office
+
+**Fast pause**:
+A request from the Ops console that has the Operator set one of the four switches its key can set: Pause, the game pause, the jackpot pause or the deployment pause. Only a wallet on the team's list may ask, and it proves itself by signing the request. It can halt and never restart, since lifting any of the four still takes the Admin.
+_Avoid_: Kill switch, emergency stop, Shutdown (permanent, Admin only)
+
 **Sparring player**:
 A backend-owned Player that deposits once and buys one Position in every Round, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House. It runs only when its backend environment flag is set, and no production env file sets it.
 _Avoid_: Bot, house player, NPC, dummy user
