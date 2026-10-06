@@ -30,7 +30,7 @@ env_file="$root/.env.surf"
 web_env="$root/apps/web/.env.surf"
 idl="$surf_dir/hex_vault.json"
 usdc=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
-token_program=TokenkegQfeZyiNwAxsLDhvsiQpAKjzhkwV9U4Rh7mJ
+token_program=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
 # Kamino main market USDC reserve, its liquidity supply and cToken mint
 # (tests/fork/klend.fork.ts). Reset together so the fork holds one snapshot.
 klend_accounts="D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59 Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6 B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D"

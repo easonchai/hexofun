@@ -145,10 +145,11 @@ export function poolFromDto(
  *  balance read can throw is unknown, not zero (ticket 15: a stuttering RPC
  *  must never look like an empty wallet and block a deposit as over
  *  balance). Solana's JSON-RPC has no dedicated error code for a missing
- *  token account, only this message text. */
+ *  token account, only this message text: Agave's "could not find account",
+ *  Surfpool's "Account <address> not found". */
 export function isMissingTokenAccount(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /could not find account/i.test(message);
+  return /could not find account|account \w+ not found/i.test(message);
 }
 
 export function useWalletBalance(
