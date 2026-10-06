@@ -94,6 +94,17 @@ export class BurnerWalletAdapter extends BaseWalletAdapter {
     return connection.sendRawTransaction(raw);
   }
 
+  /** Ed25519 via WebCrypto: the invite gate and referrals sign messages. */
+  async signMessage(message: Uint8Array): Promise<Uint8Array> {
+    if (!this.keypair) throw new Error("burner wallet not connected");
+    // PKCS#8 wrapper for a raw 32-byte Ed25519 seed (RFC 8410).
+    const pkcs8 = new Uint8Array(48);
+    pkcs8.set([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]);
+    pkcs8.set(this.keypair.secretKey.slice(0, 32), 16);
+    const key = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+    return new Uint8Array(await crypto.subtle.sign("Ed25519", key, new Uint8Array(message)));
+  }
+
   async signAllTransactions<T extends Transaction | VersionedTransaction>(
     transactions: T[],
   ): Promise<T[]> {
