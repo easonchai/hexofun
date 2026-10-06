@@ -1,6 +1,7 @@
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 
 import { POOL_ID } from "../chain.js";
+import { AdminPanel } from "./AdminPanel.js";
 import { AlertsBanner } from "./AlertsBanner.js";
 import { CranksPanel } from "./CranksPanel.js";
 import { FastPausePanel } from "./FastPausePanel.js";
@@ -37,7 +38,7 @@ export function OpsPage() {
         <YieldPanel />
         <RateChartPanel />
         <CranksPanel />
-        {/* Slot, ticket 05: <AdminPanel /> (pause switches, parameter forms, Squads paste). */}
+        <AdminPanel />
       </div>
     </main>
   );
