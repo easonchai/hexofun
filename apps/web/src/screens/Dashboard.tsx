@@ -114,7 +114,7 @@ interface HistoryRow {
 }
 
 /**
- * The three event kinds an account statement cares about. Everything else the
+ * The event kinds that move a Player's USDC. Everything else the
  * feed carries (positions, rounds, rollovers) belongs to the game, not the
  * money path, so it is dropped rather than shown with a blank amount.
  */
@@ -138,6 +138,18 @@ function toHistoryRow(row: EventDto): HistoryRow | null {
         label: "Withdraw",
         signature: row.signature,
         amount: `- ${amount}`,
+        blockTime: row.blockTime,
+        prize: false,
+      };
+    // A request pays its pending-deposit part at once (ADR 0020); the queued
+    // part shows as Withdraw when `process_withdraw` moves it.
+    case "withdrawRequested":
+      if (BigInt(String(data.paid ?? "0")) === 0n) return null;
+      return {
+        key,
+        label: "Refund",
+        signature: row.signature,
+        amount: `- ${dollars(String(data.paid))}`,
         blockTime: row.blockTime,
         prize: false,
       };
@@ -183,7 +195,7 @@ export function Dashboard(props: DashboardScreenProps) {
   const loadHistory = useCallback(
     (signal: AbortSignal) =>
       ownerBase58
-        ? // Over-fetch: the feed carries game events too, and only the three
+        ? // Over-fetch: the feed carries game events too, and only the
           // money ones survive toHistoryRow.
           fetchFeed(apiBaseUrl(), historyLimit * 4, signal, ownerBase58)
         : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),

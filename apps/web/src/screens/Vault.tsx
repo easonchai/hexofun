@@ -329,8 +329,14 @@ export function Vault(props: VaultScreenProps) {
       );
     } else {
       // One instruction (ADR 0020): the pending-deposit part refunds in the same
-      // transaction and the rest queues.
-      void run("Withdraw requested", program, () =>
+      // transaction and the rest queues. The note says which happened.
+      const label =
+        split === null || split.payNow === 0n
+          ? "Withdraw requested"
+          : split.queued === 0n
+            ? "Refunded"
+            : "Refunded today's deposit, rest requested";
+      void run(label, program, () =>
         requestWithdraw(program, signer, pool, amount),
       );
     }
