@@ -22,6 +22,10 @@ pub const SEED_TEST_VAULT: &[u8] = b"test-venue-vault";
 /// `TestReserve::rate` is USDC per share scaled by this.
 pub const RATE_SCALE: u128 = 1_000_000_000_000_000_000;
 
+/// At exactly this rate a redeem delivers one unit more than asked, as klend's
+/// does (audit ticket 04). No other rate does.
+pub const OVERSHOOT_RATE: u128 = 2 * RATE_SCALE + 1;
+
 #[account]
 #[derive(InitSpace)]
 pub struct TestReserve {
@@ -89,17 +93,19 @@ pub fn stub_deposit<'info>(
 }
 
 /// Burns `ceil(amount x 1e18 / rate)` shares. Fails with `VenueIlliquid` when
-/// the stub vault holds less than `amount`, or fewer shares than that.
+/// the stub vault holds less than `amount`, or fewer shares than that. At
+/// [`OVERSHOOT_RATE`] it moves `amount + 1` instead.
 pub fn stub_redeem<'info>(
     pool: &Account<'info, Pool>,
     venue: &Venue<'_, 'info>,
     funds: &Funds<'_, 'info>,
     amount: u64,
 ) -> Result<()> {
+    let mut reserve = load(venue.reserve)?;
+    let amount = if reserve.rate == OVERSHOOT_RATE { amount + 1 } else { amount };
     let vault = TokenAccount::try_deserialize(&mut &venue.ctoken.try_borrow_data()?[..])?;
     require!(vault.amount >= amount, HexVaultError::VenueIlliquid);
 
-    let mut reserve = load(venue.reserve)?;
     let rate = reserve.rate.max(1);
     let burned = u128::from(amount)
         .checked_mul(RATE_SCALE)

@@ -651,7 +651,7 @@ pub fn request_withdraw<'info>(
             // What the value fell by beyond what arrived is rounding dust,
             // charged to the fee owed and floored at zero, as in `recall`.
             a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
-            a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(gap));
+            a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(received));
             redeemed = gap;
         }
 
@@ -1035,7 +1035,7 @@ pub fn recall<'info>(ctx: Context<'info, Recall<'info>>, amount: u64) -> Result<
     // fee owed, floored at zero.
     let pool = &mut a.pool;
     pool.venue_value = pool.venue_value.saturating_sub(fall);
-    pool.fee_owed = pool.fee_owed.saturating_sub(fall.saturating_sub(amount));
+    pool.fee_owed = pool.fee_owed.saturating_sub(fall.saturating_sub(received));
 
     emit!(VenueRecalled {
         pool: pool.key(),
@@ -1097,7 +1097,7 @@ pub fn harvest<'info>(ctx: Context<'info, Harvest<'info>>) -> Result<()> {
         let received = a.principal_vault.amount.saturating_sub(before);
         require!(received >= from_venue, HexVaultError::VenueShortReturn);
         a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
-        dust = fall.saturating_sub(from_venue);
+        dust = fall.saturating_sub(received);
     }
 
     // The dust the redeem cost is the fee's to bear: pay that much less, and
