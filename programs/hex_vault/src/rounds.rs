@@ -119,6 +119,12 @@ pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) 
 
     let round = &mut ctx.accounts.round;
     require!(round.status == round_status::OPEN, HexVaultError::RoundNotOpen);
+    // A Round opened before epoch 1 carries epoch 0; once epoch 1 begins its
+    // stakes would leave the epoch tree and never be credited back.
+    require!(
+        round.epoch_id == pool.current_epoch_id,
+        HexVaultError::RoundEpochNotCurrent
+    );
     // No stake may fall between two draws: a round that ends after its epoch
     // does is closed to Positions. `create_round` already bounds new rounds, so
     // only one opened before epoch 1 began can get here. Before that there is

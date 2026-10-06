@@ -232,4 +232,8 @@ pub enum HexVaultError {
     OpenPositions,
     #[msg("the pool is impaired; the player's owner must sign this exit")]
     OwnerSignatureRequired,
+
+    // audit-fixes ticket 02. Appended too.
+    #[msg("the round belongs to an earlier epoch and takes no new positions")]
+    RoundEpochNotCurrent,
 }

@@ -21,6 +21,7 @@ describe("decodeErrorCode", () => {
     [6003, "Enter an amount greater than zero."], // ZeroAmount
     [6005, "You don't have enough Tickets for that."], // InsufficientEntries
     [6012, "This round is closed to new plays. Wait for the next one."], // RoundClosed
+    [6088, "This round is closed to new plays. Wait for the next one."], // RoundEpochNotCurrent
     [6085, "This round would end after the day does. Wait for the new day's first round."], // RoundStraddlesEpoch
     [
       6036,

@@ -1209,7 +1209,7 @@ describe("rounds", () => {
   const GRID_LEAD = 20;
 
   it(
-    "buy_position is refused when the round would end after the epoch does",
+    "buy_position is refused when a round opened before epoch 1 would end after the epoch does",
     async () => {
       const anchor = (await chainNow()) + GRID_LEAD;
       const pool = await setupPool({ epochSeconds: 30, epochAnchor: anchor, roundSeconds: 6, closeBuffer: 2 });
@@ -1224,31 +1224,14 @@ describe("rounds", () => {
       ).toBe(anchor);
 
       await expect(buyPosition(pool, alice, round, 1n << 0n, 1_000_000n)).rejects.toThrow(
-        /RoundStraddlesEpoch/,
+        // The epoch check fires first (audit-fixes ticket 02); a straddling
+        // round is by definition one from before epoch 1.
+        /RoundEpochNotCurrent/,
       );
       // Nothing moved: no Position, the Tickets are whole, the pot is empty.
       await expectClosed(positionPda(round, alice.keypair.publicKey));
       expect(await ticketsOf(pool, alice.keypair.publicKey, 1n)).toBe(5_000_000n);
       expect((await program.account.round.fetch(round)).pot.toString()).toBe("0");
-      await assertSolvent(pool);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "buy_position is allowed when the round ends one second earlier, with the epoch",
-    async () => {
-      const anchor = (await chainNow()) + GRID_LEAD;
-      const pool = await setupPool({ epochSeconds: 30, epochAnchor: anchor, roundSeconds: 6, closeBuffer: 2 });
-      const alice = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, alice, 5_000_000n);
-
-      const { round } = await createRound(pool, 6, pool.pool, anchor);
-      await beginFirstEpoch(pool);
-
-      await buyPosition(pool, alice, round, 1n << 0n, 1_000_000n);
-      expect(await ticketsOf(pool, alice.keypair.publicKey, 1n)).toBe(4_000_000n);
-      expect((await program.account.round.fetch(round)).pot.toString()).toBe("1000000");
       await assertSolvent(pool);
     },
     TIMEOUT,
