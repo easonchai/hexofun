@@ -9,6 +9,7 @@ Issues and specs for this repo live as markdown files in `docs/plan/`. There is 
 - Implementation issues are one file per ticket at `docs/plan/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a single combined tickets file
 - Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
+- A ticket is done once its commits pass a review against `CODING_STANDARDS.md` (the `code-review` skill reads it); run one review per batch of tickets, after the last commit
 
 `docs/plan/rebuild/` is the worked example of this layout.
 
