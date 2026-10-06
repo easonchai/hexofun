@@ -409,6 +409,44 @@ export const fetchDailyRates = (
 ): Promise<ApiResult<DailyRateDto[]>> =>
   get<DailyRateDto[]>(baseUrl, `/rates/daily?days=${days}`, signal);
 
+/** One firing alert from `GET /alerts`. `code` is the backend's AlertCode. */
+export interface AlertDto {
+  code: string;
+  message: string;
+}
+
+/**
+ * `GET /alerts` answers 503 with `{ alerts }` while any alert fires and 200
+ * with an empty list otherwise, so a 503 carrying that body is data, not a
+ * failure. Any other non-200 is a failure.
+ */
+export async function fetchAlerts(
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<ApiResult<AlertDto[]>> {
+  const timeout = withTimeout(signal, FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${baseUrl}/alerts`, {
+      signal: timeout.signal,
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok && response.status !== 503) {
+      return { ok: false, reason: `HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as { alerts?: AlertDto[] };
+    if (!Array.isArray(body.alerts)) return { ok: false, reason: `HTTP ${response.status}` };
+    return { ok: true, data: body.alerts };
+  } catch (error) {
+    if (timeout.timedOut()) return { ok: false, reason: TIMEOUT_MESSAGE };
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : "indexer offline",
+    };
+  } finally {
+    timeout.cancel();
+  }
+}
+
 export const fetchEpochs = (
   baseUrl: string,
   limit: number,
