@@ -95,11 +95,11 @@ test("rank matches loadMember through ties, and the board stops at 100", { skip 
   }
 });
 
-test("a typed-email row without a Privy login has no rank or board slot", { skip }, async () => {
-  await member({ code: "dd0001", handle: "legacy", points: 99999, privy: false });
+test("a typed-email row without a Privy login still has a rank and a board slot", { skip }, async () => {
+  await member({ code: "dd0001", points: 99999, email: "legacy@proton.me", privy: false });
   const { body } = await call();
-  assert.ok(!body.some((r) => r.name === "@legacy"));
-  assert.equal(await loadMemberByCode("dd0001"), null);
+  assert.deepEqual(body[0], { rank: 1, name: "le***@proton.me", points: 99999 });
+  assert.equal((await loadMemberByCode("dd0001")).rank, 1);
 });
 
 test("rejects non-GET", { skip }, async () => {

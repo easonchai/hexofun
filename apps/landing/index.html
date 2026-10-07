@@ -1216,6 +1216,206 @@
         cursor: progress;
       }
 
+      /* "Tell us about you" dialog, Figma 677:35763. */
+      .about {
+        width: min(720px, calc(100% - 32px));
+        max-height: calc(100% - 32px);
+        padding: 0;
+        border: 1px solid rgba(182, 255, 59, 0.22);
+        border-radius: 12px;
+        background: var(--navy-800);
+        color: #fff;
+        font-family: var(--mono);
+      }
+
+      .about[open] {
+        animation: popIn var(--std) var(--ease);
+      }
+
+      .about::backdrop {
+        background: rgba(0, 0, 0, 0.75);
+      }
+
+      .about-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        padding: 22px 24px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      }
+
+      .about-head h2 {
+        margin: 0;
+        font: 700 24px/23px var(--display);
+        letter-spacing: 1px;
+        text-transform: uppercase;
+      }
+
+      .about-pts {
+        margin: 9px 0 0;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--lime);
+      }
+
+      .about-x {
+        width: 32px;
+        height: 32px;
+        flex: none;
+        padding: 0;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 6px;
+        background: none;
+        color: var(--ink-75);
+        font: 22px/1 var(--mono);
+        cursor: pointer;
+      }
+
+      .about-x:hover {
+        color: var(--lime);
+      }
+
+      .about-q {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        margin: 0 24px;
+        padding: 18px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      }
+
+      .about-lbl {
+        display: flex;
+        gap: 14px;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 16px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .about-lbl span {
+        color: var(--ink-30);
+      }
+
+      .about :is(select, input, textarea) {
+        width: 100%;
+        min-height: 44px;
+        padding: 0 16px;
+        border: 1px solid var(--ink-30);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--ink);
+        font: 13px var(--mono);
+        outline: none;
+        transition:
+          border-color var(--std) var(--ease),
+          box-shadow var(--std) var(--ease);
+      }
+
+      .about textarea {
+        height: 92px;
+        padding: 13px 15px;
+        line-height: 19.5px;
+        resize: none;
+      }
+
+      .about :is(input, textarea)::placeholder {
+        color: var(--ink-30);
+      }
+
+      .about :is(select, input, textarea):focus {
+        border-color: var(--lime);
+        box-shadow: 0 0 0 3px var(--lime-08);
+      }
+
+      /* Closed select: uppercase, lime chevron, placeholder dim until picked. */
+      .about select {
+        appearance: none;
+        font-size: 14px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none' stroke='%23b6ff3b' stroke-width='1.2'%3E%3Cpath d='m1 1.5 5 5 5-5'/%3E%3C/svg%3E")
+          no-repeat right 18px center;
+        cursor: pointer;
+      }
+
+      .about select:invalid {
+        color: var(--ink-30);
+      }
+
+      /* The open list matches Figma 677:35870 where the browser lets CSS
+         style it (Chrome 135+); elsewhere it is the native picker. */
+      @supports (appearance: base-select) {
+        .about select,
+        .about ::picker(select) {
+          appearance: base-select;
+        }
+        .about select {
+          display: flex;
+          align-items: center;
+        }
+        .about select::picker-icon {
+          display: none;
+        }
+        .about ::picker(select) {
+          margin-top: 4px;
+          padding: 0;
+          border: 1px solid var(--ink-30);
+          border-radius: 8px;
+          background: var(--navy-800);
+        }
+        .about option {
+          min-height: 26px;
+          padding: 0 12px;
+          color: #fff;
+          font: 14px var(--mono);
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+        }
+        .about option::checkmark {
+          display: none;
+        }
+        .about option:is(:hover, :focus-visible, :checked) {
+          background: var(--lime-30);
+        }
+      }
+
+      .about-count {
+        position: absolute;
+        right: 12px;
+        bottom: 28px;
+        font-size: 8px;
+        font-weight: 500;
+        color: var(--ink-30);
+      }
+
+      .about-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 20px 24px 24px;
+      }
+
+      .about-foot .form-err {
+        margin: 0;
+        font-size: 12px;
+      }
+
+      .about-foot .btn {
+        width: 208px;
+        flex: none;
+      }
+
+      .about-foot .btn:disabled {
+        opacity: 0.6;
+        cursor: progress;
+      }
+
       @keyframes popIn {
         0% {
           opacity: 0;
@@ -2023,6 +2223,23 @@
           width: 100%;
           flex: none;
         }
+        .about-head h2 {
+          font-size: 18px;
+        }
+        .about-q {
+          margin: 0 16px;
+        }
+        .about-head,
+        .about-foot {
+          padding-inline: 16px;
+        }
+        .about-foot {
+          flex-direction: column-reverse;
+          align-items: stretch;
+        }
+        .about-foot .btn {
+          width: 100%;
+        }
         .cta-title {
           margin-top: 18px;
         }
@@ -2227,6 +2444,39 @@
           </div>
           <ol class="quest-list" data-quests></ol>
         </section>
+
+        <!-- The "Tell us about you" quest. Options and limits come from the
+             quest in /api/me, filled in by openAbout(). -->
+        <dialog class="about" aria-labelledby="about-h" data-about>
+          <form data-about-form>
+            <div class="about-head">
+              <div>
+                <h2 id="about-h">Tell us about you</h2>
+                <p class="about-pts" data-about-pts></p>
+              </div>
+              <button type="button" class="about-x" aria-label="Close" data-about-close>×</button>
+            </div>
+            <label class="about-q">
+              <span class="about-lbl"><span>01</span>How long have you been in crypto?</span>
+              <select name="experience" required>
+                <option value="" selected disabled hidden>Select experience</option>
+              </select>
+            </label>
+            <label class="about-q">
+              <span class="about-lbl"><span>02</span>What platform do you use to save or invest?</span>
+              <input name="platform" required placeholder="Tell us about it" />
+            </label>
+            <label class="about-q">
+              <span class="about-lbl"><span>03</span>What would make you trust Hexo with your money?</span>
+              <textarea name="trust" rows="3" required placeholder="Tell us about it…"></textarea>
+              <span class="about-count" data-about-count></span>
+            </label>
+            <div class="about-foot">
+              <p class="form-err" role="alert" data-about-err></p>
+              <button type="submit" class="btn"><span>Submit</span></button>
+            </div>
+          </form>
+        </dialog>
       </div>
     </main>
 
@@ -3359,6 +3609,7 @@
         document.body.classList.toggle("signed-in", !!s);
         dash.hidden = !s;
         if (s) renderDash(s);
+        else about.close();
       });
 
       function renderDash(s) {
@@ -3403,7 +3654,7 @@
         }
         // Verified = X plus the follow quest. Until then, referral awards
         // wait and land all at once.
-        const verified = s.quests.every((q) => q.id === "x_like_repost" || q.done);
+        const verified = s.quests.every((q) => !["x_connect", "x_follow"].includes(q.id) || q.done);
         rows.push({
           title: "Each verified referral",
           tip: "Verified referrals are referrals who have connected their X and followed @hexofun on X.",
@@ -3439,6 +3690,12 @@
           a.addEventListener("click", () => window.posthog?.capture("x_connect_started"));
           return a;
         }
+        if (q.check === "form") {
+          const b = el("button", "qbtn", "Go");
+          b.type = "button";
+          b.addEventListener("click", () => openAbout(q));
+          return b;
+        }
         const b = el("button", "qbtn", state === "claim" ? "Claim" : "Go");
         b.type = "button";
         // A proof quest's Claim submits the link form under its title, and
@@ -3461,13 +3718,16 @@
         return b;
       }
 
-      // `bad` runs instead of a re-render when the server rejects the link.
-      async function claim(q, b, url, bad) {
+      // `fields` ride along with the quest id. `bad` runs instead of a
+      // re-render when the server rejects them. True once the claim is saved.
+      async function claim(q, b, fields, bad) {
         b.disabled = true;
         try {
-          const member = await api("/api/quests/claim", { id: q.id, url });
+          const member = await api("/api/quests/claim", { id: q.id, ...fields });
           window.posthog?.capture("quest_claimed", { quest: q.id });
           writeJoined(member);
+          renderJoined();
+          return true;
         } catch (err) {
           window.posthog?.capture("quest_claim_failed", { quest: q.id, status: err.status });
           if (err.status === 400 && bad) {
@@ -3478,6 +3738,7 @@
           else dashMsg.textContent = "Couldn't claim that. Try again.";
         }
         renderJoined();
+        return false;
       }
 
       // The waitlist email field, shrunk to fit a quest row. A bad link
@@ -3506,7 +3767,7 @@
         form.addEventListener("submit", (e) => {
           e.preventDefault();
           if (!input.value.trim()) return;
-          claim(q, button(), input.value, () => {
+          claim(q, button(), { url: input.value }, () => {
             input.setAttribute("aria-invalid", "true");
             hint.hidden = false;
             form.classList.remove("shake");
@@ -3516,6 +3777,50 @@
         });
         return form;
       }
+
+      // "Tell us about you". The dialog is static markup; the quest brings its
+      // options and length cap. Answers stay in the fields if a save fails.
+      const about = $("[data-about]");
+      const aboutForm = $("[data-about-form]");
+      const aboutErr = $("[data-about-err]");
+      const aboutCount = $("[data-about-count]");
+      let aboutQuest;
+
+      function openAbout(q) {
+        aboutQuest = q;
+        window.posthog?.capture("quest_go", { quest: q.id });
+        $("[data-about-pts]").textContent = `+${q.points} pts`;
+        // Built once, so a reopen keeps the earlier pick.
+        const select = aboutForm.elements.experience;
+        if (select.options.length === 1) {
+          select.append(...q.form.experience.map((v) => Object.assign(el("option", "", v), { value: v })));
+        }
+        for (const name of ["platform", "trust"]) aboutForm.elements[name].maxLength = q.form.maxLength;
+        countAbout();
+        aboutErr.textContent = "";
+        about.showModal();
+      }
+
+      const countAbout = () =>
+        (aboutCount.textContent = `${aboutForm.elements.trust.value.length} / ${aboutQuest.form.maxLength}`);
+      aboutForm.elements.trust.addEventListener("input", countAbout);
+      $("[data-about-close]").addEventListener("click", () => about.close());
+
+      aboutForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const submit = aboutForm.querySelector("[type=submit]");
+        const answers = Object.fromEntries(new FormData(aboutForm));
+        aboutErr.textContent = "";
+        const bad = () => {
+          aboutErr.textContent = "Answer all three questions.";
+          aboutForm.classList.remove("shake");
+          void aboutForm.offsetWidth;
+          aboutForm.classList.add("shake");
+        };
+        if (await claim(aboutQuest, submit, { answers }, bad)) return about.close();
+        submit.disabled = false;
+        if (!aboutErr.textContent) aboutErr.textContent = "Couldn't save that. Try again.";
+      });
 
       // Port of the web app's InfoTip (apps/web/src/InfoTip.tsx): opens on
       // hover, focus or tap; closes on Esc, blur or an outside tap.

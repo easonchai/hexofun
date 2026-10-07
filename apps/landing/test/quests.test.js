@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ensureSchema, loadMember, sessionCookie, useSql } from "../api/_lib.js";
 import me from "../api/me.js";
-import claim, { postLink } from "../api/quests/claim.js";
+import claim, { parseAnswers, postLink } from "../api/quests/claim.js";
 
 // Same harness as points.test.js: needs TEST_DATABASE_URL and pg.
 const url = process.env.TEST_DATABASE_URL;
@@ -109,18 +109,28 @@ test("claim needs POST and a session", { skip }, async () => {
 test("/me reports done and locked before and after X connect", { skip }, async () => {
   const id = await member();
   const before = (await call(me, { method: "GET", id })).body;
-  assert.equal(before.quests.length, 3);
+  assert.equal(before.quests.length, 4);
   assert.equal(before.code, null, "the referral code waits for X");
   assert.deepEqual(
     before.quests.map((q) => [q.id, q.done, q.locked]),
-    [["x_connect", false, false], ["x_follow", false, true], ["x_like_repost", false, true]],
+    [
+      ["x_connect", false, false],
+      ["x_follow", false, true],
+      ["x_like_repost", false, true],
+      ["about_you", false, false],
+    ],
   );
   await connectX(id);
   await call(claim, { id, body: { id: "x_like_repost", url: "https://x.com/a/status/1" } });
   const after = await loadMember(id);
   assert.deepEqual(
     after.quests.map((q) => [q.id, q.done, q.locked]),
-    [["x_connect", true, false], ["x_follow", false, false], ["x_like_repost", true, false]],
+    [
+      ["x_connect", true, false],
+      ["x_follow", false, false],
+      ["x_like_repost", true, false],
+      ["about_you", false, false],
+    ],
   );
   assert.equal(after.points, 30);
   assert.match(after.code, /^qq\d{4}$/);
@@ -163,4 +173,37 @@ test("like + repost needs a post link and stores it", { skip }, async () => {
     [id],
   );
   assert.deepEqual(got, [{ proof: "https://x.com/me/status/9" }]);
+});
+
+const ANSWERS = { experience: "1-3 Years", platform: " Binance ", trust: "Audits" };
+
+test("parseAnswers trims and checks every answer", () => {
+  assert.deepEqual(parseAnswers(ANSWERS), { experience: "1-3 Years", platform: "Binance", trust: "Audits" });
+  for (const bad of [
+    undefined,
+    {},
+    { ...ANSWERS, experience: "10 Years" },
+    { ...ANSWERS, platform: "   " },
+    { ...ANSWERS, trust: 5 },
+    { ...ANSWERS, trust: "x".repeat(151) },
+  ]) {
+    assert.equal(parseAnswers(bad), null, JSON.stringify(bad));
+  }
+  assert.ok(parseAnswers({ ...ANSWERS, trust: "x".repeat(150) }));
+});
+
+test("about you works without X and stores the answers", { skip }, async () => {
+  const id = await member();
+  const bad = await call(claim, { id, body: { id: "about_you", answers: { ...ANSWERS, trust: "" } } });
+  assert.equal(bad.status, 400);
+  assert.deepEqual(await rows(id), []);
+  const ok = await call(claim, { id, body: { id: "about_you", answers: ANSWERS } });
+  assert.equal(ok.status, 200);
+  assert.equal(quest(ok.body, "about_you").done, true);
+  assert.equal(ok.body.points, 10);
+  const { rows: got } = await pool.query(
+    "select answers from waitlist_points where waitlist_id = $1 and ref = 'about_you'",
+    [id],
+  );
+  assert.deepEqual(got, [{ answers: { experience: "1-3 Years", platform: "Binance", trust: "Audits" } }]);
 });
