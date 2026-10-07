@@ -30,6 +30,7 @@ import {
   stubVenueValue,
   testSyncMethod,
   waitPastLastSync,
+  VENUE_KIND,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -177,6 +178,7 @@ describe("pinned venue accounts", () => {
       expect(pool.klendMarket.toBase58()).toBe(ctx.venue.klendMarket.toBase58());
       expect(pool.klendReserve.toBase58()).toBe(ctx.venue.klendReserve.toBase58());
       expect(pool.klendCtoken.toBase58()).toBe(ctx.venue.klendCtoken.toBase58());
+      expect(pool.venueKind).toBe(VENUE_KIND.stub);
 
       expect(pool.yieldFeeBps).toBe(1_000);
       expect(pool.idleFloorBps).toBe(500);

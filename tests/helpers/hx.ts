@@ -121,6 +121,9 @@ export interface VenueAccounts {
   klendCtoken: PublicKey;
 }
 
+/** `Pool.venue_kind` values (`constants::venue_kind`). Fixtures run the stub. */
+export const VENUE_KIND = { klend: 0, stub: 1, unsupported: 2 } as const;
+
 export function venueAccountsFor(pool: PublicKey): VenueAccounts {
   return {
     klendProgram: PROGRAM_ID,
@@ -581,6 +584,7 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       baseRateBps: params.baseRateBps,
       ticketsPerUsdc: params.ticketsPerUsdc,
       bonusCapBps: params.bonusCapBps,
+      venueKind: VENUE_KIND.stub,
     })
     .accountsPartial({
       payer: operator.publicKey,

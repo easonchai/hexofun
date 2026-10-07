@@ -12,7 +12,7 @@ use anchor_spl::token::spl_token;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 use crate::constants::{
-    impaired_cause, MAX_IDLE_TARGET_BPS, MAX_LOSS_TOLERANCE_BPS, MAX_MIN_VENUE_MOVE,
+    impaired_cause, venue_kind, MAX_IDLE_TARGET_BPS, MAX_LOSS_TOLERANCE_BPS, MAX_MIN_VENUE_MOVE,
     MAX_RESERVE_LIQUIDITY_FLOOR_BPS, MAX_RESERVE_SHARE_CAP_BPS, MAX_YIELD_FEE_BPS,
     MIN_RESERVE_LIQUIDITY_FLOOR_BPS,
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
@@ -71,6 +71,9 @@ pub struct CreatePoolParams {
     /// `grant_tickets` call may credit pool-wide per epoch. Capped at
     /// `BPS_DENOMINATOR`.
     pub bonus_cap_bps: u16,
+    /// A `constants::venue_kind` value: which backing the four venue accounts
+    /// belong to. Refused unless this build supports it.
+    pub venue_kind: u8,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
@@ -137,6 +140,10 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         HexVaultError::UnsupportedMint
     );
 
+    require!(
+        venue_kind::supported(params.venue_kind),
+        HexVaultError::UnsupportedVenueKind
+    );
     // A default key would pin a venue nobody can ever pass, bricking deploy
     // and every instruction that syncs.
     let klend_program = ctx.accounts.klend_program.key();
@@ -154,13 +161,9 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     // an account the pool PDA does not own strands the lot. The mint is
     // still checked against the reserve at the first sync.
     // The stub venue's vault is a PDA that `test_venue_init` creates after
-    // this instruction, so a pool pinned to the stub (klend_program is this
-    // program) skips the check. Only test-venue builds compile that skip.
-    #[cfg(feature = "test-venue")]
-    let stub_venue = klend_program == crate::ID;
-    #[cfg(not(feature = "test-venue"))]
-    let stub_venue = false;
-    if !stub_venue {
+    // this instruction, so a pool of the stub kind skips the check. Only a
+    // test-venue build accepts that kind.
+    if params.venue_kind != venue_kind::STUB {
         let ctoken_info = ctx.accounts.klend_ctoken.to_account_info();
         require!(
             ctoken_info.owner == &spl_token::ID
@@ -226,6 +229,7 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     pool.klend_market = klend_market;
     pool.klend_reserve = klend_reserve;
     pool.klend_ctoken = klend_ctoken;
+    pool.venue_kind = params.venue_kind;
     pool.yield_fee_bps = DEFAULT_YIELD_FEE_BPS;
     pool.idle_floor_bps = DEFAULT_IDLE_FLOOR_BPS;
     pool.idle_target_bps = DEFAULT_IDLE_TARGET_BPS;

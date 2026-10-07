@@ -3,15 +3,16 @@
 //! program knows which venue it is.
 //!
 //! Every operation first checks the four accounts it was handed against the
-//! addresses pinned on the Pool, then goes to the backing. Under `test-venue`
-//! that is the stub in `test_venue.rs`. Without it, it is klend through
-//! `klend.rs` (ticket 12), which reads its extra accounts from
-//! [`Venue::remaining`].
+//! addresses pinned on the Pool, then goes to the backing the Pool's
+//! `venue_kind` names: klend through `klend.rs` (ticket 12), which reads its
+//! extra accounts from [`Venue::remaining`], or the stub in `test_venue.rs`.
+//! The `test-venue` feature only decides whether the stub kind is compiled in
+//! and accepted (venue-switch ticket 02).
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
-use crate::constants::{impaired_cause, BPS_DENOMINATOR};
+use crate::constants::{impaired_cause, venue_kind, BPS_DENOMINATOR};
 use crate::errors::HexVaultError;
 use crate::events::{ImpairedCleared, ImpairedSet, Synced};
 use crate::state::Pool;
@@ -53,28 +54,36 @@ impl Venue<'_, '_> {
     }
 }
 
-#[cfg(feature = "test-venue")]
-mod backing {
-    pub use crate::test_venue::{
-        stub_deposit as deposit, stub_redeem as redeem, stub_reserve_stats as reserve_stats,
-        stub_value as value,
-    };
-}
-
-#[cfg(not(feature = "test-venue"))]
 #[path = "klend.rs"]
 mod klend;
 
-#[cfg(not(feature = "test-venue"))]
-mod backing {
-    pub use super::klend::{deposit, redeem, reserve_stats, value};
+/// The backing a pool's `venue_kind` names. A kind this build does not
+/// support never reaches a backing: `create_pool` refuses it, and this is the
+/// second line if a stored byte is ever wrong.
+enum Backing {
+    Klend,
+    #[cfg(feature = "test-venue")]
+    Stub,
+}
+
+fn backing_of(pool: &Pool) -> Result<Backing> {
+    match pool.venue_kind {
+        venue_kind::KLEND => Ok(Backing::Klend),
+        #[cfg(feature = "test-venue")]
+        venue_kind::STUB => Ok(Backing::Stub),
+        _ => err!(HexVaultError::UnsupportedVenueKind),
+    }
 }
 
 /// The pool's position in USDC atomic units, read fresh: the backing makes
 /// the venue current first, so a caller never asks for a refresh.
 pub fn value(pool: &Pool, venue: &Venue<'_, '_>) -> Result<u64> {
     venue.check(pool)?;
-    backing::value(pool, venue)
+    match backing_of(pool)? {
+        Backing::Klend => klend::value(pool, venue),
+        #[cfg(feature = "test-venue")]
+        Backing::Stub => crate::test_venue::stub_value(pool, venue),
+    }
 }
 
 /// Moves `amount` USDC from the principal vault into the venue, the pool PDA
@@ -86,7 +95,11 @@ pub fn deposit<'info>(
     amount: u64,
 ) -> Result<()> {
     venue.check(pool)?;
-    backing::deposit(pool, venue, funds, amount)
+    match backing_of(pool)? {
+        Backing::Klend => klend::deposit(pool, venue, funds, amount),
+        #[cfg(feature = "test-venue")]
+        Backing::Stub => crate::test_venue::stub_deposit(pool, venue, funds, amount),
+    }
 }
 
 /// Moves `amount` USDC from the venue back into the principal vault.
@@ -97,7 +110,11 @@ pub fn redeem<'info>(
     amount: u64,
 ) -> Result<()> {
     venue.check(pool)?;
-    backing::redeem(pool, venue, funds, amount)
+    match backing_of(pool)? {
+        Backing::Klend => klend::redeem(pool, venue, funds, amount),
+        #[cfg(feature = "test-venue")]
+        Backing::Stub => crate::test_venue::stub_redeem(pool, venue, funds, amount),
+    }
 }
 
 /// Instruction-level sync: values the venue, then books any gain on the Pool
@@ -155,7 +172,11 @@ pub struct ReserveStats {
 /// The reserve's supply and free liquidity, read fresh. Only a deploy asks.
 pub fn reserve_stats(pool: &Pool, venue: &Venue<'_, '_>) -> Result<ReserveStats> {
     venue.check(pool)?;
-    backing::reserve_stats(pool, venue)
+    match backing_of(pool)? {
+        Backing::Klend => klend::reserve_stats(pool, venue),
+        #[cfg(feature = "test-venue")]
+        Backing::Stub => crate::test_venue::stub_reserve_stats(pool, venue),
+    }
 }
 
 /// The two deploy caps (ticket 10), judged on the reserve as it will stand
@@ -196,6 +217,26 @@ mod tests {
         supply: 1_000_000,
         available: 300_000,
     };
+
+    #[test]
+    fn klend_is_zero_and_the_stub_needs_its_feature() {
+        assert_eq!(venue_kind::KLEND, 0);
+        assert!(venue_kind::supported(venue_kind::KLEND));
+        assert_eq!(
+            venue_kind::supported(venue_kind::STUB),
+            cfg!(feature = "test-venue")
+        );
+        assert!(!venue_kind::supported(2));
+        assert!(!venue_kind::supported(255));
+    }
+
+    #[test]
+    fn a_stored_kind_the_build_lacks_is_refused_by_name() {
+        let mut pool = Pool::deserialize(&mut &[0u8; Pool::INIT_SPACE][..]).unwrap();
+        pool.venue_kind = 255;
+        let err = backing_of(&pool).err().unwrap();
+        assert!(format!("{err:?}").contains("UnsupportedVenueKind"));
+    }
 
     #[test]
     fn the_share_cap_is_judged_after_the_deploy_adds_to_supply() {

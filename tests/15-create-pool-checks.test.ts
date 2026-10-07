@@ -28,11 +28,16 @@ import {
   principalVaultPda,
   program,
   weightTreeAccount,
+  VENUE_KIND,
 } from "./helpers/hx.js";
 
 const TIMEOUT = 60_000;
 
-async function createPoolWith(opts: { ctokenOwner?: "pool" | "other"; payoutTimeout?: number }) {
+async function createPoolWith(opts: {
+  ctokenOwner?: "pool" | "other";
+  payoutTimeout?: number;
+  venueKind?: number;
+}) {
   const poolId = nextPoolId();
   const pool = poolPda(poolId);
   const operator = Keypair.generate();
@@ -77,6 +82,7 @@ async function createPoolWith(opts: { ctokenOwner?: "pool" | "other"; payoutTime
       baseRateBps: p.baseRateBps,
       ticketsPerUsdc: p.ticketsPerUsdc,
       bonusCapBps: p.bonusCapBps,
+      venueKind: opts.venueKind ?? VENUE_KIND.klend,
     })
     .accountsPartial({
       payer: operator.publicKey,
@@ -109,6 +115,17 @@ describe("create_pool checks", () => {
     await expect(
       createPoolWith({ payoutTimeout: DEFAULT_PARAMS.epochSeconds }),
     ).rejects.toThrow(/InvalidParameter/);
+  }, TIMEOUT);
+
+  it("refuses a venue kind the build does not support, by name", async () => {
+    await expect(createPoolWith({ venueKind: VENUE_KIND.unsupported })).rejects.toThrow(
+      /UnsupportedVenueKind/,
+    );
+    await expect(createPoolWith({ venueKind: 255 })).rejects.toThrow(/UnsupportedVenueKind/);
+  }, TIMEOUT);
+
+  it("skips the cToken ownership check for the stub kind only", async () => {
+    await createPoolWith({ ctokenOwner: "other", venueKind: VENUE_KIND.stub });
   }, TIMEOUT);
 
   it("accepts the pool's own associated token account", async () => {

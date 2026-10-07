@@ -1021,6 +1021,7 @@ describe("create_pool guards", () => {
     baseRateBps: 488,
     ticketsPerUsdc: 10,
     bonusCapBps: 500,
+    venueKind: 1, // the stub, since this file pins venueAccountsFor
     ...over,
   });
 

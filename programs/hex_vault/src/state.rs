@@ -184,9 +184,13 @@ pub struct Pool {
     /// mid-epoch cannot widen the cap. Zero before epoch 1, which refuses
     /// operator grants until an epoch exists.
     pub epoch_start_principal: u64,
+    /// Which backing the four pinned venue keys point at, a
+    /// `constants::venue_kind` value. Zero is klend, so a pool made before the
+    /// byte existed reads as klend. `create_pool` sets it.
+    pub venue_kind: u8,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.
-    pub _reserved: [u8; 88],
+    pub _reserved: [u8; 87],
 }
 
 /// One lottery cycle. Contiguous: the next opens the moment this one ends.
@@ -476,7 +480,8 @@ mod tests {
         assert_eq!(pool(|p| p.harvest_depositor = 1), 775);
         assert_eq!(pool(|p| p.harvest_prize = 1), 783);
         assert_eq!(pool(|p| p.epoch_start_principal = 1), 791);
-        assert_eq!(pool(|p| p._reserved[0] = 1), 799);
+        assert_eq!(pool(|p| p.venue_kind = 1), 799);
+        assert_eq!(pool(|p| p._reserved[0] = 1), 800);
 
         let player = |set: fn(&mut Player)| offset(Player::INIT_SPACE, set);
         // `owner` at 8 is what the indexer's per-owner memcmp filters on.

@@ -98,6 +98,24 @@ pub mod impaired_cause {
     pub const WITHDRAWAL: u8 = 2;
 }
 
+/// `Pool::venue_kind`: which backing the four pinned venue keys point at.
+/// Zero is klend, so every pool created before the byte existed reads as klend.
+pub mod venue_kind {
+    pub const KLEND: u8 = 0;
+    /// The localnet stub. Only a `test-venue` build accepts it.
+    pub const STUB: u8 = 1;
+    // 2 is reserved for the kVault backing (venue-switch ticket 06).
+
+    /// Whether this build can back a pool with `kind`.
+    pub const fn supported(kind: u8) -> bool {
+        match kind {
+            KLEND => true,
+            STUB => cfg!(feature = "test-venue"),
+            _ => false,
+        }
+    }
+}
+
 /// `Epoch::status`. An epoch is Open while it is the current one. `begin_epoch`
 /// moves it to Ended, then `request_draw` walks it Drawing → Drawn → Paid, or
 /// short-circuits to RolledOver. An Ended epoch nobody draws for leaves

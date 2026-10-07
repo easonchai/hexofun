@@ -4427,6 +4427,11 @@
       "code": 6088,
       "name": "RoundEpochNotCurrent",
       "msg": "the round belongs to an earlier epoch and takes no new positions"
+    },
+    {
+      "code": 6089,
+      "name": "UnsupportedVenueKind",
+      "msg": "this build does not support that venue kind"
     }
   ],
   "types": [
@@ -4574,6 +4579,14 @@
               "`BPS_DENOMINATOR`."
             ],
             "type": "u16"
+          },
+          {
+            "name": "venue_kind",
+            "docs": [
+              "A `constants::venue_kind` value: which backing the four venue accounts",
+              "belong to. Refused unless this build supports it."
+            ],
+            "type": "u8"
           }
         ]
       }
@@ -5820,6 +5833,15 @@
             "type": "u64"
           },
           {
+            "name": "venue_kind",
+            "docs": [
+              "Which backing the four pinned venue keys point at, a",
+              "`constants::venue_kind` value. Zero is klend, so a pool made before the",
+              "byte existed reads as klend. `create_pool` sets it."
+            ],
+            "type": "u8"
+          },
+          {
             "name": "_reserved",
             "docs": [
               "Take new fields from here. Their zero value must be the safe default,",
@@ -5828,7 +5850,7 @@
             "type": {
               "array": [
                 "u8",
-                88
+                87
               ]
             }
           }

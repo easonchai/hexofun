@@ -236,4 +236,8 @@ pub enum HexVaultError {
     // audit-fixes ticket 02. Appended too.
     #[msg("the round belongs to an earlier epoch and takes no new positions")]
     RoundEpochNotCurrent,
+
+    // venue-switch ticket 02. Appended too.
+    #[msg("this build does not support that venue kind")]
+    UnsupportedVenueKind,
 }
