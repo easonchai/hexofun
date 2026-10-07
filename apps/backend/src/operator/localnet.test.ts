@@ -236,6 +236,7 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
         baseRateBps: 0,
         ticketsPerUsdc: 10,
         bonusCapBps: 0,
+        venueKind: 1, // the stub, which is what these suites pin
       })
         .accountsPartial({
           payer: authority.publicKey,

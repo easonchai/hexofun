@@ -182,6 +182,7 @@ export interface DecodedPool {
   klendMarket: PublicKey;
   klendReserve: PublicKey;
   klendCtoken: PublicKey;
+  venueKind: number;
   yieldIndex: BN;
   venueValue: BN;
   lastSyncAt: BN;
@@ -299,6 +300,7 @@ export function poolRow(
     klendMarket: pool.klendMarket.toBase58(),
     klendReserve: pool.klendReserve.toBase58(),
     klendCtoken: pool.klendCtoken.toBase58(),
+    venueKind: pool.venueKind,
     yieldIndex: pool.yieldIndex.toString(),
     venueValue: big(pool.venueValue),
     lastSyncAt: big(pool.lastSyncAt),

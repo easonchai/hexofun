@@ -124,6 +124,8 @@ export interface PoolDto {
   klendMarket: string;
   klendReserve: string;
   klendCtoken: string;
+  /** Which backing the four pins point at: 0 klend, 1 the localnet stub. */
+  venueKind: number;
 }
 
 export interface EpochDto {

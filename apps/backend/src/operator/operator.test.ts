@@ -1,6 +1,7 @@
 // Step selection is the whole operator: given a state, exactly one thing
 // should happen. The instructions built here are the real ones, decoded back
 // out of the recorded transaction, so a wrong account list still shows up.
+import { VENUE_KIND } from "../chain/venue-kind";
 import {
   AnchorProvider,
   BorshInstructionCoder,
@@ -114,6 +115,7 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   klendMarket: PublicKey.default,
   klendReserve: PublicKey.default,
   klendCtoken: PublicKey.default,
+  venueKind: VENUE_KIND.klend,
   pendingWithdrawals: 0n,
   venueValue: 0n,
   feeOwed: 0n,
@@ -1534,10 +1536,29 @@ describe("venue cranks (ticket 13)", () => {
     expect(keys.slice(-4)).toEqual([LMA, LIQ_SUPPLY, CMINT].map((k) => k.toBase58()).concat(SYSVAR_IX));
   });
 
-  it("takes no extra accounts under a test-venue build, which pins this program as klend", async () => {
-    const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ klendProgram: PROGRAM_ID }) });
+  it("takes no extra accounts for the stub kind", async () => {
+    const { ctx, sent } = venueTick(10_000n * U, {
+      pool: venuePool({ klendProgram: PROGRAM_ID, venueKind: VENUE_KIND.stub }),
+    });
     await runTick(ctx);
     expect(sent[0]?.[0]?.keys.map((key) => key.pubkey.toBase58())).not.toContain(SYSVAR_IX);
+  });
+
+  it("chooses accounts by the kind, not by which program is pinned", async () => {
+    // klend kind with this program pinned still gets klend's four extras; the
+    // stub kind with klend pinned gets none.
+    const klendKind = venueTick(10_000n * U, { pool: venuePool({ klendProgram: PROGRAM_ID }) });
+    await runTick(klendKind.ctx);
+    expect(klendKind.sent[0]?.[0]?.keys.map((key) => key.pubkey.toBase58())).toContain(SYSVAR_IX);
+    const stubKind = venueTick(10_000n * U, { pool: venuePool({ venueKind: VENUE_KIND.stub }) });
+    await runTick(stubKind.ctx);
+    expect(stubKind.sent[0]?.[0]?.keys.map((key) => key.pubkey.toBase58())).not.toContain(SYSVAR_IX);
+  });
+
+  it("builds nothing for a venue kind it does not know", async () => {
+    const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ venueKind: 2 }) });
+    await runTick(ctx).catch(() => undefined);
+    expect(sent).toHaveLength(0);
   });
 
   it("never deploys under the minimum size", async () => {

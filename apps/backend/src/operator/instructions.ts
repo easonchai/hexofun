@@ -23,6 +23,7 @@ import {
   principalVaultAddress,
   roundAddress,
 } from "../chain/pda";
+import { VENUE_KIND } from "../chain/venue-kind";
 import type { EpochState, PoolState, RoundState } from "./chain-state";
 import {
   ORAO_VRF_PROGRAM_ID,
@@ -108,11 +109,14 @@ export class OperatorInstructions {
    * supply vault, the cToken mint and the instructions sysvar. klend derives
    * the first three from the market and the liquidity mint, so no RPC read is
    * needed, and the program checks each against the reserve itself
-   * (`KlendAccountMismatch`). The `test-venue` stub pins this program as its
-   * own klend and ignores remaining accounts.
+   * (`KlendAccountMismatch`). The stub kind ignores remaining accounts. The
+   * builder switches on the pool's venue kind, not on which program is pinned.
    */
   private venueRemaining(pool: PoolState): AccountMeta[] {
-    if (pool.klendProgram.equals(this.programId)) return [];
+    if (pool.venueKind === VENUE_KIND.stub) return [];
+    if (pool.venueKind !== VENUE_KIND.klend) {
+      throw new Error(`pool ${pool.address.toBase58()} has venue kind ${pool.venueKind}, which this operator cannot build accounts for`);
+    }
     const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
       PublicKey.findProgramAddressSync(
         seeds.map((seed) => (typeof seed === "string" ? Buffer.from(seed) : seed.toBuffer())),

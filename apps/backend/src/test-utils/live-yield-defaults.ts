@@ -9,6 +9,7 @@ export const LIVE_POOL_DEFAULTS = {
   klendMarket: "",
   klendReserve: "",
   klendCtoken: "",
+  venueKind: 0,
   yieldIndex: new Prisma.Decimal(0),
   venueValue: 0n,
   lastSyncAt: 0n,

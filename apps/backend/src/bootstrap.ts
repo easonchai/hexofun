@@ -30,6 +30,7 @@ import {
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
+import { VENUE_KIND } from "./chain/venue-kind";
 
 import {
   assertMainnetSafe,
@@ -277,6 +278,7 @@ async function createPool(
     baseRateBps: params.baseRateBps,
     ticketsPerUsdc: params.ticketsPerUsdc,
     bonusCapBps: params.bonusCapBps,
+    venueKind: venue.kind,
   })
     .accountsPartial({
       payer: payer.publicKey,
@@ -324,7 +326,7 @@ async function createPool(
   }
 }
 
-/** `KLEND_VENUE=test`: creates the stub reserve and vault `venuePinsFor` pinned. */
+/** `VENUE_KIND=stub`: creates the stub reserve and vault `venuePinsFor` pinned. */
 async function initTestVenue(
   program: Program<Idl>,
   payer: Keypair,
@@ -616,7 +618,7 @@ async function main(): Promise<void> {
         params,
       ),
     );
-    if (process.env.KLEND_VENUE?.trim() === "test") {
+    if (venue.kind === VENUE_KIND.stub) {
       await step("initialising the test venue", () =>
         initTestVenue(program, authority, pool, mint, venue),
       );

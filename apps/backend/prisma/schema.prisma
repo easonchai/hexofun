@@ -68,6 +68,8 @@ model Pool {
   klendMarket         String  @default("")
   klendReserve        String  @default("")
   klendCtoken         String  @default("")
+  /// Which backing the four pins point at: 0 klend, 1 the localnet stub, 2 reserved for kVault. A row written before the column reads as klend.
+  venueKind           Int     @default(0)
   /// Per unit of Principal, scaled by 1e18.
   yieldIndex          Decimal @default(0) @db.Decimal(40, 0)
   venueValue          BigInt  @default(0)

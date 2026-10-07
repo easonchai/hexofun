@@ -60,6 +60,9 @@ export interface PoolState {
   readonly klendMarket: PublicKey;
   readonly klendReserve: PublicKey;
   readonly klendCtoken: PublicKey;
+  /** Which backing those four point at (`VENUE_KIND`). Read from the pool,
+   *  never from env, so a venue change needs no restart. */
+  readonly venueKind: number;
   /** Withdrawals requested and not yet paid; not free idle. */
   readonly pendingWithdrawals: bigint;
   /** The pool's position at the venue as of the last sync. */
@@ -150,6 +153,7 @@ export function decodePool(
     klendMarket: raw.klendMarket as PublicKey,
     klendReserve: raw.klendReserve as PublicKey,
     klendCtoken: raw.klendCtoken as PublicKey,
+    venueKind: Number(raw.venueKind),
     pendingWithdrawals: big(raw.pendingWithdrawals),
     venueValue: big(raw.venueValue),
     feeOwed: big(raw.feeOwed),

@@ -226,6 +226,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         baseRateBps: 0,
         ticketsPerUsdc: 10,
         bonusCapBps: 0,
+        venueKind: 1, // the stub, which is what these suites pin
       })
       .accountsPartial({
         payer: authority.publicKey,

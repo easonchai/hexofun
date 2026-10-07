@@ -209,6 +209,7 @@ const poolAccount = (overrides: object = {}) => ({
   klendMarket: STRANGER,
   klendReserve: STRANGER,
   klendCtoken: STRANGER,
+  venueKind: 0,
   yieldIndex: bn(0),
   venueValue: bn(0),
   lastSyncAt: bn(0),

@@ -365,6 +365,27 @@ describe("venuePinsFor", () => {
     ).toThrow(/KLEND_PROGRAM must be a base58 pubkey/);
   });
 
+  it("defaults to the klend kind and reads the kind from VENUE_KIND", () => {
+    const env = { KLEND_PROGRAM: key(), KLEND_MARKET: key(), KLEND_RESERVE: key(), KLEND_CTOKEN: key() };
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, env, pool, programId).kind).toBe(0);
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, { ...env, VENUE_KIND: "klend" }, pool, programId).kind).toBe(0);
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "stub" }, pool, programId).kind).toBe(1);
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId).kind).toBe(1);
+    expect(venuePinsFor(MAINNET_GENESIS_HASH, {}, pool, programId).kind).toBe(0);
+  });
+
+  it("refuses an unknown kind, a contradiction, and the stub kind on mainnet", () => {
+    expect(() => venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "kvault" }, pool, programId)).toThrow(
+      /VENUE_KIND must be/,
+    );
+    expect(() =>
+      venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "klend", KLEND_VENUE: "test" }, pool, programId),
+    ).toThrow(/contradict/);
+    expect(() => venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "stub" }, pool, programId)).toThrow(
+      /VENUE_KIND=stub is refused on mainnet/,
+    );
+  });
+
   it("pins the test-venue stub on KLEND_VENUE=test, never on mainnet", () => {
     const pins = venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId);
     expect(pins.klendProgram.equals(programId)).toBe(true);

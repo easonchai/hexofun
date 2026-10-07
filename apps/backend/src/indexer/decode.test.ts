@@ -460,6 +460,7 @@ function decodedPool(overrides: Partial<DecodedPool> = {}): DecodedPool {
     klendMarket: new PublicKey(MINT),
     klendReserve: new PublicKey(POOL),
     klendCtoken: new PublicKey(MINT),
+    venueKind: 1,
     yieldIndex: new BN(0),
     venueValue: new BN(0),
     lastSyncAt: new BN(0),
@@ -538,6 +539,7 @@ describe("poolRow", () => {
     expect(poolRow(new PublicKey(POOL), pool, 9n)).toMatchObject({
       weightTree: OWNER,
       klendProgram: MINT,
+      venueKind: 1,
       klendReserve: POOL,
       yieldIndex: "1180591620717411303429",
       venueValue: 40_000_000n,

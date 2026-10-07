@@ -231,9 +231,11 @@ from `KLEND_PROGRAM`, `KLEND_MARKET`, `KLEND_RESERVE` and `KLEND_CTOKEN`. On mai
 to Kamino's USDC reserve on the main market, and `KLEND_CTOKEN` to the pool PDA's ATA of the
 reserve's cToken mint, which bootstrap creates before `create_pool`. Overriding `KLEND_RESERVE`
 there requires `KLEND_CTOKEN` too. Any other cluster has no default and bootstrap names the
-missing variables; on a localnet built with `--features test-vrf,test-venue`, `KLEND_VENUE=test`
-pins the stub venue and runs `test_venue_init` (`apps/backend/scripts/bootstrap-localnet.sh` sets
-it). Bootstrap prints `WEIGHT_TREE` and the four pins as the chain recorded them, for a second
+missing variables. `VENUE_KIND` (`klend`, the default, or `stub`) is the Pool's venue kind byte,
+0 or 1, stored at `create_pool`; the program refuses a kind its build does not support. On a
+localnet built with `--features test-vrf,test-venue`, `VENUE_KIND=stub` pins the stub venue and
+runs `test_venue_init` (`apps/backend/scripts/bootstrap-localnet.sh` sets it; `KLEND_VENUE=test`
+still works as the old spelling). Bootstrap refuses the stub on mainnet. Bootstrap prints `WEIGHT_TREE` and the four pins as the chain recorded them, for a second
 person to check.
 
 ## Moving admin and the upgrade authority to Squads later

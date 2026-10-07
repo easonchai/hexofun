@@ -2,6 +2,7 @@
 // Position or does nothing. The instruction is the real one, decoded back out
 // of the recorded transaction, so a wrong account list or a bad tile mask
 // still shows up here.
+import { VENUE_KIND } from "../chain/venue-kind";
 import {
   AnchorProvider,
   BorshInstructionCoder,
@@ -87,6 +88,7 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   klendMarket: PublicKey.default,
   klendReserve: PublicKey.default,
   klendCtoken: PublicKey.default,
+  venueKind: VENUE_KIND.klend,
   pendingWithdrawals: 0n,
   venueValue: 0n,
   feeOwed: 0n,

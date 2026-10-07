@@ -140,6 +140,7 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
         baseRateBps: 0,
         ticketsPerUsdc: TICKETS_PER_USDC,
         bonusCapBps: 0,
+        venueKind: 1, // the stub, which is what these suites pin
       })
         .accountsPartial({
           payer: authority.publicKey,

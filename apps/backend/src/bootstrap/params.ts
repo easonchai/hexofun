@@ -1,6 +1,7 @@
 // The pool parameters bootstrap passes to `create_pool`, and the two CLI
 // flags that override them. Split out of bootstrap.ts so a unit test can
 // import it without the script's chain calls running on import.
+import { VENUE_KIND } from "../chain/venue-kind";
 import { parseArgs } from "node:util";
 
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
@@ -180,6 +181,8 @@ export interface VenuePins {
   readonly klendMarket: PublicKey;
   readonly klendReserve: PublicKey;
   readonly klendCtoken: PublicKey;
+  /** The `Pool.venue_kind` byte `create_pool` takes alongside them. */
+  readonly kind: number;
   /** Set when `klendCtoken` is the Pool's own ATA of this mint, which
    * bootstrap then has to create: nothing else will before the first deploy. */
   readonly ctokenMint?: PublicKey;
@@ -200,8 +203,10 @@ const MAINNET_KLEND = {
  * KLEND_CTOKEN overriding its own; with KLEND_RESERVE set, KLEND_CTOKEN has to
  * be too, since the cToken account belongs to the reserve. Every other cluster
  * must name all four, because a wrong pin is permanent and there is no safe
- * guess. `KLEND_VENUE=test` pins the `test-venue` build's stub (localnet only,
- * bootstrap then runs `test_venue_init`). `env` is handed in so this stays pure.
+ * guess. `VENUE_KIND` (klend, the default, or stub) names the backing;
+ * `stub` pins the `test-venue` build's stub (localnet only, bootstrap then runs
+ * `test_venue_init`), and `KLEND_VENUE=test` is the older spelling of it.
+ * `env` is handed in so this stays pure.
  */
 export function venuePinsFor(
   genesisHash: string,
@@ -210,8 +215,16 @@ export function venuePinsFor(
   programId: PublicKey,
 ): VenuePins {
   const mainnet = genesisHash === MAINNET_GENESIS_HASH;
-  if (env.KLEND_VENUE?.trim() === "test") {
-    if (mainnet) throw new Error("KLEND_VENUE=test is refused on mainnet");
+  const named = env.VENUE_KIND?.trim().toLowerCase() || undefined;
+  if (named !== undefined && !(named in VENUE_KIND)) {
+    throw new Error(`VENUE_KIND must be ${Object.keys(VENUE_KIND).join(" or ")}, got "${env.VENUE_KIND}"`);
+  }
+  const legacyStub = env.KLEND_VENUE?.trim() === "test";
+  if (legacyStub && named === "klend") {
+    throw new Error("KLEND_VENUE=test and VENUE_KIND=klend contradict each other");
+  }
+  if (legacyStub || named === "stub") {
+    if (mainnet) throw new Error(`${legacyStub ? "KLEND_VENUE=test" : "VENUE_KIND=stub"} is refused on mainnet`);
     const stub = (seed: string): PublicKey =>
       PublicKey.findProgramAddressSync([Buffer.from(seed), pool.toBuffer()], programId)[0];
     return {
@@ -219,6 +232,7 @@ export function venuePinsFor(
       klendMarket: pool,
       klendReserve: stub("test-venue-reserve"),
       klendCtoken: stub("test-venue-vault"),
+      kind: VENUE_KIND.stub,
     };
   }
   const read = (key: string): PublicKey | undefined => {
@@ -249,7 +263,7 @@ export function venuePinsFor(
       `${missing.join(", ")} must be set${mainnet ? "" : " off mainnet (or KLEND_VENUE=test on a test-venue localnet)"}`,
     );
   }
-  return { klendProgram, klendMarket, klendReserve, klendCtoken, ...(ctokenMint ? { ctokenMint } : {}) };
+  return { klendProgram, klendMarket, klendReserve, klendCtoken, kind: VENUE_KIND.klend, ...(ctokenMint ? { ctokenMint } : {}) };
 }
 
 /** The accepted mint is 6 decimals on every cluster we run on (bootstrap.ts
