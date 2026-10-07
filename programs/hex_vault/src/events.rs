@@ -387,3 +387,14 @@ pub struct VenueProposalCancelled {
     pub klend_ctoken: Pubkey,
     pub proposed_at: i64,
 }
+
+/// `drain_venue` brought USDC home from the venue (venue-switch ticket 04).
+/// `asked` is what the caller named, `received` what reached the principal
+/// vault, `venue_value` the recorded value after.
+#[event]
+pub struct VenueDrained {
+    pub pool: Pubkey,
+    pub asked: u64,
+    pub received: u64,
+    pub venue_value: u64,
+}

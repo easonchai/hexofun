@@ -307,6 +307,13 @@ pub mod hex_vault {
         venue_change::cancel_venue(ctx)
     }
 
+    /// Venue-switch ticket 04: redeems `amount` from the venue into the
+    /// principal vault. Admin or Operator any time, anyone while a proposal
+    /// is open.
+    pub fn drain_venue<'info>(ctx: Context<'info, DrainVenue<'info>>, amount: u64) -> Result<()> {
+        venue_change::drain_venue(ctx, amount)
+    }
+
     // Localnet only: the stub venue behind `venue.rs` (yield-claimer ticket
     // 05). Created once after `create_pool`, repriced by the tests.
     #[cfg(feature = "test-venue")]

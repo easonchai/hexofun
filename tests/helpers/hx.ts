@@ -864,6 +864,28 @@ export function recallMethod(ctx: PoolCtx, amount: bigint, venue: VenueAccounts 
   });
 }
 
+/** Builder for `drain_venue` (venue-switch ticket 04). Signed by `signer`, the
+ *  Admin unless told otherwise. */
+export function drainVenueMethod(
+  ctx: PoolCtx,
+  amount: bigint,
+  signer: Keypair = ctx.admin,
+  venue: VenueAccounts = ctx.venue,
+) {
+  return program.methods
+    .drainVenue(new BN(amount.toString()))
+    .accountsPartial({
+      signer: signer.publicKey,
+      pool: ctx.pool,
+      principalVault: ctx.principalVault,
+      acceptedMint: ctx.mint,
+      ...venue,
+      venueProposal: venueProposalPda(ctx.pool),
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers([signer]);
+}
+
 /** Builder for `harvest`. `treasury` overrides the pool's own for the
  *  wrong-destination test. */
 export function harvestMethod(

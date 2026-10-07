@@ -1219,6 +1219,138 @@
       ]
     },
     {
+      "name": "drain_venue",
+      "docs": [
+        "Venue-switch ticket 04: redeems `amount` from the venue into the",
+        "principal vault. Admin or Operator any time, anyone while a proposal",
+        "is open."
+      ],
+      "discriminator": [
+        210,
+        14,
+        42,
+        170,
+        56,
+        179,
+        50,
+        189
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "principal_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  105,
+                  110,
+                  99,
+                  105,
+                  112,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "accepted_mint"
+        },
+        {
+          "name": "klend_program"
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        },
+        {
+          "name": "venue_proposal",
+          "docs": [
+            "Only its address and owner are read: a program-owned account opens the",
+            "drain to anyone."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  101,
+                  110,
+                  117,
+                  101,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "draw",
       "discriminator": [
         61,
@@ -4153,6 +4285,19 @@
       ]
     },
     {
+      "name": "VenueDrained",
+      "discriminator": [
+        171,
+        173,
+        16,
+        89,
+        35,
+        37,
+        173,
+        21
+      ]
+    },
+    {
       "name": "VenueParamsSet",
       "discriminator": [
         129,
@@ -6772,6 +6917,35 @@
           },
           {
             "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "venue_value",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueDrained",
+      "docs": [
+        "`drain_venue` brought USDC home from the venue (venue-switch ticket 04).",
+        "`asked` is what the caller named, `received` what reached the principal",
+        "vault, `venue_value` the recorded value after."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "asked",
+            "type": "u64"
+          },
+          {
+            "name": "received",
             "type": "u64"
           },
           {
