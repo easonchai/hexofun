@@ -5080,6 +5080,11 @@
       "code": 6097,
       "name": "VaultStateNotWritable",
       "msg": "the kVault state account must be passed writable"
+    },
+    {
+      "code": 6098,
+      "name": "AlreadyGranted",
+      "msg": "this player already received a grant in the current epoch"
     }
   ],
   "types": [

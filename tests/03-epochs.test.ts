@@ -1738,6 +1738,10 @@ describe("epochs", () => {
       await deposit(pool, owner, 1_000_000n);
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
 
+      // One past the Player's own cap fails; the cap itself lands.
+      await expect(
+        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_001n),
+      ).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
       const sig = await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n);
 
       const player = await fetchPlayer(pool, owner.keypair.publicKey);
@@ -1757,9 +1761,12 @@ describe("epochs", () => {
       expect(event?.amount.toString()).toBe("1000000");
       expect(event?.byAdmin).toBe(false);
 
+      // A second grant in the same epoch is refused, whatever its size
+      // (mainnet-readiness-fixes 07), so a resent transaction cannot double up.
       await expect(
         grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
+      ).rejects.toThrow(/AlreadyGranted/);
+      // The next epoch grants again, as "both counters reset" shows.
     },
     TIMEOUT,
   );
@@ -1775,10 +1782,10 @@ describe("epochs", () => {
 
       // Player cap is 10_000_000; the pool cap (5% of the epoch-start total) is
       // 500_000, far tighter, so hitting it here cannot be the player cap.
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
       await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
+        grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_001n),
       ).rejects.toThrow(/DailyPoolGrantCapExceeded/);
+      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
     },
     TIMEOUT,
   );
@@ -1796,10 +1803,10 @@ describe("epochs", () => {
 
       // Pool cap is 5% of 10_100_000 = 505_000, well above small's own
       // 100_000 cap.
-      await grantTickets(pool, pool.operator, small.keypair.publicKey, 100_000n);
       await expect(
-        grantTickets(pool, pool.operator, small.keypair.publicKey, 1n),
+        grantTickets(pool, pool.operator, small.keypair.publicKey, 100_001n),
       ).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
+      await grantTickets(pool, pool.operator, small.keypair.publicKey, 100_000n);
     },
     TIMEOUT,
   );

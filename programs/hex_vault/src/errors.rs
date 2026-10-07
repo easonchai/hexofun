@@ -262,4 +262,8 @@ pub enum HexVaultError {
     VaultAccountMismatch,
     #[msg("the kVault state account must be passed writable")]
     VaultStateNotWritable,
+
+    // mainnet-readiness-fixes ticket 07. Appended too.
+    #[msg("this player already received a grant in the current epoch")]
+    AlreadyGranted,
 }

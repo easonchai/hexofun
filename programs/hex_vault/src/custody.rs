@@ -1695,6 +1695,12 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
 
     if !by_admin {
         require!(!player.is_house, HexVaultError::HouseCannotBeGranted);
+        // One grant per referrer per epoch: a resend after a lost
+        // confirmation must not grant twice.
+        require!(
+            player.bonus_epoch != pool.current_epoch_id || player.bonus_granted == 0,
+            HexVaultError::AlreadyGranted
+        );
 
         let player_bonus = bonus_after(
             player.bonus_epoch,
