@@ -523,18 +523,50 @@ describe("the split and the queue", () => {
       await processWithdraw(ctx, owner);
 
       // It paid the queued 400 and not a unit of the yield. The sync inside
-      // process_withdraw booked the gain, and the Player's Principal and Tickets
-      // took their share of it, less the 400.
+      // process_withdraw booked the gain, and the Player's Principal took its
+      // share of it, less the 400. The yield adds no Tickets (ADR 0020): the
+      // touch reset them to the 1,000 Principal before the settle, and the
+      // withdrawal took 400 off.
       expect((await balance(owner.tokenAccount)) - walletBefore).toBe(400n * USDC);
       const pool = await fetchPool(ctx);
       expect(big(pool.yieldIndex) > 0n).toBe(true);
       const player = await fetchPlayer(ctx, owner);
       const settled = big(player.principal) - 600n * USDC;
       expect(settled > 0n).toBe(true);
-      expect(big(player.entries)).toBe(big(player.principal));
+      expect(big(player.entries)).toBe(600n * USDC);
       expect(big(player.pendingWithdraw)).toBe(0n);
-      expect(await root(ctx, 3n)).toBe(big(player.principal));
+      expect(await root(ctx, 3n)).toBe(600n * USDC);
+      expect(await treePrincipal(ctx, owner)).toBe(big(player.principal));
       expect(big(pool.totalPrincipal)).toBe(big(player.principal));
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "withdrawing in the epoch the yield settled floors Tickets below Principal: no error, the tree agrees",
+    async () => {
+      // Principal 1,000 + yield, Tickets 1,000, a queued 10: process_withdraw
+      // settles the yield, then takes 10 off Principal and off Tickets. The 10
+      // may as well have been yield, which never held a Ticket, so Tickets end
+      // at 990 and the Player gives up 10 Tickets they could have kept. The
+      // accepted cost of not tracking unticketed Principal (ADR 0020).
+      const { ctx, owner } = await activePool(1_000n * USDC, 500n * USDC, { baseRateBps: 10_000 });
+      await request(ctx, owner, 10n * USDC);
+      expect(big((await fetchPlayer(ctx, owner)).entries)).toBe(1_000n * USDC);
+
+      await setVenueRate(ctx, (12n * SCALE) / 10n).rpc();
+      await fundStub(ctx, 100n * USDC);
+      await beginEpoch(ctx, 2n); // epoch 3
+      await waitPastLastSync(ctx);
+      await processWithdraw(ctx, owner);
+
+      const player = await fetchPlayer(ctx, owner);
+      const settled = big(player.principal) - 990n * USDC;
+      expect(settled > 0n).toBe(true);
+      expect(big(player.entries)).toBe(990n * USDC);
+      expect(await root(ctx, 3n)).toBe(990n * USDC);
+      expect(await treePrincipal(ctx, owner)).toBe(big(player.principal));
+      expect(big((await fetchPool(ctx)).totalPrincipal)).toBe(big(player.principal));
     },
     TIMEOUT,
   );

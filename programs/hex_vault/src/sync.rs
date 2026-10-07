@@ -173,14 +173,19 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
 /// Pays `player` its share of the Yield index rise since its last settle and
 /// returns the amount. Call after sync, and after `touch` (ADR 0017).
 ///
-/// `touch` runs first so a stale Player is reset into the current epoch before
-/// its new Tickets are added. The result does not depend on the order, since
-/// `touch` sets Tickets to the Principal it sees and settle then adds `owed`
-/// to both.
+/// Settled yield is fresh Principal, like a deposit: it raises Principal and
+/// leaves Tickets alone, and counts as Tickets from the next epoch (ADR 0020).
+/// So it makes no difference whether a Player's yield settled this epoch or
+/// still sits in `yield_owed`, and yield earned on a pending deposit does not
+/// become live Tickets in the deposit's own epoch.
 ///
-/// The caller owns the Weight tree side: `owed` is new Principal and new
-/// Tickets alike, so it goes into the instruction's
-/// [`crate::weight::Change`] with [`crate::weight::Change::settled`].
+/// `touch` runs first so a stale Player is reset into the current epoch. The
+/// reset sets Tickets to the Principal it sees, which leaves out the `owed`
+/// settle adds after it.
+///
+/// The caller owns the Weight tree side: `owed` is new Principal only, so it
+/// goes into the instruction's [`crate::weight::Change`] with
+/// [`crate::weight::Change::settled`].
 ///
 /// owed = floor(principal x (pool index - player index) / 1e18).
 /// - The House never earns. It holds no Principal, and the early return keeps
@@ -189,8 +194,8 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
 ///   Player earns nothing from the past.
 /// - Owed of zero leaves the stored index alone, so a small balance adds up
 ///   across settles instead of losing each fraction.
-/// - Otherwise `owed` moves from `yield_owed` into Principal,
-///   `total_principal` and Tickets, and the stored index catches up.
+/// - Otherwise `owed` moves from `yield_owed` into Principal and
+///   `total_principal`, and the stored index catches up.
 pub fn settle(pool: &mut Pool, player: &mut Player) -> Result<u64> {
     if player.is_house {
         return Ok(0);
@@ -214,12 +219,10 @@ pub fn settle(pool: &mut Pool, player: &mut Player) -> Result<u64> {
     }
     let yield_owed = pool.yield_owed.checked_sub(owed).ok_or(overflow)?;
     let principal = player.principal.checked_add(owed).ok_or(overflow)?;
-    let entries = player.entries.checked_add(owed).ok_or(overflow)?;
     let total_principal = pool.total_principal.checked_add(owed).ok_or(overflow)?;
     pool.yield_owed = yield_owed;
     pool.total_principal = total_principal;
     player.principal = principal;
-    player.entries = entries;
     player.yield_index = pool.yield_index;
     Ok(owed)
 }
@@ -595,13 +598,14 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_index_pays_the_rise_into_principal_total_and_tickets() {
+    fn a_stale_index_pays_the_rise_into_principal_and_total_but_not_tickets() {
         let mut pool = pool(1_000, 0, 0);
         pool.yield_index = INDEX_SCALE / 2;
         pool.yield_owed = 500;
         let mut p = player(1_000, 0);
         assert_eq!(settle(&mut pool, &mut p).unwrap(), 500);
-        assert_eq!((p.principal, p.entries), (1_500, 1_500));
+        // Tickets wait for the next epoch's reset (ADR 0020).
+        assert_eq!((p.principal, p.entries), (1_500, 1_000));
         assert_eq!((pool.total_principal, pool.yield_owed), (1_500, 0));
         assert_eq!(p.yield_index, pool.yield_index);
         // Settling again at the same index owes nothing.
@@ -685,7 +689,9 @@ mod tests {
                 if i == players.len() {
                     players.push(player(0, pool.yield_index));
                 }
+                let entries_before = players[i].entries;
                 settled += settle(&mut pool, &mut players[i]).unwrap() as u128;
+                assert_eq!(players[i].entries, entries_before, "seed {seed}");
                 if rng.below(3) == 0 {
                     let d = rng.below(1 << 30);
                     players[i].principal += d;

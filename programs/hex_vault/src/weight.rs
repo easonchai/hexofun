@@ -64,10 +64,10 @@ impl Change {
         Ok(())
     }
 
-    /// Yield that `sync::settle` just added to Principal and to Tickets.
+    /// Yield that `sync::settle` just added to Principal. It adds no Tickets:
+    /// settled yield is fresh Principal and counts from the next epoch.
     pub fn settled(&mut self, owed: u64) -> Result<()> {
-        self.principal(i128::from(owed))?;
-        self.tickets(i128::from(owed))
+        self.principal(i128::from(owed))
     }
 }
 

@@ -17,6 +17,7 @@ import { getOrCreateAssociatedTokenAccount, mintTo, TOKEN_PROGRAM_ID } from "@so
 import {
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
+  deployToVenue,
   drawnWinner,
   epochPda,
   fetchTree,
@@ -36,11 +37,13 @@ import {
   retryUntilOk,
   roundPda,
   setupPool,
+  setVenueRate,
   sleep,
   sleepUntilOnChain,
   testNonce,
   vrfSeed,
   ticketsOf,
+  waitPastLastSync,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -784,6 +787,45 @@ describe("epochs", () => {
       await processWithdraw(pool, a);
       const tokenAfter = await program.provider.connection.getTokenAccountBalance(a.tokenAccount);
       expect(BigInt(tokenAfter.value.amount) - BigInt(tokenBefore.value.amount)).toBe(2_000_000n);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "payout to a player: the yield settled just before the prize adds Principal only, and the prize adds its own Tickets",
+    async () => {
+      // 1M USDC at 100% APR so the depositor ceiling does not bind on the gain.
+      const big = 10n ** 12n;
+      const pool = await setupPool({ epochSeconds: 6, baseRateBps: 10_000 });
+      const a = await pool.fundedWallet(big * 2n);
+      await deposit(pool, a, big);
+      await waitPastLastSync(pool);
+      await deployToVenue(pool, (big * 9n) / 10n);
+
+      await beginEpoch(pool, 0n);
+      await retryUntilOk(() => beginEpoch(pool, 1n));
+      const funder = await pool.fundedWallet(10_000_000n);
+      await fundJackpot(pool, funder, 2_000_000n);
+      await requestDraw(pool, 1n);
+      const drawing = await fetchEpoch(pool, 1n);
+      await draw(pool, 1n, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed)));
+
+      // The venue gains 18,000 (9e11 shares x 2e10 / 1e18), 16,200 of it for
+      // depositors, and `a` is the only one. Payout's own sync books it and the
+      // winner's settle takes it before the prize lands.
+      const reserve = await program.account.testReserve.fetch(pool.venue.klendReserve);
+      await setVenueRate(pool, BigInt(reserve.rate.toString()) + 2n * 10n ** 10n).rpc();
+      await waitPastLastSync(pool);
+      const before = await fetchPlayer(pool, a.keypair.publicKey);
+      await payout(pool, 1n, a.keypair.publicKey);
+      const after = await fetchPlayer(pool, a.keypair.publicKey);
+
+      const yieldSettled = 16_200n;
+      expect(BigInt(after.principal.toString()) - BigInt(before.principal.toString())).toBe(
+        2_000_000n + yieldSettled,
+      );
+      expect(BigInt(after.entries.toString()) - BigInt(before.entries.toString())).toBe(2_000_000n);
+      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(BigInt(after.entries.toString()));
     },
     TIMEOUT,
   );

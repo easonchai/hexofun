@@ -849,7 +849,11 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     // No Tickets rule: Tickets the Player lost in a round floor at zero, as the
-    // epoch reset would have done.
+    // epoch reset would have done. The same floor covers yield settled above
+    // and withdrawn in this epoch: it raised Principal and never held Tickets
+    // (principal 110, entries 100, withdraw 10 leaves entries 90). That costs
+    // the Player 10 Tickets they never had, and is accepted over a per-epoch
+    // "unticketed Principal" counter (ADR 0020).
     let entries_before = a.player.entries;
     a.player.entries = entries_before.saturating_sub(pending);
     change.principal(-i128::from(pending))?;

@@ -110,7 +110,7 @@ _Avoid_: Commission, referral reward pool
 
 
 **Tickets**:
-A whole-unit count, one per micro-USDC, and the number the draw selects over. A Player holds Principal's worth of Tickets in each epoch, and fresh Principal joins from the next epoch, so a deposit made today is in tomorrow's draw. Yield, Bought tickets, Granted tickets, round rewards, void refunds, House credits and the Prize add Tickets the moment they land. The game moves them between players, and Tickets reset to equal Principal at each new epoch. Non-transferable, non-redeemable, never USDC. Code, the API and the program call them entries (`Player.entries`); the screen and this glossary say Tickets.
+A whole-unit count, one per micro-USDC, and the number the draw selects over. A Player holds Principal's worth of Tickets in each epoch, and fresh Principal joins from the next epoch, so a deposit made today is in tomorrow's draw. Settled yield is fresh Principal too and joins the same way. Bought tickets, Granted tickets, round rewards, void refunds, House credits and the Prize add Tickets the moment they land. The game moves them between players, and Tickets reset to equal Principal at each new epoch. Non-transferable, non-redeemable, never USDC. Code, the API and the program call them entries (`Player.entries`); the screen and this glossary say Tickets.
 _Avoid_: Entries (on screen), ET, entry token, chances, chips, TWAB
 
 **Weight**:

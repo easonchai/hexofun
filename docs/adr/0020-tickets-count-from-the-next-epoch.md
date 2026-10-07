@@ -23,9 +23,9 @@ and the tree's slots hold Tickets instead. ADR 0001 stands: Principal and Ticket
 the Player.
 
 The mechanism changes four things. First, Principal earns Tickets from the epoch after the one it
-was deposited in. Yield settled into Principal, Bought tickets, Granted tickets, round rewards, void
-refunds, House credits and the Prize all credit Tickets the moment they land. Only fresh Principal
-waits. Second, the Player gains `pending_deposit` and `pending_deposit_epoch`, taken from the
+was deposited in. Bought tickets, Granted tickets, round rewards, void refunds, House credits and the
+Prize all credit Tickets the moment they land. Fresh Principal waits, and settled yield is fresh
+Principal (amended 2026-10-07, see below). Second, the Player gains `pending_deposit` and `pending_deposit_epoch`, taken from the
 reserved bytes. Principal already includes the pending amount, so pending is a sub-balance. A deposit
 raises Principal and `pending_deposit` and leaves Tickets alone. The first touch in a later epoch
 sets Tickets to Principal, zeroes `pending_deposit` and stamps the epoch, so a pending deposit folds
@@ -36,8 +36,8 @@ its base and a Ticket count in one 64-bit word. The entry shrinks from 72 to 56 
 cap holds about 187,000 Leaves instead of 145,000. A write in epoch `e` resets a slot stamped
 otherwise to `stamp = e`, `base = principal_sum`, `tickets = principal_sum`, with no multiplication
 by epoch length. A deposit adds to `principal_sum` and adds nothing to the slot's Tickets. Every
-other Ticket change adds its signed amount to the slot's Tickets, and a settled yield and a Prize
-also add to `principal_sum`. The read rule is unchanged: epoch `p` reads the slot stamped `p`, else
+other Ticket change adds its signed amount to the slot's Tickets. A settled yield adds to
+`principal_sum` only; a Prize adds to both. The read rule is unchanged: epoch `p` reads the slot stamped `p`, else
 the next epoch's base if that slot is stamped, else the live `principal_sum`. Append is unchanged
 except that it sums Tickets and bases. The epoch clock drops its start and end times and the
 forward-credit helper, and keeps the epoch id, the two-epoch readability rule and the guard against
@@ -78,9 +78,30 @@ wrong-epoch branch left.
 
 The Prize is the one case of fresh Principal earning Tickets in the same epoch. It is added to the
 winner's Principal and Tickets at once. The winner already holds a ticketed balance, and holding the
-Prize back for a day would buy a day of odds at the price of extra code. One drift is accepted too.
-Yield earned on a pending deposit credits live Tickets, because settle adds owed yield to Principal
-and Tickets together. That is cents a day, and one uniform rule is worth more than routing it.
+Prize back for a day would buy a day of odds at the price of extra code.
+
+Amended 2026-10-07: settled yield is fresh Principal, like a deposit. `settle` adds the owed yield
+to Principal and `total_principal` and leaves Tickets alone, so it counts from the next epoch's
+reset. The first version of this ADR credited it to Tickets at once and called the result cents a
+day. The fork run showed two flaws. Yield earned on a pending deposit became live Tickets in the
+deposit's own epoch, although the deposit waited (366 Tickets from 366.87 settled, on a 50,000 USDC
+pending deposit after a 77-day warp). And a Player who transacted had their yield ticketed at once,
+while a lazy Player's stayed in `yield_owed` with no Tickets, so odds depended on who happened to
+transact. The winner's settle before the Prize follows the same rule; only the Prize credits Tickets.
+
+Accepted gap: Tickets come from Principal, and unsettled yield is not in Principal. From the next
+epoch on, a Player who transacted holds their yield as Tickets and a lazy Player does not until
+their next touch. The gap is the lazy Player's unsettled yield, about 4% of Principal a year at
+today's rate, and a 1 USDC deposit closes it for them. Closing it for everyone needs a settle-only
+instruction and an operator crank over every Player each epoch. There is no such instruction, and
+it is out of scope.
+
+Accepted cost: `process_withdraw` takes the withdrawn amount out of Tickets with a saturating
+subtract. A Player whose yield settled and who withdraws it in the same epoch loses Tickets the
+yield never held. With Principal 110, Tickets 100 and a withdrawal of 10 of yield, Tickets end at
+90. It is the same floor the No Tickets rule already applies after a round loss, it is
+conservative, and telling the two cases apart would need a per-epoch "unticketed Principal" counter
+on the Player.
 
 ADR 0018 rejected a snapshot at epoch end with a deposit delay because it broke the instant
 withdraw. That objection no longer holds. The instant withdraw is gone, so no exit competes with a
