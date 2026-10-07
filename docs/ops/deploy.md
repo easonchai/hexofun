@@ -3,7 +3,8 @@
 One script, `scripts/deploy.sh <dev|staging|mainnet> [--upgrade] [--dry-run]`, builds, checks and
 deploys or upgrades the `hex_vault` program for one environment. The same script also has two
 opt-in actions, `--idl` (publish the on-chain IDL) and `verify` (reproducible-build
-verification); see "Publishing the IDL" and "Verifiable build" below. Run it from the repo root,
+verification), plus `scripts/deploy.sh mainnet handover` (see "Mainnet launch order"); see
+"Publishing the IDL" and "Verifiable build" below. Run it from the repo root,
 same as `scripts/check-deployable.sh` and `tests/run-local.sh`. See
 [`docs/ops/environments.md`](environments.md) for what each environment is.
 
@@ -22,16 +23,21 @@ The script, in order:
 2. Builds: `anchor build -- --features <feature>` for dev and staging, `solana-verify build --
    --features mainnet` for mainnet (see "Verifiable build" below).
 3. Runs `scripts/check-deployable.sh`, which refuses a `test-vrf` or `test-venue` artifact.
-4. Asserts that the keypair's pubkey matches the built `declare_id!` (read from the built IDL's
-   `address` field), so a mismatched keypair fails before anything is written on chain.
+4. Asserts that the keypair's pubkey matches the built `declare_id!` (the built IDL's `address`
+   field) and that the 32 bytes of that pubkey appear in the `.so` itself, so a mismatched keypair
+   or a stale IDL fails before anything is written on chain.
 5. Writes a buffer, then deploys or upgrades against it. Both calls carry a priority fee
    (`--with-compute-unit-price`, from `DEPLOY_CU_PRICE`, default `100000`) and
    `--max-sign-attempts 50` so a large program lands under congestion; mainnet also adds
    `--use-rpc`, since it only helps when the RPC is stake-weighted (Helius, Triton) and only
-   mainnet's RPC is.
+   mainnet's RPC is. On mainnet the hot key (the configured `solana` keypair) writes the buffer, so
+   the Ledger is not asked to sign each ~1 KB chunk of the 1 MB binary. An upgrade then hands the
+   buffer to the Ledger (`solana program set-buffer-authority`) and the Ledger signs the one
+   deploy transaction. A first deploy leaves the hot key as upgrade authority; see "Mainnet launch
+   order".
 6. After the deploy, asserts the on-chain upgrade authority (`solana program show
-   <program-id>`) equals the authority expected for the env: the Ledger on mainnet, the locally
-   configured keypair (`solana address`) elsewhere. Then checks `solana program show --buffers
+   <program-id>`) equals the authority expected for the env: the Ledger on a mainnet upgrade, the
+   locally configured keypair (`solana address`) elsewhere, including a first mainnet deploy. Then checks `solana program show --buffers
    --buffer-authority <that authority>` and fails if any buffer remains.
 7. Prints the program's `solana program show` output, then runs both apps' `sync-idl` scripts.
 
@@ -45,10 +51,33 @@ If a step after `write-buffer` fails, the script prints the exact `solana progra
 nobody. The post-deploy buffer check catches the same thing for any other leftover buffer under
 the same authority (an interrupted previous run, for example).
 
-Mainnet asks for a typed confirmation of the program ID before writing the buffer, and signs with
-`--upgrade-authority usb://ledger`. The fee payer defaults to the locally configured keypair
-(`solana config get`); set `FEE_PAYER_KEYPAIR` (a path, or another `usb://ledger[?key=N]`) to pay
-fees from somewhere else.
+Mainnet asks for a typed confirmation of the program ID before writing the buffer. A mainnet
+upgrade signs the deploy with `--upgrade-authority usb://ledger`. The fee payer defaults to the
+locally configured keypair (`solana config get`); set `FEE_PAYER_KEYPAIR` (a path, or another
+`usb://ledger[?key=N]`) to pay the deploy's fees from somewhere else.
+
+The script prints the cluster name (`devnet`, `mainnet-beta`), never the RPC URL, and pipes
+`solana` output through the same `redact` helper `surf.sh logs` uses. The URL carries the provider
+key (`.env.mainnet`, `DEPLOY_RPC_URL`), so it still must not be pasted into a ticket by hand.
+
+### Mainnet launch order
+
+`create_pool` is refused unless its payer is the program's upgrade authority (mainnet-readiness-fixes
+06), so a stranger cannot create pool 1 with their own admin the moment the program exists. The
+order is:
+
+1. `scripts/deploy.sh mainnet` deploys with the hot key as upgrade authority.
+2. Bootstrap creates the pool. Its payer is `OPERATOR_KEYPAIR`, so the keypair `solana address`
+   reports during step 1 must be the same key. Bootstrap and
+   the backend boot guard refuse an existing pool whose admin, treasury, buyback reserve, mint or
+   venue pins differ from the flags and env, and print the diff.
+3. `scripts/deploy.sh mainnet handover` moves the upgrade authority to the Ledger. It checks the
+   current authority is the hot key, asks you to type the Ledger pubkey, runs `solana program
+   set-upgrade-authority --new-upgrade-authority usb://ledger` (the Ledger signs as the new
+   authority, which proves it is reachable) and re-reads the authority.
+
+Do not run step 3 before bootstrap: no one can create a pool afterwards without the Ledger. Later
+upgrades use `scripts/deploy.sh mainnet --upgrade`, where the Ledger signs only the final deploy.
 
 ### The cosmetic "Program ID mismatch" warning
 
@@ -196,7 +225,7 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   permissionless or dual-signer by design, so none of them has to wait on multisig approval,
   which matters most for `pause` in an incident.
 
-`scripts/deploy.sh mainnet` always signs the program upgrade itself with a Ledger
+`scripts/deploy.sh mainnet --upgrade` always signs the program upgrade itself with a Ledger
 (`--upgrade-authority usb://ledger`), independent of whichever of the three modes above the admin
 CLI is using for instructions.
 
@@ -296,6 +325,8 @@ Before a real mainnet deploy:
 - [ ] An uptime monitor polling `GET /alerts` (200 with an empty list when healthy, 503 with the
   active codes otherwise) as the paged URL, not `/healthz` or `/status`; see
   [`docs/ops/incidents.md`](incidents.md) for what to do when a code fires.
+- [ ] Launch order followed: deploy, bootstrap, then `scripts/deploy.sh mainnet handover` (see
+  "Mainnet launch order").
 - [ ] The mainnet program keypair backed up offline before its first deploy. After that, only the
   upgrade authority (the Ledger) matters, but losing the keypair before the first deploy loses
   the program ID.
@@ -319,15 +350,16 @@ solana-verify verify-from-repo \
   <repo-url> --commit-hash <deployed sha> -- --features mainnet
 
 solana-verify remote submit-job \
-  --program-id <program id for the env> [--uploader <key>] -- --features mainnet
+  --program-id <program id for the env> --uploader <upgrade authority address>
 ```
 
 `<repo-url>` is `git remote get-url origin`, converted from SSH to HTTPS if needed; set
-`VERIFY_REPO_URL` to override it. `--uploader` is only added when `VERIFY_UPLOADER_KEYPAIR` is
-set; left unset, `solana-verify` falls back to its own default (the locally configured keypair).
-`verify` works for any env, not only mainnet, but only mainnet is built with `solana-verify build`
-(dev and staging use a plain `anchor build`), so it is the one whose deployed bytecode is actually
-reproducible this way.
+`VERIFY_REPO_URL` to override it. `remote submit-job` takes only `--program-id` and `--uploader`
+(no cargo arguments, no cluster), and it only runs for mainnet; `verify` skips it for other envs.
+`--uploader` is an address, read from the program's on-chain upgrade authority unless
+`VERIFY_UPLOADER` is set. `verify-from-repo` works for any env, but only mainnet is built with
+`solana-verify build` (dev and staging use a plain `anchor build`), so it is the one whose deployed
+bytecode is actually reproducible this way.
 
 If the repo stays private, run `solana-verify build -- --features mainnet` (`deploy.sh` already
 does this for a mainnet build) plus `solana-verify get-executable-hash` locally, and publish the

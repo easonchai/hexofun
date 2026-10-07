@@ -8,6 +8,7 @@
 #   scripts/deploy.sh <dev|staging|mainnet> [--upgrade] [--dry-run]
 #   scripts/deploy.sh <dev|staging|mainnet> --idl [--dry-run]
 #   scripts/deploy.sh <dev|staging|mainnet> verify
+#   scripts/deploy.sh mainnet handover
 #
 # --dry-run builds, runs check-deployable.sh, asserts the keypair against the
 # built declare_id!, and (with --upgrade) reads the current ProgramData size,
@@ -22,19 +23,33 @@
 # left under the deploy authority, or if the on-chain upgrade authority is
 # not the one expected for the env.
 #
+# Mainnet launch order (mainnet-readiness-fixes 06, 13): create_pool is
+# refused unless the payer is the program's upgrade authority, so
+#   1. `deploy.sh mainnet` deploys with the hot key (the configured solana
+#      keypair) as upgrade authority,
+#   2. bootstrap creates the pool with that same hot key as payer,
+#   3. `deploy.sh mainnet handover` moves the upgrade authority to the Ledger
+#      after a confirmation prompt. Nothing else is signed by the Ledger on
+#      this first deploy.
+# Later upgrades (`--upgrade`) write the buffer with the hot key, hand the
+# buffer to the Ledger with set-buffer-authority, and the Ledger signs only
+# the final deploy (one confirmation) instead of every ~1 KB write.
+# The script prints the cluster name, never the RPC URL: the URL carries the
+# provider key (.env.mainnet, DEPLOY_RPC_URL).
+#
 # --idl runs `anchor idl init` the first time and `anchor idl upgrade` after,
 # from the freshly built target/idl/hex_vault.json, signing with the same
 # authority as a deploy. `verify` runs `solana-verify verify-from-repo` then
 # `solana-verify remote submit-job` against the current commit and refuses on
-# a dirty working tree (VERIFY_REPO_URL and VERIFY_UPLOADER_KEYPAIR override
-# the repo URL and uploader keypair). Both are opt-in so a plain deploy stays
-# fast.
+# a dirty working tree (VERIFY_REPO_URL overrides the repo URL, VERIFY_UPLOADER
+# the uploader address; it defaults to the program's on-chain upgrade
+# authority). Both are opt-in so a plain deploy stays fast.
 #
-# Mainnet's upgrade authority is a Ledger (usb://ledger); plug it in before
-# running this for mainnet. The fee payer defaults to the locally configured
-# keypair (`solana config get`), which keeps day-to-day upgrades from
-# needing the Ledger for every prompt; set FEE_PAYER_KEYPAIR (a path or
-# another usb://ledger[?key=N]) to pay fees from somewhere else.
+# Mainnet's long-term upgrade authority is a Ledger (usb://ledger); plug it in
+# before `handover` or an `--upgrade`. The fee payer defaults to the locally
+# configured keypair (`solana config get`); set FEE_PAYER_KEYPAIR (a path or
+# another usb://ledger[?key=N]) to pay the final deploy's fees from somewhere
+# else.
 #
 # If the repo stays private (so `verify` cannot run), run `solana-verify
 # build -- --features mainnet` (this script already does) plus `solana-verify
@@ -42,9 +57,12 @@
 # job.
 set -euo pipefail
 
+. "$(dirname "$0")/lib/redact.sh"
+
 usage() {
   echo "usage: $0 <dev|devnew|staging|mainnet> [--upgrade] [--dry-run] [--idl]" >&2
   echo "       $0 <dev|devnew|staging|mainnet> verify" >&2
+  echo "       $0 mainnet handover" >&2
   exit 1
 }
 
@@ -61,6 +79,7 @@ while [ "$#" -gt 0 ]; do
     --dry-run) dry_run=1 ;;
     --idl) action="idl" ;;
     verify) action="verify" ;;
+    handover) action="handover" ;;
     *) usage ;;
   esac
   shift
@@ -70,6 +89,9 @@ case "$env_name" in
   dev | devnew | staging | mainnet) ;;
   *) usage ;;
 esac
+if [ "$action" = "handover" ] && [ "$env_name" != "mainnet" ]; then
+  usage
+fi
 
 # --- 1. env -> feature, keypair, cluster --------------------------------
 feature=""
@@ -78,11 +100,15 @@ keypair="keys/hex_vault-$env_name-keypair.json"
 # expired", "N write transactions failed"); DEPLOY_RPC_URL points devnet
 # deploys at a keyed RPC instead. Mainnet reads RPC_URL from .env.mainnet.
 cluster="${DEPLOY_RPC_URL:-devnet}"
+# What gets printed. The URL itself carries the provider key, so it is never
+# echoed; these are also valid --url monikers for a copy-pasted recovery command.
+cluster_name="devnet"
 
 if [ "$env_name" = "staging" ] || [ "$env_name" = "devnew" ]; then
   feature="$env_name"
 elif [ "$env_name" = "mainnet" ]; then
   feature="mainnet"
+  cluster_name="mainnet-beta"
   mainnet_env=".env.mainnet"
   if [ ! -f "$mainnet_env" ]; then
     echo "deploy: $mainnet_env is missing; copy .env.mainnet.example and fill in RPC_URL" >&2
@@ -124,11 +150,55 @@ if [ "$action" = "verify" ]; then
   fi
   solana-verify verify-from-repo --url "$cluster" --program-id "$keypair_pubkey" \
     "$repo_url" --commit-hash "$commit_sha" "$@"
-  if [ -n "${VERIFY_UPLOADER_KEYPAIR:-}" ]; then
-    solana-verify remote submit-job --program-id "$keypair_pubkey" --uploader "$VERIFY_UPLOADER_KEYPAIR" "$@"
+  # remote submit-job takes only --program-id and --uploader (no cargo args, no
+  # cluster: the OtterSec job runs against mainnet). The uploader is the
+  # address of the authority that uploaded the program.
+  if [ "$env_name" != "mainnet" ]; then
+    echo "==> skipping remote submit-job: OtterSec verifies mainnet programs only"
   else
-    solana-verify remote submit-job --program-id "$keypair_pubkey" "$@"
+    uploader="${VERIFY_UPLOADER:-}"
+    if [ -z "$uploader" ]; then
+      uploader=$(solana program show "$keypair_pubkey" --url "$cluster" --output json \
+        | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/')
+    fi
+    if [ -z "$uploader" ] || [ "$uploader" = "none" ]; then
+      echo "deploy: no uploader: set VERIFY_UPLOADER to the upgrade authority address" >&2
+      exit 1
+    fi
+    solana-verify remote submit-job --program-id "$keypair_pubkey" --uploader "$uploader"
   fi
+  exit 0
+fi
+
+# --- handover: hot key -> Ledger upgrade authority (mainnet, after bootstrap) ---
+if [ "$action" = "handover" ]; then
+  hot_key=$(solana address)
+  current_authority=$(solana program show "$keypair_pubkey" --url "$cluster" --output json \
+    | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/')
+  if [ "$current_authority" != "$hot_key" ]; then
+    echo "deploy: upgrade authority is $current_authority, not the hot key $hot_key; nothing to hand over" >&2
+    exit 1
+  fi
+  ledger_pubkey=$(solana-keygen pubkey usb://ledger)
+  echo "Program $keypair_pubkey ($cluster_name): upgrade authority $hot_key -> Ledger $ledger_pubkey"
+  echo "Only do this once bootstrap has created the pool: create_pool needs the hot key as authority."
+  printf 'Type the Ledger pubkey to confirm: '
+  read -r confirm
+  if [ "$confirm" != "$ledger_pubkey" ]; then
+    echo "deploy: confirmation did not match; aborting" >&2
+    exit 1
+  fi
+  # The Ledger signs as the new authority too, which proves it is reachable
+  # before the hot key lets go of the program.
+  solana program set-upgrade-authority "$keypair_pubkey" --url "$cluster" \
+    --new-upgrade-authority usb://ledger
+  after=$(solana program show "$keypair_pubkey" --url "$cluster" --output json \
+    | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/')
+  if [ "$after" != "$ledger_pubkey" ]; then
+    echo "deploy: upgrade authority is $after, expected $ledger_pubkey" >&2
+    exit 1
+  fi
+  echo "==> upgrade authority is now the Ledger $ledger_pubkey"
   exit 0
 fi
 
@@ -163,7 +233,18 @@ if [ "$idl_address" != "$keypair_pubkey" ]; then
   echo "deploy: $keypair ($keypair_pubkey) does not match this build's declare_id! ($idl_address)" >&2
   exit 1
 fi
-echo "==> $env_name program id $keypair_pubkey matches the build"
+# The IDL can be stale (solana-verify builds only the .so), so also look for
+# the program id's 32 bytes in the binary itself. declare_id! compiles into it.
+id_hex=$(tr -d '[:space:][]' <"$keypair" | tr ',' '\n' | tail -n 32 | awk '{printf "%02x", $1}')
+if [ "${#id_hex}" -ne 64 ]; then
+  echo "deploy: could not read the 32 byte public key out of $keypair" >&2
+  exit 1
+fi
+if ! od -An -v -tx1 "$so_path" | tr -d ' \n' | grep -q "$id_hex"; then
+  echo "deploy: $so_path does not contain program id $keypair_pubkey; it was built for another id" >&2
+  exit 1
+fi
+echo "==> $env_name program id $keypair_pubkey matches the build (IDL and binary)"
 
 # --- --idl: publish the freshly built IDL on chain, no deploy --------------
 if [ "$action" = "idl" ]; then
@@ -186,7 +267,7 @@ if [ "$action" = "idl" ]; then
   fi
 
   if [ "$dry_run" -eq 1 ]; then
-    echo "[dry-run] would run: anchor idl $idl_verb -f $idl_path --provider.cluster $cluster${idl_wallet:+ --provider.wallet $idl_wallet} $keypair_pubkey"
+    echo "[dry-run] would run: anchor idl $idl_verb -f $idl_path --provider.cluster $cluster_name${idl_wallet:+ --provider.wallet $idl_wallet} $keypair_pubkey"
     exit 0
   fi
 
@@ -205,7 +286,7 @@ fi
 
 # --- 5. on upgrade, check ProgramData has room for the new build -----------
 if [ "$upgrade" -eq 1 ]; then
-  echo "==> checking ProgramData size for $keypair_pubkey on $cluster"
+  echo "==> checking ProgramData size for $keypair_pubkey on $cluster_name"
   current_len=""
   if show_json=$(solana program show "$keypair_pubkey" --url "$cluster" --output json 2>/dev/null); then
     current_len=$(printf '%s' "$show_json" | grep -m1 '"dataLen"' | sed -E 's/[^0-9]*([0-9]+).*/\1/')
@@ -215,11 +296,11 @@ if [ "$upgrade" -eq 1 ]; then
   # + 1-byte Option tag + 32-byte upgrade authority pubkey = 45 bytes.
   required_len=$((so_size + 45))
   if [ -z "$current_len" ]; then
-    echo "deploy: could not read ProgramData size for $keypair_pubkey on $cluster (not deployed yet?)" >&2
+    echo "deploy: could not read ProgramData size for $keypair_pubkey on $cluster_name (not deployed yet?)" >&2
   elif [ "$required_len" -gt "$current_len" ]; then
     extend_by=$((required_len - current_len))
     echo "ProgramData is $current_len bytes; the new build needs $required_len bytes."
-    echo "  solana program extend $keypair_pubkey $extend_by --url $cluster"
+    echo "  solana program extend $keypair_pubkey $extend_by --url $cluster_name"
     if [ "$dry_run" -eq 1 ]; then
       echo "[dry-run] not prompting; not running the extend"
     else
@@ -237,15 +318,29 @@ fi
 
 # --- 6. write-buffer, then deploy (deploy also covers upgrades) -----------
 cu_price="${DEPLOY_CU_PRICE:-100000}"
+hot_key=$(solana address)
+# Mainnet: the hot key writes the buffer (the Ledger would sign each ~1 KB
+# chunk). A first deploy keeps the hot key as upgrade authority so bootstrap's
+# create_pool works; `handover` moves it to the Ledger afterwards. An upgrade
+# hands the buffer to the Ledger and the Ledger signs only the deploy.
+ledger_deploy=0
+if [ "$env_name" = "mainnet" ] && [ "$upgrade" -eq 1 ]; then
+  ledger_deploy=1
+fi
 
 if [ "$dry_run" -eq 1 ]; then
   echo "[dry-run] would run:"
   if [ "$env_name" = "mainnet" ]; then
-    echo "  solana program write-buffer $so_path --url $cluster --with-compute-unit-price $cu_price --max-sign-attempts 50 --use-rpc --buffer-authority usb://ledger"
-    echo "  solana program deploy --buffer <buffer> --program-id $keypair --url $cluster --with-compute-unit-price $cu_price --max-sign-attempts 50 --use-rpc --upgrade-authority usb://ledger${FEE_PAYER_KEYPAIR:+ --fee-payer $FEE_PAYER_KEYPAIR}"
+    echo "  solana program write-buffer $so_path --url $cluster_name --with-compute-unit-price $cu_price --max-sign-attempts 50 --use-rpc"
+    if [ "$ledger_deploy" -eq 1 ]; then
+      echo "  solana program set-buffer-authority <buffer> --new-buffer-authority <ledger pubkey> --url $cluster_name"
+      echo "  solana program deploy --buffer <buffer> --program-id $keypair --url $cluster_name --with-compute-unit-price $cu_price --max-sign-attempts 50 --use-rpc --upgrade-authority usb://ledger${FEE_PAYER_KEYPAIR:+ --fee-payer $FEE_PAYER_KEYPAIR}"
+    else
+      echo "  solana program deploy --buffer <buffer> --program-id $keypair --url $cluster_name --with-compute-unit-price $cu_price --max-sign-attempts 50 --use-rpc   (hot key stays upgrade authority until: $0 mainnet handover)"
+    fi
   else
-    echo "  solana program write-buffer $so_path --url $cluster --with-compute-unit-price $cu_price --max-sign-attempts 50"
-    echo "  solana program deploy --buffer <buffer> --program-id $keypair --url $cluster --with-compute-unit-price $cu_price --max-sign-attempts 50"
+    echo "  solana program write-buffer $so_path --url $cluster_name --with-compute-unit-price $cu_price --max-sign-attempts 50"
+    echo "  solana program deploy --buffer <buffer> --program-id $keypair --url $cluster_name --with-compute-unit-price $cu_price --max-sign-attempts 50"
   fi
   echo "[dry-run] would then check for stray buffers, assert the upgrade authority, and run: pnpm --filter @hexvault/web sync-idl && pnpm --filter @hexvault/backend sync-idl"
   exit 0
@@ -258,16 +353,21 @@ if [ "$env_name" = "mainnet" ]; then
     echo "deploy: confirmation did not match; aborting" >&2
     exit 1
   fi
-  expected_authority=$(solana-keygen pubkey usb://ledger)
-  set -- --with-compute-unit-price "$cu_price" --max-sign-attempts 50 --use-rpc --buffer-authority usb://ledger
+  if [ "$ledger_deploy" -eq 1 ]; then
+    ledger_pubkey=$(solana-keygen pubkey usb://ledger)
+    expected_authority="$ledger_pubkey"
+  else
+    expected_authority="$hot_key"
+  fi
+  set -- --with-compute-unit-price "$cu_price" --max-sign-attempts 50 --use-rpc
 else
-  expected_authority=$(solana address)
+  expected_authority="$hot_key"
   set -- --with-compute-unit-price "$cu_price" --max-sign-attempts 50
 fi
 
 echo "==> writing buffer"
 buffer_output=$(solana program write-buffer "$so_path" --url "$cluster" "$@")
-echo "$buffer_output"
+printf '%s\n' "$buffer_output" | redact
 buffer_pubkey=$(printf '%s\n' "$buffer_output" | sed -n 's/^Buffer: //p' | head -1)
 if [ -z "$buffer_pubkey" ]; then
   echo "deploy: could not parse the buffer pubkey from write-buffer output" >&2
@@ -276,20 +376,23 @@ fi
 
 # A stranded buffer still pays rent to nobody in particular. If anything from
 # here to the end of the deploy fails, print exactly how to reclaim it.
+buffer_authority_flag=""
 buffer_trap() {
   echo "deploy: a later step failed; recover the buffer with:" >&2
-  echo "  solana program close $buffer_pubkey --bypass-warning --url $cluster" >&2
+  echo "  solana program close $buffer_pubkey --bypass-warning --url $cluster_name${buffer_authority_flag}" >&2
   echo "  (recipient defaults to whichever keypair runs that command; pass --recipient <address> to send the rent elsewhere)" >&2
 }
 trap buffer_trap ERR
 
-if [ "$env_name" = "mainnet" ]; then
+if [ "$ledger_deploy" -eq 1 ]; then
+  echo "==> handing the buffer to the Ledger $ledger_pubkey"
+  solana program set-buffer-authority "$buffer_pubkey" --url "$cluster" \
+    --new-buffer-authority "$ledger_pubkey"
+  buffer_authority_flag=" --buffer-authority usb://ledger"
   set -- --with-compute-unit-price "$cu_price" --max-sign-attempts 50 --use-rpc --upgrade-authority usb://ledger
   if [ -n "${FEE_PAYER_KEYPAIR:-}" ]; then
     set -- "$@" --fee-payer "$FEE_PAYER_KEYPAIR"
   fi
-else
-  set -- --with-compute-unit-price "$cu_price" --max-sign-attempts 50
 fi
 
 echo "==> deploying (buffer $buffer_pubkey)"
@@ -299,7 +402,7 @@ trap - ERR
 
 # --- 7. buffer and authority checks, then report and sync both apps' IDL ---
 show_json=$(solana program show "$keypair_pubkey" --url "$cluster" --output json)
-echo "$show_json"
+printf '%s\n' "$show_json" | redact
 
 actual_authority=$(printf '%s' "$show_json" | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/')
 if [ "$actual_authority" != "$expected_authority" ]; then
@@ -318,7 +421,7 @@ done
 if [ "$(printf '%s' "$buffers_json" | tr -d '[:space:]')" != '{"buffers":[]}' ]; then
   echo "$buffers_json" >&2
   echo "deploy: buffer(s) left under $expected_authority; close them:" >&2
-  echo "  solana program close <buffer> --bypass-warning --url $cluster" >&2
+  echo "  solana program close <buffer> --bypass-warning --url $cluster_name" >&2
   exit 1
 fi
 echo "==> no stray buffers under $expected_authority"
