@@ -41,7 +41,7 @@ import bs58 from "bs58";
 
 import { generateInviteCode } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
-import { fetchKvaultView } from "../chain/kvault";
+import { fetchKvaultView, kvaultRemaining } from "../chain/kvault";
 import { venueProposalAddress } from "../chain/pda";
 import { VENUE_KIND } from "../chain/venue-kind";
 import { rpcStatus, withRpcFallback } from "../chain/rpc-fallback";
@@ -565,7 +565,10 @@ async function playersOwedABalance(chain: ChainService): Promise<CrankPlayer[]> 
  * than sending every remaining batch into the same wall.
  */
 async function emergencyCrank(chain: ChainService, batchSize: number): Promise<void> {
-  const pool = await readPool(chain);
+  const { pool, tables } = await readVenuePool(chain);
+  // `emergency_withdraw` syncs the venue first: a kVault pool's value is read
+  // from every allocation's reserve and market (fork-run-fixes 10).
+  const remaining = pool.kvault ? kvaultRemaining(pool.kvault, { valueOnly: true }) : [];
   const players = await playersOwedABalance(chain);
   if (players.length === 0) {
     log("no Player owes a balance; nothing to crank");
@@ -601,11 +604,12 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
             klendCtoken: pool.klendCtoken,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
+          .remainingAccounts(remaining)
           .instruction(),
       );
     }
     try {
-      const signature = await chain.send(instructions);
+      const signature = await chain.send(instructions, chain.keypair, tables);
       paid += batch.length;
       log(`signature ${signature}`);
       log(`paid ${batch.map((player) => player.owner.toBase58()).join(", ")}`);
