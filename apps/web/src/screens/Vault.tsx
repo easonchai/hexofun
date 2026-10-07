@@ -553,7 +553,7 @@ export function Vault(props: VaultScreenProps) {
               </button>
             </div>
 
-            <dl className="vault-rows">
+            <dl className={`vault-rows vault-rows-${mode}`}>
               {mode === "deposit" ? (
                 <>
                   <div className="vault-line" data-testid="vault-tickets">

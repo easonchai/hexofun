@@ -2959,10 +2959,17 @@ input::placeholder {
   margin: 0;
 }
 
-/* "6 OCT, 12:00AM" over "(GMT+8)", as in the Figma. */
+/* "6 OCT, 12:00AM" over "(GMT+8)", as in the Figma, and never broken
+   further. */
 .vault-line-when {
   text-align: right;
-  white-space: pre-line;
+  white-space: pre;
+}
+
+/* The withdraw frame's rows carry no tracking; with the deposit rows' 0.083em
+   "Expected to receive at" and its date overrun a phone-width widget. */
+.vault-rows-withdraw .vault-line {
+  letter-spacing: 0;
 }
 
 .vault-line-label {
