@@ -1862,6 +1862,19 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     });
   });
 
+  // mainnet-readiness-fixes 10: anyone can post here and the rows land in the
+  // Postgres the indexer and operator share, so it is throttled per IP.
+  describe("POST /error-reports throttling", () => {
+    it("answers 429 on the 6th post in a minute from one address, not another", async () => {
+      const report = { code: "render_error", message: "boom" };
+      for (let i = 0; i < 5; i += 1) {
+        await http.post("/error-reports").set("x-forwarded-for", "203.0.113.21").send(report).expect(201);
+      }
+      await http.post("/error-reports").set("x-forwarded-for", "203.0.113.21").send(report).expect(429);
+      await http.post("/error-reports").set("x-forwarded-for", "203.0.113.22").send(report).expect(201);
+    });
+  });
+
   describe("POST /faucet", () => {
     it("rejects a body without a usable owner", async () => {
       await http.post("/faucet").send({}).expect(400);

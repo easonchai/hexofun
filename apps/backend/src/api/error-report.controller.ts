@@ -1,8 +1,16 @@
 import { BadRequestException, Body, Controller, Logger, Post } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 
 import { PrismaService } from "../prisma/prisma.service";
 
 const MAX_LEN = 2_000;
+/** The table keeps the newest rows only; `create` trims the rest. */
+export const MAX_ROWS = 10_000;
+/** Per IP per minute. The web posts one report per failure, so this is generous. */
+export const REPORTS_PER_MINUTE = 5;
+
+/** One log line per report: a caller cannot forge a second line with a newline. */
+const oneLine = (text: string): string => text.replace(/[\r\n]+/g, " ");
 
 interface ErrorReportBody {
   code?: unknown;
@@ -54,11 +62,14 @@ export class ErrorReportController {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  @Throttle({ default: { limit: REPORTS_PER_MINUTE, ttl: 60_000 } })
   @Post()
   async create(@Body() body: unknown): Promise<{ ok: true }> {
     const report = parseErrorReport(body);
-    this.logger.warn(`error report ${report.code}: ${report.message}`);
-    await this.prisma.errorReport.create({ data: report });
+    this.logger.warn(`error report ${oneLine(report.code)}: ${oneLine(report.message)}`);
+    const created = await this.prisma.errorReport.create({ data: report });
+    // Ids only grow, so this keeps at most MAX_ROWS rows and costs one indexed delete.
+    await this.prisma.errorReport.deleteMany({ where: { id: { lte: created.id - MAX_ROWS } } });
     return { ok: true };
   }
 }

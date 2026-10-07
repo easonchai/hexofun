@@ -158,6 +158,27 @@ export function assertMainnetSafe(input: MainnetGuardInput): void {
 }
 
 /**
+ * Mainnet only: the Treasury and Buyback reserve are real token accounts that
+ * receive every fee and House win, so a pasted account owned by someone else
+ * would send them to a stranger. The mint check cannot see that. Names the
+ * owner it found so the operator can see whose account it is.
+ */
+export function assertTokenAccountOwner(
+  genesisHash: string,
+  flag: string,
+  address: PublicKey,
+  owner: PublicKey,
+  admin: PublicKey,
+): void {
+  if (genesisHash !== MAINNET_GENESIS_HASH) return;
+  if (!owner.equals(admin)) {
+    throw new Error(
+      `--${flag} ${address.toBase58()} is owned by ${owner.toBase58()}, not by the admin ${admin.toBase58()}; refusing on mainnet`,
+    );
+  }
+}
+
+/**
  * Whether bootstrap sets the pool's Bought Tickets switch (yield-claimer
  * ticket 11, ADR 0019). On by default on mainnet-beta, off on every other
  * cluster; `BUY_TICKETS_PAUSED=true|false` overrides either way, and the

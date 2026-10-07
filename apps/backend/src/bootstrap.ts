@@ -34,6 +34,7 @@ import { VENUE_KIND } from "./chain/venue-kind";
 
 import {
   assertMainnetSafe,
+  assertTokenAccountOwner,
   buyTicketsPausedFor,
   parsePoolParams,
   venuePinsFor,
@@ -218,6 +219,7 @@ async function ensureExplicitTokenAccount(
   flag: string,
   address: PublicKey,
   mint: PublicKey,
+  ownerCheck: { genesisHash: string; admin: PublicKey },
 ): Promise<PublicKey> {
   const account = await getAccount(connection, address).catch(
     (cause: unknown) => {
@@ -232,6 +234,13 @@ async function ensureExplicitTokenAccount(
       `--${flag} ${address.toBase58()} holds mint ${account.mint.toBase58()}, expected ${mint.toBase58()}`,
     );
   }
+  assertTokenAccountOwner(
+    ownerCheck.genesisHash,
+    flag,
+    address,
+    account.owner,
+    ownerCheck.admin,
+  );
   return address;
 }
 
@@ -557,7 +566,10 @@ async function main(): Promise<void> {
     ? existing.treasury
     : params.treasury
       ? await step("checking --treasury", () =>
-          ensureExplicitTokenAccount(connection, "treasury", params.treasury!, mint),
+          ensureExplicitTokenAccount(connection, "treasury", params.treasury!, mint, {
+            genesisHash,
+            admin: roles.admin,
+          }),
         )
       : await step("creating the treasury", () =>
           ensureSeededTokenAccount(
@@ -577,6 +589,7 @@ async function main(): Promise<void> {
             "buyback-reserve",
             params.buybackReserve!,
             mint,
+            { genesisHash, admin: roles.admin },
           ),
         )
       : await step("creating the buyback reserve", () =>
