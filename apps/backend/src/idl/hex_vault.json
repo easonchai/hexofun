@@ -748,16 +748,33 @@
           "name": "buyback_reserve"
         },
         {
-          "name": "klend_program"
+          "name": "klend_program",
+          "docs": [
+            "The venue program. klend: the klend program. kVault: the kVault program.",
+            "Stub: this program."
+          ]
         },
         {
-          "name": "klend_market"
+          "name": "klend_market",
+          "docs": [
+            "The venue market. klend: the lending market. kVault: the vault state",
+            "account. Stub: the pool PDA."
+          ]
         },
         {
-          "name": "klend_reserve"
+          "name": "klend_reserve",
+          "docs": [
+            "The venue reserve. klend: the reserve. kVault: the vault's shares mint.",
+            "Stub: the stub reserve PDA."
+          ]
         },
         {
-          "name": "klend_ctoken"
+          "name": "klend_ctoken",
+          "docs": [
+            "The pool's position token account. klend: the pool's cToken account.",
+            "kVault: the pool's token account of the shares mint. Stub: the stub",
+            "vault PDA."
+          ]
         },
         {
           "name": "token_program"
@@ -4432,6 +4449,31 @@
       "code": 6089,
       "name": "UnsupportedVenueKind",
       "msg": "this build does not support that venue kind"
+    },
+    {
+      "code": 6090,
+      "name": "VaultStateUnreadable",
+      "msg": "the kVault state account is not a VaultState this program can read"
+    },
+    {
+      "code": 6091,
+      "name": "VaultPinMismatch",
+      "msg": "a kVault pin does not match the vault state"
+    },
+    {
+      "code": 6092,
+      "name": "VaultMintMismatch",
+      "msg": "the kVault does not hold the pool's accepted mint"
+    },
+    {
+      "code": 6093,
+      "name": "VaultAccountMismatch",
+      "msg": "a kVault account does not match the vault state"
+    },
+    {
+      "code": 6094,
+      "name": "VaultStateNotWritable",
+      "msg": "the kVault state account must be passed writable"
     }
   ],
   "types": [
@@ -4583,8 +4625,12 @@
           {
             "name": "venue_kind",
             "docs": [
-              "A `constants::venue_kind` value: which backing the four venue accounts",
-              "belong to. Refused unless this build supports it."
+              "A `constants::venue_kind` value: 0 klend, 1 stub (a `test-venue` build",
+              "only), 2 kVault. Which backing the four venue accounts belong to, and so",
+              "what each is: see `Pool::klend_program` to `klend_ctoken`. Refused unless",
+              "this build supports it. A kVault pool's four pins are checked against",
+              "the vault state (`VaultPinMismatch`, `VaultMintMismatch`,",
+              "`VaultStateUnreadable`)."
             ],
             "type": "u8"
           }
@@ -5666,22 +5712,40 @@
           {
             "name": "klend_program",
             "docs": [
-              "The pinned klend program, lending market, reserve and the pool's",
-              "cToken account. `create_pool` takes them (never the default key) and",
-              "every venue instruction checks its accounts against them."
+              "The four pinned venue accounts. The names are klend's and stay, because",
+              "renaming a field breaks every client's IDL; what each one is depends on",
+              "`venue_kind`. `create_pool` takes them (never the default key) and every",
+              "venue instruction checks its accounts against them.",
+              "",
+              "Venue program. klend: the klend program. kVault: the kVault program.",
+              "Stub: this program."
             ],
             "type": "pubkey"
           },
           {
             "name": "klend_market",
+            "docs": [
+              "Venue market. klend: the lending market. kVault: the vault state",
+              "account (a deposit and a redeem write it, so the client passes it",
+              "writable). Stub: the pool PDA."
+            ],
             "type": "pubkey"
           },
           {
             "name": "klend_reserve",
+            "docs": [
+              "Venue reserve. klend: the reserve. kVault: the vault's shares mint.",
+              "Stub: the stub reserve PDA."
+            ],
             "type": "pubkey"
           },
           {
             "name": "klend_ctoken",
+            "docs": [
+              "The pool's position token account. klend: the pool's cToken account.",
+              "kVault: the pool's token account of the shares mint. Stub: the stub",
+              "vault PDA."
+            ],
             "type": "pubkey"
           },
           {
@@ -5836,8 +5900,9 @@
             "name": "venue_kind",
             "docs": [
               "Which backing the four pinned venue keys point at, a",
-              "`constants::venue_kind` value. Zero is klend, so a pool made before the",
-              "byte existed reads as klend. `create_pool` sets it."
+              "`constants::venue_kind` value: 0 klend, 1 stub (localnet only), 2 kVault.",
+              "Zero is klend, so a pool made before the byte existed reads as klend.",
+              "`create_pool` sets it."
             ],
             "type": "u8"
           },
