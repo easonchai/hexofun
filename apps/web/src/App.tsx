@@ -602,6 +602,7 @@ export function App() {
             launchAt={state?.launchAt ?? null}
             jackpotPaused={jackpotPaused}
             player={player}
+            baseRateBps={pool?.baseRateBps ?? null}
             onDeposit={() => {
               setVaultMode("deposit");
               setTab("VAULT");
@@ -734,7 +735,6 @@ export function App() {
             initialMode={vaultMode}
             onConnect={() => signer.connect()}
             onDone={statePoll.kick}
-            onPlay={() => setTab("MINE")}
           />
         ) : null}
         {tab === "DAILY DRAW" ? (

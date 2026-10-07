@@ -25,6 +25,30 @@ export interface HistoryRow {
   blockTime: string | null;
   /** Prize rows read lime across the row; deposits and withdrawals do not. */
   prize: boolean;
+  /** A queued request no later payout or cancel has closed: the Pending badge. */
+  pending?: boolean;
+}
+
+/**
+ * Every event's rows, newest first as the feed sends them. A queued request
+ * is pending until a `Withdrawn` or `WithdrawCancelled` lands after it (the
+ * program pays or clears the whole queue at once), so walking newest first,
+ * every request before the first of those is still waiting. It reads
+ * "Withdraw" with the badge, as in the Figma, and "Withdraw requested" once
+ * closed, beside the Withdraw row that paid it.
+ */
+export function toHistoryList(events: readonly EventDto[]): HistoryRow[] {
+  let closed = false;
+  const out: HistoryRow[] = [];
+  for (const event of events) {
+    const kind = eventKey(event.name);
+    for (const row of toHistoryRows(event)) {
+      const waiting = !closed && row.key.endsWith("-requested");
+      out.push(waiting ? { ...row, label: "Withdraw", pending: true } : row);
+    }
+    if (kind === "withdrawn" || kind === "withdrawCancelled") closed = true;
+  }
+  return out;
 }
 
 /**

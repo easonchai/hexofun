@@ -2959,6 +2959,19 @@ input::placeholder {
   margin: 0;
 }
 
+/* "6 OCT, 12:00AM" over "(GMT+8)", as in the Figma, and never broken
+   further. */
+.vault-line-when {
+  text-align: right;
+  white-space: pre;
+}
+
+/* The withdraw frame's rows carry no tracking; with the deposit rows' 0.083em
+   "Expected to receive at" and its date overrun a phone-width widget. */
+.vault-rows-withdraw .vault-line {
+  letter-spacing: 0;
+}
+
 .vault-line-label {
   display: inline-flex;
   align-items: center;
@@ -3185,7 +3198,7 @@ input::placeholder {
   flex-direction: column;
   align-items: center;
   width: min(480px, 100%);
-  padding: 0 16px 16px;
+  padding: 0 16px 32px;
   background: var(--brand-slate);
   border: 1px solid rgba(182, 255, 59, 0.18);
   border-radius: 16px;
@@ -3237,10 +3250,11 @@ input::placeholder {
 
 .deposit-modal-kicker {
   margin: 0;
-  color: rgba(182, 255, 59, 0.6);
+  color: var(--brand-lime);
   font-family: "Roboto Mono", monospace;
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 12px;
+  line-height: 15px;
+  letter-spacing: 0.15em;
 }
 
 .deposit-modal-amount {
@@ -3255,14 +3269,16 @@ input::placeholder {
 .deposit-modal-sub {
   margin: 6px 0 32px;
   color: rgba(255, 255, 255, 0.5);
+  font-family: "Inter", sans-serif;
   font-size: 14px;
+  line-height: 21px;
 }
 
 .deposit-modal-sub strong {
   color: var(--brand-white);
 }
 
-.deposit-modal-play {
+.deposit-modal-ok {
   width: 100%;
   font-size: 14px;
   letter-spacing: 0.125em;
@@ -3277,6 +3293,14 @@ input::placeholder {
 
   .deposit-modal-amount {
     font-size: 22px;
+  }
+
+  .deposit-modal {
+    padding-bottom: 20px;
+  }
+
+  .deposit-modal-sub {
+    margin-bottom: 24px;
   }
 }
 
@@ -3425,27 +3449,56 @@ input::placeholder {
   margin: 0;
 }
 
+/* PRINCIPAL and EARNINGS side by side, the second column at the frame's +264. */
+.dash-balance {
+  margin: 16px 0 0;
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+}
+
+.dash-balance dt {
+  font-family: "Roboto Mono", monospace;
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 19.5px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.dash-balance dd {
+  margin: 0;
+}
+
 .dash-principal {
   font-family: "Roboto Mono", monospace;
   font-weight: 700;
   font-size: 48px;
-  line-height: 52px;
-  letter-spacing: -0.52px;
+  line-height: 58px;
+  letter-spacing: -2.4px;
   color: var(--brand-white);
   font-variant-numeric: tabular-nums;
-  margin-top: 20px;
+}
+
+.dash-earnings {
+  font-family: "Roboto Mono", monospace;
+  font-weight: 700;
+  font-size: 32px;
+  line-height: 47px;
+  color: var(--brand-lime);
+  font-variant-numeric: tabular-nums;
 }
 
 .dash-card-lines {
-  margin: 12px 0 0;
+  margin: 16px 0 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
+/* Label and figure in the frame's 211px row, the figure flush right. */
 .dash-card-lines > div {
   display: flex;
-  gap: 6px;
+  justify-content: space-between;
+  width: 211px;
   font-family: "Roboto Mono", monospace;
   font-size: 13px;
   line-height: 19.5px;
@@ -3809,6 +3862,33 @@ input::placeholder {
   white-space: nowrap;
 }
 
+/* Queued withdrawal (Figma 698:19769): amber 25% pill, 97x20. */
+.dash-badge-pending {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 4px;
+  height: 20px;
+  padding: 0 18px;
+  border-radius: 16px;
+  background: rgba(255, 201, 64, 0.25);
+  color: #ffc940;
+  font-family: "Roboto Mono", monospace;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.dash-badge-pending svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dash-badge-phone {
+  display: none;
+}
+
 .dash-date {
   font-weight: 400;
   font-size: 11px;
@@ -3844,6 +3924,38 @@ input::placeholder {
 
   .dash-prize {
     font-size: 48px;
+  }
+
+  /* Scaled down like the rest of the card so both figures fit a phone. */
+  .dash-balance {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+  }
+
+  .dash-balance dt {
+    font-size: 11px;
+  }
+
+  .dash-principal {
+    font-size: 34px;
+    line-height: 42px;
+    letter-spacing: -1.6px;
+  }
+
+  .dash-earnings {
+    font-size: 22px;
+    line-height: 42px;
+  }
+
+  .dash-card-lines > div {
+    font-size: 12px;
+  }
+
+  .dash-badge-phone {
+    display: flex;
+    width: fit-content;
+    margin-top: 4px;
+    padding: 0 8px;
   }
 
   /* Syncopate is wide: "+ Deposit More" wraps at 11px+ on a 390px screen. */

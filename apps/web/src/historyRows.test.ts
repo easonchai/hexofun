@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { EventDto } from "./api.js";
-import { toHistoryRows } from "./historyRows.js";
+import { toHistoryList, toHistoryRows } from "./historyRows.js";
 
 const event = (name: string, data: Record<string, unknown>): EventDto => ({
   slot: "9",
@@ -64,5 +64,36 @@ describe("toHistoryRows", () => {
       prize: true,
     });
     expect(toHistoryRows(event("PositionBought", { total: "5" }))).toEqual([]);
+  });
+});
+
+describe("toHistoryList", () => {
+  const at = (slot: string, name: string, data: Record<string, unknown>): EventDto => ({
+    ...event(name, data),
+    slot,
+  });
+  const request = (slot: string) => at(slot, "WithdrawRequested", { amount: "1000000", refunded: "0", paid: "0" });
+
+  it("badges a queued request until a later payout or cancel closes it", () => {
+    // Newest first, as the feed sends them.
+    const rows = toHistoryList([
+      request("5"),
+      at("4", "Withdrawn", { amount: "1000000" }),
+      request("3"),
+      at("2", "WithdrawCancelled", { amount: "1000000" }),
+      request("1"),
+    ]);
+    expect(rows.map((row) => [row.label, row.pending ?? false])).toEqual([
+      ["Withdraw", true],
+      ["Withdraw", false],
+      ["Withdraw requested", false],
+      ["Withdraw cancelled", false],
+      ["Withdraw requested", false],
+    ]);
+  });
+
+  it("never badges a refund", () => {
+    const rows = toHistoryList([at("1", "WithdrawRequested", { amount: "1000000", refunded: "1000000", paid: "1000000" })]);
+    expect(rows.map((row) => row.pending ?? false)).toEqual([false]);
   });
 });

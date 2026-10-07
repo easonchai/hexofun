@@ -47,7 +47,12 @@ const SETTLE_TIMEOUT_MS = (ROUND_SECONDS + VRF_TIMEOUT_SECONDS + 60) * 1000;
 
 async function connectBurnerWallet(page: Page): Promise<void> {
   await page.goto("/#play");
-  await page.getByTestId("connect-button").click();
+  // The invite gate (AccessGate.tsx) covers the app until a wallet with
+  // access connects; the burner needs an InviteRedemption row in the backend.
+  const gateConnect = page.getByRole("button", { name: /connect wallet/i });
+  const navConnect = page.getByTestId("connect-button");
+  await expect(gateConnect.or(navConnect).first()).toBeVisible({ timeout: 15_000 });
+  await ((await gateConnect.isVisible()) ? gateConnect : navConnect).click();
   // Standard wallet-adapter-react-ui modal. With VITE_BURNER_WALLET=1 and a
   // local RPC (see src/dev-burner.ts's isLocalRpc gate), the burner is the
   // only entry in the list.
@@ -95,12 +100,15 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   // already holding USDC from a previous run. This does not fix
   // repeatability properly; upgrade path is a fresh keypair per run, or a
   // backend reset endpoint, whichever ticket ends up owning CI for this spec.
-  // The faucet lives in the wallet menu under the address pill.
+  // The faucet lives in the wallet menu under the address pill. A
+  // mainnet-shaped cluster (the surf fork) has none; `scripts/surf.sh fund`
+  // pre-funds the burner there instead.
   await page.getByTestId("connect-button").click();
-  await page.getByTestId("faucet").click();
-  await expect(page.getByTestId("faucet")).toHaveText(/Sent|Faucet in \d+s/, {
-    timeout: 30_000,
-  });
+  const faucet = page.getByTestId("faucet");
+  if (await faucet.isVisible().catch(() => false)) {
+    await faucet.click();
+    await expect(faucet).toHaveText(/Sent|Faucet in \d+s/, { timeout: 30_000 });
+  }
   await page.keyboard.press("Escape");
   // EARN lands on the dashboard; the deposit widget is one hop further in.
   await page.getByTestId("tab-dashboard").click();
@@ -114,7 +122,7 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   await expect(page.getByTestId("deposit-modal-amount")).toContainText("100.00", {
     timeout: 30_000,
   });
-  await page.getByTestId("deposit-modal-play").click();
+  await page.getByTestId("deposit-modal-ok").click();
   await expect(page.getByTestId("deposit-modal")).toHaveCount(0);
 
   // 3. Buy a position on 3 tiles.
@@ -156,15 +164,14 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   // The ceiling is Principal less anything already queued.
   const shownWithdrawable = parseAfterLabel(
     await page.getByTestId("withdrawable-now").innerText(),
-    "Withdrawable",
+    "Available to withdraw:",
   );
   expect(shownWithdrawable).toBeGreaterThan(0);
 
   // 6. Withdraw that much. Today's deposit never held a Ticket, so the form
   // says it pays now, the USDC lands in the wallet and there is no pending row.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
-  await expect(page.getByTestId("withdraw-pays-now")).toContainText("pays now");
-  await expect(page.getByTestId("withdraw-pays-later")).toHaveCount(0);
+  await expect(page.getByTestId("withdraw-expected")).toContainText("Now");
   const withdrawSubmit = page.getByTestId("withdraw-submit");
   await expect(withdrawSubmit).toBeEnabled();
   await withdrawSubmit.click();

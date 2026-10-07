@@ -41,6 +41,7 @@ import {
   depositOpen,
   formatAtomic,
   formatAtomic2,
+  formatMoney2,
   haircutValue,
   parseAtomic,
   pendingTickets,
@@ -74,16 +75,22 @@ const ONE = 10n ** BigInt(DECIMALS);
 const INPUT_DECIMALS = 2;
 /** The Figma quick pills: each adds this many whole USDC. */
 const QUICK_ADDS = [50n, 100n, 500n] as const;
+/** Withdraw's pills: this percent of what can be withdrawn. */
+const QUICK_PERCENTS = [25n, 50n, 75n] as const;
 
 /** ADR 0020: a deposit earns no Ticket until the next epoch. */
 const TICKETS_TIP = ["Tickets from this deposit join the draw from tomorrow."];
+
+const RECEIVE_TIP = [
+  "A deposit from today never held a Ticket, so it comes back at once. The rest stays in today's draw, keeps earning yield, and pays after the day ends.",
+];
 
 const YIELD_TIP = [
   "Base yield is paid into your deposit once a day, so it compounds. The estimate is a year at today's rate.",
 ];
 
 /** `base_rate_bps` APR compounded daily, as a percentage: 488 bps is about 5%. */
-const apyFromBaseRateBps = (baseRateBps: number): number =>
+export const apyFromBaseRateBps = (baseRateBps: number): number =>
   ((1 + baseRateBps / 10_000 / 365) ** 365 - 1) * 100;
 
 /** A year of compounded Base yield on `amount` at `apy` percent, in atomic
@@ -104,6 +111,20 @@ const explorerUrl = (signature: string): string =>
   `https://explorer.solana.com/tx/${signature}${CLUSTER === "devnet" ? "?cluster=devnet" : ""}`;
 
 const CHECKING_NOTE = "Checking your transaction…";
+
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+/** Unix seconds as the Figma's local "6 OCT, 12:00AM (GMT+8)"; `gap` goes
+ *  between the time and AM/PM (the modal has one, the widget does not). */
+export function receiveTime(unixSeconds: number, gap = ""): string {
+  const at = new Date(unixSeconds * 1000);
+  const hours = at.getHours();
+  const clock = `${hours % 12 || 12}:${String(at.getMinutes()).padStart(2, "0")}${gap}${hours < 12 ? "AM" : "PM"}`;
+  const offset = -at.getTimezoneOffset();
+  const abs = Math.abs(offset);
+  const zone = `GMT${offset < 0 ? "-" : "+"}${Math.floor(abs / 60)}${abs % 60 ? `:${String(abs % 60).padStart(2, "0")}` : ""}`;
+  return `${at.getDate()} ${MONTHS[at.getMonth()]}, ${clock} (${zone})`;
+}
 
 /** Local HH:MM of a unix-seconds time; the preview and the pending row say "about". */
 const clockTime = (unixSeconds: number): string =>
@@ -146,8 +167,6 @@ export interface VaultScreenProps {
   initialMode?: Mode | undefined;
   onConnect: () => void;
   onDone: () => void;
-  /** "Play HEXO" on the deposit-confirmed modal: App switches to the MINE tab. */
-  onPlay: () => void;
 }
 
 export function Vault(props: VaultScreenProps) {
@@ -167,7 +186,6 @@ export function Vault(props: VaultScreenProps) {
     initialMode,
     onConnect,
     onDone,
-    onPlay,
   } = props;
   // Two decimals everywhere, including what the pills write into the input
   // (see INPUT_DECIMALS).
@@ -314,9 +332,23 @@ export function Vault(props: VaultScreenProps) {
         ? { payNow: amount, queued: 0n }
         : splitWithdraw(amount, pendingNow)
       : null;
-  // The queue pays when the epoch ends, as long as that is still ahead.
+  // The queue pays when the epoch ends, as long as that is still ahead; the
+  // same moment a deposit's Tickets start counting.
   const epochEnd = currentEpoch ? Number(currentEpoch.endsAt) : 0;
-  const payTime = epochEnd * 1000 > Date.now() ? clockTime(epochEnd) : null;
+  const epochAhead = epochEnd * 1000 > Date.now();
+  const expectedAt =
+    shutdown || (split !== null && split.queued === 0n)
+      ? "Now"
+      : epochAhead
+        ? receiveTime(epochEnd).replace(" (", "\n(")
+        : "After today's draw";
+  // Tickets once this request and anything already queued have paid. The
+  // refunded part never held one, so only the queued part comes off.
+  const ticketsAfter = (() => {
+    const tickets = playerExtras.data ? BigInt(playerExtras.data.weight) : 0n;
+    const leaving = pendingWithdraw + (split?.queued ?? 0n);
+    return tickets > leaving ? tickets - leaving : 0n;
+  })();
   const queuedMaturesAt = playerExtras.data?.pendingMaturesAt;
   const yieldEarned = unsettledYieldLine(playerExtras.data?.unsettledYield, DECIMALS);
 
@@ -480,23 +512,35 @@ export function Vault(props: VaultScreenProps) {
                   ? walletBalance === null
                     ? "Balance unavailable"
                     : `Available ${fmt2(walletBalance)} ${SYMBOL}`
-                  : shutdown
-                    ? `Withdrawable ${fmt2(principal)} ${SYMBOL}`
-                    : `Withdrawable ${fmt2(cap ?? 0n)} ${SYMBOL}`}
+                  : `Available to withdraw: ${fmt2(shutdown ? principal : (cap ?? 0n))} ${SYMBOL}`}
               </span>
             </label>
 
             <div className="vault-quick">
-              {QUICK_ADDS.map((units) => (
-                <button
-                  key={units.toString()}
-                  type="button"
-                  className="vault-pill"
-                  onClick={() => addQuick(units)}
-                >
-                  +${units.toString()}
-                </button>
-              ))}
+              {mode === "deposit"
+                ? QUICK_ADDS.map((units) => (
+                    <button
+                      key={units.toString()}
+                      type="button"
+                      className="vault-pill"
+                      onClick={() => addQuick(units)}
+                    >
+                      +${units.toString()}
+                    </button>
+                  ))
+                : QUICK_PERCENTS.map((percent) => (
+                    <button
+                      key={percent.toString()}
+                      type="button"
+                      className="vault-pill"
+                      disabled={cap === null}
+                      onClick={() => {
+                        if (cap !== null) setAmountText(fmt2((cap * percent) / 100n));
+                      }}
+                    >
+                      {percent.toString()}%
+                    </button>
+                  ))}
               <button
                 type="button"
                 className="vault-pill"
@@ -509,7 +553,7 @@ export function Vault(props: VaultScreenProps) {
               </button>
             </div>
 
-            <dl className="vault-rows">
+            <dl className={`vault-rows vault-rows-${mode}`}>
               {mode === "deposit" ? (
                 <>
                   <div className="vault-line" data-testid="vault-tickets">
@@ -533,24 +577,24 @@ export function Vault(props: VaultScreenProps) {
                 </>
               ) : (
                 <>
-                  {split && split.payNow > 0n ? (
-                    <div className="vault-line" data-testid="withdraw-pays-now">
-                      <dt>
-                        {fmt2(split.payNow)} {SYMBOL} pays now
-                      </dt>
-                    </div>
-                  ) : null}
-                  {split && split.queued > 0n ? (
-                    <div className="vault-line" data-testid="withdraw-pays-later">
-                      <dt>
-                        {fmt2(split.queued)} {SYMBOL} pays after today&apos;s draw
-                        {payTime ? `, about ${payTime}` : ""}
-                      </dt>
-                    </div>
-                  ) : null}
+                  <div className="vault-line" data-testid="withdraw-receive">
+                    <dt>You will receive</dt>
+                    <dd>${fmt2(haircutValue(amount ?? 0n, haircutFactor))}</dd>
+                  </div>
+                  <div className="vault-line" data-testid="withdraw-tickets-after">
+                    <dt>Ticket after</dt>
+                    <dd>{fmt2(ticketsAfter)}</dd>
+                  </div>
+                  <div className="vault-line" data-testid="withdraw-expected">
+                    <dt className="vault-line-label">
+                      Expected to receive at
+                      <InfoTip id="receive-tip" paragraphs={RECEIVE_TIP} />
+                    </dt>
+                    <dd className="vault-line-when">{expectedAt}</dd>
+                  </div>
                 </>
               )}
-              {yieldEarned === null ? null : (
+              {mode === "withdraw" || yieldEarned === null ? null : (
                 <div className="vault-line" data-testid="unsettled-yield">
                   <dt>Yield</dt>
                   <dd>${yieldEarned}</dd>
@@ -632,11 +676,9 @@ export function Vault(props: VaultScreenProps) {
                   Deposits reopen when the pool recovers from its venue loss.
                 </span>
               ) : null}
-              {mode === "withdraw" ? (
+              {mode === "withdraw" && shutdown ? (
                 <span className="vault-note" data-testid="withdraw-lock-note">
-                  {shutdown
-                    ? "The pool is closed, so the whole payout lands in this same transaction."
-                    : "A deposit from today never held a Ticket, so it comes back at once. The rest stays in today's draw, keeps earning yield, and pays after the day ends."}
+                  The pool is closed, so the whole payout lands in this same transaction.
                 </span>
               ) : null}
               {mode === "withdraw" && haircutFactor !== null && haircutFactor < 1 ? (
@@ -689,9 +731,9 @@ export function Vault(props: VaultScreenProps) {
       {confirmed !== null ? (
         <DepositConfirmed
           amount={`$${fmt2(confirmed)} ${SYMBOL}`}
-          tickets={fmt2(confirmed)}
+          tickets={formatMoney2(confirmed, DECIMALS).replace(/\.00$/, "")}
+          availableAt={epochAhead ? receiveTime(epochEnd, " ") : null}
           onClose={() => setConfirmed(null)}
-          onPlay={onPlay}
         />
       ) : null}
     </div>
@@ -700,14 +742,15 @@ export function Vault(props: VaultScreenProps) {
 
 interface DepositConfirmedProps {
   amount: string;
-  /** What the deposit adds from tomorrow's draw. */
+  /** What the deposit adds from the next epoch. */
   tickets: string;
+  /** When the next epoch starts; null when the clock is unknown or past. */
+  availableAt: string | null;
   onClose: () => void;
-  onPlay: () => void;
 }
 
 /** The Figma "deposit confirmed" popup: backdrop, ×, and Escape dismiss. */
-function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmedProps) {
+function DepositConfirmed({ amount, tickets, availableAt, onClose }: DepositConfirmedProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -755,15 +798,22 @@ function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmed
           {amount}
         </p>
         <p className="deposit-modal-sub">
-          <strong>+{tickets} Tickets</strong> from tomorrow&apos;s draw
+          <strong>{tickets} Tickets</strong> available{" "}
+          {availableAt ? (
+            <>
+              on <strong>{availableAt}</strong>
+            </>
+          ) : (
+            "from the next draw"
+          )}
         </p>
         <button
           type="button"
-          className="vault-cta deposit-modal-play"
-          data-testid="deposit-modal-play"
-          onClick={onPlay}
+          className="vault-cta deposit-modal-ok"
+          data-testid="deposit-modal-ok"
+          onClick={onClose}
         >
-          Play HEXO
+          Got it!
         </button>
       </section>
     </div>

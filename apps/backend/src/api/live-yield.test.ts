@@ -10,6 +10,8 @@ import {
   freeIdle,
   haircutFactor,
   pendingTickets,
+  positionBasis,
+  positionYield,
   solvencyMargin,
   supplyRateBps,
   trailingRate,
@@ -58,6 +60,59 @@ describe("unsettledYield", () => {
   it("is zero while the index has not moved, and never negative", () => {
     expect(unsettledYield(1_000_000n, INDEX_SCALE, INDEX_SCALE)).toBe(0n);
     expect(unsettledYield(1_000_000n, INDEX_SCALE, 2n * INDEX_SCALE)).toBe(0n);
+  });
+});
+
+describe("positionBasis and positionYield", () => {
+  const deposit = (amount: string) => ({ name: "Deposited", data: { amount } });
+  const request = (amount: string, refunded = "0") => ({
+    name: "WithdrawRequested",
+    data: { amount, refunded },
+  });
+  const paid = (amount: string, principal: string) => ({
+    name: "Withdrawn",
+    data: { amount, principal },
+  });
+
+  it("counts deposits and compounded prizes, not house prizes or other events", () => {
+    const basis = positionBasis([
+      deposit("100"),
+      { name: "JackpotPaid", data: { amount: "20", compounded: true } },
+      { name: "JackpotPaid", data: { amount: "99", compounded: false } },
+      { name: "PositionBought", data: { total: "5" } },
+    ]);
+    expect(basis).toBe(120n);
+    // Principal 130 after 10 of settled yield, plus 2 unsettled.
+    expect(positionYield(130n, 2n, basis)).toBe(12n);
+  });
+
+  it("takes a partial withdrawal from the basis, keeping the yield shown", () => {
+    // 100 in, grew to 110, 55 queued then paid: 55 left, 10 of it yield.
+    const basis = positionBasis([deposit("100"), request("55"), paid("55", "55")]);
+    expect(basis).toBe(45n);
+    expect(positionYield(55n, 0n, basis)).toBe(10n);
+  });
+
+  it("drops the refunded part at once and a cancelled queue removes nothing", () => {
+    expect(positionBasis([deposit("100"), request("30", "30")])).toBe(70n);
+    expect(
+      positionBasis([deposit("100"), request("40"), { name: "WithdrawCancelled", data: {} }, paid("0", "100")]),
+    ).toBe(100n);
+  });
+
+  it("removes queued Principal, not the paid figure, under a haircut", () => {
+    expect(positionBasis([deposit("100"), request("50"), paid("45", "60")])).toBe(50n);
+  });
+
+  it("starts from zero once Principal empties", () => {
+    const events = [deposit("100"), request("110"), paid("110", "0"), deposit("40")];
+    expect(positionBasis(events)).toBe(40n);
+    expect(positionBasis([deposit("100"), { name: "EmergencyWithdrawn", data: {} }])).toBe(0n);
+  });
+
+  it("never reads below zero", () => {
+    expect(positionBasis([deposit("100"), request("105"), paid("105", "5")])).toBe(0n);
+    expect(positionYield(5n, 0n, 10n)).toBe(0n);
   });
 });
 

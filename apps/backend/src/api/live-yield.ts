@@ -19,6 +19,62 @@ export function unsettledYield(principal: bigint, poolIndex: bigint, playerIndex
   return (principal * (poolIndex - playerIndex)) / INDEX_SCALE;
 }
 
+/** An indexed event as `decode.ts` stores it: atomic amounts are strings. */
+export interface OwnerEvent {
+  name: string;
+  data: Record<string, unknown>;
+}
+
+/**
+ * What the Player put into the open position: deposits and compounded prizes,
+ * less Principal taken out, from zero again once Principal empties. The chain
+ * emits no event for settled yield, so `principal + unsettled - basis` is the
+ * yield the position has earned. Oldest event first.
+ *
+ * A withdrawal takes from the basis first, so partial exits keep the yield
+ * shown; floored at 0, so earnings never read above Principal. Removal is
+ * the queued Principal (`amount - refunded` per request), not `Withdrawn.amount`,
+ * which is the paid figure and falls under it while the pool is impaired.
+ */
+export function positionBasis(events: readonly OwnerEvent[]): bigint {
+  let basis = 0n;
+  let queued = 0n;
+  for (const { name, data } of events) {
+    const atomic = (key: string) => BigInt(String(data[key] ?? "0"));
+    switch (name) {
+      case "Deposited":
+        basis += atomic("amount");
+        break;
+      case "WithdrawRequested":
+        basis -= atomic("refunded");
+        queued += atomic("amount") - atomic("refunded");
+        break;
+      case "WithdrawCancelled":
+        queued = 0n;
+        break;
+      case "Withdrawn":
+        basis = atomic("principal") === 0n ? 0n : basis - queued;
+        queued = 0n;
+        break;
+      case "EmergencyWithdrawn":
+        basis = 0n;
+        queued = 0n;
+        break;
+      case "JackpotPaid":
+        if (data.compounded === true) basis += atomic("amount");
+        break;
+    }
+    if (basis < 0n) basis = 0n;
+  }
+  return basis;
+}
+
+/** Yield the open position has earned: settled into Principal or not yet. */
+export function positionYield(principal: bigint, unsettled: bigint, basis: bigint): bigint {
+  const earned = principal + unsettled - basis;
+  return earned > 0n ? earned : 0n;
+}
+
 /**
  * The Tickets the draw counts for a Player in the current epoch. Same rule as
  * the program's `touch`: a Player last touched in an earlier epoch holds their
