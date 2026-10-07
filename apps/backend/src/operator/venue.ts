@@ -175,6 +175,22 @@ export function drainAmount(
 ): bigint | null {
   if (proposal === null || now < venueUnlocksAt(proposal)) return null;
   if (pool.venueValue <= pool.minVenueMove) return null;
+  return liquidStep(pool, available);
+}
+
+/**
+ * After Shutdown, the whole position, sized like a drain step, or null when
+ * the venue is empty. The program lifts the band and `min_venue_move` for a
+ * recall then, and `emergency_withdraw` pays only from the vault. The recall's
+ * sync books the gain since the last one, which stays behind; the next tick
+ * recalls that too.
+ */
+export function shutdownRecallAmount(pool: PoolState, available: bigint | null): bigint | null {
+  if (!pool.shutdown || pool.venueValue <= 0n) return null;
+  return liquidStep(pool, available);
+}
+
+function liquidStep(pool: PoolState, available: bigint | null): bigint | null {
   const amount =
     available !== null && available <= pool.venueValue ? available - 1n : pool.venueValue;
   return amount > 0n ? amount : null;
@@ -213,7 +229,7 @@ export function nextHarvestAt(
  *
  * Deploy waits out a deploy pause and an impaired venue, and nothing deploys
  * after Shutdown. Recall and harvest stay available then (harvest is refused
- * only while impaired).
+ * only while impaired), and after Shutdown the recall takes the whole position.
  */
 export function decideVenue(input: {
   readonly pool: PoolState;
@@ -223,7 +239,8 @@ export function decideVenue(input: {
   readonly state: VenueState;
   /** The open venue proposal, null when none. */
   readonly proposal: VenueProposalState | null;
-  /** The venue's free liquidity, null when unknown. Only drains read it. */
+  /** The venue's free liquidity, null when unknown. Only drains and the
+   *  shutdown recall read it. */
   readonly venueAvailable: bigint | null;
 }): VenueCrank | null {
   const { pool, vaultBalance, now, currentEpoch, state, proposal, venueAvailable } = input;
@@ -231,6 +248,12 @@ export function decideVenue(input: {
 
   if (venueReady(state, "harvest", now) && harvestDue(pool, currentEpoch, now, state)) {
     return { kind: "harvest" };
+  }
+
+  // Shut down: bring everything home. Nothing deploys, and a drain is moot.
+  if (pool.shutdown) {
+    const amount = shutdownRecallAmount(pool, venueAvailable);
+    return amount !== null && venueReady(state, "recall", now) ? { kind: "recall", amount } : null;
   }
 
   const free = freeIdle(pool, vaultBalance);

@@ -111,7 +111,13 @@ export function todoDrafts(input: TodoInput): TodoDraft[] {
           drafts.push(
             crank.kind === "deploy"
               ? { code: "DEPLOY_DUE", message: "Idle USDC is above the target band. Deploy it to the venue.", amount: crank.amount }
-              : { code: "RECALL_DUE", message: "Free idle is under the floor. Recall USDC from the venue.", amount: crank.amount },
+              : {
+                  code: "RECALL_DUE",
+                  message: pool.shutdown
+                    ? "The pool is shut down. Recall the venue position."
+                    : "Free idle is under the floor. Recall USDC from the venue.",
+                  amount: crank.amount,
+                },
           );
           state = venueFailed(state, crank.kind, now);
         }

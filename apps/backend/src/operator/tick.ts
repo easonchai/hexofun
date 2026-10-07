@@ -25,6 +25,7 @@ import {
   EMPTY_VENUE_STATE,
   hasVenue,
   nextHarvestAt,
+  shutdownRecallAmount,
   venueFailed,
   venueSucceeded,
   VENUE_EXPECTED_ERRORS,
@@ -752,8 +753,11 @@ async function decide(ctx: TickContext): Promise<Decision> {
   }
 
   if (hasVenue(pool)) {
-    // The liquidity read is a round trip, so it waits until a drain is due.
-    const drainDue = drainAmount(pool, ctx.venueProposal, null, now) !== null;
+    // The liquidity read is a round trip, so it waits until a drain or the
+    // shutdown recall is due.
+    const drainDue =
+      drainAmount(pool, ctx.venueProposal, null, now) !== null ||
+      shutdownRecallAmount(pool, null) !== null;
     const crank = decideVenue({
       pool,
       vaultBalance: await ctx.principalVaultBalance(),

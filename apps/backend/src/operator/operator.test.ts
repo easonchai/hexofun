@@ -1901,6 +1901,38 @@ describe("venue cranks (ticket 13)", () => {
     expect(sent[0]?.map(label)).toEqual(["recall"]);
   });
 
+  it("recalls the whole position after shutdown, band or not (fork-run-fixes 11)", async () => {
+    // Free idle 2,000 against a target of 300: no recall before shutdown.
+    const pool = venuePool({ shutdown: true, venueValue: 1_000n * U });
+    const { ctx, sent } = venueTick(2_000n * U, { pool });
+    expect((await runTick(ctx)).action).toBe("recall");
+    expect(amountSent(sent)).toBe((1_000n * U).toString());
+
+    // Under min_venue_move too: what the sync booked last time still comes home.
+    const dust = venueTick(2_000n * U, { pool: venuePool({ shutdown: true, venueValue: 3n }) });
+    await runTick(dust.ctx);
+    expect(amountSent(dust.sent)).toBe("3");
+
+    const empty = venueTick(2_000n * U, { pool: venuePool({ shutdown: true, venueValue: 0n }) });
+    expect((await runTick(empty.ctx)).action).toBeNull();
+  });
+
+  it("sizes the shutdown recall by the venue's free liquidity, and recalls rather than drains", async () => {
+    let reads = 0;
+    const { ctx, sent } = venueTick(2_000n * U, {
+      pool: venuePool({ shutdown: true, venueValue: 1_000n * U }),
+      venueProposal: elapsed,
+      venueAvailable: async () => {
+        reads += 1;
+        return 400n * U;
+      },
+    });
+    await runTick(ctx);
+    expect(reads).toBe(1);
+    expect(sent[0]?.map(label)).toEqual(["recall"]);
+    expect(amountSent(sent)).toBe((400n * U - 1n).toString());
+  });
+
   it("does nothing on a pool whose klend addresses are not pinned yet", async () => {
     const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ klendProgram: PublicKey.default }) });
     expect((await runTick(ctx)).action).toBeNull();
