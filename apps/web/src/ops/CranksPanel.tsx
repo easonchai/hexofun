@@ -12,6 +12,7 @@ import { pct, UNAVAILABLE, usdc } from "./format.js";
 import {
   coverDeficit,
   deployToVenue,
+  drainVenue,
   harvest,
   loadEpochSeed,
   loadPool,
@@ -26,6 +27,7 @@ import {
 import { useSendTx } from "./tx.js";
 import { Panel, Row } from "./ui.js";
 import { useOps } from "./useOps.js";
+import { drainAccess } from "./venueProposal.js";
 
 type Build = (program: HexVaultProgram, pool: VenuePool, caller: PublicKey) => Promise<TransactionInstruction[]>;
 
@@ -64,6 +66,7 @@ export function CranksPanel() {
   const off = !tx.ready || tx.pending;
   const stuckRound = s?.stuck?.round ?? null;
   const stuckEpoch = s?.stuck?.epoch ?? null;
+  const drain = s ? drainAccess(s, tx.publicKey?.toBase58() ?? null) : null;
   const hasDeficit = s !== null && BigInt(s.deficit) > 0n;
   const band = s?.venueParams
     ? `floor ${pct(s.venueParams.idleFloorBps)}, target ${pct(s.venueParams.idleTargetBps)}`
@@ -104,6 +107,18 @@ export function CranksPanel() {
         >
           Recall
         </button>
+        <button
+          type="button"
+          data-testid="crank-drain"
+          disabled={off || parsed === null || drain?.allowed !== true}
+          onClick={() =>
+            parsed !== null &&
+            tx.publicKey &&
+            void run(async (p, pool, caller) => [await drainVenue(p, pool, caller, parsed)])
+          }
+        >
+          Drain venue
+        </button>
         {hasDeficit && (
           <button
             type="button"
@@ -118,6 +133,11 @@ export function CranksPanel() {
         )}
       </div>
 
+      {drain && !drain.allowed && (
+        <p className="ops-sync" data-testid="crank-drain-why">
+          Drain venue is off. {drain.reason}
+        </p>
+      )}
       <div className="ops-actions">
         <button
           type="button"

@@ -159,6 +159,25 @@ export const deployToVenue = (program: HexVaultProgram, pool: VenuePool, amount:
 export const recall = (program: HexVaultProgram, pool: VenuePool, amount: bigint) =>
   build(program, "recall", principalAccounts(pool), [bn(amount)], venueRemaining(pool));
 
+/**
+ * `drain_venue` (venue-switch ticket 04): brings `amount` home from the venue
+ * to the principal vault. The connected wallet signs; the program lets the
+ * Admin and the Operator in always and anyone while a proposal is open.
+ */
+export const drainVenue = (
+  program: HexVaultProgram,
+  pool: VenuePool,
+  signer: PublicKey,
+  amount: bigint,
+) =>
+  build(
+    program,
+    "drainVenue",
+    { signer, ...principalAccounts(pool), venueProposal: venueProposalAddress(pool.address) },
+    [bn(amount)],
+    venueRemaining(pool),
+  );
+
 export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
   build(
     program,

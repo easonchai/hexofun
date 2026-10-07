@@ -370,6 +370,8 @@ export interface OpsSummaryDto extends StatusDto {
   /** Chain unix seconds of the last Sync; "0" before the pool is indexed. */
   lastSyncAt: string;
   admin: string | null;
+  /** The Operator key, which may drain the venue at any time. */
+  operatorKey: string | null;
   venueParams: {
     yieldFeeBps: number;
     idleFloorBps: number;

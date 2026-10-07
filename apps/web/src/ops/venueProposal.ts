@@ -45,3 +45,30 @@ export function proposalView(
     unlocksAt: new Date(Number(proposal.unlocksAt) * 1000).toISOString(),
   };
 }
+
+export type DrainAccess = { allowed: true } | { allowed: false; reason: string };
+
+/**
+ * Whether the connected wallet may call `drain_venue`, as the program will
+ * judge it: the Admin and the Operator always, anyone while a proposal is
+ * open. The reason is shown beside the disabled button. An older backend with
+ * no proposal or operator field gives "unknown", never an allowance.
+ */
+export function drainAccess(
+  summary: Pick<OpsSummaryDto, "venueProposal" | "admin" | "operatorKey">,
+  wallet: string | null,
+): DrainAccess {
+  if (wallet === null) return { allowed: false, reason: "Connect a wallet to drain." };
+  if (summary.venueProposal === undefined) {
+    return { allowed: false, reason: "Cannot tell whether a venue proposal is open." };
+  }
+  if (summary.venueProposal !== null) return { allowed: true };
+  if (summary.admin == null || summary.operatorKey == null) {
+    return { allowed: false, reason: "Cannot tell who the Admin and Operator are." };
+  }
+  if (wallet === summary.admin || wallet === summary.operatorKey) return { allowed: true };
+  return {
+    allowed: false,
+    reason: "With no venue proposal open, only the Admin or the Operator may drain.",
+  };
+}

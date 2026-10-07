@@ -17,6 +17,7 @@ import { idl } from "../idl.js";
 import {
   coverDeficit,
   deployToVenue,
+  drainVenue,
   harvest,
   parseUsdcAmount,
   processWithdraw,
@@ -112,6 +113,22 @@ describe("venue crank account lists", () => {
     expect(keysOf(await deployToVenue(program, pool, 5n))).toContain(
       venueProposalAddress(pool.address).toBase58(),
     );
+  });
+
+  it("drain_venue is signed by the wallet and names the proposal PDA, the pins and the klend extras", async () => {
+    const ix = await drainVenue(program, pool, caller, 5n);
+    expect(ix.keys).toHaveLength(idlAccounts("drain_venue") + KLEND_EXTRAS);
+    expect(ix.keys[0]!.pubkey.equals(caller)).toBe(true);
+    expect(ix.keys[0]!.isSigner).toBe(true);
+    expect(keysOf(ix)).toEqual(
+      expect.arrayContaining([
+        venueProposalAddress(pool.address).toBase58(),
+        principalVaultAddress(pool.address).toBase58(),
+        pool.klendReserve.toBase58(),
+      ]),
+    );
+    const stub = await drainVenue(program, { ...pool, venueKind: VENUE_KIND.stub }, caller, 5n);
+    expect(stub.keys).toHaveLength(idlAccounts("drain_venue"));
   });
 
   it("cover_deficit pays from the wallet's USDC account", async () => {
