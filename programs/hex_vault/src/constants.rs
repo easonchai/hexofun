@@ -1,3 +1,5 @@
+use anchor_lang::prelude::*;
+
 /// Hex tiles on a round's board, indexed 0..35.
 pub const TILE_COUNT: u8 = 36;
 pub const TILE_MASK: u64 = (1u64 << TILE_COUNT) - 1;
@@ -94,6 +96,18 @@ pub const SEED_VENUE_PROPOSAL: &[u8] = b"venue_proposal";
 /// it (venue-switch ticket 05 reads this). A constant, not a parameter: the
 /// only way to shorten the depositors' window is a visible program upgrade.
 pub const VENUE_LOCK_SECONDS: i64 = 48 * 60 * 60;
+
+/// The only klend program a klend-kind pool or proposal may pin (mainnet-readiness
+/// ticket 04, ADR 0023). `klend::deposit` CPIs into the pinned program with the
+/// pool PDA signing, so an admin key that could pin any program could name one it
+/// wrote and skip the 48 hour lock. Same id on every build, as for kVault: the
+/// fork rehearsals run klend's mainnet program. No devnet klend is used.
+pub const KLEND_PROGRAM_ID: Pubkey = pubkey!("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+
+/// `epoch_seconds` may not pass 7 days. `process_withdraw` reads it for the
+/// time route, so an unbounded value would close that route and trap
+/// depositors during the venue lock.
+pub const MAX_EPOCH_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 /// `ImpairedCleared::cause`: what took the deficit to zero.
 pub mod impaired_cause {

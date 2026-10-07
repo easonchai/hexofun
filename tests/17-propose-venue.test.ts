@@ -23,8 +23,11 @@ const TIMEOUT = 60_000;
 const USDC = 1_000_000n;
 const LOCK_SECONDS = 48 * 60 * 60;
 
+// A klend-kind proposal must pin the real klend program (ticket 04).
+const KLEND_PROGRAM = new PublicKey("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+
 const target = () => ({
-  klendProgram: Keypair.generate().publicKey,
+  klendProgram: KLEND_PROGRAM,
   klendMarket: Keypair.generate().publicKey,
   klendReserve: Keypair.generate().publicKey,
   klendCtoken: Keypair.generate().publicKey,
@@ -148,6 +151,47 @@ describe("propose_venue and cancel_venue", () => {
         propose(ctx, { ...target(), klendReserve: PublicKey.default }),
       ).rejects.toThrow(/InvalidParameter/);
       expect(await exists(ctx)).toBe(false);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "refuses a klend proposal that pins a foreign program, leaving nothing behind",
+    async () => {
+      const ctx = await setupPool();
+      const foreign = { ...target(), klendProgram: Keypair.generate().publicKey };
+      await expect(propose(ctx, foreign, VENUE_KIND.klend)).rejects.toThrow(
+        /KlendProgramMismatch/,
+      );
+      expect(await exists(ctx)).toBe(false);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "refuses an epoch_seconds above seven days in set_params",
+    async () => {
+      const ctx = await setupPool();
+      await expect(
+        program.methods
+          .setParams({
+            epochSeconds: new BN(7 * 86_400 + 1),
+            epochAnchor: null,
+            roundSeconds: null,
+            closeBuffer: null,
+            vrfTimeout: null,
+            minDeposit: null,
+            houseCutBps: null,
+            minJackpot: null,
+            payoutTimeout: null,
+            baseRateBps: null,
+            ticketsPerUsdc: null,
+            bonusCapBps: null,
+          })
+          .accountsPartial({ admin: ctx.admin.publicKey, pool: ctx.pool })
+          .signers([ctx.admin])
+          .rpc(),
+      ).rejects.toThrow(/InvalidParameter/);
     },
     TIMEOUT,
   );

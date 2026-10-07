@@ -51,6 +51,9 @@ pub fn propose_venue<'info>(
         HexVaultError::InvalidParameter
     );
 
+    // Else a stolen Admin key could pin a program it wrote and skip the lock.
+    venue::check_klend_program(args.venue_kind, &args.klend_program)?;
+
     if args.venue_kind == venue_kind::KVAULT {
         let r = ctx.remaining_accounts;
         require!(r.len() >= 4, HexVaultError::VaultAccountMismatch);

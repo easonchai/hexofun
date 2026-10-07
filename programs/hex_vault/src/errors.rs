@@ -266,4 +266,8 @@ pub enum HexVaultError {
     // mainnet-readiness-fixes ticket 07. Appended too.
     #[msg("this player already received a grant in the current epoch")]
     AlreadyGranted,
+
+    // mainnet-readiness-fixes tickets 04 and 06. Appended too.
+    #[msg("a klend venue must pin the klend program")]
+    KlendProgramMismatch,
 }

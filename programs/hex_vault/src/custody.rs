@@ -13,7 +13,7 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, Tran
 
 use crate::constants::{
     impaired_cause, venue_kind, MAX_IDLE_TARGET_BPS, MAX_LOSS_TOLERANCE_BPS, MAX_MIN_VENUE_MOVE,
-    MAX_RESERVE_LIQUIDITY_FLOOR_BPS, MAX_RESERVE_SHARE_CAP_BPS, MAX_YIELD_FEE_BPS,
+    MAX_EPOCH_SECONDS, MAX_RESERVE_LIQUIDITY_FLOOR_BPS, MAX_RESERVE_SHARE_CAP_BPS, MAX_YIELD_FEE_BPS,
     MIN_RESERVE_LIQUIDITY_FLOOR_BPS,
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
     DEFAULT_MIN_VENUE_MOVE, DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS, DEFAULT_RESERVE_SHARE_CAP_BPS,
@@ -105,7 +105,7 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         HexVaultError::InvalidParameter
     );
     require!(
-        params.epoch_seconds > 0
+        valid_epoch_seconds(params.epoch_seconds)
             && params.epoch_anchor > 0
             && params.round_seconds > 0
             && params.vrf_timeout >= MIN_VRF_TIMEOUT,
@@ -162,6 +162,7 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
             && klend_ctoken != Pubkey::default(),
         HexVaultError::InvalidParameter
     );
+    venue::check_klend_program(params.venue_kind, &klend_program)?;
     // Every deploy sends cTokens here and every redeem draws them back, so
     // an account the pool PDA does not own strands the lot. The mint is
     // still checked against the reserve at the first sync.
@@ -312,7 +313,7 @@ pub fn set_params(ctx: Context<SetParams>, params: SetParamsArgs) -> Result<()> 
     let pool = &mut ctx.accounts.pool;
 
     if let Some(v) = params.epoch_seconds {
-        require!(v > 0, HexVaultError::InvalidParameter);
+        require!(valid_epoch_seconds(v), HexVaultError::InvalidParameter);
         pool.epoch_seconds = v;
     }
     if let Some(v) = params.epoch_anchor {
@@ -773,6 +774,31 @@ pub fn request_withdraw<'info>(
     Ok(())
 }
 
+/// `create_pool` and `set_params` take an `epoch_seconds` in (0, 7 days].
+fn valid_epoch_seconds(v: i64) -> bool {
+    v > 0 && v <= MAX_EPOCH_SECONDS
+}
+
+/// Either the epoch the request was made in has been left behind, or a whole
+/// epoch's worth of seconds has passed since the request. The second can never
+/// come first while the operator is alive, because the epoch the request
+/// landed in ends within `epoch_seconds` of it; it is the escape hatch for an
+/// operator that stopped calling `begin_epoch`, and for a paused jackpot, which
+/// freezes `current_epoch_id`. The wait is capped at `MAX_EPOCH_SECONDS`, so a
+/// huge `epoch_seconds` from before the cap cannot close the route (ticket 04).
+fn withdrawal_due(
+    current_epoch_id: u64,
+    pending_epoch: u64,
+    requested_at: i64,
+    epoch_seconds: i64,
+    now: i64,
+) -> Result<bool> {
+    let deadline = requested_at
+        .checked_add(epoch_seconds.min(MAX_EPOCH_SECONDS))
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    Ok(current_epoch_id > pending_epoch || now > deadline)
+}
+
 /// Pays a matured request. Not impaired, no signer at all: the operator pushes
 /// these every epoch, and the depositor (or anyone) can push their own if it
 /// does not. Impaired, the payout is the haircut value, so the Player's owner
@@ -794,20 +820,17 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
 
     let pending = a.player.pending_withdraw;
     require!(pending > 0, HexVaultError::NothingPending);
-    // Either the epoch the request was made in has been left behind, or a
-    // whole epoch's worth of seconds has passed since the request. The
-    // second can never come first while the operator is alive, because the
-    // epoch the request landed in ends within `epoch_seconds` of it; it is
-    // the escape hatch for an operator that stopped calling `begin_epoch`.
-    let deadline = a
-        .player
-        .requested_at
-        .checked_add(a.pool.epoch_seconds)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
     // Shutdown lets a request and its payout land in one transaction: a
     // depositor pulls their own money instead of waiting on the epoch lock.
     require!(
-        a.pool.shutdown || a.pool.current_epoch_id > a.player.pending_epoch || now > deadline,
+        a.pool.shutdown
+            || withdrawal_due(
+                a.pool.current_epoch_id,
+                a.player.pending_epoch,
+                a.player.requested_at,
+                a.pool.epoch_seconds,
+                now,
+            )?,
         HexVaultError::WithdrawalNotDue
     );
     require!(
@@ -2538,6 +2561,29 @@ pub struct GrantTickets<'info> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epoch_seconds_above_seven_days_are_refused() {
+        assert!(valid_epoch_seconds(MAX_EPOCH_SECONDS));
+        assert!(!valid_epoch_seconds(MAX_EPOCH_SECONDS + 1));
+        assert!(!valid_epoch_seconds(0));
+    }
+
+    #[test]
+    fn a_request_matures_on_the_deadline_while_the_epoch_id_is_frozen() {
+        // Jackpot paused: current_epoch_id stays at the request's epoch.
+        assert!(!withdrawal_due(5, 5, 1_000, 86_400, 1_000 + 86_400).unwrap());
+        assert!(withdrawal_due(5, 5, 1_000, 86_400, 1_000 + 86_400 + 1).unwrap());
+        // A boundary crossed matures it at once.
+        assert!(withdrawal_due(6, 5, 1_000, 86_400, 1_001).unwrap());
+    }
+
+    #[test]
+    fn a_huge_epoch_seconds_cannot_push_the_deadline_past_seven_days() {
+        let at = 1_000;
+        assert!(!withdrawal_due(5, 5, at, i64::MAX / 2, at + MAX_EPOCH_SECONDS).unwrap());
+        assert!(withdrawal_due(5, 5, at, i64::MAX / 2, at + MAX_EPOCH_SECONDS + 1).unwrap());
+    }
 
     #[test]
     fn a_purchase_landing_exactly_on_the_cap_succeeds() {
