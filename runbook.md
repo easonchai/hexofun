@@ -627,6 +627,15 @@
   propose-admin, accept-admin, set-treasury-accounts and create-invite. The venue switch also starts and cancels in
   the CLI, with propose-venue and cancel-venue. The footer of Advanced's Admin actions panel lists the same eight.
 
+  Withdrawals the crank does not pay
+
+  The operator pays a queued withdrawal on any of the program's three routes: the pool moved past the request's epoch,
+  more than `epoch_seconds` passed since the request, or the pool is shut down. So a frozen epoch (jackpot paused, a
+  stuck draw) no longer strands requests. While the pool is Impaired the program wants the owner's own signature and
+  the operator sends nothing. Those exits stay off the crank, by decision. The owner pays their own withdrawal from
+  their wallet, or Impaired clears first (Cover deficit under Advanced). docs/ops/incidents.md, "Venue loss", has the
+  playbook. Process withdraw under Routine cranks pays the rest by hand.
+
   Launch week
 
   A new pool starts with the game and the jackpot both paused; start each on chain with the admin CLI's `pause-game`,

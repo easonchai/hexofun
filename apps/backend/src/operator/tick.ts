@@ -233,11 +233,14 @@ export interface TickContext {
   principalVaultBalance(): Promise<bigint>;
   /**
    * Players from the Read model whose withdrawal request is payable now:
-   * `pendingWithdraw > 0` and `pendingEpoch < currentEpochId`. Oldest
-   * request first, so a long queue still drains in order.
+   * `pendingWithdraw > 0` and one of the program's three routes: the pool
+   * moved past `pendingEpoch`, `now` is past `requestedAt + epochSeconds`, or
+   * the pool is shut down. Oldest request first, so a long queue still drains
+   * in order.
    */
   duePendingWithdrawals(
     currentEpochId: bigint,
+    deadline: { now: bigint; epochSeconds: bigint; shutdown: boolean },
   ): Promise<{ owner: string; amount: bigint }[]>;
   /**
    * Every qualifying referrer's daily bonus for `epochId` not yet sent
@@ -808,7 +811,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // owner's own signature and the crank sends nothing until the pool recovers.
   const due = pool.impaired
     ? []
-    : (await ctx.duePendingWithdrawals(pool.currentEpochId)).filter(
+    : (
+        await ctx.duePendingWithdrawals(pool.currentEpochId, {
+          now: ctx.now,
+          epochSeconds: pool.epochSeconds,
+          shutdown: pool.shutdown,
+        })
+      ).filter(
         (entry) => !withdrawStateIn.skipped.has(entry.owner),
       );
   let withdrawShortfall = 0n;

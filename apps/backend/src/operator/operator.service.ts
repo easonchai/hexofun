@@ -370,8 +370,8 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       launchAt: this.launchAt,
       fulfilled: (seed) => this.fulfilled(seed),
       principalVaultBalance: () => this.principalVaultBalance(),
-      duePendingWithdrawals: (currentEpochId) =>
-        this.duePendingWithdrawals(currentEpochId),
+      duePendingWithdrawals: (currentEpochId, deadline) =>
+        this.duePendingWithdrawals(currentEpochId, deadline),
       referralGrantsDue: (epochId) => this.indexer.referralGrantsDue(epochId),
       markReferralGrantsSent: (epochId, referrers, txSig) =>
         this.indexer.markReferralGrantsSent(epochId, referrers, txSig),
@@ -552,14 +552,24 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    *  so a batch that only covers part of the queue still drains it in order. */
   private async duePendingWithdrawals(
     currentEpochId: bigint,
+    deadline: { now: bigint; epochSeconds: bigint; shutdown: boolean },
   ): Promise<{ owner: string; amount: bigint }[]> {
+    // The same three routes `process_withdraw` accepts (custody.rs): the epoch
+    // moved on, `now > requested_at + epoch_seconds`, or the pool is shut down.
     const players = await this.prisma.player.findMany({
       where: {
         poolAddress: this.chain.poolAddress().toBase58(),
         pendingWithdraw: { gt: 0 },
-        pendingEpoch: { lt: currentEpochId },
+        ...(deadline.shutdown
+          ? {}
+          : {
+              OR: [
+                { pendingEpoch: { lt: currentEpochId } },
+                { requestedAt: { lt: deadline.now - deadline.epochSeconds } },
+              ],
+            }),
       },
-      orderBy: { pendingEpoch: "asc" },
+      orderBy: [{ pendingEpoch: "asc" }, { requestedAt: "asc" }],
       select: { owner: true, pendingWithdraw: true },
     });
     return players.map((player) => ({
