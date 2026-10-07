@@ -41,6 +41,7 @@ import {
   provider,
   sleep,
   sleepUntilOnChain,
+  venueProposalPda,
   WEIGHT_TREE_SPACE,
 } from "../helpers/hx.js";
 
@@ -295,6 +296,7 @@ function deployMethod(f: ForkPool, amount: bigint) {
       principalVault: f.principalVault,
       acceptedMint: USDC,
       ...f.venue,
+      venueProposal: venueProposalPda(f.pool),
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .remainingAccounts(klendRemaining());

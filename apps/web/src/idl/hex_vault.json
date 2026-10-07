@@ -435,6 +435,85 @@
       ]
     },
     {
+      "name": "cancel_venue",
+      "docs": [
+        "Admin-only: withdraws the open proposal and returns its rent."
+      ],
+      "discriminator": [
+        28,
+        150,
+        213,
+        160,
+        160,
+        129,
+        100,
+        213
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  101,
+                  110,
+                  117,
+                  101,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "close_round",
       "docs": [
         "Permissionless (ops-and-envs ticket 05): reclaims a finished Round's",
@@ -954,6 +1033,40 @@
         {
           "name": "klend_ctoken",
           "writable": true
+        },
+        {
+          "name": "venue_proposal",
+          "docs": [
+            "Only its address and owner are read: the handler refuses while this",
+            "program owns it (venue-switch ticket 03)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  101,
+                  110,
+                  117,
+                  101,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
         },
         {
           "name": "token_program"
@@ -1964,6 +2077,103 @@
         {
           "name": "new_admin",
           "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "propose_venue",
+      "docs": [
+        "Admin-only (venue-switch ticket 03): announces a venue change, or",
+        "replaces the open announcement and restarts its 48 hour lock. Deploys",
+        "are refused while it stands."
+      ],
+      "discriminator": [
+        127,
+        247,
+        135,
+        201,
+        103,
+        49,
+        122,
+        74
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "docs": [
+            "Pays the proposal's rent on the first proposal."
+          ],
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  101,
+                  110,
+                  117,
+                  101,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "ProposeVenueArgs"
+            }
+          }
         }
       ]
     },
@@ -3486,6 +3696,19 @@
       ]
     },
     {
+      "name": "VenueProposal",
+      "discriminator": [
+        66,
+        22,
+        199,
+        53,
+        61,
+        168,
+        69,
+        115
+      ]
+    },
+    {
       "name": "WeightTree",
       "discriminator": [
         135,
@@ -3940,6 +4163,32 @@
         203,
         247,
         154
+      ]
+    },
+    {
+      "name": "VenueProposalCancelled",
+      "discriminator": [
+        178,
+        179,
+        76,
+        15,
+        170,
+        213,
+        159,
+        45
+      ]
+    },
+    {
+      "name": "VenueProposed",
+      "discriminator": [
+        100,
+        36,
+        229,
+        7,
+        206,
+        194,
+        103,
+        6
       ]
     },
     {
@@ -4432,6 +4681,11 @@
       "code": 6089,
       "name": "UnsupportedVenueKind",
       "msg": "this build does not support that venue kind"
+    },
+    {
+      "code": 6090,
+      "name": "VenueProposalOpen",
+      "msg": "a venue change is proposed; deploys wait until it is cancelled or executed"
     }
   ],
   "types": [
@@ -6017,6 +6271,34 @@
       }
     },
     {
+      "name": "ProposeVenueArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "venue_kind",
+            "type": "u8"
+          },
+          {
+            "name": "klend_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_ctoken",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
       "name": "Round",
       "docs": [
         "One 60 second game on the 36-tile hex board."
@@ -6539,6 +6821,140 @@
           {
             "name": "loss_tolerance_bps",
             "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueProposal",
+      "docs": [
+        "The Admin's announced venue change (venue-switch ticket 03): a PDA from the",
+        "pool, `[SEED_VENUE_PROPOSAL, pool]`, created by `propose_venue` and closed",
+        "by `cancel_venue` (or the migration, ticket 05). While it exists the pool",
+        "refuses to deploy. The four pins mean what they mean on the Pool for",
+        "`venue_kind`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "venue_kind",
+            "type": "u8"
+          },
+          {
+            "name": "klend_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_ctoken",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "docs": [
+              "Unix seconds of the latest `propose_venue`; the lock counts from it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueProposalCancelled",
+      "docs": [
+        "`cancel_venue` closed the proposal. Carries what was withdrawn."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "venue_kind",
+            "type": "u8"
+          },
+          {
+            "name": "klend_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_ctoken",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueProposed",
+      "docs": [
+        "`propose_venue` created or replaced the pool's venue proposal. Carries the",
+        "whole proposal, so the log alone rebuilds it. A later event for the same",
+        "pool replaces this one. `unlocks_at` is `proposed_at` plus the lock."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "venue_kind",
+            "type": "u8"
+          },
+          {
+            "name": "klend_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "klend_ctoken",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "unlocks_at",
+            "type": "i64"
           }
         ]
       }

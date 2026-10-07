@@ -360,3 +360,30 @@ pub struct VenueParamsSet {
     pub min_venue_move: u64,
     pub loss_tolerance_bps: u16,
 }
+
+/// `propose_venue` created or replaced the pool's venue proposal. Carries the
+/// whole proposal, so the log alone rebuilds it. A later event for the same
+/// pool replaces this one. `unlocks_at` is `proposed_at` plus the lock.
+#[event]
+pub struct VenueProposed {
+    pub pool: Pubkey,
+    pub venue_kind: u8,
+    pub klend_program: Pubkey,
+    pub klend_market: Pubkey,
+    pub klend_reserve: Pubkey,
+    pub klend_ctoken: Pubkey,
+    pub proposed_at: i64,
+    pub unlocks_at: i64,
+}
+
+/// `cancel_venue` closed the proposal. Carries what was withdrawn.
+#[event]
+pub struct VenueProposalCancelled {
+    pub pool: Pubkey,
+    pub venue_kind: u8,
+    pub klend_program: Pubkey,
+    pub klend_market: Pubkey,
+    pub klend_reserve: Pubkey,
+    pub klend_ctoken: Pubkey,
+    pub proposed_at: i64,
+}

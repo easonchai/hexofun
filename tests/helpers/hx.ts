@@ -96,6 +96,15 @@ export function jackpotVaultPda(pool: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync([Buffer.from("jackpot"), pool.toBuffer()], PROGRAM_ID)[0];
 }
 
+/** The pool's venue proposal PDA (`propose_venue`); it exists only while a
+ *  venue change is open. */
+export function venueProposalPda(pool: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("venue_proposal"), pool.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
 /** The test-venue stub's reserve: shares held and the USDC-per-share rate. */
 export function testVenueReservePda(pool: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(
@@ -681,6 +690,7 @@ export function deployMethod(ctx: PoolCtx, amount: bigint, venue: VenueAccounts 
     principalVault: ctx.principalVault,
     acceptedMint: ctx.mint,
     ...venue,
+    venueProposal: venueProposalPda(ctx.pool),
     tokenProgram: TOKEN_PROGRAM_ID,
   });
 }

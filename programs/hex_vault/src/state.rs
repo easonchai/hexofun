@@ -193,6 +193,25 @@ pub struct Pool {
     pub _reserved: [u8; 87],
 }
 
+/// The Admin's announced venue change (venue-switch ticket 03): a PDA from the
+/// pool, `[SEED_VENUE_PROPOSAL, pool]`, created by `propose_venue` and closed
+/// by `cancel_venue` (or the migration, ticket 05). While it exists the pool
+/// refuses to deploy. The four pins mean what they mean on the Pool for
+/// `venue_kind`.
+#[account]
+#[derive(InitSpace)]
+pub struct VenueProposal {
+    pub pool: Pubkey,
+    pub venue_kind: u8,
+    pub klend_program: Pubkey,
+    pub klend_market: Pubkey,
+    pub klend_reserve: Pubkey,
+    pub klend_ctoken: Pubkey,
+    /// Unix seconds of the latest `propose_venue`; the lock counts from it.
+    pub proposed_at: i64,
+    pub bump: u8,
+}
+
 /// One lottery cycle. Contiguous: the next opens the moment this one ends.
 #[account]
 #[derive(InitSpace)]
@@ -435,6 +454,7 @@ mod tests {
         assert_eq!(Round::INIT_SPACE, 456);
         assert_eq!(Position::INIT_SPACE, 114);
         assert_eq!(size_of::<WeightTree>(), 48);
+        assert_eq!(VenueProposal::INIT_SPACE, 170);
     }
 
     /// On-chain offset (discriminator included) of whichever field `set`
@@ -495,6 +515,16 @@ mod tests {
         assert_eq!(player(|p| p.pending_deposit_epoch = 1), 151);
         assert_eq!(player(|p| p.open_positions = 1), 159);
         assert_eq!(player(|p| p._reserved[0] = 1), 163);
+
+        let proposal = |set: fn(&mut VenueProposal)| offset(VenueProposal::INIT_SPACE, set);
+        assert_eq!(proposal(|p| p.pool = Pubkey::new_from_array([1; 32])), 8);
+        assert_eq!(proposal(|p| p.venue_kind = 1), 40);
+        assert_eq!(proposal(|p| p.klend_program = Pubkey::new_from_array([1; 32])), 41);
+        assert_eq!(proposal(|p| p.klend_market = Pubkey::new_from_array([1; 32])), 73);
+        assert_eq!(proposal(|p| p.klend_reserve = Pubkey::new_from_array([1; 32])), 105);
+        assert_eq!(proposal(|p| p.klend_ctoken = Pubkey::new_from_array([1; 32])), 137);
+        assert_eq!(proposal(|p| p.proposed_at = 1), 169);
+        assert_eq!(proposal(|p| p.bump = 1), 177);
 
         let round = |set: fn(&mut Round)| offset(Round::INIT_SPACE, set);
         assert_eq!(round(|r| r.open_positions = 1), 387);

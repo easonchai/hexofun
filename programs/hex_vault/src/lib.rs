@@ -25,6 +25,7 @@ pub mod test_vrf;
 pub mod touch;
 pub mod utils;
 pub mod venue;
+pub mod venue_change;
 pub mod vrf;
 pub mod weight;
 pub mod weight_tree;
@@ -34,6 +35,7 @@ use anchor_lang::prelude::*;
 use custody::*;
 use epochs::*;
 use rounds::*;
+use venue_change::*;
 #[cfg(feature = "test-venue")]
 use test_venue::*;
 #[cfg(feature = "test-vrf")]
@@ -291,6 +293,18 @@ pub mod hex_vault {
     /// tolerance, each inside its program constant.
     pub fn set_venue_params(ctx: Context<SetVenueParams>, params: SetVenueParamsArgs) -> Result<()> {
         custody::set_venue_params(ctx, params)
+    }
+
+    /// Admin-only (venue-switch ticket 03): announces a venue change, or
+    /// replaces the open announcement and restarts its 48 hour lock. Deploys
+    /// are refused while it stands.
+    pub fn propose_venue(ctx: Context<ProposeVenue>, args: ProposeVenueArgs) -> Result<()> {
+        venue_change::propose_venue(ctx, args)
+    }
+
+    /// Admin-only: withdraws the open proposal and returns its rent.
+    pub fn cancel_venue(ctx: Context<CancelVenue>) -> Result<()> {
+        venue_change::cancel_venue(ctx)
     }
 
     // Localnet only: the stub venue behind `venue.rs` (yield-claimer ticket

@@ -87,6 +87,13 @@ pub const SEED_EPOCH: &[u8] = b"epoch";
 pub const SEED_ROUND: &[u8] = b"round";
 pub const SEED_PLAYER: &[u8] = b"player";
 pub const SEED_POSITION: &[u8] = b"position";
+/// The open venue proposal of a pool: `[SEED_VENUE_PROPOSAL, pool]`.
+pub const SEED_VENUE_PROPOSAL: &[u8] = b"venue_proposal";
+
+/// How long a venue proposal must stand before `migrate_venue` may execute
+/// it (venue-switch ticket 05 reads this). A constant, not a parameter: the
+/// only way to shorten the depositors' window is a visible program upgrade.
+pub const VENUE_LOCK_SECONDS: i64 = 48 * 60 * 60;
 
 /// `ImpairedCleared::cause`: what took the deficit to zero.
 pub mod impaired_cause {

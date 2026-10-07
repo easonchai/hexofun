@@ -240,4 +240,8 @@ pub enum HexVaultError {
     // venue-switch ticket 02. Appended too.
     #[msg("this build does not support that venue kind")]
     UnsupportedVenueKind,
+
+    // venue-switch ticket 03. Appended too.
+    #[msg("a venue change is proposed; deploys wait until it is cancelled or executed")]
+    VenueProposalOpen,
 }

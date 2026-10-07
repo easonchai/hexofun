@@ -18,7 +18,8 @@ use crate::constants::{
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
     DEFAULT_MIN_VENUE_MOVE, DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS, DEFAULT_RESERVE_SHARE_CAP_BPS,
     DEFAULT_YIELD_FEE_BPS, LAYOUT_VERSION, MIN_PAYOUT_TIMEOUT, MIN_VRF_TIMEOUT,
-    SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, WEIGHT_TREE_VERSION,
+    SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
+    WEIGHT_TREE_VERSION,
 };
 use crate::errors::HexVaultError;
 use crate::events::{
@@ -899,6 +900,12 @@ pub fn deploy_to_venue<'info>(
     amount: u64,
 ) -> Result<()> {
     let a = &mut *ctx.accounts;
+    // A proposal account owned by this program means a venue change is open.
+    // Absent, it is system-owned (even if someone sent it lamports).
+    require!(
+        a.venue_proposal.owner != &crate::ID,
+        HexVaultError::VenueProposalOpen
+    );
     let venue = Venue {
         program: &a.klend_program,
         market: &a.klend_market,
@@ -1798,6 +1805,12 @@ pub struct DeployToVenue<'info> {
     /// CHECK: `venue::check` pins it to `pool.klend_ctoken`.
     #[account(mut)]
     pub klend_ctoken: UncheckedAccount<'info>,
+
+    /// CHECK: the pool's venue proposal PDA, which usually does not exist.
+    /// Only its address and owner are read: the handler refuses while this
+    /// program owns it (venue-switch ticket 03).
+    #[account(seeds = [SEED_VENUE_PROPOSAL, pool.key().as_ref()], bump)]
+    pub venue_proposal: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
 }
