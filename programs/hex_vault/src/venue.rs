@@ -44,7 +44,8 @@ pub struct Funds<'a, 'info> {
 
 impl Venue<'_, '_> {
     /// Refuses any account that is not the one the Admin pinned at
-    /// `create_pool`. No instruction accepts another reserve.
+    /// `create_pool` or repinned with `migrate_venue`. No other instruction
+    /// accepts another reserve.
     pub fn check(&self, pool: &Pool) -> Result<()> {
         require!(
             self.program.key() == pool.klend_program

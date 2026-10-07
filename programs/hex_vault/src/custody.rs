@@ -239,8 +239,9 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     pool.version = LAYOUT_VERSION;
     pool.paused = false;
     pool.weight_tree = tree_key;
-    // The four venue addresses are pinned here for good: every venue
-    // instruction checks its accounts against them (`venue::check`). The rest
+    // The four venue addresses are pinned here: every venue
+    // instruction checks its accounts against them (`venue::check`), and
+    // `migrate_venue` is the only way to repin them (ADR 0023). The rest
     // of the yield state starts at zero.
     pool.klend_program = klend_program;
     pool.klend_market = klend_market;

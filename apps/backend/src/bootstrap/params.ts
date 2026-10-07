@@ -176,7 +176,7 @@ export function buyTicketsPausedFor(
   return value === "true";
 }
 
-/** The four accounts `create_pool` pins as the Pool's venue for good. */
+/** The four accounts `create_pool` pins as the Pool's first venue. `migrate_venue` can repin it later (ADR 0023). */
 export interface VenuePins {
   readonly klendProgram: PublicKey;
   readonly klendMarket: PublicKey;
@@ -203,8 +203,8 @@ const MAINNET_KLEND = {
  * Kamino's USDC reserve, each of KLEND_PROGRAM, KLEND_MARKET, KLEND_RESERVE and
  * KLEND_CTOKEN overriding its own; with KLEND_RESERVE set, KLEND_CTOKEN has to
  * be too, since the cToken account belongs to the reserve. Every other cluster
- * must name all four, because a wrong pin is permanent and there is no safe
- * guess. `VENUE_KIND` (klend, the default, stub or kvault) names the backing;
+ * must name all four, because a wrong pin costs a 48 hour venue change to undo and there
+ * is no safe guess. `VENUE_KIND` (klend, the default, stub or kvault) names the backing;
  * `stub` pins the `test-venue` build's stub (localnet only, bootstrap then runs
  * `test_venue_init`), and `KLEND_VENUE=test` is the older spelling of it.
  * `kvault` pins a Kamino Earn vault: `KVAULT_ADDRESS` (the vault state, required,
