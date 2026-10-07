@@ -778,6 +778,14 @@ describe("kVault backing, liquidity limits", () => {
     expect(text).toContain("VenueShortReturn");
     expect((await program.account.pool.fetch(g.pool)).venueValue.toString()).toBe(before.venueValue.toString());
     expect(await tokenBalance(g.shares)).toBe(sharesBefore);
+
+    // A drain of the same size does not revert: it books what came back, and
+    // the rest of the position stays valued at the vault until the next sync.
+    const vaultBefore = await tokenBalance(g.principalVault);
+    await sendV0("drain_venue 800 USDC (vault pays short)", await ix.drainVenue(await poolState(g), 800n * USDC_UNIT), [g.operator], view);
+    const received = (await tokenBalance(g.principalVault)) - vaultBefore;
+    expect(received > 0n && received < 800n * USDC_UNIT).toBe(true);
+    expect((await program.account.pool.fetch(g.pool)).venueValue.toString()).toBe((big(before.venueValue) - received).toString());
     await resetPosition();
   }, TIMEOUT);
 });
