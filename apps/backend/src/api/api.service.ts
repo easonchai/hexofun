@@ -29,7 +29,10 @@ import {
   freeIdle,
   haircutFactor,
   pendingTickets,
+  positionBasis,
+  positionYield,
   withdrawMaturity,
+  type OwnerEvent,
   solvencyMargin,
   supplyRateBps,
   trailingRate,
@@ -493,8 +496,9 @@ export class ApiService {
   /**
    * Principal, the yield earned since the last settle as of the pool's last
    * sync (`unsettledYield`, `syncedAt`), the Weight the tree holds for the
-   * Player in the current epoch, and `pendingMaturesAt`, when the queued
-   * withdrawal pays (null with nothing queued).
+   * Player in the current epoch, `pendingMaturesAt`, when the queued
+   * withdrawal pays (null with nothing queued), and `positionYield`, what the
+   * open position has earned, settled or not (`positionBasis`).
    */
   async getPlayer(owner: string) {
     const [pool, player] = await Promise.all([
@@ -510,12 +514,15 @@ export class ApiService {
     }
     const { weights, total } = await this.weightsFor(pool, [player]);
     const mine = weights[0] as LiveWeight;
-    const queuedEpoch =
+    const [queuedEpoch, ownerEvents] = await Promise.all([
       player.pendingWithdraw > 0n
-        ? await this.prisma.epoch.findUnique({
+        ? this.prisma.epoch.findUnique({
             where: { poolAddress_id: { poolAddress: this.poolAddress, id: player.pendingEpoch } },
           })
-        : null;
+        : null,
+      this.principalEvents(owner),
+    ]);
+    const unsettled = unsettledYield(player.principal, toBigInt(pool.yieldIndex), toBigInt(player.yieldIndex));
     return {
       ...playerDto(mine, total),
       ...playerTicketExtras(player, pool.currentEpochId),
@@ -523,9 +530,26 @@ export class ApiService {
         player.pendingWithdraw > 0n
           ? withdrawMaturity(queuedEpoch?.endsAt ?? null, player.requestedAt, pool.epochSeconds)
           : null,
-      unsettledYield: unsettledYield(player.principal, toBigInt(pool.yieldIndex), toBigInt(player.yieldIndex)),
+      unsettledYield: unsettled,
+      positionYield: positionYield(player.principal, unsettled, positionBasis(ownerEvents)),
       syncedAt: pool.lastSyncAt,
     };
+  }
+
+  /** Every event that moves this owner's Principal, oldest first, for
+   *  `positionBasis`. Seq scan on `data`, same trade as `getFeed`. */
+  private principalEvents(owner: string): Promise<OwnerEvent[]> {
+    return this.prisma.$queryRaw<OwnerEvent[]>`
+      SELECT name, data
+      FROM "Event"
+      WHERE "poolAddress" = ${this.poolAddress}
+        AND (
+          (name IN ('Deposited', 'WithdrawRequested', 'WithdrawCancelled', 'Withdrawn', 'EmergencyWithdrawn')
+            AND data->>'owner' = ${owner})
+          OR (name = 'JackpotPaid' AND data->>'winner' = ${owner})
+        )
+      ORDER BY slot ASC, "index" ASC
+    `;
   }
 
   /**

@@ -766,6 +766,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(body.principal).toBe("1000000");
     // Principal x (pool index 1.05e18 - her index 1e18) / 1e18.
     expect(body.unsettledYield).toBe("50000");
+    // The seed's one Deposited is all of her Principal, so the position has
+    // earned only the unsettled part.
+    expect(body.positionYield).toBe("50000");
     expect(body.syncedAt).toBe(LAST_SYNC.toString());
     // Read from the tree: she holds the whole epoch, so all of the odds.
     expect(body.weight).toBe(ALICE_WEIGHT.toString());
