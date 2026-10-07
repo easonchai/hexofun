@@ -582,6 +582,14 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     return due;
   }
 
+  async sentReferralGrants(epochId: bigint): Promise<{ referrer: string; txSig: string }[]> {
+    const rows = await this.prisma.referralGrant.findMany({
+      where: { poolAddress: this.activePool, epochId, txSig: { not: null } },
+      select: { referrer: true, txSig: true },
+    });
+    return rows.flatMap((row) => (row.txSig === null ? [] : [{ referrer: row.referrer, txSig: row.txSig }]));
+  }
+
   async markReferralGrantsSent(
     epochId: bigint,
     referrers: readonly string[],

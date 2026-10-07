@@ -35,6 +35,7 @@ import {
   type PoolState,
   type RoundState,
 } from "./chain-state";
+import { type GrantReclaimState, reclaimUnlandedGrants } from "./grant-reclaim";
 import { INDEXER_QUERIES, type IndexerQueries } from "./indexer-queries";
 import { OperatorInstructions } from "./instructions";
 import { SparringService } from "./sparring";
@@ -94,6 +95,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    *  (ops-and-envs ticket 08): keeps an immediate next tick from resending
    *  it before the indexer's `RoundClosed` mirror lands. */
   private closingRounds = new Map<bigint, number>();
+  private grantReclaim: GrantReclaimState = { firstSeen: new Map(), confirmed: new Set() };
   /** Epoch id to the owner whose leaf held its target. A target never moves
    *  once drawn, so a retried payout does not re-read the whole tree. */
   private winners = new Map<bigint, { owner: string; isHouse: boolean }>();
@@ -372,7 +374,16 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       principalVaultBalance: () => this.principalVaultBalance(),
       duePendingWithdrawals: (currentEpochId, deadline) =>
         this.duePendingWithdrawals(currentEpochId, deadline),
-      referralGrantsDue: (epochId) => this.indexer.referralGrantsDue(epochId),
+      referralGrantsDue: async (epochId) => {
+        await reclaimUnlandedGrants({
+          rows: await this.indexer.sentReferralGrants(epochId),
+          connection: this.chain.connection,
+          clear: (referrers) => this.indexer.markReferralGrantsSent(epochId, referrers, null),
+          state: this.grantReclaim,
+          now: Date.now(),
+        });
+        return this.indexer.referralGrantsDue(epochId);
+      },
       markReferralGrantsSent: (epochId, referrers, txSig) =>
         this.indexer.markReferralGrantsSent(epochId, referrers, txSig),
       unsettledPositions: async () =>

@@ -335,6 +335,7 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
         // nothing to do; it still has to be callable.
         referralGrantsDue: async () => [],
         markReferralGrantsSent: async () => {},
+        sentReferralGrants: async () => [],
         // Same terminal-and-clear rule as unsettledPositions above, off the
         // chain instead of Postgres; this fixture has no `closed` flag to
         // mirror, so a Round this validator has already closed simply stops

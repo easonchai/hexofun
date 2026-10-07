@@ -39,4 +39,6 @@ export interface IndexerQueries {
     referrers: readonly string[],
     txSig: string | null,
   ): Promise<void>;
+  /** The recorded grant signatures for `epochId`, one entry per referrer. */
+  sentReferralGrants(epochId: bigint): Promise<{ referrer: string; txSig: string }[]>;
 }

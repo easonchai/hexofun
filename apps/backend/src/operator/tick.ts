@@ -19,6 +19,7 @@ import {
   type RoundState,
 } from "./chain-state";
 import type { SendHooks } from "../chain/chain.service";
+import { ALREADY_GRANTED_MARKER } from "./grant-reclaim";
 import type { OperatorInstructions } from "./instructions";
 import {
   decideVenue,
@@ -647,7 +648,7 @@ async function decide(ctx: TickContext): Promise<Decision> {
           // The program refused a second grant to a referrer this epoch, so
           // an earlier send landed. There is no signature of ours to record
           // (the refusal is at simulation), so the rows get a marker.
-          await ctx.markReferralGrantsSent(epochId, referrers, "already-granted");
+          await ctx.markReferralGrantsSent(epochId, referrers, ALREADY_GRANTED_MARKER);
           return finish({ action: "grant_tickets" });
         }
         if (!capExceeded(cause)) {

@@ -151,6 +151,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService end-of-tick timestamp", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -218,6 +219,7 @@ describe("OperatorService catch-path state write", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -262,6 +264,7 @@ describe("OperatorService.onModuleDestroy", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -327,6 +330,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
         unsettledPositions: async () => [],
         referralGrantsDue: async () => [],
         markReferralGrantsSent: async () => {},
+        sentReferralGrants: async () => [],
         roundsToClose: async () => [],
       },
       noopSparring,
@@ -477,6 +481,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -558,6 +563,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService RPC failure recovery", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -661,6 +667,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService randomness subscription", () => 
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -819,6 +826,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -885,6 +893,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
         unsettledPositions: async () => [],
         referralGrantsDue: async () => [],
         markReferralGrantsSent: async () => {},
+        sentReferralGrants: async () => [],
         roundsToClose: async () => [],
       },
       noopSparring,
