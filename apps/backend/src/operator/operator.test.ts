@@ -21,7 +21,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { loadIdl } from "../chain/idl";
-import { poolAddress } from "../chain/pda";
+import { poolAddress, venueProposalAddress } from "../chain/pda";
 import {
   EPOCH_STATUS,
   ROUND_STATUS,
@@ -1534,6 +1534,25 @@ describe("venue cranks (ticket 13)", () => {
     // klend.rs documents the order: market authority, supply vault, cToken
     // mint, instructions sysvar; the program checks each against the reserve.
     expect(keys.slice(-4)).toEqual([LMA, LIQ_SUPPLY, CMINT].map((k) => k.toBase58()).concat(SYSVAR_IX));
+  });
+
+  it("passes the venue proposal PDA to a deploy, and skips on VenueProposalOpen without an alert", async () => {
+    const { ctx, warned } = venueTick(10_000n * U, {
+      send: async () => {
+        throw new Error("VenueProposalOpen");
+      },
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.stepError).toBeUndefined();
+    expect(outcome.action).toBeNull();
+    expect(outcome.venueState?.failedAt.deploy).toBe(NOW);
+    expect(warned.some((message) => message.includes("VenueProposalOpen"))).toBe(true);
+
+    const built = await instructions.deployToVenue(venuePool(), 1n);
+    expect(built[0]?.keys.map((key) => key.pubkey.toBase58())).toContain(
+      venueProposalAddress(PROGRAM_ID, venuePool().address).toBase58(),
+    );
   });
 
   it("takes no extra accounts for the stub kind", async () => {

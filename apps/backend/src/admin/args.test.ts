@@ -203,6 +203,30 @@ describe("parseAdminCommand", () => {
     );
   });
 
+  it("parses propose-venue by kind name or number, and cancel-venue", () => {
+    const [program, market, reserve, ctoken] = Array.from({ length: 4 }, () => Keypair.generate().publicKey);
+    const flags = (kind: string) => [
+      "propose-venue",
+      "--kind", kind,
+      "--program", program!.toBase58(),
+      "--market", market!.toBase58(),
+      "--reserve", reserve!.toBase58(),
+      "--ctoken", ctoken!.toBase58(),
+    ];
+    expect(parseAdminCommand(flags("klend"))).toEqual({
+      kind: "propose-venue", venueKind: 0, program, market, reserve, ctoken,
+    });
+    expect(parseAdminCommand(flags("kvault"))).toMatchObject({ venueKind: 2 });
+    expect(parseAdminCommand(flags("7"))).toMatchObject({ venueKind: 7 });
+    expect(() => parseAdminCommand(flags("vault"))).toThrow(/--kind must be one of/);
+    expect(() => parseAdminCommand(flags("256"))).toThrow(/--kind must be one of/);
+    expect(() => parseAdminCommand(["propose-venue", "--kind", "klend"])).toThrow(/needs --program/);
+    expect(() => parseAdminCommand([...flags("klend").slice(0, 7), "--reserve", "nope", "--ctoken", ctoken!.toBase58()]))
+      .toThrow(/--reserve must be a base58 pubkey/);
+    expect(parseAdminCommand(["cancel-venue"])).toEqual({ kind: "cancel-venue" });
+    expect(() => parseAdminCommand(["cancel-venue", "now"])).toThrow(/unexpected argument/);
+  });
+
   it("parses create-invite, owner and count optional", () => {
     expect(parseAdminCommand(["create-invite", "--max-uses", "5"])).toEqual({
       kind: "create-invite",

@@ -2,7 +2,7 @@
 // start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
 // start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
 // fund-jackpot, grant-tickets, set-operator,
-// propose-admin, accept-admin, create-invite, shutdown, emergency-crank,
+// propose-admin, accept-admin, propose-venue, cancel-venue, create-invite, shutdown, emergency-crank,
 // sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
@@ -39,6 +39,7 @@ import bs58 from "bs58";
 
 import { generateInviteCode } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
+import { venueProposalAddress } from "../chain/pda";
 import { rpcStatus, withRpcFallback } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { validateEnv } from "../config/env";
@@ -771,6 +772,44 @@ export async function run(
         `propose ${command.key.toBase58()} as the next admin; it then runs accept-admin`,
         ledger,
       );
+    }
+    // venue-switch ticket 03. The admin signs and pays the proposal's rent on
+    // the first proposal, so on mainnet the multisig vault needs a little SOL.
+    case "propose-venue": {
+      const ix = await method(
+        chain,
+        "proposeVenue",
+        {
+          venueKind: command.venueKind,
+          klendProgram: command.program,
+          klendMarket: command.market,
+          klendReserve: command.reserve,
+          klendCtoken: command.ctoken,
+        },
+      )
+        .accountsPartial({
+          admin: mode.signer,
+          pool: chain.poolAddress(),
+          proposal: venueProposalAddress(chain.programId, chain.poolAddress()),
+        })
+        .instruction();
+      return submit(
+        chain,
+        mode,
+        [ix],
+        `propose venue kind ${command.venueKind} (reserve ${command.reserve.toBase58()}); deploys stop until cancel-venue or the migration, and the 48 hour lock restarts`,
+        ledger,
+      );
+    }
+    case "cancel-venue": {
+      const ix = await method(chain, "cancelVenue")
+        .accountsPartial({
+          admin: mode.signer,
+          pool: chain.poolAddress(),
+          proposal: venueProposalAddress(chain.programId, chain.poolAddress()),
+        })
+        .instruction();
+      return submit(chain, mode, [ix], "cancel the open venue proposal; deploys resume", ledger);
     }
     // Signed by the pending admin, which is whoever is taking the pool over:
     // the loaded key when a person is, ADMIN_ADDRESS when the multisig is.

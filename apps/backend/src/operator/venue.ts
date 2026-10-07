@@ -82,6 +82,9 @@ export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   "ReserveShareCapExceeded",
   "VenueIlliquid",
   "VenueMoveTooSmall",
+  // A venue change is proposed: deploys wait for the Admin to cancel or
+  // execute it. Expected, so a warning and a cool-down, not an alert.
+  "VenueProposalOpen",
 ]);
 
 /** An unpinned pool has `Pubkey::default()` for its klend program. */

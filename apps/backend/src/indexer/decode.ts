@@ -260,6 +260,33 @@ export interface DecodedPosition {
   stakePerTile: BN;
 }
 
+/** The `VenueProposal` account (venue-switch ticket 03). */
+export interface DecodedVenueProposal {
+  venueKind: number;
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
+  proposedAt: BN;
+}
+
+export function venueProposalRow(
+  proposal: DecodedVenueProposal,
+  poolAddress: string,
+  slot: bigint,
+): Prisma.VenueProposalUncheckedCreateInput {
+  return {
+    poolAddress,
+    venueKind: proposal.venueKind,
+    klendProgram: proposal.klendProgram.toBase58(),
+    klendMarket: proposal.klendMarket.toBase58(),
+    klendReserve: proposal.klendReserve.toBase58(),
+    klendCtoken: proposal.klendCtoken.toBase58(),
+    proposedAt: big(proposal.proposedAt),
+    updatedSlot: slot,
+  };
+}
+
 export function poolRow(
   address: PublicKey,
   pool: DecodedPool,

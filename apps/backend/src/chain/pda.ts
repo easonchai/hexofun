@@ -9,6 +9,7 @@ const SEED_EPOCH = Buffer.from("epoch");
 const SEED_ROUND = Buffer.from("round");
 const SEED_PLAYER = Buffer.from("player");
 const SEED_POSITION = Buffer.from("position");
+const SEED_VENUE_PROPOSAL = Buffer.from("venue_proposal");
 
 const leU64 = (value: bigint): Buffer => {
   const buf = Buffer.alloc(8);
@@ -58,3 +59,10 @@ export const jackpotVaultAddress = (
   programId: PublicKey,
   pool: PublicKey,
 ): PublicKey => pda(programId, [SEED_JACKPOT, pool.toBuffer()]);
+
+/** The pool's open venue proposal, if any (`propose_venue`). `deploy_to_venue`
+ *  takes it as an account and refuses while the program owns it. */
+export const venueProposalAddress = (
+  programId: PublicKey,
+  pool: PublicKey,
+): PublicKey => pda(programId, [SEED_VENUE_PROPOSAL, pool.toBuffer()]);

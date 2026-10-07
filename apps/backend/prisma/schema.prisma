@@ -104,6 +104,7 @@ model Pool {
   referralGrantShares ReferralGrantShare[]
   yieldIndexPoints    YieldIndexPoint[]
   weightTreeState     WeightTreeState?
+  venueProposal       VenueProposal?
 }
 
 // Pool-scoped tables carry poolAddress, the Pool PDA, as part of their key so
@@ -220,6 +221,23 @@ model Event {
   // transaction's own, so a slot in the key stored one event twice.
   @@id([signature, index])
   @@index([poolAddress, slot])
+}
+
+// The pool's open venue proposal (venue-switch ticket 03), one row per pool
+// while the on-chain account exists. `propose_venue` upserts it, `cancel_venue`
+// (and the migration, ticket 05) delete it. The unlock time is proposedAt plus
+// the program's 48 hour lock, which is not stored.
+model VenueProposal {
+  poolAddress  String @id
+  pool         Pool   @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
+  venueKind    Int
+  klendProgram String
+  klendMarket  String
+  klendReserve String
+  klendCtoken  String
+  /// Chain unix seconds of the latest proposal.
+  proposedAt   BigInt
+  updatedSlot  BigInt
 }
 
 // One row per pool: the indexer's signature-catch-up cursor. A new pool has

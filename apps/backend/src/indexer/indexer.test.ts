@@ -96,6 +96,7 @@ async function wipe(): Promise<void> {
   await prisma.$transaction([
     prisma.event.deleteMany(),
     prisma.cursor.deleteMany(),
+    prisma.venueProposal.deleteMany(),
     prisma.position.deleteMany(),
     prisma.player.deleteMany(),
     prisma.round.deleteMany(),
@@ -301,6 +302,55 @@ describe("account sync", () => {
     expect(await prisma.position.findMany()).toMatchObject([
       { owner: OWNER.toBase58(), roundId: 1n, tiles: 11n, stakePerTile: 1_000n },
     ]);
+  });
+
+  // venue-switch ticket 03
+  it("mirrors the open venue proposal, and drops it when a full walk or a log read finds it gone", async () => {
+    indexer["lastSyncedSlot"] = undefined;
+    const proposal = chain.venueProposalAddress();
+    const target = Keypair.generate().publicKey;
+    await put("pool", chain.poolAddress(), poolAccount());
+    await put("venueProposal", proposal, {
+      pool: chain.poolAddress(),
+      venueKind: 2,
+      klendProgram: target,
+      klendMarket: target,
+      klendReserve: target,
+      klendCtoken: target,
+      proposedAt: bn(1_800_000_000),
+      bump: 255,
+    });
+
+    await indexer.syncAccounts();
+    expect(await prisma.venueProposal.findUniqueOrThrow({ where: { poolAddress: active() } }))
+      .toMatchObject({
+        venueKind: 2,
+        klendReserve: target.toBase58(),
+        proposedAt: 1_800_000_000n,
+      });
+
+    // A log-triggered read that finds no account is the cancel.
+    connection.deleteAccount(proposal);
+    await indexer["refreshFromLogs"]([], 200n);
+    expect(await prisma.venueProposal.count()).toBe(0);
+
+    // And a full walk that does not see it removes a row left behind.
+    await prisma.venueProposal.create({
+      data: {
+        poolAddress: active(),
+        venueKind: 0,
+        klendProgram: "a",
+        klendMarket: "b",
+        klendReserve: "c",
+        klendCtoken: "d",
+        proposedAt: 1n,
+        updatedSlot: 1n,
+      },
+    });
+    indexer["lastSyncedSlot"] = undefined;
+    indexer["freshWrites"].clear();
+    await indexer.syncAccounts();
+    expect(await prisma.venueProposal.count()).toBe(0);
   });
 
   it("records the winning tile once the round is settled", async () => {

@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { PublicKey } from "@solana/web3.js";
 
 import { INVITE_CODE_MAX_USES } from "../api/invite-code";
+import { VENUE_KIND } from "../chain/venue-kind";
 import { houseCutBps, isoSeconds, wholeUsdc } from "../bootstrap/params";
 
 export interface SetParamsInput {
@@ -73,6 +74,17 @@ export type AdminCommand =
   | { readonly kind: "set-operator"; readonly key: PublicKey }
   | { readonly kind: "propose-admin"; readonly key: PublicKey }
   | { readonly kind: "accept-admin" }
+  /** venue-switch ticket 03: announce a venue change (replaces an open one and
+   *  restarts the 48 hour lock), or withdraw it. Admin only. */
+  | {
+      readonly kind: "propose-venue";
+      readonly venueKind: number;
+      readonly program: PublicKey;
+      readonly market: PublicKey;
+      readonly reserve: PublicKey;
+      readonly ctoken: PublicKey;
+    }
+  | { readonly kind: "cancel-venue" }
   /** Never touches the chain: `create-invite` writes straight to Postgres,
    *  so `main()` handles it before a ChainService is even built. */
   | {
@@ -112,6 +124,8 @@ export const USAGE = [
   "  set-operator --key PUBKEY",
   "  propose-admin --key PUBKEY",
   "  accept-admin",
+  "  propose-venue --kind klend|stub|kvault|N --program PUBKEY --market PUBKEY --reserve PUBKEY --ctoken PUBKEY   (admin only; replaces an open proposal and restarts the 48 hour lock; deploys stop until cancel-venue or the migration)",
+  "  cancel-venue   (admin only; closes the open proposal, rent back to the admin)",
   `  create-invite [--max-uses N] [--owner PUBKEY] [--count K]   (max-uses defaults to ${INVITE_CODE_MAX_USES})`,
   "  shutdown --confirm POOL_ID   (irreversible; POOL_ID must match the configured pool)",
   `  emergency-crank [--batch N]   (permissionless; N players per transaction, default ${DEFAULT_EMERGENCY_CRANK_BATCH})`,
@@ -176,6 +190,22 @@ function pubkey(flag: string, raw: string): PublicKey {
   } catch (cause) {
     throw new Error(`--${flag} must be a base58 pubkey, got "${raw}"`, { cause });
   }
+}
+
+/** A venue kind by name, or its raw `Pool::venue_kind` byte. The program
+ *  decides which kinds a build supports; this only names them. */
+const VENUE_KIND_NAMES: Readonly<Record<string, number>> = { ...VENUE_KIND, kvault: 2 };
+
+function venueKindFlag(flag: string, raw: string): number {
+  const named = VENUE_KIND_NAMES[raw];
+  if (named !== undefined) return named;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || value > 255) {
+    throw new Error(
+      `--${flag} must be one of ${Object.keys(VENUE_KIND_NAMES).join(", ")} or a number 0 to 255, got "${raw}"`,
+    );
+  }
+  return value;
 }
 
 /** No flags accepted; `pause`/`unpause`/`accept-admin` take none. */
@@ -360,6 +390,48 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
     case "accept-admin":
       rejectExtra(rest);
       return { kind: "accept-admin" };
+
+    case "cancel-venue":
+      rejectExtra(rest);
+      return { kind: "cancel-venue" };
+
+    case "propose-venue": {
+      let values: {
+        kind?: string;
+        program?: string;
+        market?: string;
+        reserve?: string;
+        ctoken?: string;
+      };
+      try {
+        ({ values } = parseArgs({
+          args: [...rest],
+          options: {
+            kind: { type: "string" },
+            program: { type: "string" },
+            market: { type: "string" },
+            reserve: { type: "string" },
+            ctoken: { type: "string" },
+          },
+          allowPositionals: false,
+        }));
+      } catch (cause) {
+        throw new Error(USAGE, { cause });
+      }
+      for (const flag of ["kind", "program", "market", "reserve", "ctoken"] as const) {
+        if (typeof values[flag] !== "string") {
+          throw new Error(`propose-venue needs --${flag}\n${USAGE}`);
+        }
+      }
+      return {
+        kind: "propose-venue",
+        venueKind: venueKindFlag("kind", values.kind as string),
+        program: pubkey("program", values.program as string),
+        market: pubkey("market", values.market as string),
+        reserve: pubkey("reserve", values.reserve as string),
+        ctoken: pubkey("ctoken", values.ctoken as string),
+      };
+    }
 
     case "set-params": {
       let values: {

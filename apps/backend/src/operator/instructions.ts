@@ -22,6 +22,7 @@ import {
   positionAddress,
   principalVaultAddress,
   roundAddress,
+  venueProposalAddress,
 } from "../chain/pda";
 import { VENUE_KIND } from "../chain/venue-kind";
 import type { EpochState, PoolState, RoundState } from "./chain-state";
@@ -484,6 +485,8 @@ export class OperatorInstructions {
           principalVault: principalVaultAddress(this.programId, pool.address),
           acceptedMint: pool.acceptedMint,
           ...this.venue(pool),
+          // Usually absent on chain; the program refuses a deploy while it exists.
+          venueProposal: venueProposalAddress(this.programId, pool.address),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .remainingAccounts(this.venueRemaining(pool))

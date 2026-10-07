@@ -14,6 +14,7 @@ import {
   type RoundState,
 } from "../operator/chain-state";
 import { isFulfilled, randomnessAddress } from "../operator/vrf";
+import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import { PrismaService } from "../prisma/prisma.service";
 import { ApiService } from "./api.service";
 import { supplyRateBps } from "./live-yield";
@@ -41,6 +42,18 @@ export interface VenueParams {
   lossToleranceBps: number;
 }
 
+/** The open venue proposal (venue-switch ticket 03). `unlocksAt` is chain unix
+ *  seconds: `proposedAt` plus the program's 48 hour lock. */
+export interface VenueProposalSummary {
+  venueKind: number;
+  klendProgram: string;
+  klendMarket: string;
+  klendReserve: string;
+  klendCtoken: string;
+  proposedAt: bigint;
+  unlocksAt: bigint;
+}
+
 /** What `GET /ops/summary` adds to the `GET /status` payload. Amounts are
  *  atomic USDC; the serialization interceptor turns each bigint into a string. */
 export interface OpsSummaryExtras {
@@ -56,6 +69,10 @@ export interface OpsSummaryExtras {
   admin: string | null;
   /** Null before the pool is indexed. */
   venueParams: VenueParams | null;
+  /** The venue kind the pool is on now. Null before the pool is indexed. */
+  venueKind: number | null;
+  /** The open proposal, or null when none is. */
+  venueProposal: VenueProposalSummary | null;
   /** klend's supply rate in basis points. Null when the reserve is unreadable. */
   supplyRateBps: number | null;
   /** Lifetime `fee_paid` and `prize_paid`, summed from indexed `Harvested` events. */
@@ -135,7 +152,11 @@ export class OpsSummaryService {
     // Cached for BALANCES_TTL_MS and already warm from getStatus, so this is
     // the same reserve read, not a second RPC call.
     const reserve = (await this.api.chainBalances(pool?.klendReserve)).reserve;
-    const [harvested, stuck] = await Promise.all([this.harvestedTotals(), this.stuck(pool !== null)]);
+    const [harvested, stuck, proposal] = await Promise.all([
+      this.harvestedTotals(),
+      this.stuck(pool !== null),
+      this.prisma.venueProposal.findUnique({ where: { poolAddress } }),
+    ]);
     return {
       ...status,
       totalPrincipal: pool?.totalPrincipal ?? 0n,
@@ -157,6 +178,19 @@ export class OpsSummaryService {
               reserveLiquidityFloorBps: pool.reserveLiquidityFloorBps,
               minVenueMove: pool.minVenueMove,
               lossToleranceBps: pool.lossToleranceBps,
+            },
+      venueKind: pool?.venueKind ?? null,
+      venueProposal:
+        proposal === null
+          ? null
+          : {
+              venueKind: proposal.venueKind,
+              klendProgram: proposal.klendProgram,
+              klendMarket: proposal.klendMarket,
+              klendReserve: proposal.klendReserve,
+              klendCtoken: proposal.klendCtoken,
+              proposedAt: proposal.proposedAt,
+              unlocksAt: proposal.proposedAt + VENUE_LOCK_SECONDS,
             },
       supplyRateBps: reserve === null ? null : supplyRateBps(reserve),
       harvestedToTreasury: harvested.treasury,

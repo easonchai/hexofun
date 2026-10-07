@@ -40,12 +40,14 @@ import {
   positionRow,
   roundRow,
   settledPosition,
+  venueProposalRow,
   type DecodedEpoch,
   type DecodedEvent,
   type DecodedPlayer,
   type DecodedPool,
   type DecodedPosition,
   type DecodedRound,
+  type DecodedVenueProposal,
 } from "./decode";
 
 /** What a log-triggered read expects at an address, plus anything the row
@@ -55,6 +57,7 @@ type WantedAccount =
   | { kind: "epoch" }
   | { kind: "round" }
   | { kind: "player" }
+  | { kind: "venueProposal" }
   | { kind: "position"; roundId: bigint };
 
 /** One string field of a decoded event, or undefined when the event has no
@@ -155,6 +158,7 @@ const ACCOUNT = {
   round: "round",
   player: "player",
   position: "position",
+  venueProposal: "venueProposal",
 } as const;
 
 /** One transaction's finalized logs, the unit both ingest paths hand over. */
@@ -661,6 +665,9 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // row lands before the rows below that reference it (ADR 0016).
     const wanted = new Map<string, WantedAccount>();
     wanted.set(this.activePool, { kind: "pool" });
+    // Every pool instruction can open, replace or close the proposal, and a
+    // close leaves no account to read, so it is asked for every time.
+    wanted.set(this.chain.venueProposalAddress().toBase58(), { kind: "venueProposal" });
 
     const [pool, openRound] = await Promise.all([
       this.prisma.pool.findUnique({ where: { address: this.activePool } }),
@@ -724,6 +731,12 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     const coder = this.chain.program.coder.accounts;
     const pubkey = new PublicKey(address);
     if (data === undefined) {
+      if (wanted.kind === "venueProposal") {
+        // Closed by `cancel_venue`: absence is the fact.
+        await this.prisma.venueProposal.deleteMany({ where: { poolAddress: this.activePool } });
+        this.freshWrites.set(address, slot);
+        return;
+      }
       if (wanted.kind !== "position") return;
       await this.prisma.position.deleteMany({ where: { poolAddress: this.activePool, address } });
       this.freshWrites.set(address, slot);
@@ -736,6 +749,15 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         const row = poolRow(pubkey, pool, slot);
         await this.prisma.pool.upsert({ where: { address: row.address }, create: row, update: row });
         await this.mirrorLiveYield(row, pool);
+        break;
+      }
+      case "venueProposal": {
+        const row = venueProposalRow(
+          coder.decode<DecodedVenueProposal>(ACCOUNT.venueProposal, data),
+          poolAddress,
+          slot,
+        );
+        await this.prisma.venueProposal.upsert({ where: { poolAddress }, create: row, update: row });
         break;
       }
       case "epoch": {
@@ -906,6 +928,22 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     );
     for (const { pubkey, account } of pools) {
       await this.mirrorLiveYield(poolRow(pubkey, account, slot), account);
+    }
+
+    // The proposal exists only while open, so a full walk that does not see it
+    // deletes the row, like the Position delete below; an incremental walk
+    // cannot tell absent from unchanged and only upserts.
+    const proposalAddress = this.chain.venueProposalAddress();
+    if (!this.behindLogPath(proposalAddress, slot)) {
+      const proposal = accounts
+        .get<DecodedVenueProposal>(ACCOUNT.venueProposal)
+        .find(({ pubkey }) => pubkey.equals(proposalAddress));
+      if (proposal) {
+        const row = venueProposalRow(proposal.account, poolAddress, slot);
+        await this.prisma.venueProposal.upsert({ where: { poolAddress }, create: row, update: row });
+      } else if (fullWalk) {
+        await this.prisma.venueProposal.deleteMany({ where: { poolAddress } });
+      }
     }
 
     const epochs = accounts.get<DecodedEpoch>(ACCOUNT.epoch);

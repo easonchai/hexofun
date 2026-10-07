@@ -30,6 +30,7 @@ import {
   positionAddress,
   principalVaultAddress,
   roundAddress,
+  venueProposalAddress,
 } from "./pda";
 import {
   heliusPriorityFeeEstimate,
@@ -163,6 +164,11 @@ export class ChainService {
 
   jackpotVaultAddress(pool: PublicKey = this.poolAddress()): PublicKey {
     return jackpotVaultAddress(this.programId, pool);
+  }
+
+  /** The pool's venue proposal PDA; the account exists only while one is open. */
+  venueProposalAddress(pool: PublicKey = this.poolAddress()): PublicKey {
+    return venueProposalAddress(this.programId, pool);
   }
 
   /** Records a Clock sysvar reading, for `lastObservedChainTime`. */

@@ -467,6 +467,64 @@ describe("admin run", () => {
     ).rejects.toThrow(/transaction .* failed/);
   });
 
+  // venue-switch ticket 03: local, Ledger and multisig modes.
+  const proposeVenue = {
+    kind: "propose-venue" as const,
+    venueKind: 0,
+    program: Keypair.generate().publicKey,
+    market: Keypair.generate().publicKey,
+    reserve: Keypair.generate().publicKey,
+    ctoken: Keypair.generate().publicKey,
+  };
+  const proposalPda = PublicKey.findProgramAddressSync(
+    [Buffer.from("venue_proposal"), POOL.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+
+  it("propose-venue and cancel-venue sign locally and carry the proposal PDA", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    const { stdout } = await capture(async () => {
+      await run(proposeVenue, chain, mode);
+      await run({ kind: "cancel-venue" }, chain, mode);
+    });
+
+    expect(stdout).toEqual([]);
+    expect(sent).toHaveLength(2);
+    const propose = decodeInstruction(sent[0]?.[0]?.data);
+    expect(propose?.name).toBe("propose_venue");
+    expect(sent[0]?.[0]?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
+    expect(decodeInstruction(sent[1]?.[0]?.data)?.name).toBe("cancel_venue");
+    expect(sent[1]?.[0]?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
+  });
+
+  it("propose-venue and cancel-venue in multisig mode print one transaction signed by the vault", async () => {
+    const { chain, sent } = await harness();
+    const vault = Keypair.generate().publicKey;
+    const mode: AdminMode = { signer: vault, multisig: true };
+    for (const command of [proposeVenue, { kind: "cancel-venue" as const }]) {
+      const { stdout } = await capture(() => run(command, chain, mode));
+      expect(stdout).toHaveLength(1);
+      const tx = Transaction.from(bs58.decode(stdout[0] as string));
+      expect(tx.feePayer?.equals(vault)).toBe(true);
+      expect(tx.instructions[0]?.keys.some((k) => k.isSigner && k.pubkey.equals(vault))).toBe(true);
+    }
+    expect(sent).toEqual([]);
+  });
+
+  it("propose-venue and cancel-venue with a Ledger send through it", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const ledgerKeypair = Keypair.generate();
+    const mode: AdminMode = { signer: ledgerKeypair.publicKey, multisig: false };
+    await capture(async () => {
+      await run(proposeVenue, chain, mode, fakeLedger(ledgerKeypair));
+      await run({ kind: "cancel-venue" }, chain, mode, fakeLedger(ledgerKeypair));
+    });
+    expect(sent).toEqual([]);
+    expect(rawSent).toHaveLength(2);
+  });
+
   // game-jackpot-pause ticket 02.
   it("pause-game signs locally with the loaded key", async () => {
     const { chain, sent } = await harness();

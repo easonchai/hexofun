@@ -334,6 +334,37 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect(summary).toHaveProperty("rpcOk");
   });
 
+  it("reports the open venue proposal with its unlock time, and null when none is open", async () => {
+    await seedActive();
+    const none = await ops.getOpsSummary();
+    expect(none.venueProposal).toBeNull();
+    expect(none.venueKind).toBe(0);
+
+    const target = Keypair.generate().publicKey.toBase58();
+    await prisma.venueProposal.create({
+      data: {
+        poolAddress: POOL.toBase58(),
+        venueKind: 2,
+        klendProgram: target,
+        klendMarket: target,
+        klendReserve: target,
+        klendCtoken: target,
+        proposedAt: NOW,
+        updatedSlot: 1n,
+      },
+    });
+    const open = await ops.getOpsSummary();
+    expect(open.venueProposal).toEqual({
+      venueKind: 2,
+      klendProgram: target,
+      klendMarket: target,
+      klendReserve: target,
+      klendCtoken: target,
+      proposedAt: NOW,
+      unlocksAt: NOW + 172_800n,
+    });
+  });
+
   it("returns zero totals for a pool that has never harvested", async () => {
     await seedActive();
     const summary = await ops.getOpsSummary();
@@ -414,6 +445,8 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect(summary.lastSyncAt).toBe(0n);
     expect(summary.admin).toBeNull();
     expect(summary.venueParams).toBeNull();
+    expect(summary.venueKind).toBeNull();
+    expect(summary.venueProposal).toBeNull();
     expect(summary.supplyRateBps).toBeNull();
     expect(summary.stuck).toEqual({ round: null, epoch: null });
     expect(summary.pendingWithdrawals).toBe(0n);
