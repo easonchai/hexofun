@@ -1,6 +1,8 @@
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
+
+import { KVAULT_PROGRAM_ID, sharesMintAddress } from "../chain/kvault";
 
 import {
   DEFAULT_POOL_PARAMS,
@@ -375,7 +377,7 @@ describe("venuePinsFor", () => {
   });
 
   it("refuses an unknown kind, a contradiction, and the stub kind on mainnet", () => {
-    expect(() => venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "kvault" }, pool, programId)).toThrow(
+    expect(() => venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "bogus" }, pool, programId)).toThrow(
       /VENUE_KIND must be/,
     );
     expect(() =>
@@ -384,6 +386,28 @@ describe("venuePinsFor", () => {
     expect(() => venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "stub" }, pool, programId)).toThrow(
       /VENUE_KIND=stub is refused on mainnet/,
     );
+  });
+
+  it("pins a kVault: the vault state, its shares mint PDA and the pool's shares ATA", () => {
+    const vault = new PublicKey(key());
+    const pins = venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "kvault", KVAULT_ADDRESS: vault.toBase58() }, pool, programId);
+    expect(pins.kind).toBe(2);
+    expect(pins.klendProgram.equals(KVAULT_PROGRAM_ID)).toBe(true);
+    expect(pins.klendMarket.equals(vault)).toBe(true);
+    const sharesMint = sharesMintAddress(vault);
+    expect(pins.klendReserve.equals(sharesMint)).toBe(true);
+    expect(pins.klendCtoken.equals(getAssociatedTokenAddressSync(sharesMint, pool, true))).toBe(true);
+    // Bootstrap creates the shares account: nothing else does before a deploy.
+    expect(pins.ctokenMint?.equals(sharesMint)).toBe(true);
+  });
+
+  it("has no default vault and ignores the klend variables for a kVault", () => {
+    expect(() => venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "kvault" }, pool, programId)).toThrow(
+      /needs KVAULT_ADDRESS/,
+    );
+    const vault = key();
+    const pins = venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "kvault", KVAULT_ADDRESS: vault, KLEND_RESERVE: key() }, pool, programId);
+    expect(pins.klendMarket.toBase58()).toBe(vault);
   });
 
   it("pins the test-venue stub on KLEND_VENUE=test, never on mainnet", () => {

@@ -1,6 +1,8 @@
 // Step selection is the whole operator: given a state, exactly one thing
 // should happen. The instructions built here are the real ones, decoded back
 // out of the recorded transaction, so a wrong account list still shows up.
+import { KLEND_PROGRAM_ID } from "../chain/kvault";
+import { kvaultFixture } from "../chain/kvault.fixture";
 import { VENUE_KIND } from "../chain/venue-kind";
 import {
   AnchorProvider,
@@ -1556,9 +1558,65 @@ describe("venue cranks (ticket 13)", () => {
   });
 
   it("builds nothing for a venue kind it does not know", async () => {
-    const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ venueKind: 2 }) });
+    const { ctx, sent } = venueTick(10_000n * U, { pool: venuePool({ venueKind: 9 }) });
     await runTick(ctx).catch(() => undefined);
     expect(sent).toHaveLength(0);
+  });
+
+  describe("a kVault pool", () => {
+    const f = kvaultFixture([
+      { ctokens: 10n, available: 100n },
+      { ctokens: 10n, available: 900n },
+    ]);
+    const kvaultPool = (over: Partial<PoolState> = {}) =>
+      venuePool({ venueKind: VENUE_KIND.kvault, klendMarket: f.view.vault, kvault: f.view, ...over });
+    const n = f.view.allocations.length;
+
+    it("derives the remaining accounts from the vault state it was handed, not from env", async () => {
+      const { ctx, sent } = venueTick(10_000n * U, { pool: kvaultPool() });
+      await runTick(ctx);
+      const keys = (sent[0]?.[0]?.keys ?? []).map((key) => key.pubkey.toBase58());
+      // The pins and the fixed accounts come first, then the layout of kvault.rs
+      // starting at the klend program (the pinned program is that key here too).
+      const rest = keys.slice(keys.lastIndexOf(KLEND_PROGRAM_ID.toBase58()));
+      expect(rest[0]).toBe(KLEND_PROGRAM_ID.toBase58());
+      expect(rest.slice(1, 1 + n)).toEqual(f.view.allocations.map((a) => a.reserve.toBase58()));
+      expect(rest.slice(1 + n, 1 + 2 * n)).toEqual(f.view.allocations.map((a) => a.market.toBase58()));
+      expect(rest[1 + 2 * n]).toBe(f.view.tokenVault.toBase58());
+      // The vault state again, writable, so the pinned read-only slot can be written.
+      const last = sent[0]?.[0]?.keys.at(-1);
+      expect(last?.pubkey.toBase58()).toBe(f.view.vault.toBase58());
+      expect(last?.isWritable).toBe(true);
+    });
+
+    it("follows a changed allocation list on the next tick", async () => {
+      const g = kvaultFixture([{ ctokens: 5n, available: 7n }]);
+      const { ctx, sent } = venueTick(10_000n * U, {
+        pool: kvaultPool({ kvault: g.view, klendMarket: g.view.vault }),
+      });
+      await runTick(ctx);
+      const keys = (sent[0]?.[0]?.keys ?? []).map((key) => key.pubkey.toBase58());
+      expect(keys).toContain(g.view.allocations[0]!.reserve.toBase58());
+      expect(keys).not.toContain(f.view.allocations[0]!.reserve.toBase58());
+    });
+
+    it("passes the accepted mint writable to a redeem and not to a deploy", async () => {
+      const deploy = venueTick(10_000n * U, { pool: kvaultPool() });
+      await runTick(deploy.ctx);
+      const deployMint = deploy.sent[0]?.[0]?.keys.filter((k) => k.pubkey.equals(USDC) && k.isWritable);
+      expect(deployMint).toHaveLength(0);
+      const recall = venueTick(100n * U, { pool: kvaultPool({ venueValue: 9_900n * U }) });
+      await runTick(recall.ctx);
+      expect(recall.sent[0]?.[0]?.keys.filter((k) => k.pubkey.equals(USDC) && k.isWritable)).not.toHaveLength(0);
+    });
+
+    it("refuses to build when the vault was not read", async () => {
+      const { ctx, sent } = venueTick(10_000n * U, {
+        pool: venuePool({ venueKind: VENUE_KIND.kvault, klendMarket: f.view.vault }),
+      });
+      await runTick(ctx).catch(() => undefined);
+      expect(sent).toHaveLength(0);
+    });
   });
 
   it("never deploys under the minimum size", async () => {

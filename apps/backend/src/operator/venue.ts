@@ -82,6 +82,10 @@ export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   "ReserveShareCapExceeded",
   "VenueIlliquid",
   "VenueMoveTooSmall",
+  // A kVault that cannot pay the whole recall now (its idle tokens and the
+  // source reserve's liquidity are short): the redeem paid less, the program
+  // reverted it, and a later tick tries again.
+  "VenueShortReturn",
 ]);
 
 /** An unpinned pool has `Pubkey::default()` for its klend program. */

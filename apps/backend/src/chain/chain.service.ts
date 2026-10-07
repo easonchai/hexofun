@@ -15,6 +15,9 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  TransactionMessage,
+  VersionedTransaction,
+  type AddressLookupTableAccount,
   type SignatureResult,
   type TransactionInstruction,
 } from "@solana/web3.js";
@@ -196,13 +199,20 @@ export class ChainService {
   async send(
     instructions: TransactionInstruction[],
     signer: Keypair = this.keypair,
+    lookupTables: readonly AddressLookupTableAccount[] = [],
   ): Promise<string> {
     try {
       const { blockhash, lastValidBlockHeight } =
         await this.connection.getLatestBlockhash("finalized");
       const [microLamports, computeUnits] = await Promise.all([
         this.priorityFeeMicroLamports(writableAccountsOf(instructions)),
-        this.computeUnitLimit(instructions, signer.publicKey, blockhash, lastValidBlockHeight),
+        this.computeUnitLimit(
+          instructions,
+          signer.publicKey,
+          blockhash,
+          lastValidBlockHeight,
+          lookupTables,
+        ),
       ]);
       const budgetInstructions = [
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
@@ -210,6 +220,22 @@ export class ChainService {
           ? []
           : [ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnits })]),
       ];
+      if (lookupTables.length > 0) {
+        // A kVault pool's instructions name too many accounts for a legacy
+        // transaction (venue-switch ticket 06): v0, with the vault's table.
+        const versioned = new VersionedTransaction(
+          new TransactionMessage({
+            payerKey: signer.publicKey,
+            recentBlockhash: blockhash,
+            instructions: [...budgetInstructions, ...instructions],
+          }).compileToV0Message([...lookupTables]),
+        );
+        versioned.sign([signer]);
+        // SAFETY: sign() has just filled the fee payer's signature slot.
+        const versionedSignature = bs58.encode(versioned.signatures[0] as Uint8Array);
+        await this.sendSigned(versioned.serialize(), versionedSignature, lastValidBlockHeight);
+        return versionedSignature;
+      }
       const tx = new Transaction({
         blockhash,
         lastValidBlockHeight,
@@ -272,16 +298,30 @@ export class ChainService {
     payer: PublicKey,
     blockhash: string,
     lastValidBlockHeight: number,
+    lookupTables: readonly AddressLookupTableAccount[] = [],
   ): Promise<number | undefined> {
     const generousLimit = ComputeBudgetProgram.setComputeUnitLimit({
       units: MAX_COMPUTE_UNIT_LIMIT,
     });
-    const tx = new Transaction({ blockhash, lastValidBlockHeight, feePayer: payer }).add(
-      generousLimit,
-      ...instructions,
-    );
     try {
-      const { value } = await this.connection.simulateTransaction(tx);
+      const { value } =
+        lookupTables.length > 0
+          ? await this.connection.simulateTransaction(
+              new VersionedTransaction(
+                new TransactionMessage({
+                  payerKey: payer,
+                  recentBlockhash: blockhash,
+                  instructions: [generousLimit, ...instructions],
+                }).compileToV0Message([...lookupTables]),
+              ),
+              { sigVerify: false },
+            )
+          : await this.connection.simulateTransaction(
+              new Transaction({ blockhash, lastValidBlockHeight, feePayer: payer }).add(
+                generousLimit,
+                ...instructions,
+              ),
+            );
       const code = customErrorCode(value.err);
       if (code !== undefined) {
         // Carries the program's logs (how `mapSendError` names an Anchor
