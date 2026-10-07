@@ -24,6 +24,7 @@ import {
   assertSolvent,
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
+  deployMethod,
   deployToVenue,
   epochPda,
   fetchTree,
@@ -973,12 +974,230 @@ describe("open Positions block the queued payout", () => {
   );
 });
 
+/** Builder for `cancel_withdraw`: `signer` signs, `playerOwner` picks the Player. */
+function cancelMethod(ctx: PoolCtx, signer: Wallet, playerOwner: Wallet = signer) {
+  return program.methods
+    .cancelWithdraw()
+    .accountsPartial({
+      owner: signer.keypair.publicKey,
+      pool: ctx.pool,
+      player: playerPda(ctx.pool, playerOwner.keypair.publicKey),
+    })
+    .signers([signer.keypair]);
+}
+
+async function cancel(ctx: PoolCtx, owner: Wallet) {
+  const signature = await cancelMethod(ctx, owner).rpc();
+  await assertSolvent(ctx);
+  return signature;
+}
+
+interface WithdrawCancelledEvent {
+  owner: PublicKey;
+  amount: BN;
+  pendingEpoch: BN;
+}
+
+/** Everything a cancel must leave alone. */
+async function untouched(ctx: PoolCtx, owner: Wallet) {
+  const player = await fetchPlayer(ctx, owner);
+  const pool = await fetchPool(ctx);
+  const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+  return {
+    principal: big(player.principal),
+    entries: big(player.entries),
+    pendingDeposit: big(player.pendingDeposit),
+    pendingEpoch: big(player.pendingEpoch),
+    leaf: await treePrincipal(ctx, owner),
+    root: await root(ctx, big(pool.currentEpochId)),
+    totalPrincipal: big(pool.totalPrincipal),
+    venueValue: big(pool.venueValue),
+    deficit: big(pool.deficit),
+    vault: await balance(ctx.principalVault),
+    venueUsdc: await balance(ctx.venue.klendCtoken),
+    shares: reserve.shares.toString(),
+  };
+}
+
+/** Cancels `queued` and checks the Player's flag, the pool's reserve and that
+ *  nothing else moved. Returns the event. */
+async function cancelAndCheck(ctx: PoolCtx, owner: Wallet, queued: bigint, epoch: bigint) {
+  expect(big((await fetchPlayer(ctx, owner)).pendingWithdraw)).toBe(queued);
+  const reservedBefore = big((await fetchPool(ctx)).pendingWithdrawals);
+  const before = await untouched(ctx, owner);
+  const signature = await cancel(ctx, owner);
+  expect(await untouched(ctx, owner)).toEqual(before);
+  expect(big((await fetchPlayer(ctx, owner)).pendingWithdraw)).toBe(0n);
+  expect(big((await fetchPool(ctx)).pendingWithdrawals)).toBe(reservedBefore - queued);
+  const event = await findEvent<WithdrawCancelledEvent>(signature, "withdrawCancelled");
+  expect(event!.owner.toBase58()).toBe(owner.keypair.publicKey.toBase58());
+  expect(big(event!.amount)).toBe(queued);
+  expect(big(event!.pendingEpoch)).toBe(epoch);
+  return event!;
+}
+
+describe("cancel_withdraw", () => {
+  it(
+    "refuses anyone but the owner, then zeroes the flag, lowers the reserve by exactly that amount and moves nothing else",
+    async () => {
+      const { ctx, owner } = await activePool(1_000n * USDC, 900n * USDC);
+      await request(ctx, owner, 400n * USDC);
+      const stranger = await ctx.fundedWallet(1n);
+
+      // A stranger signing for the owner's Player fails the Player's seeds.
+      const before = await untouched(ctx, owner);
+      await refused(ctx, cancelMethod(ctx, stranger, owner).rpc(), /ConstraintSeeds/);
+      expect(await untouched(ctx, owner)).toEqual(before);
+      expect(big((await fetchPlayer(ctx, owner)).pendingWithdraw)).toBe(400n * USDC);
+      expect(big((await fetchPool(ctx)).pendingWithdrawals)).toBe(400n * USDC);
+
+      await cancelAndCheck(ctx, owner, 400n * USDC, 2n);
+      expect(big((await fetchPool(ctx)).pendingWithdrawals)).toBe(0n);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "fails with NothingPending when nothing is queued, before any request and after a cancel",
+    async () => {
+      const { ctx, owner } = await activePool(100n * USDC, 0n);
+      await refused(ctx, cancelMethod(ctx, owner).rpc(), /NothingPending/);
+      await request(ctx, owner, 40n * USDC);
+      await cancel(ctx, owner);
+      await refused(ctx, cancelMethod(ctx, owner).rpc(), /NothingPending/);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "cancels one merged amount for two requests in an epoch",
+    async () => {
+      const { ctx, owner } = await activePool(100n * USDC, 0n);
+      await request(ctx, owner, 30n * USDC);
+      await request(ctx, owner, 20n * USDC);
+      await cancelAndCheck(ctx, owner, 50n * USDC, 2n);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "lets the Player request the full Principal in the same epoch afterwards, and leaves nothing for process_withdraw to pay",
+    async () => {
+      const { ctx, owner } = await activePool(100n * USDC, 0n);
+      await request(ctx, owner, 60n * USDC);
+      await cancelAndCheck(ctx, owner, 60n * USDC, 2n);
+
+      // Same epoch, and the whole Principal is askable again.
+      await request(ctx, owner, 100n * USDC);
+      const player = await fetchPlayer(ctx, owner);
+      expect(big(player.pendingWithdraw)).toBe(100n * USDC);
+      expect(big((await fetchPool(ctx)).pendingWithdrawals)).toBe(100n * USDC);
+      await cancel(ctx, owner);
+
+      // The cancelled request pays nothing, even once it would have been due.
+      await beginEpoch(ctx, 2n);
+      const walletBefore = await balance(owner.tokenAccount);
+      await refused(ctx, processMethod(ctx, owner).rpc(), /NothingPending/);
+      expect(await balance(owner.tokenAccount)).toBe(walletBefore);
+      expect(big((await fetchPlayer(ctx, owner)).principal)).toBe(100n * USDC);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "gives the cancelled amount back to free idle, so a deploy the reservation blocked goes through",
+    async () => {
+      // 1,000 in the vault, all of it queued: free idle is nothing.
+      const { ctx, owner } = await activePool(1_000n * USDC, 0n);
+      await request(ctx, owner, 1_000n * USDC);
+      await waitPastLastSync(ctx);
+      await refused(ctx, deployMethod(ctx, 100n * USDC).rpc(), /DeployExceedsIdle/);
+
+      await cancel(ctx, owner);
+      // Vault 1,000 and nothing reserved: free idle is the whole 1,000, so 900
+      // can leave above the 10% idle target.
+      await waitPastLastSync(ctx);
+      await deployMethod(ctx, 900n * USDC).rpc();
+      await assertSolvent(ctx);
+      expect(await balance(ctx.principalVault)).toBe(100n * USDC);
+      expect(big((await fetchPool(ctx)).venueValue)).toBe(900n * USDC);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "works while the pool is paused",
+    async () => {
+      const { ctx, owner } = await activePool(100n * USDC, 0n);
+      await request(ctx, owner, 40n * USDC);
+      await program.methods
+        .setPause(true)
+        .accountsPartial({ signer: ctx.admin.publicKey, pool: ctx.pool })
+        .signers([ctx.admin])
+        .rpc();
+      expect((await fetchPool(ctx)).paused).toBe(true);
+      await cancelAndCheck(ctx, owner, 40n * USDC, 2n);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "works while the pool is shut down",
+    async () => {
+      const { ctx, owner } = await activePool(100n * USDC, 0n);
+      await request(ctx, owner, 40n * USDC);
+      await shutdown(ctx);
+      expect((await fetchPool(ctx)).shutdown).toBe(true);
+      await cancelAndCheck(ctx, owner, 40n * USDC, 2n);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "works while the pool is impaired, and the Player keeps the same Principal and exposure",
+    async () => {
+      const { ctx, owner } = await activePool(1_000n * USDC, 900n * USDC);
+      await request(ctx, owner, 500n * USDC);
+      await reprice(ctx, (8n * SCALE) / 10n);
+      expect((await fetchPool(ctx)).impaired).toBe(true);
+      await cancelAndCheck(ctx, owner, 500n * USDC, 2n);
+      const pool = await fetchPool(ctx);
+      expect(pool.impaired).toBe(true);
+      expect(big(pool.deficit)).toBe(180n * USDC);
+      expect(big((await fetchPlayer(ctx, owner)).principal)).toBe(1_000n * USDC);
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "works with a Position open",
+    async () => {
+      const ctx = await setupPool({ epochSeconds: 30, roundSeconds: 5, closeBuffer: 1 });
+      const a = await ctx.fundedWallet(36n * USDC);
+      await beginEpoch(ctx, 0n); // epoch 1
+      await deposit(ctx, a, 36n * USDC);
+      await beginEpoch(ctx, 1n); // epoch 2: the 36 is active Tickets
+      await request(ctx, a, 36n * USDC);
+      await openRound(ctx, 1n, 2n);
+      await stakeAll(ctx, a, 1n, 1n * USDC);
+      expect((await fetchPlayer(ctx, a)).openPositions).toBe(1);
+
+      await cancelAndCheck(ctx, a, 36n * USDC, 2n);
+      const player = await fetchPlayer(ctx, a);
+      expect(player.openPositions).toBe(1);
+      expect(big(player.principal)).toBe(36n * USDC);
+    },
+    TIMEOUT,
+  );
+});
+
 describe("the instruction set", () => {
   it("has no instant_withdraw", () => {
     // The raw IDL: `Program` camel-cases the names it keeps.
     const names = idl.instructions.map((ix) => ix.name);
     expect(names).toContain("request_withdraw");
     expect(names).toContain("process_withdraw");
+    expect(names).toContain("cancel_withdraw");
     expect(names).not.toContain("instant_withdraw");
   });
 });

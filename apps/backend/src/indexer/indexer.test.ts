@@ -1509,6 +1509,34 @@ describe("live yield mirror", () => {
     expect(events[7]?.data).toMatchObject({ refund: "250", reward: "0" });
   });
 
+  it("clears the pending amount when a WithdrawCancelled names the Player, and stores the event", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    await put(
+      "player",
+      chain.playerAddress(OWNER),
+      playerAccount(OWNER, { pendingWithdraw: bn(500), pendingEpoch: bn(3) }),
+    );
+    await fire([dataLine("WithdrawRequested", { owner: OWNER, amount: bn(500), pending: bn(500), pendingEpoch: bn(3), refunded: bn(0), paid: bn(0), redeemed: bn(0) })], 419);
+    expect(
+      await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }),
+    ).toMatchObject({ pendingWithdraw: 500n });
+
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
+    await fire(
+      [dataLine("WithdrawCancelled", { owner: OWNER, amount: bn(500), pendingEpoch: bn(3) })],
+      420,
+    );
+
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) })).toMatchObject({
+      principal: 3_000_000n,
+      pendingWithdraw: 0n,
+    });
+
+    const cancelled = dataLine("WithdrawCancelled", { owner: OWNER, amount: bn(500), pendingEpoch: bn(3) });
+    expect(await indexer.ingestLogs(batch("sig-cancel", 41n, [cancelled]))).toBe(1);
+    expect(await prisma.event.findMany({ where: { name: "WithdrawCancelled" } })).toHaveLength(1);
+  });
+
   it("re-reads the Player a Withdrawn names, without a sweep", async () => {
     await put("pool", chain.poolAddress(), poolAccount());
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER, { principal: bn(2_500) }));

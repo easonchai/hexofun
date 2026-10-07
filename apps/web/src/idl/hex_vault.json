@@ -514,6 +514,78 @@
       "args": []
     },
     {
+      "name": "cancel_withdraw",
+      "docs": [
+        "Owner-signed: clears a queued request and moves nothing."
+      ],
+      "discriminator": [
+        112,
+        53,
+        226,
+        58,
+        158,
+        30,
+        37,
+        168
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "player",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "close_round",
       "docs": [
         "Permissionless (ops-and-envs ticket 05): reclaims a finished Round's",
@@ -4479,6 +4551,19 @@
       ]
     },
     {
+      "name": "WithdrawCancelled",
+      "discriminator": [
+        162,
+        153,
+        181,
+        47,
+        154,
+        132,
+        183,
+        117
+      ]
+    },
+    {
       "name": "WithdrawRequested",
       "discriminator": [
         114,
@@ -7458,6 +7543,29 @@
               "The `Pool` this tree belongs to."
             ],
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawCancelled",
+      "docs": [
+        "`cancel_withdraw` cleared the whole queued amount. No USDC moved."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "pending_epoch",
+            "type": "u64"
           }
         ]
       }

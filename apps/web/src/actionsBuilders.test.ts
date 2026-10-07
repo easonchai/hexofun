@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import {
   buyPosition,
   buyTickets,
+  cancelWithdraw,
   deposit,
   klendRemaining,
   requestWithdraw,
@@ -119,6 +120,22 @@ describe("player instructions against the IDL", () => {
     const keys = ix!.keys.map((k) => k.pubkey.toBase58());
     expect(keys).toContain(pool.weightTree.toBase58());
     expect(keys.slice(named)).toEqual(klendRemaining(pool).map((m) => m.pubkey.toBase58()));
+  });
+
+  it("cancel_withdraw names owner, pool, player in IDL order and nothing else", async () => {
+    let owner!: PublicKey;
+    const [ix] = await sent((p, o) => {
+      owner = o.publicKey;
+      return cancelWithdraw(p, o, pool);
+    });
+    expect(ix!.keys).toHaveLength(idlAccounts("cancel_withdraw"));
+    const [player] = PublicKey.findProgramAddressSync(
+      [Buffer.from("player"), pool.address.toBuffer(), owner.toBuffer()],
+      PROGRAM_ID,
+    );
+    expect(ix!.keys.map((k) => k.pubkey.toBase58())).toEqual(
+      [owner, pool.address, player].map((k) => k.toBase58()),
+    );
   });
 
   it("the shutdown pair names the tree and klend on both instructions", async () => {

@@ -175,6 +175,11 @@ pub mod hex_vault {
         custody::process_withdraw(ctx)
     }
 
+    /// Owner-signed: clears a queued request and moves nothing.
+    pub fn cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
+        custody::cancel_withdraw(ctx)
+    }
+
     pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         custody::buy_tickets(ctx, amount)
     }

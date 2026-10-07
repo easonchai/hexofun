@@ -102,6 +102,14 @@ pub struct WithdrawRequested {
     pub redeemed: u64,
 }
 
+/// `cancel_withdraw` cleared the whole queued amount. No USDC moved.
+#[event]
+pub struct WithdrawCancelled {
+    pub owner: Pubkey,
+    pub amount: u64,
+    pub pending_epoch: u64,
+}
+
 /// A `Withdrawn` event follows once `process_withdraw` moves the USDC. Its
 /// `amount` is what was paid, under the request while the pool is impaired.
 #[event]

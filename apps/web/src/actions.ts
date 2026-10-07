@@ -523,6 +523,25 @@ export async function requestWithdraw(
 }
 
 /**
+ * Takes back the queued withdrawal. Moves no money: the amount was only a flag
+ * on Principal that never left the vault. Works while paused, shut down or
+ * impaired. Fails with `NothingPending` when the crank paid it first.
+ */
+export async function cancelWithdraw(
+  program: HexVaultProgram,
+  owner: TxSigner,
+  pool: PoolLike,
+): Promise<SendResult> {
+  const o = owner.publicKey;
+  const builder = method(program, "cancelWithdraw")().accounts({
+    owner: o,
+    pool: pool.address,
+    player: playerAddress(pool.address, o),
+  });
+  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+}
+
+/**
  * Pays out the whole pending amount. The wallet signs as the owner, which the
  * program needs while the pool is impaired (the payout is the haircut value)
  * and ignores otherwise, so this is the depositor's own escape hatch when the

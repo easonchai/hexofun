@@ -25,7 +25,7 @@ use crate::errors::HexVaultError;
 use crate::events::{
     AdminChanged, AdminProposed, Deposited, EmergencyWithdrawn, FeaturePaused, HouseSwept,
     OperatorChanged, ParamsSet, Paused, PoolCreated, PoolShutdown, TicketsBought, TicketsGranted,
-    VenueDeployed, WithdrawRequested, Withdrawn,
+    VenueDeployed, WithdrawCancelled, WithdrawRequested, Withdrawn,
     // yield-claimer ticket 07
     Harvested, TreasuryAccountsSet, VenueRecalled,
     // yield-claimer ticket 10
@@ -892,6 +892,32 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         amount: paid,
         principal: a.player.principal,
         entries: a.player.entries,
+    });
+    Ok(())
+}
+
+/// Takes back a queued request before it pays. A Pending withdrawal is only a
+/// flag on Principal that never left (ADR 0020), so this clears the flag and
+/// the pool's reservation and moves no USDC, Principal, Tickets or tree weight.
+/// A merged request cancels as one amount.
+///
+/// Allowed while paused, shut down or impaired and with a Position open, as
+/// the request is: nothing leaves the pool. Cancelling while impaired keeps the
+/// Player exposed like everyone who never asked to leave.
+pub fn cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let amount = a.player.pending_withdraw;
+    require!(amount > 0, HexVaultError::NothingPending);
+    a.player.pending_withdraw = 0;
+    a.pool.pending_withdrawals = a
+        .pool
+        .pending_withdrawals
+        .checked_sub(amount)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    emit!(WithdrawCancelled {
+        owner: a.owner.key(),
+        amount,
+        pending_epoch: a.player.pending_epoch,
     });
     Ok(())
 }
@@ -2244,6 +2270,26 @@ pub struct RequestWithdraw<'info> {
     pub klend_ctoken: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
+}
+
+/// Signed by the Player's owner; touches nothing but the Player and the Pool.
+#[derive(Accounts)]
+pub struct CancelWithdraw<'info> {
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
+        bump = player.bump,
+    )]
+    pub player: Box<Account<'info, Player>>,
 }
 
 #[derive(Accounts)]

@@ -24,6 +24,7 @@ import {
   awaitSendResult,
   deposit,
   processWithdraw,
+  cancelWithdraw,
   requestWithdraw,
   shutdownWithdraw,
   type SendResult,
@@ -43,6 +44,7 @@ import {
   haircutValue,
   parseAtomic,
   pendingTickets,
+  canCancelWithdraw,
   pendingWithdrawal,
   splitWithdraw,
 } from "../lib/money.js";
@@ -375,6 +377,33 @@ export function Vault(props: VaultScreenProps) {
     }
   };
 
+  const cancelNow = async () => {
+    if (!connected) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      let result = await cancelWithdraw(program, { publicKey: owner, sendTransaction }, pool);
+      if (result.kind === "unknown") {
+        setNote({ tone: "ok", text: CHECKING_NOTE, href: explorerUrl(result.signature) });
+        result = await awaitSendResult(program, result);
+      }
+      if (result.kind === "landed") {
+        setNote({ tone: "ok", text: "Withdrawal cancelled. Your money stays in the vault." });
+        onDone();
+      } else if (result.kind === "failed" && result.code === NOTHING_PENDING_CODE) {
+        // The crank paid it first. Same refresh as a landed cancel.
+        setNote({ tone: "ok", text: NOTHING_PENDING_NOTE });
+        onDone();
+      } else {
+        setNote({ tone: "err", text: decodeSendFailure(result) });
+      }
+    } catch (error) {
+      setNote({ tone: "err", text: decodePlayerError(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const canSubmit =
     connected &&
     !busy &&
@@ -549,6 +578,22 @@ export function Vault(props: VaultScreenProps) {
                       >
                         {impaired ? "TAKE IT NOW" : "PAY OUT NOW"}
                       </button>
+                    ) : null}
+                    {canCancelWithdraw(pending) ? (
+                      <button
+                        type="button"
+                        className="vault-pill"
+                        data-testid="cancel-withdraw"
+                        disabled={busy}
+                        onClick={() => void cancelNow()}
+                      >
+                        CANCEL
+                      </button>
+                    ) : null}
+                    {canCancelWithdraw(pending) ? (
+                      <span data-testid="cancel-withdraw-hint">
+                        Cancel and your money stays in the vault, still earning.
+                      </span>
                     ) : null}
                   </dd>
                 </div>
