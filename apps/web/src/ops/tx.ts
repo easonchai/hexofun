@@ -14,7 +14,7 @@
  */
 import { AnchorProvider, Program } from "@anchor-lang/core";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import type { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import type { AddressLookupTableAccount, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import {
@@ -70,8 +70,9 @@ export function explorerTxUrl(
 }
 
 export interface SendState {
-  /** Sends `ixs` and resolves to the signature, or null after setting `error`. */
-  send: (ixs: TransactionInstruction[]) => Promise<string | null>;
+  /** Sends `ixs` and resolves to the signature, or null after setting `error`.
+   *  `tables` makes it a v0 transaction (a kVault pool's, `VenuePool.lookupTables`). */
+  send: (ixs: TransactionInstruction[], tables?: AddressLookupTableAccount[]) => Promise<string | null>;
   pending: boolean;
   /** The last landed send. Cleared when the next one starts. */
   result: { signature: string; url: string } | null;
@@ -110,14 +111,14 @@ export function useSendTx(): SendState {
   const busy = useRef(false);
 
   const send = useCallback(
-    async (ixs: TransactionInstruction[]): Promise<string | null> => {
+    async (ixs: TransactionInstruction[], tables: AddressLookupTableAccount[] = []): Promise<string | null> => {
       if (busy.current || !publicKey) return null;
       busy.current = true;
       setPending(true);
       setResult(null);
       setError(null);
       try {
-        const first = await sendMany(program, { publicKey }, ixs, PRIORITY_FEE_MICROLAMPORTS);
+        const first = await sendMany(program, { publicKey }, ixs, PRIORITY_FEE_MICROLAMPORTS, tables);
         const outcome: ResolvedSendResult = await awaitSendResult(program, first);
         if (outcome.kind === "landed") {
           setResult({ signature: outcome.signature, url: explorerTxUrl(outcome.signature) });

@@ -20,6 +20,9 @@ import {
   SystemProgram,
   Transaction,
   TransactionExpiredBlockheightExceededError,
+  TransactionMessage,
+  VersionedTransaction,
+  type AddressLookupTableAccount,
   type Connection,
   type TransactionInstruction,
 } from "@solana/web3.js";
@@ -173,15 +176,27 @@ async function computeUnitLimit(
   instructions: TransactionInstruction[],
   payer: PublicKey,
   options: { sponsored: boolean },
+  v0?: { blockhash: string; tables: AddressLookupTableAccount[] },
 ): Promise<ComputeSizing> {
   let simulated: { err: unknown; unitsConsumed?: number; logs?: string[] | null };
   try {
-    const probe = new Transaction().add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: MAX_COMPUTE_UNIT_LIMIT }),
-      ...instructions,
-    );
-    probe.feePayer = payer;
-    simulated = (await connection.simulateTransaction(probe)).value;
+    const budget = ComputeBudgetProgram.setComputeUnitLimit({ units: MAX_COMPUTE_UNIT_LIMIT });
+    if (v0) {
+      const probe = new VersionedTransaction(
+        new TransactionMessage({
+          payerKey: payer,
+          recentBlockhash: v0.blockhash,
+          instructions: [budget, ...instructions],
+        }).compileToV0Message(v0.tables),
+      );
+      simulated = (
+        await connection.simulateTransaction(probe, { sigVerify: false, replaceRecentBlockhash: true })
+      ).value;
+    } else {
+      const probe = new Transaction().add(budget, ...instructions);
+      probe.feePayer = payer;
+      simulated = (await connection.simulateTransaction(probe)).value;
+    }
   } catch {
     return {
       kind: "units",
@@ -221,13 +236,14 @@ export async function sendMany(
   owner: TxSigner,
   instructions: TransactionInstruction[],
   priorityFeeMicroLamports: number,
+  lookupTables: AddressLookupTableAccount[] = [],
 ): Promise<SendResult> {
   const provider = providerOf(program);
   const connection = provider.connection;
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash(CONFIRMED);
   const sizing = await computeUnitLimit(connection, instructions, owner.publicKey, {
     sponsored: owner.sendTransaction !== undefined,
-  });
+  }, lookupTables.length > 0 ? { blockhash, tables: lookupTables } : undefined);
   if (sizing.kind === "programError") {
     // Ticket 15: caught before anything is signed or sent.
     return {
@@ -236,15 +252,28 @@ export async function sendMany(
       message: JSON.stringify(sizing.err),
     };
   }
-  const transaction = new Transaction({
-    blockhash,
-    lastValidBlockHeight,
-    feePayer: owner.publicKey,
-  }).add(
+  const budgeted = [
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports }),
     ComputeBudgetProgram.setComputeUnitLimit({ units: sizing.units }),
     ...instructions,
-  );
+  ];
+  // A kVault pool's instructions name too many accounts for a legacy
+  // transaction: v0 with the vault's lookup table (venue-switch ticket 06).
+  // ponytail: the Privy sponsored path (`owner.sendTransaction`) is typed for
+  // legacy transactions, so v0 is only proven on the wallet-adapter path the
+  // Ops console uses.
+  const transaction =
+    lookupTables.length > 0
+      ? (new VersionedTransaction(
+          new TransactionMessage({
+            payerKey: owner.publicKey,
+            recentBlockhash: blockhash,
+            instructions: budgeted,
+          }).compileToV0Message(lookupTables),
+        ) as unknown as Transaction)
+      : new Transaction({ blockhash, lastValidBlockHeight, feePayer: owner.publicKey }).add(
+          ...budgeted,
+        );
 
   let signature: string;
   if (owner.sendTransaction) {
@@ -346,6 +375,8 @@ const venueAccounts = (pool: PoolLike) => ({
 export function klendRemaining(pool: PoolLike) {
   if (pool.venueKind === VENUE_KIND.stub) return [];
   if (pool.venueKind !== VENUE_KIND.klend) {
+    // A kVault pool's player actions are not built: they need the vault read,
+    // its lookup table and a v0 send through the player wallet path.
     throw new Error(`unsupported venue kind ${pool.venueKind}`);
   }
   const derive = (...seeds: (string | PublicKey)[]): PublicKey =>

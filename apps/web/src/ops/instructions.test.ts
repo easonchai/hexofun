@@ -108,7 +108,25 @@ describe("venue crank account lists", () => {
   it("the klend kind gets the extras even when this program is pinned, and an unknown kind throws", async () => {
     const klend = { ...pool, klendProgram: PROGRAM_ID };
     expect((await harvest(program, klend)).keys).toHaveLength(idlAccounts("harvest") + KLEND_EXTRAS);
-    expect(() => harvest(program, { ...pool, venueKind: 2 })).toThrow(/unsupported venue kind 2/);
+    expect(() => harvest(program, { ...pool, venueKind: 3 })).toThrow(/unsupported venue kind 3/);
+  });
+
+  it("a kVault pool needs its vault read, then drains with the redeem accounts and migrates value-only", async () => {
+    const k = () => Keypair.generate().publicKey;
+    const view = {
+      vault: k(), program: k(), tokenMint: k(), tokenVault: k(), baseVaultAuthority: k(), sharesMint: k(), idle: 0n, lookupTable: k(),
+      allocations: [{ reserve: k(), ctokenVault: k(), ctokens: 1n, market: k(), liquiditySupply: k(), collateralMint: k(), available: 5n }],
+    };
+    const kv = { ...pool, venueKind: 2 };
+    expect(() => drainVenue(program, kv, kv.admin, 1n)).toThrow(/vault read first/);
+    const withVault = { ...kv, kvault: view };
+    const drain = await drainVenue(program, withVault, kv.admin, 1n);
+    const migrate = await migrateVenue(program, withVault);
+    // Drain carries the vault's token vault and the writable USDC mint; a migrate does not.
+    const keys = (ix: { keys: { pubkey: PublicKey }[] }) => ix.keys.map((x) => x.pubkey.toBase58());
+    expect(keys(drain)).toContain(view.tokenVault.toBase58());
+    expect(keys(migrate)).not.toContain(view.tokenVault.toBase58());
+    expect(keys(migrate)).toContain(view.allocations[0]!.reserve.toBase58());
   });
 
   it("deploy_to_venue names the venue proposal PDA the program refuses on", async () => {

@@ -49,7 +49,7 @@ export function CranksPanel() {
     if (!tx.publicKey) return;
     try {
       const pool = await loadPool(tx.program);
-      await tx.send(await build(tx.program, pool, tx.publicKey));
+      await tx.send(await build(tx.program, pool, tx.publicKey), pool.lookupTables);
     } catch (error) {
       console.error(error);
       setNote("Could not build the transaction. Check the figures and try again.");

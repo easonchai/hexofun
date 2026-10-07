@@ -14,6 +14,8 @@ import {
   PublicKey,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   type AccountMeta,
+  type AddressLookupTableAccount,
+  type Connection,
   type TransactionInstruction,
 } from "@solana/web3.js";
 
@@ -32,6 +34,7 @@ import {
   VENUE_KIND,
   type HexVaultProgram,
 } from "../chain.js";
+import { fetchKvaultView, kvaultRemaining, type KvaultView } from "../kvault.js";
 import { parseAtomic } from "../lib/money.js";
 import { USDC_DECIMALS } from "./format.js";
 
@@ -49,7 +52,15 @@ export interface VenuePool {
   klendCtoken: PublicKey;
   /** Which backing the four pins point at (`VENUE_KIND`). */
   venueKind: number;
+  /** A kVault pool only: the vault as read at click time, and its lookup
+   *  table, which the transaction needs to be v0 (`useSendTx.send`). */
+  kvault?: KvaultView;
+  lookupTables?: AddressLookupTableAccount[];
 }
+
+/** What an instruction does at a kVault: `sync` only values the position,
+ *  `move` also deposits, `redeem` may withdraw. klend ignores it. */
+type VenueUse = "sync" | "move" | "redeem";
 
 /** A Round or epoch's randomness request seed, read off its account. */
 export interface RoundSeed {
@@ -117,8 +128,15 @@ const venue = (pool: VenuePool) => ({
  * `test-venue` stub takes none, and a kind this build does not know throws
  * rather than guess an account list.
  */
-function venueRemaining(pool: VenuePool): AccountMeta[] {
+function venueRemaining(pool: VenuePool, use: VenueUse = "move"): AccountMeta[] {
   if (pool.venueKind === VENUE_KIND.stub) return [];
+  if (pool.venueKind === VENUE_KIND.kvault) {
+    if (!pool.kvault) throw new Error("a kVault pool needs its vault read first (loadPool)");
+    return kvaultRemaining(pool.kvault, {
+      valueOnly: use === "sync",
+      ...(use === "redeem" ? { writableMint: pool.acceptedMint } : {}),
+    });
+  }
   if (pool.venueKind !== VENUE_KIND.klend) {
     throw new Error(`unsupported venue kind ${pool.venueKind}`);
   }
@@ -159,7 +177,7 @@ export const deployToVenue = (program: HexVaultProgram, pool: VenuePool, amount:
   );
 
 export const recall = (program: HexVaultProgram, pool: VenuePool, amount: bigint) =>
-  build(program, "recall", principalAccounts(pool), [bn(amount)], venueRemaining(pool));
+  build(program, "recall", principalAccounts(pool), [bn(amount)], venueRemaining(pool, "redeem"));
 
 /**
  * `drain_venue` (venue-switch ticket 04): brings `amount` home from the venue
@@ -177,7 +195,7 @@ export const drainVenue = (
     "drainVenue",
     { signer, ...principalAccounts(pool), venueProposal: venueProposalAddress(pool.address) },
     [bn(amount)],
-    venueRemaining(pool),
+    venueRemaining(pool, "redeem"),
   );
 
 /**
@@ -196,7 +214,7 @@ export const migrateVenue = (program: HexVaultProgram, pool: VenuePool) =>
       ...venue(pool),
     },
     [],
-    venueRemaining(pool),
+    venueRemaining(pool, "sync"),
   );
 
 export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
@@ -209,7 +227,7 @@ export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
       treasury: pool.treasury,
     },
     [],
-    venueRemaining(pool),
+    venueRemaining(pool, "redeem"),
   );
 
 /** Pays `amount` from the payer's own USDC account; the program caps it at the deficit. */
@@ -228,7 +246,7 @@ export const coverDeficit = (
       ...principalAccounts(pool),
     },
     [bn(amount)],
-    venueRemaining(pool),
+    venueRemaining(pool, "sync"),
   );
 
 /**
@@ -256,7 +274,7 @@ export async function processWithdraw(
       principalVault: principalVaultAddress(pool.address),
       ...venue(pool),
       tokenProgram: TOKEN_PROGRAM_ID,
-    }),
+    }, [], pool.venueKind === VENUE_KIND.kvault ? venueRemaining(pool, "sync") : []),
   ];
 }
 
@@ -284,7 +302,7 @@ const asKey = (value: unknown): PublicKey => new PublicKey(value as PublicKey);
 export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
   const address = poolAddress(POOL_ID);
   const a = (await accountOf(program, "pool").fetch(address)) as Record<string, unknown>;
-  return {
+  const pool: VenuePool = {
     address,
     admin: asKey(a.admin),
     acceptedMint: asKey(a.acceptedMint),
@@ -296,6 +314,14 @@ export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
     klendCtoken: asKey(a.klendCtoken),
     venueKind: Number(a.venueKind),
   };
+  if (pool.venueKind !== VENUE_KIND.kvault) return pool;
+  // The curator can change the allocation list at any time, so the vault is
+  // read now and never cached.
+  const connection = (program.provider as { connection: Connection }).connection;
+  const kvault = await fetchKvaultView(connection, pool.klendMarket, pool.klendProgram);
+  const { value } = await connection.getAddressLookupTable(kvault.lookupTable);
+  if (!value) throw new Error(`lookup table ${kvault.lookupTable.toBase58()} does not exist`);
+  return { ...pool, kvault, lookupTables: [value] };
 }
 
 const seedOf = (value: unknown): Uint8Array => Uint8Array.from(value as ArrayLike<number>);
