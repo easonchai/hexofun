@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { drainAccess, proposalView, venueKindName } from "./venueProposal.js";
+import { drainAccess, migrateAccess, proposalView, venueKindName } from "./venueProposal.js";
 
 const proposal = (unlocksAt: number) => ({
   venueKind: 2,
@@ -71,6 +71,43 @@ describe("drainAccess", () => {
     expect(drainAccess({ venueProposal: null, admin: null, operatorKey: null }, "A")).toMatchObject({
       allowed: false,
       reason: expect.stringMatching(/Admin and Operator/),
+    });
+  });
+});
+
+describe("migrateAccess", () => {
+  const params = { minVenueMove: "100000000" } as never;
+  const summary = (unlocksAt: number, venueValue: string, venueParams = params) => ({
+    venueProposal: proposal(unlocksAt),
+    venueValue,
+    venueParams,
+  });
+
+  it("is allowed once the lock has elapsed and the position is at or under min_venue_move", () => {
+    expect(migrateAccess(summary(1_000, "100000000"), 1_000)).toEqual({ allowed: true });
+    expect(migrateAccess(summary(1_000, "0"), 5_000)).toEqual({ allowed: true });
+  });
+
+  it("says why when there is no proposal, the lock runs, or the position is above dust", () => {
+    expect(migrateAccess({ venueProposal: null, venueValue: "0", venueParams: params }, 1)).toMatchObject({
+      allowed: false,
+      reason: expect.stringMatching(/No venue proposal/),
+    });
+    expect(migrateAccess(summary(8_200, "0"), 1_000)).toMatchObject({
+      allowed: false,
+      reason: expect.stringMatching(/lock ends in 2 h/),
+    });
+    expect(migrateAccess(summary(1_000, "100000001"), 2_000)).toMatchObject({
+      allowed: false,
+      reason: expect.stringMatching(/Drain it first/),
+    });
+  });
+
+  it("never offers the button on a read it cannot make", () => {
+    expect(migrateAccess({ venueValue: "0", venueParams: params } as never, 1)).toMatchObject({ allowed: false });
+    expect(migrateAccess(summary(1_000, "0", null as never), 2_000)).toMatchObject({
+      allowed: false,
+      reason: expect.stringMatching(/minimum venue move/),
     });
   });
 });

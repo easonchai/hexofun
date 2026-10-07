@@ -5,7 +5,7 @@
  * and past the lock.
  */
 import type { OpsSummaryDto } from "../api.js";
-import { duration, UNAVAILABLE } from "./format.js";
+import { duration, UNAVAILABLE, usdc } from "./format.js";
 
 export type ProposalView =
   | { state: "unavailable" }
@@ -71,4 +71,36 @@ export function drainAccess(
     allowed: false,
     reason: "With no venue proposal open, only the Admin or the Operator may drain.",
   };
+}
+
+export type MigrateAccess = { allowed: true } | { allowed: false; reason: string };
+
+/**
+ * Whether `migrate_venue` would be accepted now, as far as the summary can
+ * tell: a proposal is open, its lock has elapsed and the position is at or
+ * under `min_venue_move`. Anyone may call it, so no wallet is involved. The
+ * program checks again on chain; this only decides whether to offer the
+ * button and what to say when it is off.
+ */
+export function migrateAccess(
+  summary: Pick<OpsSummaryDto, "venueProposal" | "venueValue" | "venueParams">,
+  nowSeconds: number,
+): MigrateAccess {
+  const proposal = summary.venueProposal;
+  if (proposal === undefined) {
+    return { allowed: false, reason: "Cannot tell whether a venue proposal is open." };
+  }
+  if (proposal === null) return { allowed: false, reason: "No venue proposal is open." };
+  const left = Number(proposal.unlocksAt) - nowSeconds;
+  if (left > 0) return { allowed: false, reason: `The lock ends in ${duration(left)}.` };
+  if (!summary.venueParams) {
+    return { allowed: false, reason: "Cannot tell the minimum venue move." };
+  }
+  if (BigInt(summary.venueValue) > BigInt(summary.venueParams.minVenueMove)) {
+    return {
+      allowed: false,
+      reason: `The old venue still holds ${usdc(summary.venueValue)}. Drain it first.`,
+    };
+  }
+  return { allowed: true };
 }

@@ -38,6 +38,8 @@ import { USDC_DECIMALS } from "./format.js";
 /** What the venue cranks need from the Pool account. */
 export interface VenuePool {
   address: PublicKey;
+  /** Gets the venue proposal's rent back when `migrate_venue` closes it. */
+  admin: PublicKey;
   acceptedMint: PublicKey;
   treasury: PublicKey;
   weightTree: PublicKey;
@@ -178,6 +180,25 @@ export const drainVenue = (
     venueRemaining(pool),
   );
 
+/**
+ * `migrate_venue` (venue-switch ticket 05): permissionless, so the wallet only
+ * pays the fee. `pool` is read before the migration; the pins and extras are
+ * the OLD venue's, which the sync inside values.
+ */
+export const migrateVenue = (program: HexVaultProgram, pool: VenuePool) =>
+  build(
+    program,
+    "migrateVenue",
+    {
+      pool: pool.address,
+      admin: pool.admin,
+      proposal: venueProposalAddress(pool.address),
+      ...venue(pool),
+    },
+    [],
+    venueRemaining(pool),
+  );
+
 export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
   build(
     program,
@@ -265,6 +286,7 @@ export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
   const a = (await accountOf(program, "pool").fetch(address)) as Record<string, unknown>;
   return {
     address,
+    admin: asKey(a.admin),
     acceptedMint: asKey(a.acceptedMint),
     treasury: asKey(a.treasury),
     weightTree: asKey(a.weightTree),

@@ -17,6 +17,7 @@ import {
   loadEpochSeed,
   loadPool,
   loadRoundSeed,
+  migrateVenue,
   parseUsdcAmount,
   processWithdraw,
   recall,
@@ -25,9 +26,9 @@ import {
   type VenuePool,
 } from "./instructions.js";
 import { useSendTx } from "./tx.js";
-import { Panel, Row } from "./ui.js";
+import { Panel, Row, useNow } from "./ui.js";
 import { useOps } from "./useOps.js";
-import { drainAccess } from "./venueProposal.js";
+import { drainAccess, migrateAccess } from "./venueProposal.js";
 
 type Build = (program: HexVaultProgram, pool: VenuePool, caller: PublicKey) => Promise<TransactionInstruction[]>;
 
@@ -66,6 +67,8 @@ export function CranksPanel() {
   const off = !tx.ready || tx.pending;
   const stuckRound = s?.stuck?.round ?? null;
   const stuckEpoch = s?.stuck?.epoch ?? null;
+  const now = useNow();
+  const migrate = s ? migrateAccess(s, now) : null;
   const drain = s ? drainAccess(s, tx.publicKey?.toBase58() ?? null) : null;
   const hasDeficit = s !== null && BigInt(s.deficit) > 0n;
   const band = s?.venueParams
@@ -136,6 +139,21 @@ export function CranksPanel() {
       {drain && !drain.allowed && (
         <p className="ops-sync" data-testid="crank-drain-why">
           Drain venue is off. {drain.reason}
+        </p>
+      )}
+      <div className="ops-actions">
+        <button
+          type="button"
+          data-testid="crank-migrate"
+          disabled={off || migrate?.allowed !== true}
+          onClick={() => void run(wrap(migrateVenue))}
+        >
+          Migrate venue
+        </button>
+      </div>
+      {migrate && !migrate.allowed && (
+        <p className="ops-sync" data-testid="crank-migrate-why">
+          Migrate venue is off. {migrate.reason}
         </p>
       )}
       <div className="ops-actions">

@@ -19,6 +19,7 @@ import {
   deployToVenue,
   drainVenue,
   harvest,
+  migrateVenue,
   parseUsdcAmount,
   processWithdraw,
   recall,
@@ -35,6 +36,7 @@ const program = new Program(
 
 const pool: VenuePool = {
   address: key(),
+  admin: key(),
   acceptedMint: key(),
   treasury: key(),
   weightTree: key(),
@@ -129,6 +131,19 @@ describe("venue crank account lists", () => {
     );
     const stub = await drainVenue(program, { ...pool, venueKind: VENUE_KIND.stub }, caller, 5n);
     expect(stub.keys).toHaveLength(idlAccounts("drain_venue"));
+  });
+
+  it("migrate_venue names the proposal, the Admin for the rent and the OLD venue, with no signer", async () => {
+    const ix = await migrateVenue(program, pool);
+    expect(ix.keys).toHaveLength(idlAccounts("migrate_venue") + KLEND_EXTRAS);
+    expect(ix.keys.some((k) => k.isSigner)).toBe(false);
+    expect(keysOf(ix)).toEqual(
+      expect.arrayContaining([
+        venueProposalAddress(pool.address).toBase58(),
+        pool.admin.toBase58(),
+        ...venue,
+      ]),
+    );
   });
 
   it("cover_deficit pays from the wallet's USDC account", async () => {
