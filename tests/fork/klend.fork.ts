@@ -206,6 +206,7 @@ async function createForkPool(pin?: Partial<Venue>): Promise<ForkPool> {
       baseRateBps: 488,
       ticketsPerUsdc: 10,
       bonusCapBps: 500,
+      venueKind: 0,
     })
     .accountsPartial({
       payer: operator.publicKey,
