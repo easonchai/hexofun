@@ -734,7 +734,6 @@ export function App() {
             initialMode={vaultMode}
             onConnect={() => signer.connect()}
             onDone={statePoll.kick}
-            onPlay={() => setTab("MINE")}
           />
         ) : null}
         {tab === "DAILY DRAW" ? (

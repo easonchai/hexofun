@@ -3167,7 +3167,7 @@ input::placeholder {
   }
 }
 
-/* Deposit confirmed modal (Figma 177:108900) */
+/* Deposit confirmed modal (Figma 651:63390) */
 
 .deposit-modal-backdrop {
   position: fixed;
@@ -3237,10 +3237,10 @@ input::placeholder {
 
 .deposit-modal-kicker {
   margin: 0;
-  color: rgba(182, 255, 59, 0.6);
+  color: var(--brand-lime);
   font-family: "Roboto Mono", monospace;
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 12px;
+  letter-spacing: 0.15em;
 }
 
 .deposit-modal-amount {
@@ -3262,7 +3262,7 @@ input::placeholder {
   color: var(--brand-white);
 }
 
-.deposit-modal-play {
+.deposit-modal-done {
   width: 100%;
   font-size: 14px;
   letter-spacing: 0.125em;

@@ -114,7 +114,7 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   await expect(page.getByTestId("deposit-modal-amount")).toContainText("100.00", {
     timeout: 30_000,
   });
-  await page.getByTestId("deposit-modal-play").click();
+  await page.getByTestId("deposit-modal-done").click();
   await expect(page.getByTestId("deposit-modal")).toHaveCount(0);
 
   // 3. Buy a position on 3 tiles.

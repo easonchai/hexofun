@@ -110,6 +110,17 @@ const clockTime = (unixSeconds: number): string =>
     hourCycle: "h23",
   });
 
+/** "6 OCT, 12:00 AM (GMT+8)" in the viewer's zone, for the deposit modal. */
+const ticketTime = (unixSeconds: number): string => {
+  const date = new Date(unixSeconds * 1000);
+  const day = date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const time = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const zone = new Intl.DateTimeFormat("en-US", { timeZoneName: "shortOffset" })
+    .formatToParts(date)
+    .find((part) => part.type === "timeZoneName")?.value;
+  return `${day.toUpperCase()}, ${time}${zone ? ` (${zone})` : ""}`;
+};
+
 export type VaultMode = "deposit" | "withdraw";
 type Mode = VaultMode;
 
@@ -143,8 +154,6 @@ export interface VaultScreenProps {
   initialMode?: Mode | undefined;
   onConnect: () => void;
   onDone: () => void;
-  /** "Play HEXO" on the deposit-confirmed modal: App switches to the MINE tab. */
-  onPlay: () => void;
 }
 
 export function Vault(props: VaultScreenProps) {
@@ -164,7 +173,6 @@ export function Vault(props: VaultScreenProps) {
     initialMode,
     onConnect,
     onDone,
-    onPlay,
   } = props;
   // Two decimals everywhere, including what the pills write into the input
   // (see INPUT_DECIMALS).
@@ -176,8 +184,13 @@ export function Vault(props: VaultScreenProps) {
   const [note, setNote] = useState<
     { tone: "ok" | "err"; text: string; href?: string } | null
   >(null);
-  /** Atomic amount of the deposit that just landed; null closes the modal. */
-  const [confirmed, setConfirmed] = useState<bigint | null>(null);
+  /**
+   * The deposit that just landed and when its Tickets arrive (the epoch end
+   * it was made in, ADR 0020); null closes the modal.
+   */
+  const [confirmed, setConfirmed] = useState<{ amount: bigint; ticketsAt: number | null } | null>(
+    null,
+  );
   /**
    * A `process_withdraw` has been sent and the read model has not caught up.
    * Keyed on the pending amount so the flag clears itself the moment the
@@ -266,7 +279,7 @@ export function Vault(props: VaultScreenProps) {
       else track("withdraw_requested", { amount_usdc: amountUsdc, shutdown: label === "Withdraw" });
       // Deposit gets the confirmed modal; withdraw keeps the inline note.
       if (label === "Deposit" && amount !== null) {
-        setConfirmed(amount);
+        setConfirmed({ amount, ticketsAt: epochEnd * 1000 > Date.now() ? epochEnd : null });
       } else {
         setNote({
           tone: "ok",
@@ -635,10 +648,10 @@ export function Vault(props: VaultScreenProps) {
 
       {confirmed !== null ? (
         <DepositConfirmed
-          amount={`$${fmt2(confirmed)} ${SYMBOL}`}
-          tickets={fmt2(confirmed)}
+          amount={`$${fmt2(confirmed.amount)} ${SYMBOL}`}
+          tickets={fmt2(confirmed.amount)}
+          ticketsAt={confirmed.ticketsAt === null ? null : ticketTime(confirmed.ticketsAt)}
           onClose={() => setConfirmed(null)}
-          onPlay={onPlay}
         />
       ) : null}
     </div>
@@ -647,14 +660,15 @@ export function Vault(props: VaultScreenProps) {
 
 interface DepositConfirmedProps {
   amount: string;
-  /** What the deposit adds from tomorrow's draw. */
+  /** What the deposit adds once the current epoch ends. */
   tickets: string;
+  /** When they arrive; null when the epoch end is unknown or already past. */
+  ticketsAt: string | null;
   onClose: () => void;
-  onPlay: () => void;
 }
 
-/** The Figma "deposit confirmed" popup: backdrop, ×, and Escape dismiss. */
-function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmedProps) {
+/** The Figma "deposit confirmed" popup (651:63390): backdrop, ×, Escape, and GOT IT! dismiss. */
+function DepositConfirmed({ amount, tickets, ticketsAt, onClose }: DepositConfirmedProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -702,15 +716,22 @@ function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmed
           {amount}
         </p>
         <p className="deposit-modal-sub">
-          <strong>+{tickets} Tickets</strong> from tomorrow&apos;s draw
+          <strong>{tickets} Tickets</strong> available{" "}
+          {ticketsAt ? (
+            <>
+              on <strong>{ticketsAt}</strong>
+            </>
+          ) : (
+            "next epoch"
+          )}
         </p>
         <button
           type="button"
-          className="vault-cta deposit-modal-play"
-          data-testid="deposit-modal-play"
-          onClick={onPlay}
+          className="vault-cta deposit-modal-done"
+          data-testid="deposit-modal-done"
+          onClick={onClose}
         >
-          Play HEXO
+          Got it!
         </button>
       </section>
     </div>
