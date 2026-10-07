@@ -310,6 +310,36 @@ export function venuePinsFor(
   return { klendProgram, klendMarket, klendReserve, klendCtoken, kind: VENUE_KIND.klend, ...(ctokenMint ? { ctokenMint } : {}) };
 }
 
+/** Env keys that name a venue. Any of them set, or mainnet, means the env has a venue to compare. */
+const VENUE_ENV_KEYS = [
+  "VENUE_KIND",
+  "KLEND_VENUE",
+  "KLEND_PROGRAM",
+  "KLEND_MARKET",
+  "KLEND_RESERVE",
+  "KLEND_CTOKEN",
+  "KVAULT_ADDRESS",
+  "KVAULT_PROGRAM",
+] as const;
+
+/**
+ * The venue pins the env names, for comparing against an existing Pool
+ * (mainnet-readiness-fixes 06). `venuePinsFor` throws when a non-mainnet env
+ * names nothing, which is right when a pool is about to be created and wrong
+ * here, so an env with no venue key set gives undefined (nothing to compare).
+ * Mainnet always has an answer: the defaults are Kamino's USDC reserve.
+ */
+export function expectedVenuePins(
+  genesisHash: string,
+  env: Readonly<Record<string, string | undefined>>,
+  pool: PublicKey,
+  programId: PublicKey,
+): VenuePins | undefined {
+  const named = VENUE_ENV_KEYS.some((key) => (env[key]?.trim() ?? "") !== "");
+  if (!named && genesisHash !== MAINNET_GENESIS_HASH) return undefined;
+  return venuePinsFor(genesisHash, env, pool, programId);
+}
+
 /** The accepted mint is 6 decimals on every cluster we run on (bootstrap.ts
  * rejects any other), so whole USDC scales by a constant. */
 const USDC_DECIMALS = 1_000_000n;

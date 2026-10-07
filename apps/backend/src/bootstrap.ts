@@ -36,11 +36,13 @@ import {
   assertMainnetSafe,
   assertTokenAccountOwner,
   buyTicketsPausedFor,
+  expectedVenuePins,
   parsePoolParams,
   venuePinsFor,
   type PoolParams,
   type VenuePins,
 } from "./bootstrap/params";
+import { assertPoolMatchesExpected } from "./boot-guard";
 import { loadIdl } from "./chain/idl";
 import {
   jackpotVaultAddress,
@@ -72,6 +74,7 @@ interface PoolAccount {
   klendMarket: PublicKey;
   klendReserve: PublicKey;
   klendCtoken: PublicKey;
+  venueKind: number;
   gamePaused: boolean;
   jackpotPaused: boolean;
   buyTicketsPaused: boolean;
@@ -529,13 +532,22 @@ async function main(): Promise<void> {
 
   // An existing pool has already recorded which mint and which token accounts
   // it accepts, so those win over anything this run would otherwise derive.
-  if (
-    existing &&
-    envMint &&
-    !existing.acceptedMint.equals(new PublicKey(envMint))
-  ) {
-    throw new Error(
-      `pool ${pool.toBase58()} accepts ${existing.acceptedMint.toBase58()}, but ACCEPTED_MINT is ${envMint}`,
+  // But anyone can call create_pool on a program that does not yet protect it
+  // (mainnet-readiness-fixes 06), so an existing pool must also match every
+  // admin, treasury, buyback reserve, mint and venue pin this run was given,
+  // or it may be someone else's.
+  if (existing) {
+    assertPoolMatchesExpected(
+      pool,
+      existing,
+      {
+        admin: explicitAdmin,
+        treasury: params.treasury,
+        buybackReserve: params.buybackReserve,
+        acceptedMint: envMint ? new PublicKey(envMint) : undefined,
+        venue: expectedVenuePins(genesisHash, process.env, pool, programId),
+      },
+      "the flags and env",
     );
   }
   // Read before anything is created, like the mainnet guard: a venue the env

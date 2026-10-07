@@ -40,6 +40,7 @@ async function bootstrap(): Promise<void> {
     poolAddress: chain.poolAddress(),
     acceptedMint: config.get("ACCEPTED_MINT", { infer: true }),
     cluster: config.get("CLUSTER", { infer: true }),
+    env: process.env,
     mirroredPoolRows: () => prisma.pool.findMany({ select: { address: true, poolId: true } }),
   });
 
