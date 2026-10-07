@@ -404,6 +404,20 @@ describe("runTick", () => {
     expect(outcome.action).toBe("create_round");
   });
 
+  it("2. (mainnet-readiness-fixes 01) a failing unsettledPositions read is recorded and steps 4 to 7 still run", async () => {
+    const { ctx, sent } = context({
+      pool: pool({ openRoundId: 0n }),
+      openRound: null,
+      unsettledPositions: async () => {
+        throw new Error("too many bind variables in prepared statement");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toMatch(/too many bind variables/);
+    expect(outcome.action).toBe("create_round");
+    expect((sent[0] ?? []).map(label)).toEqual(["create_round"]);
+  });
+
   it("2. (ticket 12) an AccountNotInitialized race is treated as already settled", async () => {
     const address = Keypair.generate().publicKey.toBase58();
     const forgotten: string[][] = [];

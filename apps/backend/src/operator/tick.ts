@@ -527,7 +527,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // within one Round; one batch, and one Round, per tick, as before. Ticket
   // 06: a failure here (of any kind) is recorded, not thrown, so it never
   // blocks the epoch or round loops below it.
-  const sweep = await ctx.unsettledPositions();
+  // The read is inside the same recorded-failure path (mainnet-readiness-fixes 01).
+  let sweep: Awaited<ReturnType<typeof ctx.unsettledPositions>> = [];
+  try {
+    sweep = await ctx.unsettledPositions();
+  } catch (cause) {
+    stepError = stepError ?? `unsettled_positions read failed: ${errorMessage(cause)}`;
+  }
   const [firstUnsettled] = sweep;
   if (firstUnsettled) {
     const roundId = firstUnsettled.roundId;

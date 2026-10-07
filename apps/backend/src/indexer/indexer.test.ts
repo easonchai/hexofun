@@ -1640,6 +1640,18 @@ describe("operator queries", () => {
     ]);
   });
 
+  it("finds an unsettled position past 32,767 terminal rounds (mainnet-readiness-fixes 01)", async () => {
+    await prisma.$executeRaw`
+      INSERT INTO "Round" ("poolAddress", "id", "epochId", "startsAt", "endsAt", "status", "pot", "houseCut", "tileTotals")
+      SELECT ${active()}, g, 5, 0, 60, 2, 0, 0, '[]'::jsonb FROM generate_series(1, 40000) AS g`;
+    await prisma.position.create({
+      data: { poolAddress: active(), address: "pos-late", owner: ALICE, roundId: 39_999n, tiles: 1n, stakePerTile: 1n },
+    });
+    expect(await indexer.unsettledPositions()).toEqual([
+      { address: "pos-late", owner: ALICE, roundId: 39_999n },
+    ]);
+  });
+
   it("lists terminal, not-yet-closed rounds with nothing left owed on them", async () => {
     await prisma.round.createMany({
       data: [

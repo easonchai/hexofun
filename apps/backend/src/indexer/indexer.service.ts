@@ -6,7 +6,8 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { EventParser } from "@anchor-lang/core";
-import type { Epoch, Player, Prisma, Round } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { Epoch, Player, Round } from "@prisma/client";
 import { PublicKey, type ConfirmedSignatureInfo } from "@solana/web3.js";
 import bs58 from "bs58";
 
@@ -317,22 +318,22 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Positions still on chain whose Round is Settled, Forfeited or Voided,
-   * across every such Round, so still worth a `settle_position`. Position has
-   * no Prisma relation to Round (just its id), so this is two queries.
+   * oldest Round first, so still worth a `settle_position`. One joined
+   * statement with a limit: an `in` list of every terminal Round id passes
+   * Postgres's 32,767 bind-variable cap after about a month of rounds
+   * (mainnet-readiness-fixes 01). One tick settles one Round's batch, so the
+   * limit only has to cover a batch plus the ones the operator skips as just
+   * settled.
    */
   async unsettledPositions(): Promise<{ address: string; owner: string; roundId: bigint }[]> {
-    const terminalRounds = await this.prisma.round.findMany({
-      where: { poolAddress: this.activePool, status: { notIn: LIVE_ROUND_STATUSES } },
-      select: { id: true },
-    });
-    if (terminalRounds.length === 0) return [];
-    return this.prisma.position.findMany({
-      where: {
-        poolAddress: this.activePool,
-        roundId: { in: terminalRounds.map((round) => round.id) },
-      },
-      select: { address: true, owner: true, roundId: true },
-    });
+    return this.prisma.$queryRaw<{ address: string; owner: string; roundId: bigint }[]>`
+      SELECT p."address", p."owner", p."roundId"
+      FROM "Position" p
+      JOIN "Round" r ON r."poolAddress" = p."poolAddress" AND r."id" = p."roundId"
+      WHERE p."poolAddress" = ${this.activePool}
+        AND r."status" NOT IN (${Prisma.join(LIVE_ROUND_STATUSES)})
+      ORDER BY p."roundId" ASC, p."address" ASC
+      LIMIT 200`;
   }
 
   /**
@@ -1049,10 +1050,17 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       if (referrals.length > 0) {
         // Active pool only: a referee with no Player here yet keeps the
         // Principal their last event left (spec's "Referral job" decision).
-        const referralPlayers = await this.prisma.player.findMany({
-          where: { poolAddress, owner: { in: referrals.map((referral) => referral.referee) } },
-          select: { owner: true, principal: true },
-        });
+        // Chunked: one `in` list past 32,767 ids fails the statement.
+        const referees = referrals.map((referral) => referral.referee);
+        const referralPlayers: { owner: string; principal: bigint }[] = [];
+        for (let i = 0; i < referees.length; i += 10_000) {
+          referralPlayers.push(
+            ...(await this.prisma.player.findMany({
+              where: { poolAddress, owner: { in: referees.slice(i, i + 10_000) } },
+              select: { owner: true, principal: true },
+            })),
+          );
+        }
         const principalByOwner = new Map(
           referralPlayers.map((player) => [player.owner, player.principal]),
         );
