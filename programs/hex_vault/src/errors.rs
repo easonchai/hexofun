@@ -272,4 +272,12 @@ pub enum HexVaultError {
     KlendProgramMismatch,
     #[msg("only the program's upgrade authority can create a pool")]
     NotUpgradeAuthority,
+
+    // release_leaf (mainnet-readiness-fixes ticket 08). Appended too.
+    #[msg("this Player still holds Principal, a queued withdrawal, a Position or Tickets")]
+    LeafInUse,
+    #[msg("the House keeps its leaf")]
+    HouseLeafCannotBeReleased,
+    #[msg("the free-leaves account is malformed")]
+    FreeLeavesInvalid,
 }

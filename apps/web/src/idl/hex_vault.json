@@ -902,6 +902,38 @@
           "writable": true
         },
         {
+          "name": "free_leaves",
+          "docs": [
+            "The stack of released leaves (ticket 08), a header-only PDA that",
+            "`release_leaf` grows."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  114,
+                  101,
+                  101,
+                  95,
+                  108,
+                  101,
+                  97,
+                  118,
+                  101,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
           "name": "treasury"
         },
         {
@@ -1247,12 +1279,41 @@
         {
           "name": "weight_tree",
           "docs": [
-            "Grows by one node at this Player's first deposit, `owner` paying."
+            "Grows by one node at this Player's first deposit, `owner` paying,",
+            "unless a released leaf is waiting in `free_leaves`."
           ],
           "writable": true,
           "relations": [
             "pool"
           ]
+        },
+        {
+          "name": "free_leaves",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  114,
+                  101,
+                  101,
+                  95,
+                  108,
+                  101,
+                  97,
+                  118,
+                  101,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
         },
         {
           "name": "accepted_mint"
@@ -2598,6 +2659,121 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "release_leaf",
+      "docs": [
+        "Permissionless (mainnet-readiness-fixes ticket 08): an empty Player",
+        "gives its Weight tree leaf back, and the next first deposit reuses it."
+      ],
+      "discriminator": [
+        89,
+        21,
+        53,
+        57,
+        72,
+        62,
+        185,
+        201
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": [
+            "Pays the rent if the stack grows. Any key."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "player",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  121,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "player.owner",
+                "account": "Player"
+              }
+            ]
+          }
+        },
+        {
+          "name": "weight_tree",
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "free_leaves",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  114,
+                  101,
+                  101,
+                  95,
+                  108,
+                  101,
+                  97,
+                  118,
+                  101,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "request_draw",
@@ -3973,6 +4149,19 @@
       ]
     },
     {
+      "name": "FreeLeaves",
+      "discriminator": [
+        152,
+        136,
+        145,
+        85,
+        26,
+        81,
+        251,
+        205
+      ]
+    },
+    {
       "name": "Player",
       "discriminator": [
         72,
@@ -4271,6 +4460,19 @@
         247,
         26,
         76
+      ]
+    },
+    {
+      "name": "LeafReleased",
+      "discriminator": [
+        51,
+        83,
+        232,
+        142,
+        32,
+        222,
+        244,
+        252
       ]
     },
     {
@@ -5104,6 +5306,21 @@
       "code": 6100,
       "name": "NotUpgradeAuthority",
       "msg": "only the program's upgrade authority can create a pool"
+    },
+    {
+      "code": 6101,
+      "name": "LeafInUse",
+      "msg": "this Player still holds Principal, a queued withdrawal, a Position or Tickets"
+    },
+    {
+      "code": 6102,
+      "name": "HouseLeafCannotBeReleased",
+      "msg": "the House keeps its leaf"
+    },
+    {
+      "code": 6103,
+      "name": "FreeLeavesInvalid",
+      "msg": "the free-leaves account is malformed"
     }
   ],
   "types": [
@@ -5574,6 +5791,45 @@
       }
     },
     {
+      "name": "FreeLeaves",
+      "docs": [
+        "The pool's stack of released Weight tree leaves (mainnet-readiness-fixes",
+        "ticket 08). The 1-based leaf indices follow this header as `u32`s, `count`",
+        "of them live. The account only grows, on the `release_leaf` caller's rent;",
+        "a pop leaves the capacity for the next release."
+      ],
+      "serialization": "bytemuck",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "count",
+            "docs": [
+              "Leaves on the stack."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "version",
+            "docs": [
+              "[`crate::constants::FREE_LEAVES_VERSION`]."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "pool",
+            "docs": [
+              "The `Pool` this stack belongs to."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
       "name": "Harvested",
       "docs": [
         "`harvest` paid the yield fee to the Treasury and the prize share to the",
@@ -5738,6 +5994,31 @@
               "account. Always false for a House win, which keeps its 50/30/20 split."
             ],
             "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LeafReleased",
+      "docs": [
+        "`release_leaf` gave an empty Player's Weight tree leaf back to the pool's",
+        "free stack (mainnet-readiness-fixes ticket 08). The next first deposit",
+        "takes it before the tree grows."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "leaf_index",
+            "type": "u32"
           }
         ]
       }

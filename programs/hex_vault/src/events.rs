@@ -426,3 +426,13 @@ pub struct VenueMigrated {
     pub new_klend_ctoken: Pubkey,
     pub left_behind: u64,
 }
+
+/// `release_leaf` gave an empty Player's Weight tree leaf back to the pool's
+/// free stack (mainnet-readiness-fixes ticket 08). The next first deposit
+/// takes it before the tree grows.
+#[event]
+pub struct LeafReleased {
+    pub pool: Pubkey,
+    pub owner: Pubkey,
+    pub leaf_index: u32,
+}

@@ -18,7 +18,7 @@ use crate::constants::{
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
     DEFAULT_MIN_VENUE_MOVE, DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS, DEFAULT_RESERVE_SHARE_CAP_BPS,
     DEFAULT_YIELD_FEE_BPS, LAYOUT_VERSION, MIN_PAYOUT_TIMEOUT, MIN_VRF_TIMEOUT,
-    SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
+    SEED_FREE_LEAVES, SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
     WEIGHT_TREE_VERSION,
 };
 use crate::errors::HexVaultError;
@@ -31,7 +31,8 @@ use crate::events::{
     // yield-claimer ticket 10
     DeficitCovered, DeployPauseSet, ImpairedCleared, VenueParamsSet,
 };
-use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
+use crate::free_leaves;
+use crate::state::{FreeLeaves, Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
 use crate::sync::{absorb_dust, haircut, realise_loss, settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
@@ -208,6 +209,8 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         tree.node_count = 0;
         tree.pool = pool_key;
     }
+
+    free_leaves::init(&ctx.accounts.free_leaves, pool_key)?;
 
     let pool = &mut ctx.accounts.pool;
     pool.pool_id = params.pool_id;
@@ -552,17 +555,20 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         HexVaultError::BelowMinimumDeposit
     );
 
-    // A first deposit appends this Player's leaf and the depositor pays the
-    // rent for it. Refused with `WeightTreeFull` before anything moves if
-    // the account would pass 10 MiB.
+    // A first deposit takes a released leaf if one is waiting (ticket 08),
+    // else appends one and the depositor pays the rent for it. Refused with
+    // `WeightTreeFull` before anything moves if the account would pass 10 MiB.
     if player.leaf_index == 0 {
-        player.leaf_index = weight::append_leaves(
-            &a.weight_tree,
-            pool,
-            &a.owner.to_account_info(),
-            &a.system_program.to_account_info(),
-            1,
-        )?;
+        player.leaf_index = match free_leaves::pop(&a.free_leaves)? {
+            Some(leaf) => leaf,
+            None => weight::append_leaves(
+                &a.weight_tree,
+                pool,
+                &a.owner.to_account_info(),
+                &a.system_program.to_account_info(),
+                1,
+            )?,
+        };
     }
 
     token_interface::transfer_checked(
@@ -1843,6 +1849,17 @@ pub struct CreatePool<'info> {
     )]
     pub weight_tree: AccountLoader<'info, WeightTree>,
 
+    /// The stack of released leaves (ticket 08), a header-only PDA that
+    /// `release_leaf` grows.
+    #[account(
+        init,
+        payer = payer,
+        seeds = [SEED_FREE_LEAVES, pool.key().as_ref()],
+        bump,
+        space = 8 + core::mem::size_of::<FreeLeaves>(),
+    )]
+    pub free_leaves: AccountLoader<'info, FreeLeaves>,
+
     // Only the mint is checked. On mainnet these are the multisig's own
     // accounts, which nothing in this instruction signs for.
     #[account(constraint = treasury.mint == accepted_mint.key() @ HexVaultError::MintMismatch)]
@@ -2225,9 +2242,13 @@ pub struct Deposit<'info> {
     )]
     pub player: Box<Account<'info, Player>>,
 
-    /// Grows by one node at this Player's first deposit, `owner` paying.
+    /// Grows by one node at this Player's first deposit, `owner` paying,
+    /// unless a released leaf is waiting in `free_leaves`.
     #[account(mut)]
     pub weight_tree: AccountLoader<'info, WeightTree>,
+
+    #[account(mut, seeds = [SEED_FREE_LEAVES, pool.key().as_ref()], bump)]
+    pub free_leaves: AccountLoader<'info, FreeLeaves>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,

@@ -22,6 +22,9 @@ pub const LAYOUT_VERSION: u8 = 2;
 /// Written to the Weight tree header by `create_pool`.
 pub const WEIGHT_TREE_VERSION: u8 = 1;
 
+/// Written to the FreeLeaves header by `create_pool`.
+pub const FREE_LEAVES_VERSION: u32 = 1;
+
 /// Denominator for `base_rate_bps`, an annual rate: seconds in a 365-day year.
 pub const SECONDS_PER_YEAR: u128 = 31_536_000;
 
@@ -91,6 +94,8 @@ pub const SEED_PLAYER: &[u8] = b"player";
 pub const SEED_POSITION: &[u8] = b"position";
 /// The open venue proposal of a pool: `[SEED_VENUE_PROPOSAL, pool]`.
 pub const SEED_VENUE_PROPOSAL: &[u8] = b"venue_proposal";
+/// The pool's stack of released Weight tree leaves: `[SEED_FREE_LEAVES, pool]`.
+pub const SEED_FREE_LEAVES: &[u8] = b"free_leaves";
 
 /// How long a venue proposal must stand before `migrate_venue` may execute
 /// it (venue-switch ticket 05 reads this). A constant, not a parameter: the

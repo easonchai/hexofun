@@ -403,6 +403,20 @@ pub struct WeightTree {
     pub pool: Pubkey,
 }
 
+/// The pool's stack of released Weight tree leaves (mainnet-readiness-fixes
+/// ticket 08). The 1-based leaf indices follow this header as `u32`s, `count`
+/// of them live. The account only grows, on the `release_leaf` caller's rent;
+/// a pop leaves the capacity for the next release.
+#[account(zero_copy)]
+pub struct FreeLeaves {
+    /// Leaves on the stack.
+    pub count: u32,
+    /// [`crate::constants::FREE_LEAVES_VERSION`].
+    pub version: u32,
+    /// The `Pool` this stack belongs to.
+    pub pool: Pubkey,
+}
+
 impl Player {
     /// Principal less the Pending deposit: what has been in the pool since
     /// before this epoch. The Bought and Granted ticket caps count this, since
@@ -467,6 +481,7 @@ mod tests {
         assert_eq!(Round::INIT_SPACE, 456);
         assert_eq!(Position::INIT_SPACE, 114);
         assert_eq!(size_of::<WeightTree>(), 48);
+        assert_eq!(size_of::<FreeLeaves>(), 40);
         assert_eq!(VenueProposal::INIT_SPACE, 170);
     }
 
