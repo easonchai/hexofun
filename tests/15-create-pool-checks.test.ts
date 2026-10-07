@@ -124,6 +124,13 @@ describe("create_pool checks", () => {
     await expect(createPoolWith({ venueKind: 255 })).rejects.toThrow(/UnsupportedVenueKind/);
   }, TIMEOUT);
 
+  it("takes the kVault kind on every build, and checks its pins against a vault state", async () => {
+    // Localnet has no kVault program: random keys are not a vault, and the
+    // program pin is the first thing refused, by name. The pins' own checks
+    // run against the real vault in tests/fork/kvault.pool.fork.ts.
+    await expect(createPoolWith({ venueKind: VENUE_KIND.kvault })).rejects.toThrow(/VaultPinMismatch/);
+  }, TIMEOUT);
+
   it("skips the cToken ownership check for the stub kind only", async () => {
     await createPoolWith({ ctokenOwner: "other", venueKind: VENUE_KIND.stub });
   }, TIMEOUT);
