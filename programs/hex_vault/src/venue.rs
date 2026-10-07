@@ -4,8 +4,11 @@
 //!
 //! Every operation first checks the four accounts it was handed against the
 //! addresses pinned on the Pool, then goes to the backing the Pool's
-//! `venue_kind` names: klend through `klend.rs` (ticket 12), which reads its
-//! extra accounts from [`Venue::remaining`], or the stub in `test_venue.rs`.
+//! `venue_kind` names: klend through `klend.rs` (ticket 12), a Kamino Earn vault
+//! through `kvault.rs` (venue-switch ticket 06), both of which read their extra
+//! accounts from [`Venue::remaining`], or the stub in `test_venue.rs`. The four
+//! pinned accounts mean something different per kind; `Pool::klend_program`
+//! documents each.
 //! The `test-venue` feature only decides whether the stub kind is compiled in
 //! and accepted (venue-switch ticket 02).
 
@@ -56,12 +59,18 @@ impl Venue<'_, '_> {
 
 #[path = "klend.rs"]
 mod klend;
+#[path = "kvault.rs"]
+mod kvault;
+
+/// `create_pool`'s check of a kVault pool's four pins against the vault state.
+pub use kvault::check_pins as check_kvault_pins;
 
 /// The backing a pool's `venue_kind` names. A kind this build does not
 /// support never reaches a backing: `create_pool` refuses it, and this is the
 /// second line if a stored byte is ever wrong.
 enum Backing {
     Klend,
+    Kvault,
     #[cfg(feature = "test-venue")]
     Stub,
 }
@@ -69,6 +78,7 @@ enum Backing {
 fn backing_of(pool: &Pool) -> Result<Backing> {
     match pool.venue_kind {
         venue_kind::KLEND => Ok(Backing::Klend),
+        venue_kind::KVAULT => Ok(Backing::Kvault),
         #[cfg(feature = "test-venue")]
         venue_kind::STUB => Ok(Backing::Stub),
         _ => err!(HexVaultError::UnsupportedVenueKind),
@@ -81,6 +91,7 @@ pub fn value(pool: &Pool, venue: &Venue<'_, '_>) -> Result<u64> {
     venue.check(pool)?;
     match backing_of(pool)? {
         Backing::Klend => klend::value(pool, venue),
+        Backing::Kvault => kvault::value(pool, venue),
         #[cfg(feature = "test-venue")]
         Backing::Stub => crate::test_venue::stub_value(pool, venue),
     }
@@ -97,6 +108,7 @@ pub fn deposit<'info>(
     venue.check(pool)?;
     match backing_of(pool)? {
         Backing::Klend => klend::deposit(pool, venue, funds, amount),
+        Backing::Kvault => kvault::deposit(pool, venue, funds, amount),
         #[cfg(feature = "test-venue")]
         Backing::Stub => crate::test_venue::stub_deposit(pool, venue, funds, amount),
     }
@@ -112,6 +124,7 @@ pub fn redeem<'info>(
     venue.check(pool)?;
     match backing_of(pool)? {
         Backing::Klend => klend::redeem(pool, venue, funds, amount),
+        Backing::Kvault => kvault::redeem(pool, venue, funds, amount),
         #[cfg(feature = "test-venue")]
         Backing::Stub => crate::test_venue::stub_redeem(pool, venue, funds, amount),
     }
@@ -174,6 +187,7 @@ pub fn reserve_stats(pool: &Pool, venue: &Venue<'_, '_>) -> Result<ReserveStats>
     venue.check(pool)?;
     match backing_of(pool)? {
         Backing::Klend => klend::reserve_stats(pool, venue),
+        Backing::Kvault => kvault::reserve_stats(pool, venue),
         #[cfg(feature = "test-venue")]
         Backing::Stub => crate::test_venue::stub_reserve_stats(pool, venue),
     }
@@ -226,7 +240,9 @@ mod tests {
             venue_kind::supported(venue_kind::STUB),
             cfg!(feature = "test-venue")
         );
-        assert!(!venue_kind::supported(2));
+        assert_eq!(venue_kind::KVAULT, 2);
+        assert!(venue_kind::supported(venue_kind::KVAULT));
+        assert!(!venue_kind::supported(3));
         assert!(!venue_kind::supported(255));
     }
 

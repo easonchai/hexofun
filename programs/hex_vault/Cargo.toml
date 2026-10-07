@@ -52,6 +52,10 @@ solana-security-txt = "1.1.3"
 # ships 1.89); Cargo.lock pins it. Its `Pubkey` and `Instruction` are
 # solana-pubkey 2.x types, so `klend.rs` rebuilds them from bytes before CPI.
 klend-interface = "0.6.0"
+# venue-switch ticket 06: Kamino's published kVault interface (same family as
+# klend-interface, same license grant): instruction builders and the zero-copy
+# `VaultState`. It depends on klend-interface 0.6.0, so no second klend copy.
+kvault-interface = "0.1.0"
 
 [dev-dependencies]
 bytemuck = "1"

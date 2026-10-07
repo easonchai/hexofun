@@ -240,4 +240,16 @@ pub enum HexVaultError {
     // venue-switch ticket 02. Appended too.
     #[msg("this build does not support that venue kind")]
     UnsupportedVenueKind,
+
+    // venue-switch ticket 06, the kVault backing. Appended too.
+    #[msg("the kVault state account is not a VaultState this program can read")]
+    VaultStateUnreadable,
+    #[msg("a kVault pin does not match the vault state")]
+    VaultPinMismatch,
+    #[msg("the kVault does not hold the pool's accepted mint")]
+    VaultMintMismatch,
+    #[msg("a kVault account does not match the vault state")]
+    VaultAccountMismatch,
+    #[msg("the kVault state account must be passed writable")]
+    VaultStateNotWritable,
 }
