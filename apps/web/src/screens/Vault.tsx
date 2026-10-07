@@ -342,13 +342,6 @@ export function Vault(props: VaultScreenProps) {
       : epochAhead
         ? receiveTime(epochEnd).replace(" (", "\n(")
         : "After today's draw";
-  // Tickets once this request and anything already queued have paid. The
-  // refunded part never held one, so only the queued part comes off.
-  const ticketsAfter = (() => {
-    const tickets = playerExtras.data ? BigInt(playerExtras.data.weight) : 0n;
-    const leaving = pendingWithdraw + (split?.queued ?? 0n);
-    return tickets > leaving ? tickets - leaving : 0n;
-  })();
   const queuedMaturesAt = playerExtras.data?.pendingMaturesAt;
   const yieldEarned = unsettledYieldLine(playerExtras.data?.unsettledYield, DECIMALS);
 
@@ -580,10 +573,6 @@ export function Vault(props: VaultScreenProps) {
                   <div className="vault-line" data-testid="withdraw-receive">
                     <dt>You will receive</dt>
                     <dd>${fmt2(haircutValue(amount ?? 0n, haircutFactor))}</dd>
-                  </div>
-                  <div className="vault-line" data-testid="withdraw-tickets-after">
-                    <dt>Ticket after</dt>
-                    <dd>{fmt2(ticketsAfter)}</dd>
                   </div>
                   <div className="vault-line" data-testid="withdraw-expected">
                     <dt className="vault-line-label">
