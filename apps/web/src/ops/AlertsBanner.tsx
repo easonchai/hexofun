@@ -47,7 +47,7 @@ export function AlertsBanner() {
       {banner.bot.length > 0 && (
         <ul className="ops-banner-bot">
           {banner.bot.map((t) => (
-            <li key={t.code}>{t.message}, the bot will handle it on its next tick.</li>
+            <li key={t.code}>{t.message.replace(/\.$/, "")}. The bot will handle it on its next tick.</li>
           ))}
         </ul>
       )}

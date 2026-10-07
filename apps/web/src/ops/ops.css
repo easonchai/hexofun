@@ -434,9 +434,35 @@ body.ops #root {
   font: inherit;
 }
 
+/* Phone: the operator's sections (header to routine cranks) stack in one column
+   inside the page's 16px gutter; every button there is a 44px target. */
 @media (max-width: 640px) {
-  .ops-pause {
+  .ops-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ops-header-tools {
+    justify-content: space-between;
+  }
+
+  .ops-headline {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ops-pause {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ops-banner button,
+  .ops-header-tools button {
+    min-height: 44px;
+  }
+
+  .ops-banner a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
   }
 
   .ops-grid {
