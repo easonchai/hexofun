@@ -39,6 +39,7 @@ import {
   jackpotVaultPda,
   program,
   provider,
+  onChainNowSeconds,
   sleep,
   sleepUntilOnChain,
   venueProposalPda,
@@ -117,16 +118,10 @@ async function resetKlend(): Promise<void> {
   );
 }
 
-async function chainNowSeconds(): Promise<number> {
-  const time = await connection.getBlockTime(await connection.getSlot());
-  if (time === null) throw new Error("no block time");
-  return time;
-}
-
 /** Jumps the fork clock forward. Never call `surfnet_timeTravel` with no
  *  params: it skips about 9,000 slots. */
 async function timeTravel(seconds: number): Promise<void> {
-  const target = (await chainNowSeconds()) + seconds;
+  const target = (await onChainNowSeconds()) + seconds;
   await surf("surfnet_timeTravel", [{ absoluteTimestamp: target * 1000 }]);
   await sleep(1_500);
 }
@@ -195,7 +190,7 @@ async function createForkPool(pin?: Partial<Venue>): Promise<ForkPool> {
       operator: operator.publicKey,
       vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
       epochSeconds: new BN(86_400),
-      epochAnchor: new BN(await chainNowSeconds()),
+      epochAnchor: new BN(await onChainNowSeconds()),
       roundSeconds: new BN(60),
       closeBuffer: new BN(5),
       // 180 is the floor outside a test-vrf build.

@@ -11,6 +11,7 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
+  SYSVAR_CLOCK_PUBKEY,
   type TransactionInstruction,
 } from "@solana/web3.js";
 import {
@@ -408,15 +409,14 @@ export async function retryUntilOk<T>(
   throw lastError;
 }
 
-/** The validator's actual on-chain clock (not `Date.now()`, which drifts a
- * few seconds from it and so is an unreliable proxy over a short window). */
+/** The Clock sysvar's unix_timestamp, what the program reads (not `Date.now()`,
+ * which drifts a few seconds from it). Not `getBlockTime`: on a Surfpool fork
+ * it stays at the pre-warp time after a `surfnet_timeTravel`. */
 export async function onChainNowSeconds(): Promise<number> {
-  for (;;) {
-    const slot = await connection.getSlot();
-    const time = await connection.getBlockTime(slot);
-    if (time !== null) return time;
-    await sleep(200);
-  }
+  const info = await connection.getAccountInfo(SYSVAR_CLOCK_PUBKEY);
+  if (!info) throw new Error("no Clock sysvar");
+  // slot, epoch_start_timestamp, epoch, leader_schedule_epoch, unix_timestamp
+  return Number(info.data.readBigInt64LE(32));
 }
 
 /** Blocks until the validator's own clock reaches `targetUnixSeconds`. */
