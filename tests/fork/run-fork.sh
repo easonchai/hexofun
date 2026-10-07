@@ -89,4 +89,15 @@ solana --url "$rpc" program deploy \
 echo "deployed to $rpc (forking $(echo "$datasource" | sed 's|//.*@|//|' | cut -d/ -f1-3))"
 
 export HEXVAULT_IDL_PATH="$repo/target/idl/hex_vault.json"
-pnpm exec vitest run --config tests/fork/vitest.config.ts "${@:-tests/fork}"
+# A failed account fetch makes Surfpool put the full datasource URL (api key
+# included) in the transaction error, so vitest's output goes through redact.
+# sh has no pipefail: the group writes vitest's exit code to a file instead.
+. scripts/lib/redact.sh
+status="$workdir/vitest.status"
+{
+  rc=0
+  pnpm exec vitest run --config tests/fork/vitest.config.ts "${@:-tests/fork}" || rc=$?
+  echo "$rc" >"$status"
+} 2>&1 | redact
+read -r rc <"$status" || rc=1
+exit "$rc"

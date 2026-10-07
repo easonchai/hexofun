@@ -46,18 +46,7 @@ klend_accounts="D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59 Bgq7trRgVMeq33yt235
 
 die() { echo "surf: $*" >&2; exit 1; }
 
-# Line-buffered so the log stays live. Strips colour codes and everything after
-# a URL's host: Helius keys sit in the query, Chainstack keys in the path.
-redact() {
-  awk '{
-    gsub(/\033\[[0-9;]*m/, "")
-    while (match($0, /:\/\/[A-Za-z0-9.-]+\/[^ )"<][^ )"]*/)) {
-      host_end = RSTART + index(substr($0, RSTART + 3), "/") + 2
-      $0 = substr($0, 1, host_end) "<redacted>" substr($0, RSTART + RLENGTH)
-    }
-    print; fflush()
-  }'
-}
+. "$root/scripts/lib/redact.sh"
 
 rpc_call() {
   out=$(curl -sS --max-time 30 "$rpc" -H 'content-type: application/json' \
