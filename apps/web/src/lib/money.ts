@@ -91,6 +91,15 @@ export function addCapped(current: bigint, step: bigint, cap: bigint | null): bi
 }
 
 /**
+ * The Vault card's Yield line: the yield earned since the last settle as
+ * two-decimal text, or null (no line) at 0 or while the read is unknown.
+ */
+export function unsettledYieldLine(atomic: string | undefined, decimals: number): string | null {
+  if (atomic === undefined || BigInt(atomic) <= 0n) return null;
+  return formatAtomic2(BigInt(atomic), decimals);
+}
+
+/**
  * The part of Principal that earns no Ticket yet: the deposit made in
  * `depositEpoch` while that epoch is still current, nothing once a later one
  * has begun.

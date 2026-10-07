@@ -47,6 +47,7 @@ import {
   canCancelWithdraw,
   pendingWithdrawal,
   splitWithdraw,
+  unsettledYieldLine,
 } from "../lib/money.js";
 import {
   decodeErrorCode,
@@ -317,6 +318,7 @@ export function Vault(props: VaultScreenProps) {
   const epochEnd = currentEpoch ? Number(currentEpoch.endsAt) : 0;
   const payTime = epochEnd * 1000 > Date.now() ? clockTime(epochEnd) : null;
   const queuedMaturesAt = playerExtras.data?.pendingMaturesAt;
+  const yieldEarned = unsettledYieldLine(playerExtras.data?.unsettledYield, DECIMALS);
 
   const submit = () => {
     if (!connected || !amount) return;
@@ -547,6 +549,12 @@ export function Vault(props: VaultScreenProps) {
                     </div>
                   ) : null}
                 </>
+              )}
+              {yieldEarned === null ? null : (
+                <div className="vault-line" data-testid="unsettled-yield">
+                  <dt>Yield</dt>
+                  <dd>${yieldEarned}</dd>
+                </div>
               )}
               {pending.kind === "none" ? null : (
                 <div className="vault-line" data-testid="pending-withdraw">

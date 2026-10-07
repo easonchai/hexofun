@@ -620,14 +620,11 @@ export class ApiService {
       this.chain.priorityFeeMicroLamports(hotWritableAccounts),
     ]);
 
-    // Ticket 05: no Epoch yet means the draw has no Tickets at all, so the
-    // total is 0 and the tree is not read.
+    // No Epoch yet (launch week) reads zero odds inside `weightsFor`.
     const { weights, total } =
       player === null
         ? { weights: [], total: 0n }
-        : epoch === null
-          ? { weights: weightsFrom([player], pool.currentEpochId), total: 0n }
-          : await this.weightsFor(pool, [player], epoch);
+        : await this.weightsFor(pool, [player], epoch ?? undefined);
     const mine = weights[0];
 
     return {
@@ -874,6 +871,11 @@ export class ApiService {
         where: { poolAddress_id: { poolAddress: this.poolAddress, id: pool.currentEpochId } },
       }));
     if (current === null) {
+      // Deposit-only launch week: `currentEpochId` 0 means no Epoch yet, not a
+      // lagging indexer, and the draw has no Tickets, so the tree is not read.
+      if (pool.currentEpochId === 0n) {
+        return { weights: weightsFrom(players, pool.currentEpochId), total: 0n };
+      }
       throw new NotFoundException(
         "The current epoch is not indexed yet. Try again in a few seconds.",
       );

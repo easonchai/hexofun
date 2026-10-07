@@ -892,6 +892,52 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     assertNoLargeNumbers(body, "/leaderboard");
   });
 
+  // fork-run-fixes 01: launch week, the pool bootstrapped and `currentEpochId`
+  // 0 with no Epoch row. The reads answer with zero odds instead of 404ing.
+  describe("before Epoch 1", () => {
+    const setEpoch = (currentEpochId: bigint) =>
+      prisma.pool.update({ where: { address: POOL_ADDRESS }, data: { currentEpochId } });
+    const seedBob = (pendingDeposit: bigint) =>
+      prisma.player.update({
+        where: activePlayer(BOB),
+        data: { principal: pendingDeposit, pendingDeposit, pendingDepositEpoch: 0n, epochId: 0n },
+      });
+
+    it("GET /players/:owner and /leaderboard answer for a depositor with a pending deposit", async () => {
+      await setEpoch(0n);
+      await seedBob(500_000n);
+      try {
+        const player = (await http.get(`/players/${BOB}`).expect(200)).body;
+        expect(player).toMatchObject({ owner: BOB, pendingDeposit: "500000", odds: "0.00" });
+        // The same figure as after epoch 1: principal x (pool index - player index) / 1e18.
+        const alice = (await http.get(`/players/${ALICE}`).expect(200)).body;
+        expect(alice.unsettledYield).toBe("50000");
+
+        const board = (await http.get("/leaderboard").expect(200)).body;
+        expect(board.map((row: { owner: string }) => row.owner).sort()).toEqual(
+          [ALICE, BOB, HOUSE].sort(),
+        );
+        expect(board.every((row: { odds: string }) => row.odds === "0.00")).toBe(true);
+      } finally {
+        await setEpoch(CURRENT_EPOCH);
+        await prisma.player.update({
+          where: activePlayer(BOB),
+          data: { principal: 0n, pendingDeposit: 0n, pendingDepositEpoch: 0n, epochId: CURRENT_EPOCH },
+        });
+      }
+    });
+
+    it("still 404s once an Epoch id exists that the indexer has not mirrored", async () => {
+      await setEpoch(1n);
+      try {
+        await http.get(`/players/${ALICE}`).expect(404);
+        await http.get("/leaderboard").expect(404);
+      } finally {
+        await setEpoch(CURRENT_EPOCH);
+      }
+    });
+  });
+
   it("GET /feed keeps user-facing events only, newest first", async () => {
     const { body } = await http.get("/feed").expect(200);
     expect(body.map((event: { name: string }) => event.name)).toEqual([

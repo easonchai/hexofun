@@ -14,6 +14,7 @@ import {
   canCancelWithdraw,
   pendingWithdrawal,
   splitWithdraw,
+  unsettledYieldLine,
 } from "./money.js";
 
 describe("vault widget math", () => {
@@ -148,6 +149,18 @@ describe("pending withdrawal row", () => {
 
 // ADR 0020: a deposit earns Tickets from the next epoch. 500 of Principal, 400
 // of it deposited in epoch 4, so 100 Tickets are active in epoch 4.
+describe("unsettledYieldLine", () => {
+  it("shows the yield in dollars, truncated to cents", () => {
+    expect(unsettledYieldLine("73370000", 6)).toBe("73.37");
+    expect(unsettledYieldLine("73379999", 6)).toBe("73.37");
+  });
+
+  it("has no line at 0 or while the read is unknown", () => {
+    expect(unsettledYieldLine("0", 6)).toBeNull();
+    expect(unsettledYieldLine(undefined, 6)).toBeNull();
+  });
+});
+
 describe("tickets and the pending deposit", () => {
   it("holds the deposit pending and out of Tickets in the epoch it was made", () => {
     expect(pendingTickets(400n, 4n, 4n)).toBe(400n);
