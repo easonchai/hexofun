@@ -1,3 +1,4 @@
+import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useState } from "react";
 
@@ -5,10 +6,11 @@ import { POOL_ID } from "../chain.js";
 import { AdminPanel } from "./AdminPanel.js";
 import { AlertsBanner } from "./AlertsBanner.js";
 import { CranksPanel } from "./CranksPanel.js";
-import { FastPausePanel } from "./FastPausePanel.js";
 import { HeadlinePanel } from "./HeadlinePanel.js";
+import { PausePanel } from "./PausePanel.js";
 import { PoolPanel } from "./PoolPanel.js";
 import { RateChartPanel } from "./RateChartPanel.js";
+import { ROLE_LABEL, roleOf } from "./role.js";
 import { useStoredFlag } from "./ui.js";
 import { useOps } from "./useOps.js";
 import { VenuePanel } from "./VenuePanel.js";
@@ -22,6 +24,8 @@ export function OpsPage() {
   const { error, summary } = useOps();
   const [raw, setRaw] = useStoredFlag("ops.showRaw");
   const [copied, setCopied] = useState<string | null>(null);
+  const { publicKey } = useWallet();
+  const role = roleOf(publicKey?.toBase58() ?? null, summary);
 
   const copyJson = () => {
     if (!summary) return;
@@ -43,6 +47,11 @@ export function OpsPage() {
           <button type="button" disabled={!summary} onClick={copyJson} onBlur={() => setCopied(null)}>
             {copied ?? "Copy JSON"}
           </button>
+          {role && (
+            <span className="ops-role" data-testid="ops-role">
+              {ROLE_LABEL[role]}
+            </span>
+          )}
           <WalletMultiButton />
         </div>
       </header>
@@ -54,7 +63,7 @@ export function OpsPage() {
       )}
       <HeadlinePanel />
 
-      <FastPausePanel />
+      <PausePanel />
 
       <div className="ops-grid">
         <PoolPanel />

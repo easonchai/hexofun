@@ -12,30 +12,21 @@ import {
   grantTicketsIx,
   parseAmount,
   parseUsdc,
-  pauseIx,
   PARAMS_FIELDS,
   setParamsIx,
   setVenueParamsIx,
   VENUE_FIELDS,
   type Change,
   type Field,
-  type PauseSwitch,
   type Values,
 } from "./admin.js";
 import { usdc } from "./format.js";
+import { PreparedTx } from "./PreparedTx.js";
 import { useSendTx } from "./tx.js";
-import { Panel } from "./ui.js";
+import { Panel, Why, whyOff } from "./ui.js";
 import { useOps } from "./useOps.js";
 
 import "./admin.css";
-
-const SWITCHES: readonly { sw: PauseSwitch; label: string }[] = [
-  { sw: "pool", label: "Pool" },
-  { sw: "game", label: "Game" },
-  { sw: "jackpot", label: "Jackpot" },
-  { sw: "deploy", label: "Deployment" },
-  { sw: "buyTickets", label: "Bought tickets" },
-];
 
 const toBig = (raw: unknown): bigint | undefined => {
   if (typeof raw === "number") return BigInt(raw);
@@ -88,7 +79,6 @@ export function AdminPanel() {
   const { values, error: readError } = usePoolValues(result?.signature);
   const [prepared, setPrepared] = useState<Prepared | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const adminKey = summary?.admin ?? null;
@@ -107,7 +97,6 @@ export function AdminPanel() {
   ): Promise<void> => {
     setPrepared(null);
     setLocalError(null);
-    setCopied(false);
     setBusy(true);
     try {
       if (alwaysSign || mode === "sign") {
@@ -128,23 +117,7 @@ export function AdminPanel() {
     }
   };
 
-  const stateOf = (sw: PauseSwitch): boolean | null => {
-    switch (sw) {
-      case "pool":
-        return pool ? pool.pool.paused : null;
-      case "game":
-        return pool ? pool.pool.gamePaused : null;
-      case "jackpot":
-        return pool ? pool.pool.jackpotPaused : null;
-      case "deploy":
-        return summary ? summary.deployPaused : null;
-      case "buyTickets":
-        return pool ? pool.live.buyTicketsPaused : null;
-    }
-  };
-
   const disabled = busy || pending || mode === "unknown" || !pool;
-  const verb = mode === "sign" ? "" : "Prepare ";
 
   return (
     <Panel id="admin" title="Admin actions">
@@ -155,31 +128,6 @@ export function AdminPanel() {
             ? "Preparing a transaction for the Admin. Your wallet is not the Admin, so each action shows base58 to paste into Squads."
             : "Waiting for the Admin address."}
       </p>
-
-      <div className="ops-admin-switches">
-        {SWITCHES.map(({ sw, label }) => {
-          const paused = stateOf(sw);
-          return (
-            <div className="ops-row" key={sw}>
-              <span>{label}</span>
-              <span data-halted={paused || undefined}>{paused === null ? "unavailable" : paused ? "Paused" : "Running"}</span>
-              <button
-                type="button"
-                data-testid={`admin-${sw}`}
-                disabled={disabled || paused === null || (mode === "sign" && !publicKey)}
-                onClick={() =>
-                  void run(`${paused ? "Start" : "Pause"} ${label.toLowerCase()}`, async (signer) => [
-                    await pauseIx(program, sw, !paused, signer, poolKey),
-                  ])
-                }
-              >
-                {verb}
-                {paused ? (mode === "sign" ? "Start" : "start") : mode === "sign" ? "Pause" : "pause"}
-              </button>
-            </div>
-          );
-        })}
-      </div>
 
       {readError && !values && (
         <p className="ops-error" role="status">
@@ -219,6 +167,7 @@ export function AdminPanel() {
 
       <FundJackpotForm
         disabled={busy || pending || !publicKey || !pool}
+        offReason={whyOff([!publicKey, "Connect a wallet to fund the jackpot."], [!pool, "The pool is not loaded yet."])}
         onSubmit={(amount) =>
           run(
             "Fund jackpot",
@@ -233,6 +182,11 @@ export function AdminPanel() {
       <GrantTicketsForm
         mode={mode}
         disabled={disabled || !pool?.pool.weightTree}
+        offReason={whyOff(
+          [mode === "unknown", "Waiting for the Admin address."],
+          [!pool, "The pool is not loaded yet."],
+          [!pool?.pool.weightTree, "The pool's Weight tree is not indexed yet."],
+        )}
         onSubmit={(owner, amount) =>
           run("Grant tickets", async (signer) => {
             if (!pool?.pool.weightTree) throw new Error("The pool's Weight tree is not indexed yet");
@@ -251,26 +205,7 @@ export function AdminPanel() {
           Landed. <a href={result.url} target="_blank" rel="noopener noreferrer">{result.signature}</a>
         </p>
       )}
-      {prepared && (
-        <div className="ops-admin-prepared" data-testid="admin-prepared">
-          <p className="ops-sync">
-            {prepared.title}: unsigned legacy transaction, signer and fee payer {adminKey}. Paste it into
-            Squads with Import base58 encoded tx. The blockhash expires in about a minute.
-          </p>
-          <textarea readOnly rows={5} value={prepared.base58} aria-label="Base58 transaction" />
-          <button
-            type="button"
-            onClick={() => {
-              navigator.clipboard.writeText(prepared.base58).then(
-                () => setCopied(true),
-                () => setLocalError("The browser blocked the clipboard. Select the text and copy it by hand."),
-              );
-            }}
-          >
-            {copied ? "Copied" : "Copy"}
-          </button>
-        </div>
-      )}
+      {prepared && <PreparedTx {...prepared} adminKey={adminKey} />}
 
       <p className="ops-sync">
         Shutdown, sweep-house, emergency-crank, set-operator, propose-admin, accept-admin,
@@ -377,9 +312,11 @@ function ParamForm({
 
 function FundJackpotForm({
   disabled,
+  offReason,
   onSubmit,
 }: {
   disabled: boolean;
+  offReason: string | null;
   onSubmit: (amount: bigint) => Promise<void>;
 }) {
   const [text, setText] = useState("");
@@ -398,9 +335,10 @@ function FundJackpotForm({
         <span>Amount (USDC)</span>
         <input inputMode="decimal" value={text} onChange={(e) => setText(e.target.value)} data-testid="admin-fund-amount" />
       </label>
-      <button type="submit" disabled={disabled || amount === null}>
+      <button type="submit" id="ops-action-fundJackpot" disabled={disabled || amount === null}>
         Fund jackpot
       </button>
+      <Why reason={offReason ?? whyOff([amount === null, "Enter an amount in USDC."])} />
     </form>
   );
 }
@@ -408,10 +346,12 @@ function FundJackpotForm({
 function GrantTicketsForm({
   mode,
   disabled,
+  offReason,
   onSubmit,
 }: {
   mode: ReturnType<typeof adminMode>;
   disabled: boolean;
+  offReason: string | null;
   onSubmit: (owner: PublicKey, amount: bigint) => Promise<void>;
 }) {
   const [wallet, setWallet] = useState("");
@@ -445,6 +385,7 @@ function GrantTicketsForm({
       <button type="submit" disabled={disabled || !owner || amount === null}>
         {mode === "sign" ? "Grant tickets" : "Prepare grant"}
       </button>
+      <Why reason={offReason ?? whyOff([!owner || amount === null, "Enter a player wallet and a ticket count."])} />
     </form>
   );
 }

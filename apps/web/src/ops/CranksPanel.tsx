@@ -5,10 +5,12 @@
  */
 import type { PublicKey, TransactionInstruction } from "@solana/web3.js";
 import { PublicKey as Key } from "@solana/web3.js";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { HexVaultProgram } from "../chain.js";
-import { pct, UNAVAILABLE, usdc } from "./format.js";
+import { formatAtomic } from "../lib/money.js";
+import { labelEpochStatus, labelRoundStatus } from "../lib/protocol.js";
+import { pct, stuckLine, UNAVAILABLE, usdc, USDC_DECIMALS } from "./format.js";
 import {
   coverDeficit,
   deployToVenue,
@@ -25,8 +27,9 @@ import {
   voidRound,
   type VenuePool,
 } from "./instructions.js";
+import { dueFor } from "./opsMap.js";
 import { useSendTx } from "./tx.js";
-import { Panel, Row, useNow } from "./ui.js";
+import { Panel, Row, useNow, Why, whyOff } from "./ui.js";
 import { useOps } from "./useOps.js";
 import { drainAccess, migrateAccess } from "./venueProposal.js";
 
@@ -37,11 +40,25 @@ const wrap =
   async (program, pool, caller) => [await one(program, pool, caller)];
 
 export function CranksPanel() {
-  const { summary: s } = useOps();
+  const { summary: s, pool: poolSummary } = useOps();
   const tx = useSendTx();
   const [amount, setAmount] = useState("");
   const [withdrawOwner, setWithdrawOwner] = useState("");
   const [note, setNote] = useState<string | null>(null);
+
+  // A todo due now lights its button and fills an empty field with its figure.
+  const todo = s?.todo ?? [];
+  const deployDue = dueFor(todo, "deploy");
+  const recallDue = dueFor(todo, "recall");
+  const withdrawDue = dueFor(todo, "withdraw");
+  const dueAmount = (deployDue ?? recallDue)?.amount;
+  const dueOwner = withdrawDue?.owner;
+  useEffect(() => {
+    if (dueAmount) setAmount((a) => (a === "" ? formatAtomic(BigInt(dueAmount), USDC_DECIMALS) : a));
+  }, [dueAmount]);
+  useEffect(() => {
+    if (dueOwner) setWithdrawOwner((o) => (o === "" ? dueOwner : o));
+  }, [dueOwner]);
 
   /** Reads the pool, builds, sends. Failures before the send land in `note`. */
   const run = async (build: Build) => {
@@ -71,6 +88,27 @@ export function CranksPanel() {
   const migrate = s ? migrateAccess(s, now) : null;
   const drain = s ? drainAccess(s, tx.publicKey?.toBase58() ?? null) : null;
   const hasDeficit = s !== null && BigInt(s.deficit) > 0n;
+  // When the stuck epoch could first have moved on: the end of the current or previous epoch.
+  const epochEndedAt = (id: string): number | null => {
+    const p = poolSummary?.pool;
+    if (!p) return null;
+    if (id === p.currentEpochId) return Number(p.currentEpochEndsAt);
+    if (BigInt(id) + 1n === BigInt(p.currentEpochId)) return Number(p.previousEpochEndsAt);
+    return null;
+  };
+  const amountWhy = whyOff([parsed === null, "Enter an amount in USDC."]);
+  const stuckUnknown = s === null || s.stuck === null;
+  const voidWhy = stuckRound
+    ? `Round ${stuckRound.id} ${stuckLine(labelRoundStatus(stuckRound.status), null)}.`
+    : whyOff([stuckUnknown, "Cannot tell whether a Round is stuck."], [true, "No stuck Round."]);
+  const rolloverWhy = stuckEpoch
+    ? `Epoch ${stuckEpoch.id} ${stuckLine(labelEpochStatus(stuckEpoch.status), epochEndedAt(stuckEpoch.id))}.`
+    : whyOff([stuckUnknown, "Cannot tell whether an epoch is stuck."], [true, "No stuck epoch."]);
+  const withdrawWhy = whyOff(
+    [withdrawOwner.trim() === "", "Enter the player's wallet."],
+    [ownerKey === null, "That is not a valid wallet address."],
+  );
+  const coverWhy = whyOff([!hasDeficit, "Cover deficit is off. No deficit to cover."]);
   const band = s?.venueParams
     ? `floor ${pct(s.venueParams.idleFloorBps)}, target ${pct(s.venueParams.idleTargetBps)}`
     : UNAVAILABLE;
@@ -98,6 +136,8 @@ export function CranksPanel() {
       <div className="ops-actions">
         <button
           type="button"
+          id="ops-action-deploy"
+          data-due={deployDue ? true : undefined}
           disabled={off || parsed === null}
           onClick={() => parsed !== null && void run(async (p, pool) => [await deployToVenue(p, pool, parsed)])}
         >
@@ -105,6 +145,8 @@ export function CranksPanel() {
         </button>
         <button
           type="button"
+          id="ops-action-recall"
+          data-due={recallDue ? true : undefined}
           disabled={off || parsed === null}
           onClick={() => parsed !== null && void run(async (p, pool) => [await recall(p, pool, parsed)])}
         >
@@ -122,19 +164,20 @@ export function CranksPanel() {
         >
           Drain venue
         </button>
-        {hasDeficit && (
-          <button
-            type="button"
-            disabled={off || parsed === null}
-            onClick={() =>
-              parsed !== null &&
-              void run(async (p, pool, caller) => [await coverDeficit(p, pool, caller, parsed)])
-            }
-          >
-            Cover deficit ({usdc(s?.deficit)})
-          </button>
-        )}
+        <button
+          type="button"
+          id="ops-action-cover"
+          disabled={off || parsed === null || !hasDeficit}
+          onClick={() =>
+            parsed !== null &&
+            void run(async (p, pool, caller) => [await coverDeficit(p, pool, caller, parsed)])
+          }
+        >
+          Cover deficit{hasDeficit ? ` (${usdc(s?.deficit)})` : ""}
+        </button>
       </div>
+      <Why reason={amountWhy} />
+      <Why reason={coverWhy} />
 
       {drain && !drain.allowed && (
         <p className="ops-sync" data-testid="crank-drain-why">
@@ -160,6 +203,8 @@ export function CranksPanel() {
         <button
           type="button"
           data-testid="crank-harvest"
+          id="ops-action-harvest"
+          data-due={dueFor(todo, "harvest") ? true : undefined}
           disabled={off}
           onClick={() => void run(wrap(harvest))}
         >
@@ -179,6 +224,8 @@ export function CranksPanel() {
       <div className="ops-actions">
         <button
           type="button"
+          id="ops-action-withdraw"
+          data-due={withdrawDue ? true : undefined}
           disabled={off || ownerKey === null}
           onClick={() =>
             ownerKey &&
@@ -188,6 +235,7 @@ export function CranksPanel() {
           Process withdraw
         </button>
       </div>
+      <Why reason={withdrawWhy} />
 
       <dl>
         <Row label="Stuck Round" value={stuckRound ? `#${stuckRound.id}` : "None"} />
@@ -196,6 +244,7 @@ export function CranksPanel() {
       <div className="ops-actions">
         <button
           type="button"
+          id="ops-action-void"
           disabled={off || !stuckRound}
           onClick={() =>
             stuckRound &&
@@ -208,6 +257,7 @@ export function CranksPanel() {
         </button>
         <button
           type="button"
+          id="ops-action-rollover"
           disabled={off || !stuckEpoch}
           onClick={() =>
             stuckEpoch &&
@@ -219,6 +269,8 @@ export function CranksPanel() {
           Roll over epoch
         </button>
       </div>
+      <Why reason={voidWhy} />
+      <Why reason={rolloverWhy} />
 
       {tx.pending && <p className="ops-sync">Waiting for the transaction to confirm.</p>}
       {tx.result && (

@@ -74,6 +74,20 @@ export function useStoredFlag(key: string, initial = false): [boolean, (next: bo
   return [value, set];
 }
 
+/** The first reason whose condition holds, or null: why an action is off. */
+export const whyOff = (...checks: readonly (readonly [boolean, string])[]): string | null =>
+  checks.find(([off]) => off)?.[1] ?? null;
+
+/** The one line under an action: why it is off, or what it will act on. */
+export function Why({ reason, testId }: { reason: string | null; testId?: string }) {
+  if (!reason) return null;
+  return (
+    <p className="ops-sync ops-why" data-testid={testId}>
+      {reason}
+    </p>
+  );
+}
+
 /** "On" or "Off" for a pause switch; red when halted. */
 export function Switch({ label, on }: { label: string; on: boolean | null }) {
   return (
