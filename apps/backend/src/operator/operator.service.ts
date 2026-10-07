@@ -396,10 +396,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         this.closingRounds.set(id, now);
       },
       winner: (epoch) => this.winner(pool, epoch),
-      send: (instructions) =>
-        tables.length === 0
+      send: (instructions, hooks) =>
+        tables.length === 0 && !hooks
           ? this.chain.send(instructions)
-          : this.chain.send(instructions, undefined, tables),
+          : this.chain.send(instructions, undefined, tables, hooks),
       warn: (message) => this.logger.warn(message),
     };
   }

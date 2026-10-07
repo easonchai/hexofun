@@ -585,7 +585,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   async markReferralGrantsSent(
     epochId: bigint,
     referrers: readonly string[],
-    txSig: string,
+    txSig: string | null,
   ): Promise<void> {
     await this.prisma.referralGrant.updateMany({
       where: { poolAddress: this.activePool, epochId, referrer: { in: [...referrers] } },

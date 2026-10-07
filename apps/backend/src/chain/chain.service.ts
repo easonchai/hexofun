@@ -52,6 +52,17 @@ export const SOLANA_CONNECTION = Symbol("SOLANA_CONNECTION");
  */
 export const CONFIRM_TIMEOUT_MS = 30_000;
 
+/** `send` gave up waiting but the blockhash is still live: the transaction may yet land. */
+export class TxPendingError extends Error {}
+
+/** `send` callbacks for a caller that records the signature (mainnet-readiness-fixes 07). */
+export interface SendHooks {
+  /** The transaction is on the wire, before confirmation. */
+  onSent(signature: string): Promise<void>;
+  /** Confirmation failed for good (expired, or landed with an error): nothing happened. */
+  onDropped(signature: string): Promise<void>;
+}
+
 /**
  * How often `send`'s confirmation wait rebroadcasts the identical signed
  * bytes (production-hardening ticket 04, research/report.md "Landing a
@@ -206,6 +217,7 @@ export class ChainService {
     instructions: TransactionInstruction[],
     signer: Keypair = this.keypair,
     lookupTables: readonly AddressLookupTableAccount[] = [],
+    hooks?: SendHooks,
   ): Promise<string> {
     try {
       const { blockhash, lastValidBlockHeight } =
@@ -239,7 +251,12 @@ export class ChainService {
         versioned.sign([signer]);
         // SAFETY: sign() has just filled the fee payer's signature slot.
         const versionedSignature = bs58.encode(versioned.signatures[0] as Uint8Array);
-        await this.sendSigned(versioned.serialize(), versionedSignature, lastValidBlockHeight);
+        await this.sendSigned(
+          versioned.serialize(),
+          versionedSignature,
+          lastValidBlockHeight,
+          hooks,
+        );
         return versionedSignature;
       }
       const tx = new Transaction({
@@ -250,7 +267,7 @@ export class ChainService {
       tx.sign(signer);
       // SAFETY: sign() has just filled the fee payer's signature slot.
       const signature = bs58.encode(tx.signature as Buffer);
-      await this.sendSigned(tx.serialize(), signature, lastValidBlockHeight);
+      await this.sendSigned(tx.serialize(), signature, lastValidBlockHeight, hooks);
       return signature;
     } catch (cause) {
       throw this.mapSendError(cause);
@@ -268,6 +285,7 @@ export class ChainService {
     raw: Uint8Array,
     signature: string,
     lastValidBlockHeight: number,
+    hooks?: SendHooks,
   ): Promise<void> {
     // Subscribe before sending. The RPC only notifies a signature that lands
     // after the subscription opens, so one that confirms first never would.
@@ -281,7 +299,14 @@ export class ChainService {
       watch.cancel();
       throw cause;
     }
-    await this.confirm(raw, signature, watch, lastValidBlockHeight);
+    await hooks?.onSent(signature);
+    try {
+      await this.confirm(raw, signature, watch, lastValidBlockHeight);
+    } catch (cause) {
+      // A pending transaction keeps its recorded signature: it may still land.
+      if (!(cause instanceof TxPendingError)) await hooks?.onDropped(signature);
+      throw cause;
+    }
   }
 
   /**
@@ -419,7 +444,7 @@ export class ChainService {
         `transaction ${signature} expired: block height ${blockHeight} passed the blockhash's last valid height ${lastValidBlockHeight}`,
       );
     }
-    throw new Error(
+    throw new TxPendingError(
       `transaction ${signature} still pending after ${CONFIRM_TIMEOUT_MS}ms; the blockhash has not expired yet`,
     );
   }

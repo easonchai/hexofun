@@ -122,6 +122,28 @@ describe("ChainService.send", () => {
     }
   });
 
+  it("send hooks: the signature is reported before confirmation, and dropped only when the send fails for good", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [blockHeightOffset, dropped] of [[0, 0], [1_000, 1]] as const) {
+        const connection = new CountingConnection();
+        connection.autoConfirmSignature = false;
+        connection.blockHeight = connection.slot + blockHeightOffset;
+        const chain = chainWith(connection);
+        const onSent = vi.fn(async () => {});
+        const onDropped = vi.fn(async () => {});
+
+        const rejected = expect(chain.send(noop, undefined, [], { onSent, onDropped })).rejects.toThrow();
+        await vi.advanceTimersByTimeAsync(CONFIRM_TIMEOUT_MS);
+        await rejected;
+        expect(onSent).toHaveBeenCalledTimes(1);
+        expect(onDropped).toHaveBeenCalledTimes(dropped);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a block height past the blockhash's last valid height surfaces as expired, never a hang", async () => {
     vi.useFakeTimers();
     try {

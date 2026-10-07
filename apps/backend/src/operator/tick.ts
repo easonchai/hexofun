@@ -18,6 +18,7 @@ import {
   type PoolState,
   type RoundState,
 } from "./chain-state";
+import type { SendHooks } from "../chain/chain.service";
 import type { OperatorInstructions } from "./instructions";
 import {
   decideVenue,
@@ -106,6 +107,10 @@ const cannotPayWinner = (cause: unknown): boolean =>
  * when a referrer's row was written.
  */
 const GRANT_CAP_EXCEEDED = ["DailyPlayerGrantCapExceeded", "DailyPoolGrantCapExceeded"];
+
+/** Ticket 07: the Player already got this epoch's grant, so the batch's rows are done. */
+const alreadyGranted = (cause: unknown): boolean =>
+  errorMessage(cause).includes("AlreadyGranted");
 
 const capExceeded = (cause: unknown): boolean =>
   GRANT_CAP_EXCEEDED.some((marker) => errorMessage(cause).includes(marker));
@@ -250,11 +255,11 @@ export interface TickContext {
    * granted on chain.
    */
   referralGrantsDue(epochId: bigint): Promise<{ referrer: string; amount: bigint }[]>;
-  /** Records the signature of a batch of grants just sent. */
+  /** Records the signature of a batch of grants just sent; null clears it. */
   markReferralGrantsSent(
     epochId: bigint,
     referrers: readonly string[],
-    txSig: string,
+    txSig: string | null,
   ): Promise<void>;
   /**
    * Positions still on chain whose Round has reached a terminal status
@@ -282,7 +287,7 @@ export interface TickContext {
    * Read model table holds Weight ranges any more). Null when none does yet.
    */
   winner(epoch: EpochState): Promise<{ owner: string; isHouse: boolean } | null>;
-  send(instructions: TransactionInstruction[]): Promise<string>;
+  send(instructions: TransactionInstruction[], hooks?: SendHooks): Promise<string>;
   /** Something an operator should read but that is not a failed tick: so far
    *  only a payout that would not land, which step 6 retries. */
   warn(message: string): void;
@@ -626,15 +631,25 @@ async function decide(ctx: TickContext): Promise<Decision> {
     const grants = await ctx.referralGrantsDue(currentEpoch.epochId);
     if (grants.length > 0) {
       const batch = grants.slice(0, BATCH_SIZE);
+      const epochId = currentEpoch.epochId;
+      const referrers = batch.map((grant) => grant.referrer);
       try {
-        const signature = await ctx.send(await ctx.ix.grantTickets(pool, batch));
-        await ctx.markReferralGrantsSent(
-          currentEpoch.epochId,
-          batch.map((grant) => grant.referrer),
-          signature,
-        );
+        // The signature is recorded the moment the transaction is on the wire
+        // (ticket 07): a send that times out while the blockhash is live may
+        // still land, and a row without it would be granted a second time.
+        await ctx.send(await ctx.ix.grantTickets(pool, batch), {
+          onSent: (signature) => ctx.markReferralGrantsSent(epochId, referrers, signature),
+          onDropped: () => ctx.markReferralGrantsSent(epochId, referrers, null),
+        });
         return finish({ action: "grant_tickets" });
       } catch (cause) {
+        if (alreadyGranted(cause)) {
+          // The program refused a second grant to a referrer this epoch, so
+          // an earlier send landed. There is no signature of ours to record
+          // (the refusal is at simulation), so the rows get a marker.
+          await ctx.markReferralGrantsSent(epochId, referrers, "already-granted");
+          return finish({ action: "grant_tickets" });
+        }
         if (!capExceeded(cause)) {
           stepError = stepError ?? `grant_tickets failed: ${errorMessage(cause)}`;
           // Fall through to step 4 and below.

@@ -169,13 +169,13 @@ interface Recorder {
   ctx: TickContext;
   sent: TransactionInstruction[][];
   warned: string[];
-  markedSent: { epochId: bigint; referrers: string[]; txSig: string }[];
+  markedSent: { epochId: bigint; referrers: string[]; txSig: string | null }[];
 }
 
 function context(over: Partial<TickContext> = {}): Recorder {
   const sent: TransactionInstruction[][] = [];
   const warned: string[] = [];
-  const markedSent: { epochId: bigint; referrers: string[]; txSig: string }[] = [];
+  const markedSent: { epochId: bigint; referrers: string[]; txSig: string | null }[] = [];
   const ctx: TickContext = {
     now: NOW,
     pool: pool(),
@@ -213,8 +213,9 @@ function context(over: Partial<TickContext> = {}): Recorder {
     markReferralGrantsSent: async (epochId, referrers, txSig) => {
       markedSent.push({ epochId, referrers: [...referrers], txSig });
     },
-    send: async (ixs) => {
+    send: async (ixs, hooks) => {
       sent.push(ixs);
+      await hooks?.onSent("signature");
       return "signature";
     },
     warn: (message) => warned.push(message),
@@ -771,6 +772,44 @@ describe("runTick", () => {
     const outcome = await runTick(ctx);
     expect(outcome.stepError).toMatch(/PoolPaused/);
     expect(outcome.action).toBe("process_withdraw");
+  });
+
+  // mainnet-readiness-fixes 07: the signature is recorded when the transaction
+  // is sent, so a confirmation that times out does not leave the rows unmarked.
+  it("3b. a grant whose confirmation times out keeps its recorded signature, so the next tick does not resend", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    const rows = new Map<string, string | null>([[referrer, null]]);
+    const recorder = context({
+      referralGrantsDue: async () =>
+        [...rows].filter(([, sig]) => sig === null).map(([r]) => ({ referrer: r, amount: 1n })),
+      markReferralGrantsSent: async (_epochId, referrers, txSig) => {
+        for (const r of referrers) rows.set(r, txSig);
+      },
+      send: async (ixs, hooks) => {
+        recorder.sent.push(ixs);
+        await hooks?.onSent("sig-1");
+        throw new Error("transaction sig-1 still pending after 30000ms");
+      },
+    });
+    const first = await runTick(recorder.ctx);
+    expect(first.stepError).toMatch(/still pending/);
+    expect(rows.get(referrer)).toBe("sig-1");
+
+    await runTick(recorder.ctx);
+    expect(recorder.sent.flat().filter((ix) => label(ix) === "grant_tickets")).toHaveLength(1);
+  });
+
+  it("3b. a batch refused with AlreadyGranted marks its rows sent", async () => {
+    const referrers = [Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58()];
+    const { ctx, markedSent } = context({
+      referralGrantsDue: async () => referrers.map((referrer) => ({ referrer, amount: 1n })),
+      send: async () => {
+        throw new Error("AlreadyGranted");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toBeUndefined();
+    expect(markedSent).toEqual([{ epochId: 2n, referrers, txSig: "already-granted" }]);
   });
 
   // --- 4. request_draw: the ended epoch goes to the draw straight away. There
