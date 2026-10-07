@@ -189,6 +189,8 @@ export interface DecodedPool {
   yieldOwed: BN;
   feeOwed: BN;
   prizeOwed: BN;
+  /** Jackpot promised to a Drawing or Drawn epoch that has not paid yet. */
+  jackpotReserved: BN;
   deficit: BN;
   yieldFeeBps: number;
   idleFloorBps: number;
@@ -334,6 +336,7 @@ export function poolRow(
     yieldOwed: big(pool.yieldOwed),
     feeOwed: big(pool.feeOwed),
     prizeOwed: big(pool.prizeOwed),
+    jackpotReserved: big(pool.jackpotReserved),
     deficit: big(pool.deficit),
     yieldFeeBps: pool.yieldFeeBps,
     idleFloorBps: pool.idleFloorBps,

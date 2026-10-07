@@ -79,6 +79,8 @@ model Pool {
   yieldOwed           BigInt  @default(0)
   feeOwed             BigInt  @default(0)
   prizeOwed           BigInt  @default(0)
+  /// Jackpot already promised to a Drawing or Drawn epoch that has not paid. The vault holds it; the next draw snapshots the vault minus this.
+  jackpotReserved     BigInt  @default(0)
   deficit             BigInt  @default(0)
   yieldFeeBps         Int     @default(0)
   idleFloorBps        Int     @default(0)

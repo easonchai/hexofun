@@ -395,7 +395,7 @@ export class ApiService {
     }
     return {
       ...epoch,
-      jackpotAmount: await this.liveJackpot(epoch),
+      jackpotAmount: await this.liveJackpot(epoch, pool, true),
       drawing: await this.drawingProgress(pool),
     };
   }
@@ -404,13 +404,28 @@ export class ApiService {
    * `Epoch.jackpot_amount` is a snapshot the program takes once, at
    * `request_draw`. While the epoch is still open it is 0 on chain no
    * matter what `fund_jackpot` has moved into the vault, so the open epoch
-   * reports the vault's token balance instead. From Ended on the chain
+   * reports the vault's token balance instead, less `jackpotReserved`: the
+   * prize a Drawing or Drawn epoch still owes sits in the same vault, and
+   * `request_draw` subtracts it before it snapshots. From Ended on the chain
    * value is authoritative (the vault drains to the winner at payout).
+   *
+   * `withPrizeOwed` picks the figure. The display one (`/epochs/current`,
+   * `/state`) adds `Pool.prizeOwed`, the prize share already earned and
+   * booked but only moved into the vault at Harvest, once an epoch. The
+   * snapshot one (`/status` and the min-jackpot alert behind it) leaves it
+   * out: it is what the draw would snapshot, and counting `prizeOwed` there
+   * would hide a failed harvest.
+   *
+   * Right after a harvest the indexed Pool row can lag the vault read by a
+   * few seconds, so the display figure briefly counts that prize twice.
+   * Fine for a display.
    */
-  private async liveJackpot(epoch: Epoch): Promise<bigint> {
+  private async liveJackpot(epoch: Epoch, pool: Pool, withPrizeOwed: boolean): Promise<bigint> {
     if (epoch.status !== EPOCH_OPEN) return epoch.jackpotAmount;
+    const owed = withPrizeOwed ? pool.prizeOwed : 0n;
     try {
-      return await this.cachedJackpotBalance();
+      const vault = await this.cachedJackpotBalance();
+      return (vault > pool.jackpotReserved ? vault - pool.jackpotReserved : 0n) + owed;
     } catch (error: unknown) {
       // This fallback never enters the cache. cachedJackpotBalance clears a
       // failed read, so the next request retries the chain.
@@ -419,7 +434,7 @@ export class ApiService {
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return epoch.jackpotAmount;
+      return epoch.jackpotAmount + owed;
     }
   }
 
@@ -598,7 +613,7 @@ export class ApiService {
     ];
 
     const [jackpotAmount, rpc, chainTime, balances, priorityFeeMicroLamports] = await Promise.all([
-      epoch === null ? Promise.resolve(0n) : this.liveJackpot(epoch),
+      epoch === null ? Promise.resolve(0n) : this.liveJackpot(epoch, pool, true),
       this.rpcHealth(),
       this.extrapolatedChainNow(),
       this.chainBalances(pool.klendReserve),
@@ -767,7 +782,8 @@ export class ApiService {
       launchAt: pool !== null && pool.currentEpochId > 0n ? null : this.launchAt,
       epochEndsAt: epoch?.endsAt ?? null,
       epochStatus: epoch?.status ?? null,
-      jackpotAmount: epoch === null ? null : await this.liveJackpot(epoch),
+      jackpotAmount:
+        pool === null || epoch === null ? null : await this.liveJackpot(epoch, pool, false),
       minJackpot: pool?.minJackpot ?? 0n,
     };
   }

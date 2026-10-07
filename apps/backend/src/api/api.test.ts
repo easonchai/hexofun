@@ -247,6 +247,8 @@ let balanceReads = 0;
 let treeReads = 0;
 /** When set, the next `getTokenAccountBalance` call throws once and resets it. */
 let failNextJackpotRead = false;
+/** What the fake jackpot vault holds; a test sets it and restores it. */
+let vaultBalance = VAULT_BALANCE;
 /** Same, for the paired vault/operator balance read behind /status. */
 let failNextBalanceRead = false;
 /** Same, for the Weight tree account read behind a Player's Weight. */
@@ -296,7 +298,7 @@ const fakeChain = {
         failNextJackpotRead = false;
         throw new Error("simulated jackpot vault balance read failure");
       }
-      return { value: { amount: VAULT_BALANCE.toString() } };
+      return { value: { amount: vaultBalance.toString() } };
     },
   },
   poolAddress: (): PublicKey => new PublicKey(POOL_ADDRESS),
@@ -1638,6 +1640,113 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       const second = await http.get("/state").expect(200);
       expect(second.body.currentEpoch.jackpotAmount).toBe(VAULT_BALANCE.toString());
       expect(jackpotReads).toBe(before + 1);
+    });
+
+    // fork-run-fixes 02 and 06: the open epoch's jackpot is the vault less
+    // `jackpotReserved`, plus `prizeOwed` for the display routes only. Each
+    // test steps the clock past the vault read's cache first.
+    describe("open epoch jackpot", () => {
+      const configure = async (
+        vault: bigint,
+        pool: { prizeOwed?: bigint; jackpotReserved?: bigint; minJackpot?: bigint },
+      ): Promise<void> => {
+        vaultBalance = vault;
+        await prisma.pool.update({ where: { address: POOL_ADDRESS }, data: pool });
+        vi.setSystemTime(Date.now() + JACKPOT_BALANCE_TTL_MS + 1);
+      };
+      const reset = async (): Promise<void> => {
+        vaultBalance = VAULT_BALANCE;
+        await prisma.pool.update({
+          where: { address: POOL_ADDRESS },
+          data: { prizeOwed: 0n, jackpotReserved: 0n, minJackpot: 1_000_000n },
+        });
+        vi.setSystemTime(Date.now() + JACKPOT_BALANCE_TTL_MS + 1);
+      };
+      const amounts = async () => ({
+        current: (await http.get("/epochs/current").expect(200)).body.jackpotAmount,
+        state: (await http.get("/state").expect(200)).body.currentEpoch.jackpotAmount,
+        status: (await http.get("/status").expect(200)).body.jackpotAmount,
+      });
+
+      it("adds the booked prize share to the display figure, not to /status", async () => {
+        await configure(5n, { prizeOwed: 7n });
+        try {
+          expect(await amounts()).toEqual({ current: "12", state: "12", status: "5" });
+        } finally {
+          await reset();
+        }
+      });
+
+      it("reports 0 while the vault holds only a drawn, unpaid prize", async () => {
+        await configure(50n, { jackpotReserved: 50n });
+        try {
+          expect(await amounts()).toEqual({ current: "0", state: "0", status: "0" });
+        } finally {
+          await reset();
+        }
+      });
+
+      it("floors at 0 when the reserve outruns the vault", async () => {
+        await configure(10n, { jackpotReserved: 50n, prizeOwed: 3n });
+        try {
+          expect(await amounts()).toEqual({ current: "3", state: "3", status: "0" });
+        } finally {
+          await reset();
+        }
+      });
+
+      it("keeps the snapshot of an ended epoch and ignores prizeOwed", async () => {
+        await configure(5n, { prizeOwed: 7n });
+        await prisma.epoch.update({
+          where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: CURRENT_EPOCH } },
+          data: { status: 1, jackpotAmount: 9n },
+        });
+        try {
+          const { body } = await http.get("/epochs/current").expect(200);
+          expect(body.jackpotAmount).toBe("9");
+        } finally {
+          await prisma.epoch.update({
+            where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: CURRENT_EPOCH } },
+            data: { status: 0, jackpotAmount: 0n },
+          });
+          await reset();
+        }
+      });
+
+      it("falls back to the indexed snapshot plus prizeOwed on a failed vault read", async () => {
+        await configure(5n, { prizeOwed: 7n });
+        failNextJackpotRead = true;
+        try {
+          const { body } = await http.get("/epochs/current").expect(200);
+          // Epoch 7's snapshot is seeded at 0.
+          expect(body.jackpotAmount).toBe("7");
+        } finally {
+          await reset();
+        }
+      });
+
+      // `prizeOwed` 7 would lift the vault's 5 over `minJackpot` 6 if /status
+      // counted it, and a failed harvest would hide behind it.
+      it.each([
+        ["prizeOwed does not count", 5n, { prizeOwed: 7n, minJackpot: 6n }],
+        ["a reserved prize does not count", 50n, { jackpotReserved: 50n, minJackpot: 10n }],
+      ])("fires JACKPOT_LOW_NEAR_CLOSE in the last hour when %s", async (_name, vault, pool) => {
+        await configure(vault, pool);
+        const endsAt = { poolAddress_id: { poolAddress: POOL_ADDRESS, id: CURRENT_EPOCH } };
+        await prisma.epoch.update({
+          where: endsAt,
+          data: { endsAt: BigInt(Math.floor(Date.now() / 1000) + 600) },
+        });
+        try {
+          const { body } = await http.get("/alerts");
+          expect(body.alerts.map((alert: { code: string }) => alert.code)).toContain(
+            "JACKPOT_LOW_NEAR_CLOSE",
+          );
+        } finally {
+          await prisma.epoch.update({ where: endsAt, data: { endsAt: CURRENT_START + EPOCH_LENGTH } });
+          await reset();
+        }
+      });
     });
   });
 

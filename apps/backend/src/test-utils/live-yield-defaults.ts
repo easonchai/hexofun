@@ -16,6 +16,7 @@ export const LIVE_POOL_DEFAULTS = {
   yieldOwed: 0n,
   feeOwed: 0n,
   prizeOwed: 0n,
+  jackpotReserved: 0n,
   deficit: 0n,
   yieldFeeBps: 0,
   idleFloorBps: 0,
