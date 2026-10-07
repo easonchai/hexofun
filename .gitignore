@@ -16,6 +16,10 @@ playwright-report/
 .env.*
 !.env*.example
 *.keypair.json
+*.keypair
+*-keypair.json
+id.json
+admin.json
 keys/
 .surf/
 
