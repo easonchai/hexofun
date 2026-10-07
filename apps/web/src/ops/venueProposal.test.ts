@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { drainAccess, migrateAccess, proposalView, venueKindName } from "./venueProposal.js";
+import { drainAccess, migrateAccess, proposalView, venueKindName, venueStep } from "./venueProposal.js";
 
 const proposal = (unlocksAt: number) => ({
   venueKind: 2,
@@ -109,5 +109,45 @@ describe("migrateAccess", () => {
       allowed: false,
       reason: expect.stringMatching(/minimum venue move/),
     });
+  });
+});
+
+describe("venueStep", () => {
+  const now = 1_000_000;
+  const params = (minVenueMove: string) => ({
+    yieldFeeBps: 0,
+    idleFloorBps: 0,
+    idleTargetBps: 0,
+    reserveShareCapBps: 0,
+    reserveLiquidityFloorBps: 0,
+    minVenueMove,
+    lossToleranceBps: 0,
+  });
+  const base = { venueValue: "500000000", venueParams: params("100000000"), deployPaused: false };
+
+  it("cannot tell without the proposal or the params", () => {
+    expect(venueStep({ ...base, venueProposal: undefined as never }, now)).toBeNull();
+    expect(venueStep({ ...base, venueProposal: null, venueParams: null }, now)).toBeNull();
+  });
+
+  it("starts in the CLI with no proposal and nothing to finish", () => {
+    expect(venueStep({ ...base, venueProposal: null }, now)).toBe(1);
+  });
+
+  it("asks for the dust line, then the wait, while locked", () => {
+    expect(venueStep({ ...base, venueProposal: proposal(now + 60) }, now)).toBe(3);
+    expect(venueStep({ ...base, venueParams: params("10000"), venueProposal: proposal(now + 60) }, now)).toBe(4);
+  });
+
+  it("drains past the lock until the position is dust, then migrates", () => {
+    expect(venueStep({ ...base, venueParams: params("10000"), venueProposal: proposal(now - 1) }, now)).toBe(5);
+    expect(
+      venueStep({ ...base, venueValue: "5000", venueParams: params("10000"), venueProposal: proposal(now - 1) }, now),
+    ).toBe(6);
+  });
+
+  it("resumes deploys after the migration, then restores the dust line", () => {
+    expect(venueStep({ ...base, venueParams: params("10000"), venueProposal: null, deployPaused: true }, now)).toBe(7);
+    expect(venueStep({ ...base, venueParams: params("10000"), venueProposal: null }, now)).toBe(8);
   });
 });

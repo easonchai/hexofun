@@ -197,7 +197,15 @@ const fakeChain = {
   },
   program: {
     idl: { instructions: [] },
-    coder: { accounts: { decode: (_name: string, data: Buffer) => JSON.parse(data.toString()) } },
+    coder: {
+      accounts: {
+        decode: (name: string, data: Buffer) => {
+          const fields = JSON.parse(data.toString());
+          // The venue rules read the pinned program as a key; an unpinned pool is the default key.
+          return name === "pool" ? { ...fields, klendProgram: PublicKey.default } : fields;
+        },
+      },
+    },
   },
   programId: Keypair.generate().publicKey,
   keypair: Keypair.generate(),
@@ -268,7 +276,7 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     chainAccounts.clear();
     // New services per test: the balance read is cached for 15 s.
     const api = new ApiService(prisma, fakeChain as unknown as ChainService, config);
-    ops = new OpsSummaryService(prisma, api, fakeChain as unknown as ChainService);
+    ops = new OpsSummaryService(prisma, api, fakeChain as unknown as ChainService, config);
   });
 
   const seedActive = async () => {
@@ -367,6 +375,34 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     });
   });
 
+  it("lists the open deficit, the unpaid withdrawals and the Fast pause wallets", async () => {
+    await seedActive();
+    const wallet = Keypair.generate().publicKey.toBase58();
+    const player = {
+      poolAddress: POOL.toBase58(), principal: 0n, entries: 0n, epochId: 0n, isHouse: false,
+      pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n, bonusEpoch: 0n, bonusGranted: 0n,
+    };
+    await prisma.player.createMany({
+      data: [
+        // The pool is in epoch 7: a request made in 6 is due, one made in 7 is not.
+        { ...player, owner: "alice", pendingWithdraw: 4n, pendingEpoch: 6n },
+        { ...player, owner: "bob", pendingWithdraw: 5n, pendingEpoch: 7n },
+        { ...player, owner: "carol" },
+      ],
+    });
+    const configured = {
+      get: (name: string) => (name === "OPS_WALLETS" ? [wallet] : undefined),
+    } as unknown as ConfigService<HexVaultEnv, true>;
+    const api = new ApiService(prisma, fakeChain as unknown as ChainService, configured);
+    const summary = await new OpsSummaryService(prisma, api, fakeChain as unknown as ChainService, configured).getOpsSummary();
+
+    expect(summary.fastPauseWallets).toEqual([wallet]);
+    expect(summary.todo).toEqual([
+      expect.objectContaining({ code: "DEFICIT_OPEN", due: "now", amount: 8n }),
+      expect.objectContaining({ code: "WITHDRAWS_DUE", due: "bot", amount: 4n, owner: "alice" }),
+    ]);
+  });
+
   it("returns zero totals for a pool that has never harvested", async () => {
     await seedActive();
     const summary = await ops.getOpsSummary();
@@ -452,6 +488,8 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect(summary.venueProposal).toBeNull();
     expect(summary.supplyRateBps).toBeNull();
     expect(summary.stuck).toEqual({ round: null, epoch: null });
+    expect(summary.todo).toEqual([]);
+    expect(summary.fastPauseWallets).toEqual([]);
     expect(summary.pendingWithdrawals).toBe(0n);
     expect(summary.solvencyMargin).toBeNull();
   });

@@ -117,6 +117,40 @@ export interface AlertInputs {
   treeUsedBps: number;
 }
 
+/** `/status`'s operator block, which both the alerts and the ops todo list read. */
+type OperatorStatus = Awaited<ReturnType<ApiService["getStatus"]>>["operator"];
+
+/** The two operator ages `AlertInputs` carries, from `/status`'s operator block. */
+export function operatorAges(
+  operator: OperatorStatus,
+  nowSeconds: number,
+): Pick<AlertInputs, "tickAgeSeconds" | "operatorFailingSeconds"> {
+  const lastTickAt = operator?.lastTickAt;
+  const lastError = operator?.lastError ?? null;
+  const lastSuccessAt = operator?.lastSuccessAt ?? null;
+  return {
+    tickAgeSeconds: lastTickAt == null ? null : nowSeconds - Math.floor(lastTickAt.getTime() / 1000),
+    // Ticket 09: null when the last tick did not fail; Infinity when it
+    // failed but the operator has never once succeeded, which always trips
+    // the threshold rather than reading as "just started failing".
+    operatorFailingSeconds:
+      lastError === null
+        ? null
+        : lastSuccessAt === null
+          ? Number.POSITIVE_INFINITY
+          : nowSeconds - Math.floor(lastSuccessAt.getTime() / 1000),
+  };
+}
+
+export const isOperatorStale = (
+  inputs: Pick<AlertInputs, "shutdown" | "tickAgeSeconds">,
+  tickStaleSeconds: number,
+): boolean =>
+  !inputs.shutdown && inputs.tickAgeSeconds !== null && inputs.tickAgeSeconds > tickStaleSeconds;
+
+export const isOperatorFailing = (inputs: Pick<AlertInputs, "operatorFailingSeconds">): boolean =>
+  inputs.operatorFailingSeconds !== null && inputs.operatorFailingSeconds > OPERATOR_FAILING_SECONDS;
+
 export interface AlertThresholds {
   tickStaleSeconds: number;
   indexerStaleSeconds: number;
@@ -147,20 +181,13 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The operator's SOL balance could not be read.",
     });
   }
-  if (
-    !inputs.shutdown &&
-    inputs.tickAgeSeconds !== null &&
-    inputs.tickAgeSeconds > thresholds.tickStaleSeconds
-  ) {
+  if (isOperatorStale(inputs, thresholds.tickStaleSeconds)) {
     alerts.push({
       code: "OPERATOR_STALE",
       message: `The operator has not ticked in over ${thresholds.tickStaleSeconds}s.`,
     });
   }
-  if (
-    inputs.operatorFailingSeconds !== null &&
-    inputs.operatorFailingSeconds > OPERATOR_FAILING_SECONDS
-  ) {
+  if (isOperatorFailing(inputs)) {
     // Distinct from OPERATOR_STALE: ticks are running (a fresh lastTickAt),
     // but every one of them has been failing for a while.
     alerts.push({
@@ -320,18 +347,6 @@ export class AlertsController {
       this.recentVoidOrRollover(),
     ]);
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const lastTickAt = status.operator?.lastTickAt;
-    const lastError = status.operator?.lastError ?? null;
-    const lastSuccessAt = status.operator?.lastSuccessAt ?? null;
-    // Ticket 09: null when the last tick did not fail; Infinity when it
-    // failed but the operator has never once succeeded, which always trips
-    // the threshold rather than reading as "just started failing".
-    const operatorFailingSeconds =
-      lastError === null
-        ? null
-        : lastSuccessAt === null
-          ? Number.POSITIVE_INFINITY
-          : nowSeconds - Math.floor(lastSuccessAt.getTime() / 1000);
     const secondsToEpochClose =
       status.epochStatus === EPOCH_OPEN && status.epochEndsAt !== null
         ? Number(status.epochEndsAt - BigInt(nowSeconds))
@@ -344,7 +359,7 @@ export class AlertsController {
     const alerts = evaluateAlerts(
       {
         operatorSolLow: status.operatorSolLow,
-        tickAgeSeconds: lastTickAt == null ? null : nowSeconds - Math.floor(lastTickAt.getTime() / 1000),
+        ...operatorAges(status.operator, nowSeconds),
         shutdown: status.shutdown,
         rpcOk: status.rpcOk,
         rpcFallbackAgeMs:
@@ -354,7 +369,6 @@ export class AlertsController {
         roundVoidedRecently: recent.roundVoidedRecently,
         epochRolledOverRecently: recent.epochRolledOverRecently,
         withdrawSkippedCount: status.withdrawSkippedCount,
-        operatorFailingSeconds,
         epochNoProgress: status.operator?.epochNoProgress ?? false,
         drawnUnpaid: status.operator?.drawnUnpaid ?? false,
         sparringSolLow: status.sparringSolLow,

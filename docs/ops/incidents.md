@@ -7,6 +7,8 @@ that usually starts it. Admin commands run through the CLI,
 first; see [`docs/ops/funds.md`](funds.md) for the full convention and signing through a Ledger or
 Squads.
 
+<a id="operator-stale"></a>
+<a id="indexer-stale"></a>
 ## Chain stall mid-round
 
 Starts with `OPERATOR_STALE`, sometimes alongside `INDEXER_STALE`.
@@ -38,6 +40,8 @@ Starts with `OPERATOR_STALE`, sometimes alongside `INDEXER_STALE`.
    ([`runbook.md`](../../runbook.md)). A real stall shows as DRAWING, or "no open round", staying
    that way well past the usual few seconds.
 
+<a id="rpc-down"></a>
+<a id="rpc-fallback-active"></a>
 ## RPC provider down
 
 Starts with `RPC_DOWN` or `RPC_FALLBACK_ACTIVE`.
@@ -58,6 +62,8 @@ Starts with `RPC_DOWN` or `RPC_FALLBACK_ACTIVE`.
    the next build. Never put a keyed URL there; it ships to every visitor
    ([`runbook.md`](../../runbook.md), "Frontend RPC endpoint").
 
+<a id="round-voided-recently"></a>
+<a id="epoch-rolled-over-recently"></a>
 ## VRF not fulfilling
 
 Starts with `ROUND_VOIDED_RECENTLY` or `EPOCH_ROLLED_OVER_RECENTLY`.
@@ -106,6 +112,7 @@ Starts with whichever code names the damage, or none if the report comes in firs
    `programs/hex_vault/src/lib.rs`; once filled, an outside researcher's report lands on the
    address in that file's `contacts:` line instead.
 
+<a id="operator-sol-low"></a>
 ## Operator out of SOL
 
 Starts with `OPERATOR_SOL_LOW`.
@@ -117,6 +124,7 @@ Starts with `OPERATOR_SOL_LOW`.
 3. No restart needed. The same hot key just needed more lamports; the next tick's transactions go
    through once the balance lands.
 
+<a id="operator-sol-read-failed"></a>
 ## Operator SOL balance unreadable
 
 Starts with `OPERATOR_SOL_READ_FAILED`.
@@ -128,6 +136,7 @@ Starts with `OPERATOR_SOL_READ_FAILED`.
    `OPERATOR_KEYPAIR`, wrong network). This alert never means "the balance is fine"; it means it
    could not be checked, so treat it as `OPERATOR_SOL_LOW` until it clears.
 
+<a id="operator-failing"></a>
 ## Operator failing silently
 
 Starts with `OPERATOR_FAILING`.
@@ -138,9 +147,14 @@ Starts with `OPERATOR_FAILING`.
 2. Work the error like "Chain stall mid-round" above once the cause is in hand: an RPC problem, an
    Anchor error naming a bad account or balance, or a bug in the tick itself.
 
+<a id="epoch-no-progress"></a>
+<a id="stuck-round"></a>
+<a id="stuck-epoch"></a>
 ## Epoch stuck without progress
 
-Starts with `EPOCH_NO_PROGRESS`.
+Starts with `EPOCH_NO_PROGRESS`. The console's `STUCK_ROUND` and `STUCK_EPOCH` lines belong here
+too. They appear once the program would accept `void_round` or `rollover_epoch`, so step 2 is the
+Void round and Roll over epoch buttons under Advanced.
 
 1. First check: `GET /epochs/current`'s `status` against `endsAt` and `vrfTimeout`. This fires only once an epoch has run well past the point every self-healing
    timeout (void, rollover) should already have moved it on, so treat it as "the backstop itself
@@ -155,6 +169,7 @@ Starts with `EPOCH_NO_PROGRESS`.
    with `request_draw`, and an Ended epoch that stays stuck means `request_draw` keeps failing, so
    read the operator's error before giving up the draw.
 
+<a id="drawn-unpaid"></a>
 ## Drawn epoch sitting unpaid
 
 Starts with `DRAWN_UNPAID`.
@@ -163,6 +178,7 @@ Starts with `DRAWN_UNPAID`.
    quietly; if `payout` keeps failing, check the backend logs for the send error before
    `payout_timeout` passes and a real winner loses their prize to a rollover.
 
+<a id="solvency-negative"></a>
 ## Pool not covering its balances
 
 Starts with `SOLVENCY_NEGATIVE`.
@@ -177,9 +193,14 @@ Starts with `SOLVENCY_NEGATIVE`.
    off is not expected: treat it as a program bug, `pause` the pool (see "Suspected exploit"
    below) and stop.
 
+<a id="free-idle-low"></a>
+<a id="reserve-liquidity-low"></a>
+<a id="recall-due"></a>
 ## Free idle or reserve liquidity running low
 
-Starts with `FREE_IDLE_LOW` or `RESERVE_LIQUIDITY_LOW`.
+Starts with `FREE_IDLE_LOW` or `RESERVE_LIQUIDITY_LOW`. The console's `RECALL_DUE` line is the same
+condition seen from the Operator's rules, free idle under the floor. See also "A routine crank is
+due" below.
 
 1. `FREE_IDLE_LOW` means free idle (the vault less queued withdrawals) has sat under the idle floor
    for longer than `ALERT_IDLE_LOW_S`. The operator recalls from the venue when it falls under the
@@ -193,9 +214,12 @@ Starts with `FREE_IDLE_LOW` or `RESERVE_LIQUIDITY_LOW`.
    reserve can pay, so check `reserveUtilizationBps` and consider `admin pause-deploy` to stop adding
    to a reserve that is running dry.
 
+<a id="pool-impaired"></a>
+<a id="deficit-open"></a>
 ## Venue loss
 
-Starts with `POOL_IMPAIRED`.
+Starts with `POOL_IMPAIRED`, or the console's `DEFICIT_OPEN` line, which shows whenever the
+recorded deficit is above zero. Cover deficit under Advanced pays it down.
 
 1. The venue reported a loss past the tolerance. Deploy and harvest are refused, and exits pay a
    haircut (`GET /pool`'s `live.haircutFactor`). The prize share and the fee owed absorbed the loss
@@ -233,12 +257,17 @@ failure. There is no code of its own, and `RPC_DOWN` may stay quiet.
    rata. It is not built. Decide on it as a team before any upgrade, and ship it with
    `scripts/deploy.sh <env> --upgrade` ([`docs/ops/deploy.md`](deploy.md#upgrading)).
 
+<a id="venue-lock-elapsed"></a>
 ## The venue is going bad
 
 No alert code of its own. It starts with news or a signal outside the pool: a klend reserve deprecated or
 its utilization near 100%, a Kamino Earn vault whose curator raised fees or set a withdrawal penalty, an
 allocation market losing liquidity, or `RESERVE_LIQUIDITY_LOW` that does not clear. `POOL_IMPAIRED` means
-the loss already happened, so go to "Venue loss" first.
+the loss already happened, so go to "Venue loss" first. A planned venue switch lands here too: the
+console's `VENUE_LOCK_ELAPSED` line means a proposal's 48 hour lock has passed, so the next move is
+a drain, or the migration once the position is at the dust line. Both are steps 5 and 6 of the
+migration in [`runbook.md`](../../runbook.md), and the venue switch stepper under Advanced marks
+which one is next.
 
 1. Decide to park, not to wait. Parking brings the position home and earns nothing, so it fits a venue the
    team no longer trusts, not a bad day.
@@ -252,14 +281,19 @@ the loss already happened, so go to "Venue loss" first.
    is safe in the pool's own vault and that withdrawals still pay.
 5. If the old venue recovers, `admin start-deploy` resumes deploys and no proposal is needed.
 
+<a id="deploy-paused"></a>
+<a id="deploy-due"></a>
 ## Deployment paused
 
-Starts with `DEPLOY_PAUSED`.
+Starts with `DEPLOY_PAUSED`. The console's `DEPLOY_DUE` line is the other side of it: idle USDC is
+above the target band and nothing has deployed it. If deployment is not paused, see "A routine
+crank is due" below.
 
 1. Either key can pause deployment; only the Admin can restart it. The alert holds for as long as
    the pause does, so a deliberate pause keeps paging until it is lifted. Idle USDC above the band
    stays idle and earns nothing, which lowers the rate for everyone.
 
+<a id="weight-tree-nearly-full"></a>
 ## Weight tree filling up
 
 Starts with `WEIGHT_TREE_NEARLY_FULL`.
@@ -268,6 +302,7 @@ Starts with `WEIGHT_TREE_NEARLY_FULL`.
    deposits from a new wallet fail with `WeightTreeFull`. A second tree is out of scope for the
    current program, so this needs a design decision well before the last leaf is taken.
 
+<a id="sparring-sol-low"></a>
 ## Sparring player out of SOL
 
 Starts with `SPARRING_SOL_LOW`.
@@ -276,6 +311,7 @@ Starts with `SPARRING_SOL_LOW`.
    `SPARRING_KEYPAIR`'s pubkey. Top up with a plain transfer, same as "Operator out of SOL" above;
    a lone human otherwise has no one to play against.
 
+<a id="jackpot-low-near-close"></a>
 ## Jackpot short before close
 
 Starts with `JACKPOT_LOW_NEAR_CLOSE`.
@@ -284,11 +320,53 @@ Starts with `JACKPOT_LOW_NEAR_CLOSE`.
    fires inside the last hour before an epoch closes, so there is a real window to fund the jackpot
    vault (the operator's `harvest` pays the prize share into it) before `request_draw` snapshots it.
 
+<a id="withdraw-forecast-short"></a>
+<a id="withdraw-shortfall"></a>
 ## Withdrawals outrunning vault liquidity
 
-Starts with `WITHDRAW_FORECAST_SHORT`.
+Starts with `WITHDRAW_FORECAST_SHORT`, or `WITHDRAW_SHORTFALL`, which means the vault already fell
+short of a pending withdrawal on the last tick.
 
 1. First check: `GET /status`'s `pendingWithdrawals` against `vaultLiquidity`. The operator recalls
    from the venue when the vault is short of what is queued; if it cannot, see "Free idle or
    reserve liquidity running low" above
    ([`docs/ops/funds.md`](funds.md#shutdown-and-the-emergency-exits)).
+
+<a id="harvest-due"></a>
+<a id="withdraws-due"></a>
+## A routine crank is due
+
+Starts with the console's `HARVEST_DUE` or `WITHDRAWS_DUE` line, or `DEPLOY_DUE` or `RECALL_DUE`
+when "Deployment paused" and "Free idle or reserve liquidity running low" above do not fit. These
+come from the `todo` list in `GET /ops/summary`, not from `/alerts`.
+
+1. Each one is a crank the Operator sends itself, by the same rules (`decideVenue`, and the
+   withdrawal queue for `WITHDRAWS_DUE`). While the Operator is healthy and the condition is newer
+   than `ALERT_TICK_STALE_S` (300s by default), the console shows it grey with "the bot will handle
+   it on its next tick". Do nothing.
+2. The line turns amber when the Operator is stale or failing, or when the condition has held past
+   that window. The bot did not do its job. Work `OPERATOR_STALE` or `OPERATOR_FAILING` first
+   ("Chain stall mid-round", "Operator failing silently" above).
+3. If the Operator will stay down, press the matching button under Routine cranks: Deploy to venue,
+   Recall, Harvest or Process withdraw. All four are permissionless, so any wallet with SOL can
+   sign. A due todo fills in the amount for Deploy and Recall and the owner for Process withdraw.
+   While the pool is Impaired, Process withdraw also needs that owner's signature ("Venue loss"
+   above).
+4. Harvest is due once the last 10 minutes of the epoch open and no Harvest has landed in them. It
+   pays the Yield fee and the prize share, so a missed one leaves the jackpot short
+   ("Jackpot short before close" above).
+
+<a id="withdraw-owners-skipped"></a>
+## Withdrawal owners skipped
+
+Starts with `WITHDRAW_OWNERS_SKIPPED`.
+
+1. After a failed batch the Operator sends queued withdrawals one at a time. An owner whose send
+   fails three times in a row (`WITHDRAW_FAILURE_LIMIT`) is skipped for the rest of that epoch. The
+   backend logs `withdrawal to <owner> failed 3 times in a row; skipping`. The count starts clean
+   in the next epoch.
+2. Read that owner's send error in the backend logs. An Impaired pool is the known cause, because
+   `process_withdraw` then needs the owner's own signature ("Venue loss" above). Otherwise look at
+   the owner's token account and the Position they may still hold open.
+3. The skipped owner's withdrawal stays queued and keeps showing as `WITHDRAWS_DUE`. Once the
+   cause is fixed, Process withdraw under Routine cranks pays it by hand.

@@ -21,15 +21,21 @@ export function Panel({
   );
 }
 
-/** One label and figure. `value` null or the word "unavailable" is styled as missing. */
+/**
+ * One label and figure. `value` null or the word "unavailable" is styled as
+ * missing. `raw` (slot, atomic amount, bps, address) shows only while the
+ * header's "Show raw" toggle is on.
+ */
 export function Row({
   label,
   value,
   note,
+  raw,
 }: {
   label: string;
   value: string | null;
   note?: string;
+  raw?: string | number | null | undefined;
 }) {
   const missing = value === null || value === UNAVAILABLE;
   return (
@@ -38,8 +44,61 @@ export function Row({
       <dd data-figure data-unavailable={missing || undefined}>
         {value ?? UNAVAILABLE}
         {note ? <span className="ops-note">{note}</span> : null}
+        {raw != null ? <span className="ops-raw">{raw}</span> : null}
       </dd>
     </div>
+  );
+}
+
+/**
+ * A boolean the viewer sets once and the page remembers (raw toggle, open
+ * sections). A blocked store falls back to `initial` and the page still works.
+ */
+export function useStoredFlag(key: string, initial = false): [boolean, (next: boolean) => void] {
+  const [value, setValue] = useState(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored === null ? initial : stored === "1";
+    } catch {
+      return initial;
+    }
+  });
+  const set = (next: boolean) => {
+    setValue(next);
+    try {
+      localStorage.setItem(key, next ? "1" : "0");
+    } catch {
+      // Not remembered this time; the toggle itself still works.
+    }
+  };
+  return [value, set];
+}
+
+/**
+ * A collapsed group (Details, Advanced) that remembers whether it was open.
+ * `goToAction` opens it by setting `open` on the element, which `onToggle` keeps.
+ */
+export function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  const [open, setOpen] = useStoredFlag(`ops.open.${id}`);
+  return (
+    <details className="ops-section" data-testid={`section-${id}`} open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>{title}</summary>
+      <div className="ops-grid">{children}</div>
+    </details>
+  );
+}
+
+/** The first reason whose condition holds, or null: why an action is off. */
+export const whyOff = (...checks: readonly (readonly [boolean, string])[]): string | null =>
+  checks.find(([off]) => off)?.[1] ?? null;
+
+/** The one line under an action: why it is off, or what it will act on. */
+export function Why({ reason, testId }: { reason: string | null; testId?: string }) {
+  if (!reason) return null;
+  return (
+    <p className="ops-sync ops-why" data-testid={testId}>
+      {reason}
+    </p>
   );
 }
 

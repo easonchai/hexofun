@@ -7,9 +7,15 @@ import { expect, test } from "playwright/test";
 
 test.use({ viewport: { width: 1280, height: 900 } });
 
-test("ops console shows the pool, venue and yield panels with figures", async ({ page }) => {
+test("ops console shows the banner, headline, and the pool, venue and yield panels under Details", async ({ page }) => {
   await page.goto("/ops");
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
+  await expect(page.getByTestId("ops-alerts")).toBeVisible();
+  await expect(page.getByTestId("ops-headline").locator("[data-figure]").first()).toContainText(/\d/);
+
+  // Details starts collapsed unless this browser opened it before.
+  const details = page.getByTestId("section-details");
+  if (!(await details.evaluate((d) => (d as HTMLDetailsElement).open))) await details.locator("summary").click();
 
   for (const id of ["pool", "venue", "yield"]) {
     const panel = page.getByTestId(`panel-${id}`);

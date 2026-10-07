@@ -3,21 +3,6 @@
   grid-column: 1 / -1;
 }
 
-.ops-admin-switches .ops-row {
-  align-items: center;
-}
-
-.ops-admin-switches .ops-row span:first-child {
-  flex: 1;
-  color: var(--text-muted);
-}
-
-.ops-admin-switches .ops-row span[data-halted] {
-  color: var(--danger-text);
-  font-weight: 700;
-}
-
-.ops-admin-switches button,
 .ops-admin-form button,
 .ops-admin-prepared button {
   min-height: 44px;

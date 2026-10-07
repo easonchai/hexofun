@@ -353,6 +353,28 @@ export interface StuckItemDto {
   status: number;
 }
 
+export type TodoCode =
+  | "DEPLOY_DUE"
+  | "RECALL_DUE"
+  | "HARVEST_DUE"
+  | "WITHDRAWS_DUE"
+  | "STUCK_ROUND"
+  | "STUCK_EPOCH"
+  | "DEFICIT_OPEN"
+  | "VENUE_LOCK_ELAPSED";
+
+/** One action due on the pool. `due` "now" means a person acts; "bot" means the
+ *  Operator does it on its next tick. `amount` is atomic USDC, `id` a Round or
+ *  epoch id, `owner` a wallet; each is set only where the matching button needs it. */
+export interface TodoItem {
+  code: TodoCode;
+  message: string;
+  due: "now" | "bot";
+  amount?: string;
+  owner?: string;
+  id?: string;
+}
+
 /** `GET /ops/summary`: the `/status` payload plus what the Ops console shows.
  *  Amounts are atomic USDC strings; nulls mean unknown or not indexed. */
 export interface OpsSummaryDto extends StatusDto {
@@ -406,6 +428,10 @@ export interface OpsSummaryDto extends StatusDto {
   harvestedToJackpot: string;
   /** Null when the backend's chain read failed: unknown, not clean. */
   stuck: { round: StuckItemDto | null; epoch: StuckItemDto | null } | null;
+  /** Actions due on the pool; empty before the pool is indexed. */
+  todo: TodoItem[];
+  /** `OPS_WALLETS` as base58: the wallets that may use `POST /ops/fast-pause`. Empty when unset. */
+  fastPauseWallets: string[];
 }
 
 export const fetchOpsSummary = (

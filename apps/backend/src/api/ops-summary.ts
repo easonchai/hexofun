@@ -1,7 +1,9 @@
 import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
 
 import { ChainService } from "../chain/chain.service";
+import type { HexVaultEnv } from "../config/env";
 import {
   clockUnixTimestamp,
   decodeEpoch,
@@ -14,10 +16,13 @@ import {
   type RoundState,
 } from "../operator/chain-state";
 import { isFulfilled, randomnessAddress } from "../operator/vrf";
+import { HARVEST_LEAD_SECONDS } from "../operator/venue";
 import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import { PrismaService } from "../prisma/prisma.service";
+import { isOperatorFailing, isOperatorStale, operatorAges } from "./alerts.controller";
 import { ApiService } from "./api.service";
 import { supplyRateBps } from "./live-yield";
+import { TodoClock, todoDrafts, type TodoInput, type TodoItem } from "./ops-todo";
 
 /** The Round or epoch a permissionless crank would accept right now. */
 export interface StuckItem {
@@ -83,11 +88,21 @@ export interface OpsSummaryExtras {
   /** Null when the chain read failed, so the console shows "unknown" rather
    *  than a clean pool. The failure is logged. */
   stuck: Stuck | null;
+  /** Actions due on the pool, from the Operator's own rules. Empty before the pool is indexed. */
+  todo: TodoItem[];
+  /** `OPS_WALLETS` as base58: the wallets `POST /ops/fast-pause` accepts. Empty when unset. */
+  fastPauseWallets: string[];
 }
 
 export type OpsSummary = Awaited<ReturnType<ApiService["getStatus"]>> & OpsSummaryExtras;
 
 const NOT_STUCK: Stuck = { round: null, epoch: null };
+
+/** What one chain read gives the summary: the stuck check and the todo list share it. */
+interface ChainView {
+  stuck: Stuck;
+  chain: TodoInput["chain"];
+}
 
 /**
  * Mirrors the program's own gates in `void_round` and `rollover_epoch`, so the
@@ -140,12 +155,19 @@ export async function findStuck(input: {
 @Injectable()
 export class OpsSummaryService {
   private readonly logger = new Logger(OpsSummaryService.name);
+  private readonly todoClock = new TodoClock();
+  private readonly tickStaleSeconds: number;
+  private readonly fastPauseWallets: string[];
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly api: ApiService,
     private readonly chain: ChainService,
-  ) {}
+    config: ConfigService<HexVaultEnv, true>,
+  ) {
+    this.tickStaleSeconds = config.get("ALERT_TICK_STALE_S", { infer: true });
+    this.fastPauseWallets = config.get("OPS_WALLETS", { infer: true }) ?? [];
+  }
 
   async getOpsSummary(): Promise<OpsSummary> {
     const poolAddress = this.api.poolAddress;
@@ -154,11 +176,25 @@ export class OpsSummaryService {
     // Cached for BALANCES_TTL_MS and already warm from getStatus, so this is
     // the same reserve read, not a second RPC call.
     const reserve = (await this.api.chainBalances(pool?.klendReserve)).reserve;
-    const [harvested, stuck, proposal] = await Promise.all([
+    const [harvested, view, proposal] = await Promise.all([
       this.harvestedTotals(),
-      this.stuck(pool !== null),
+      this.chainView(pool !== null),
       this.prisma.venueProposal.findUnique({ where: { poolAddress } }),
     ]);
+    const stuck = view === null ? null : view.stuck;
+    const todo =
+      pool === null
+        ? []
+        : await this.todo({
+            chain: view === null ? null : view.chain,
+            vaultBalance: status.vaultLiquidity,
+            proposal,
+            stuck,
+            deficit: pool.deficit,
+            impaired: pool.impaired,
+            currentEpochId: pool.currentEpochId,
+            status,
+          });
     return {
       ...status,
       totalPrincipal: pool?.totalPrincipal ?? 0n,
@@ -199,7 +235,60 @@ export class OpsSummaryService {
       harvestedToTreasury: harvested.treasury,
       harvestedToJackpot: harvested.jackpot,
       stuck,
+      todo,
+      fastPauseWallets: this.fastPauseWallets,
     };
+  }
+
+  /** The todo list with `due` set. The two DB reads are the Operator's own queries, mirrored. */
+  private async todo(input: {
+    chain: TodoInput["chain"];
+    vaultBalance: bigint | null;
+    proposal: TodoInput["proposal"];
+    stuck: Stuck | null;
+    deficit: bigint;
+    impaired: boolean;
+    currentEpochId: bigint;
+    status: Awaited<ReturnType<ApiService["getStatus"]>>;
+  }): Promise<TodoItem[]> {
+    const { chain, status } = input;
+    const poolAddress = this.api.poolAddress;
+    const windowOpensAt = chain?.currentEpoch ? chain.currentEpoch.endsAt - HARVEST_LEAD_SECONDS : null;
+    const [players, harvests] = await Promise.all([
+      // Impaired, the Operator pays nothing (every payout is the owner's to sign).
+      input.impaired
+        ? []
+        : this.prisma.player.findMany({
+            where: { poolAddress, pendingWithdraw: { gt: 0 }, pendingEpoch: { lt: input.currentEpochId } },
+            orderBy: { pendingEpoch: "asc" },
+            select: { owner: true, pendingWithdraw: true },
+          }),
+      windowOpensAt === null
+        ? 0
+        : this.prisma.event.count({
+            where: { poolAddress, name: "Harvested", blockTime: { gte: windowOpensAt } },
+          }),
+    ]);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const ages = operatorAges(status.operator, nowSeconds);
+    return this.todoClock.mark(
+      todoDrafts({
+        chain,
+        vaultBalance: input.vaultBalance,
+        proposal: input.proposal,
+        harvestedThisWindow: harvests > 0,
+        stuck: input.stuck,
+        deficit: input.deficit,
+        dueWithdrawals: players.map((player) => ({ owner: player.owner, amount: player.pendingWithdraw })),
+      }),
+      {
+        operatorDown:
+          isOperatorStale({ ...ages, shutdown: status.shutdown }, this.tickStaleSeconds) ||
+          isOperatorFailing(ages),
+        nowSeconds,
+        tickStaleSeconds: this.tickStaleSeconds,
+      },
+    );
   }
 
   private async harvestedTotals(): Promise<{ treasury: bigint; jackpot: bigint }> {
@@ -212,31 +301,40 @@ export class OpsSummaryService {
     return { treasury: BigInt(row?.treasury ?? "0"), jackpot: BigInt(row?.jackpot ?? "0") };
   }
 
-  /** Reads the chain, since the timeouts and request times are not indexed. */
-  private async stuck(indexed: boolean): Promise<Stuck | null> {
-    if (!indexed) return NOT_STUCK;
+  /** Reads the chain, since the timeouts and request times are not indexed.
+   *  Null when the read failed. */
+  private async chainView(indexed: boolean): Promise<ChainView | null> {
+    if (!indexed) return { stuck: NOT_STUCK, chain: null };
     try {
       const { connection, program } = this.chain;
       const poolKey = this.chain.poolAddress();
       const [poolInfo, clockInfo] = await connection.getMultipleAccountsInfo([poolKey, SYSVAR_CLOCK_PUBKEY]);
-      if (!poolInfo) return NOT_STUCK;
+      if (!poolInfo) return { stuck: NOT_STUCK, chain: null };
       const pool = decodePool(program, poolKey, poolInfo.data);
       const wanted = [
         ...(pool.openRoundId > 0n ? [this.chain.roundAddress(pool.openRoundId)] : []),
         ...(pool.currentEpochId > 1n ? [this.chain.epochAddress(pool.currentEpochId - 1n)] : []),
+        ...(pool.currentEpochId > 0n ? [this.chain.epochAddress(pool.currentEpochId)] : []),
       ];
       const infos = wanted.length > 0 ? await connection.getMultipleAccountsInfo(wanted) : [];
       const roundInfo = pool.openRoundId > 0n ? infos[0] : null;
-      const epochInfo = pool.currentEpochId > 1n ? infos[infos.length - 1] : null;
+      const epochInfo = pool.currentEpochId > 1n ? infos[pool.openRoundId > 0n ? 1 : 0] : null;
+      const currentInfo = pool.currentEpochId > 0n ? infos[infos.length - 1] : null;
       const testVrf = program.idl.instructions.some((ix) => ix.name === "testFulfill");
-      return await findStuck({
-        now: clockUnixTimestamp(clockInfo?.data),
-        pool,
-        openRound: roundInfo ? decodeRound(program, roundInfo.data) : null,
-        previousEpoch: epochInfo ? decodeEpoch(program, epochInfo.data) : null,
-        fulfilled: async (seed) =>
-          isFulfilled((await connection.getAccountInfo(randomnessAddress(this.chain.programId, seed, testVrf)))?.data),
-      });
+      const now = clockUnixTimestamp(clockInfo?.data);
+      const openRound = roundInfo ? decodeRound(program, roundInfo.data) : null;
+      const previousEpoch = epochInfo ? decodeEpoch(program, epochInfo.data) : null;
+      return {
+        chain: { pool, now, currentEpoch: currentInfo ? decodeEpoch(program, currentInfo.data) : null },
+        stuck: await findStuck({
+          now,
+          pool,
+          openRound,
+          previousEpoch,
+          fulfilled: async (seed) =>
+            isFulfilled((await connection.getAccountInfo(randomnessAddress(this.chain.programId, seed, testVrf)))?.data),
+        }),
+      };
     } catch (cause) {
       this.logger.warn(`stuck check failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       return null;
