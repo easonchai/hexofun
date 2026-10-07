@@ -19,6 +19,7 @@ import {
   apiBaseUrl,
   fetchEpochs,
   fetchFeed,
+  fetchPlayer,
   fetchPositionCounts,
   type CurrentEpochDto,
   type EpochDto,
@@ -26,11 +27,13 @@ import {
 } from "../api.js";
 import { CLUSTER, GAME_GATED, JACKPOT_GATED } from "../chain.js";
 import { dhmsParts } from "../engine.js";
-import { dollars, toHistoryRows, type HistoryRow } from "../historyRows.js";
+import { dollars, toHistoryList } from "../historyRows.js";
+import { InfoGlyph } from "../InfoTip.js";
 import { launchCountdown, launchCountdownLabel, prizeCardState } from "../launch.js";
 import { formatAddress, formatMoney2 } from "../lib/money.js";
 import { useApiPoll } from "../useApiPoll.js";
 import { Star, wholeDollars } from "./Home.js";
+import { apyFromBaseRateBps } from "./Vault.js";
 
 const DECIMALS = 6;
 const SYMBOL = "USDC";
@@ -57,6 +60,18 @@ const NewTab = () => (
     <path d="M5.5 2.5H2.5v8h8V7.5M7.5 2.5h3v3M10.5 2.5 6 7" />
   </svg>
 );
+/** The Figma's amber "Pending" pill on a queued withdrawal (698:19769). */
+const PendingBadge = ({ phone = false }: { phone?: boolean }) => (
+  <span
+    className={`dash-badge-pending${phone ? " dash-badge-phone" : ""}`}
+    data-testid={phone ? undefined : "dash-history-pending"}
+    title="Pays after the draw it was requested in"
+  >
+    <InfoGlyph />
+    Pending
+  </span>
+);
+
 /** Rollovers leave `winner: null`, so look back further than 5 to find five. */
 const EPOCH_LOOKBACK = 20;
 const WINNERS_SHOWN = 5;
@@ -79,6 +94,8 @@ export interface DashboardScreenProps {
   jackpotPaused: boolean;
   /** Null until the owner's Player is indexed, or no wallet is connected. */
   player: PlayerDto | null;
+  /** The pool's `base_rate_bps`, for the Estimated Yield line; null unread. */
+  baseRateBps: number | null;
   onDeposit: () => void;
   onWithdraw: () => void;
   onPlay: () => void;
@@ -109,6 +126,7 @@ export function Dashboard(props: DashboardScreenProps) {
     launchAt,
     jackpotPaused,
     player,
+    baseRateBps,
     onDeposit,
     onWithdraw,
     onPlay,
@@ -134,8 +152,17 @@ export function Dashboard(props: DashboardScreenProps) {
     [ownerBase58, historyLimit],
   );
 
+  const loadPlayerExtras = useCallback(
+    (signal: AbortSignal) =>
+      ownerBase58
+        ? fetchPlayer(apiBaseUrl(), ownerBase58, signal)
+        : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
+    [ownerBase58],
+  );
+
   const epochs = useApiPoll(loadEpochs, 10_000);
   const history = useApiPoll(loadHistory, 10_000);
+  const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
 
   const winners = useMemo(
     () =>
@@ -145,13 +172,10 @@ export function Dashboard(props: DashboardScreenProps) {
     [epochs.data],
   );
 
-  const historyRows = useMemo(() => {
-    const out: HistoryRow[] = [];
-    for (const row of history.data ?? []) {
-      out.push(...toHistoryRows(row));
-    }
-    return out.slice(0, historyLimit);
-  }, [history.data, historyLimit]);
+  const historyRows = useMemo(
+    () => toHistoryList(history.data ?? []).slice(0, historyLimit),
+    [history.data, historyLimit],
+  );
 
   // Rounds played per winner, for the chip beside each Past Winners row. One
   // batched call for the whole table, refreshed only when the addresses change.
@@ -196,9 +220,10 @@ export function Dashboard(props: DashboardScreenProps) {
       ? launchCountdownLabel(launchCountdown(JACKPOT_GATED ? null : launchAt, now))
       : null;
 
-  // Principal drops the moment a withdrawal is requested and the USDC lands a
-  // day later, so the card says where the difference went.
-  const pendingWithdraw = player ? BigInt(player.pendingWithdraw) : 0n;
+  // What the open position has earned, settled into Principal or not; zero
+  // until the backend knows the wallet.
+  const earnings = BigInt(playerExtras.data?.positionYield ?? "0");
+  const apy = baseRateBps === null ? null : apyFromBaseRateBps(baseRateBps);
   // Odds need the pool-wide weight denominator, so they only exist once the
   // backend knows this wallet. Before the first deposit the whole strip goes.
   const showBoost = entries > 0n;
@@ -209,25 +234,28 @@ export function Dashboard(props: DashboardScreenProps) {
     <div className="screen-dash" data-testid="dashboard-screen">
       <div className="dash-cards">
         <section className="dash-card dash-card-principal">
-          <h2 className="dash-card-title">Your Principal</h2>
-          <div className="dash-principal" data-testid="dash-principal">
-            ${fmt2(principal)}
-          </div>
-          <dl className="dash-card-lines">
+          <h2 className="dash-card-title">Your Balance</h2>
+          <dl className="dash-balance">
             <div>
-              <dt>Ticket</dt>
-              <dd data-testid="dash-tickets">
-                {(entries / 10n ** BigInt(DECIMALS)).toLocaleString("en-US")}
+              <dt>PRINCIPAL</dt>
+              <dd className="dash-principal" data-testid="dash-principal">
+                ${fmt2(principal)}
               </dd>
             </div>
-            {pendingWithdraw > 0n ? (
-              <div>
-                <dt>Withdrawing</dt>
-                <dd data-testid="dash-pending-withdraw">
-                  ${fmt2(pendingWithdraw)}
-                </dd>
-              </div>
-            ) : null}
+            <div>
+              <dt>EARNINGS</dt>
+              <dd className="dash-earnings" data-testid="dash-earnings">
+                +${fmt2(earnings)}
+              </dd>
+            </div>
+          </dl>
+          <dl className="dash-card-lines">
+            <div>
+              <dt>Estimated Yield</dt>
+              <dd data-testid="dash-apy">
+                {apy === null ? "—" : `~${Number(apy.toFixed(2))}%`}
+              </dd>
+            </div>
           </dl>
           <div className="dash-card-actions">
             <button
@@ -393,7 +421,12 @@ export function Dashboard(props: DashboardScreenProps) {
             </div>
             {historyRows.map((row) => (
               <div className="board-row" key={row.key}>
-                <span className={row.prize ? "dash-lime" : "dash-dim"}>{row.label}</span>
+                <span className={row.prize ? "dash-lime" : "dash-dim"}>
+                  {row.label}
+                  {/* The hash column goes on phones, so the badge has a
+                      second home beside the label there. */}
+                  {row.pending ? <PendingBadge phone /> : null}
+                </span>
                 <span className="dash-addr">
                   <a
                     className="dash-tx"
@@ -404,6 +437,7 @@ export function Dashboard(props: DashboardScreenProps) {
                     {formatAddress(row.signature)}
                     <NewTab />
                   </a>
+                  {row.pending ? <PendingBadge /> : null}
                 </span>
                 <span className={row.prize ? "dash-lime" : undefined}>{row.amount}</span>
                 <span className="dash-date">{shortDate(row.blockTime)}</span>

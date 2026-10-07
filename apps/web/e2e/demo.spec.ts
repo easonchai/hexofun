@@ -114,7 +114,7 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   await expect(page.getByTestId("deposit-modal-amount")).toContainText("100.00", {
     timeout: 30_000,
   });
-  await page.getByTestId("deposit-modal-play").click();
+  await page.getByTestId("deposit-modal-ok").click();
   await expect(page.getByTestId("deposit-modal")).toHaveCount(0);
 
   // 3. Buy a position on 3 tiles.
@@ -156,15 +156,14 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   // The ceiling is Principal less anything already queued.
   const shownWithdrawable = parseAfterLabel(
     await page.getByTestId("withdrawable-now").innerText(),
-    "Withdrawable",
+    "Available to withdraw:",
   );
   expect(shownWithdrawable).toBeGreaterThan(0);
 
   // 6. Withdraw that much. Today's deposit never held a Ticket, so the form
   // says it pays now, the USDC lands in the wallet and there is no pending row.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
-  await expect(page.getByTestId("withdraw-pays-now")).toContainText("pays now");
-  await expect(page.getByTestId("withdraw-pays-later")).toHaveCount(0);
+  await expect(page.getByTestId("withdraw-expected")).toContainText("Now");
   const withdrawSubmit = page.getByTestId("withdraw-submit");
   await expect(withdrawSubmit).toBeEnabled();
   await withdrawSubmit.click();
