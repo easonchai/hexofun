@@ -276,8 +276,10 @@ the upgrade authority on a Ledger, and the admin CLI can already print for a Squ
 one yet. The path, when it happens:
 
 1. **Upgrade authority**: `solana program set-upgrade-authority <program-id>
-   --new-upgrade-authority <squads-vault> --upgrade-authority usb://ledger` moves it from the
-   Ledger to the vault.
+   --new-upgrade-authority <squads-vault> --upgrade-authority usb://ledger
+   --skip-new-upgrade-authority-signer-check` moves it from the Ledger to the vault. The flag is
+   needed because a vault cannot sign. From then on `deploy.sh mainnet --upgrade` no longer
+   applies, since it signs with the Ledger.
 2. **Admin role**: the current admin runs `admin propose-admin --key <squads-vault>`, then, with
    `ADMIN_ADDRESS=<squads-vault>` exported, `admin accept-admin`; the CLI prints a base58
    transaction with the vault as the proposed admin, and someone with a signer role in Squads

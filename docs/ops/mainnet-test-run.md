@@ -501,15 +501,24 @@ signer pubkeys, the mainnet API host and web domain, and the mainnet Helius key.
 
 ```sh
 scripts/deploy.sh mainnet --dry-run                # solana-verify build, check-deployable, keypair assert
-scripts/deploy.sh mainnet                          # Ledger plugged in, typed program ID confirmation
+scripts/deploy.sh mainnet                          # hot key stays upgrade authority, typed program ID confirmation
+```
+
+Bootstrap Pool 1 next. Its payer is `OPERATOR_KEYPAIR`, which must be the hot key that deployed:
+`create_pool` refuses any payer but the upgrade authority (`docs/ops/deploy.md`, "Mainnet launch
+order"). Pass `--admin <squads-vault> --operator <hot-key> --treasury <plain token
+account> --buyback-reserve <plain token account>`, with `ACCEPTED_MINT=EPjFW...` in the env. On
+mainnet, the four klend pins default to Kamino's USDC reserve on the main market and bootstrap
+creates the cToken ATA itself. Then hand the upgrade authority to the Ledger and publish the IDL,
+which the Ledger signs:
+
+```sh
+scripts/deploy.sh mainnet handover                 # Ledger plugged in
 scripts/deploy.sh mainnet --idl
 scripts/deploy.sh mainnet verify                   # solana-verify, clean tree only
 ```
 
-Bootstrap Pool 1 with `--admin <squads-vault> --operator <hot-key> --treasury <plain token
-account> --buyback-reserve <plain token account> --accepted-mint EPjFW...`. On mainnet, the four
-klend pins default to Kamino's USDC reserve on the main market and bootstrap creates the cToken
-ATA itself. Then:
+Then:
 
 1. Start with ~100 USDC from two wallets we hold. Deposit, wait for the operator to deploy,
    watch `/status` for the venue position and a positive yield index after an hour.
