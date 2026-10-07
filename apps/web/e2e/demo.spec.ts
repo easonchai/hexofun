@@ -47,7 +47,12 @@ const SETTLE_TIMEOUT_MS = (ROUND_SECONDS + VRF_TIMEOUT_SECONDS + 60) * 1000;
 
 async function connectBurnerWallet(page: Page): Promise<void> {
   await page.goto("/#play");
-  await page.getByTestId("connect-button").click();
+  // The invite gate (AccessGate.tsx) covers the app until a wallet with
+  // access connects; the burner needs an InviteRedemption row in the backend.
+  const gateConnect = page.getByRole("button", { name: /connect wallet/i });
+  const navConnect = page.getByTestId("connect-button");
+  await expect(gateConnect.or(navConnect).first()).toBeVisible({ timeout: 15_000 });
+  await ((await gateConnect.isVisible()) ? gateConnect : navConnect).click();
   // Standard wallet-adapter-react-ui modal. With VITE_BURNER_WALLET=1 and a
   // local RPC (see src/dev-burner.ts's isLocalRpc gate), the burner is the
   // only entry in the list.
@@ -95,12 +100,15 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   // already holding USDC from a previous run. This does not fix
   // repeatability properly; upgrade path is a fresh keypair per run, or a
   // backend reset endpoint, whichever ticket ends up owning CI for this spec.
-  // The faucet lives in the wallet menu under the address pill.
+  // The faucet lives in the wallet menu under the address pill. A
+  // mainnet-shaped cluster (the surf fork) has none; `scripts/surf.sh fund`
+  // pre-funds the burner there instead.
   await page.getByTestId("connect-button").click();
-  await page.getByTestId("faucet").click();
-  await expect(page.getByTestId("faucet")).toHaveText(/Sent|Faucet in \d+s/, {
-    timeout: 30_000,
-  });
+  const faucet = page.getByTestId("faucet");
+  if (await faucet.isVisible().catch(() => false)) {
+    await faucet.click();
+    await expect(faucet).toHaveText(/Sent|Faucet in \d+s/, { timeout: 30_000 });
+  }
   await page.keyboard.press("Escape");
   // EARN lands on the dashboard; the deposit widget is one hop further in.
   await page.getByTestId("tab-dashboard").click();
