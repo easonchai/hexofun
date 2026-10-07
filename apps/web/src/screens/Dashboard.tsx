@@ -423,9 +423,6 @@ export function Dashboard(props: DashboardScreenProps) {
               <div className="board-row" key={row.key}>
                 <span className={row.prize ? "dash-lime" : "dash-dim"}>
                   {row.label}
-                  {/* The hash column goes on phones, so the badge has a
-                      second home beside the label there. */}
-                  {row.pending ? <PendingBadge phone /> : null}
                 </span>
                 <span className="dash-addr">
                   <a
@@ -440,7 +437,14 @@ export function Dashboard(props: DashboardScreenProps) {
                   {row.pending ? <PendingBadge /> : null}
                 </span>
                 <span className={row.prize ? "dash-lime" : undefined}>{row.amount}</span>
-                <span className="dash-date">{shortDate(row.blockTime)}</span>
+                {/* The hash column goes on phones, so the badge takes the
+                    date's place there until the withdrawal pays out. */}
+                <span className="dash-date">
+                  {row.pending ? <PendingBadge phone /> : null}
+                  <span className={row.pending ? "dash-date-pending" : undefined}>
+                    {shortDate(row.blockTime)}
+                  </span>
+                </span>
               </div>
             ))}
           </div>

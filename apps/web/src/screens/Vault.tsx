@@ -77,6 +77,8 @@ const INPUT_DECIMALS = 2;
 const QUICK_ADDS = [50n, 100n, 500n] as const;
 /** Withdraw's pills: this percent of what can be withdrawn. */
 const QUICK_PERCENTS = [25n, 50n, 75n] as const;
+/** Figma types the CTA in mixed case; Syncopate's lowercase glyphs draw "DePOSIT". */
+const MODE_CTA = { deposit: "Deposit", withdraw: "Withdraw" } as const;
 
 /** ADR 0020: a deposit earns no Ticket until the next epoch. */
 const TICKETS_TIP = ["Tickets from this deposit join the draw from tomorrow."];
@@ -450,7 +452,7 @@ export function Vault(props: VaultScreenProps) {
           ? "POOL PAUSED"
           : mode === "deposit" && impaired
             ? "DEPOSITS CLOSED"
-            : mode.toUpperCase();
+            : MODE_CTA[mode];
 
   return (
     <div className="vault" data-testid="vault-screen">
@@ -546,7 +548,7 @@ export function Vault(props: VaultScreenProps) {
               </button>
             </div>
 
-            <dl className={`vault-rows vault-rows-${mode}`}>
+            <dl className="vault-rows">
               {mode === "deposit" ? (
                 <>
                   <div className="vault-line" data-testid="vault-tickets">

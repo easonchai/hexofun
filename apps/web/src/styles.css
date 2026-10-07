@@ -2808,7 +2808,7 @@ input::placeholder {
 
 .vault-tabs {
   display: flex;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .vault-tab {
@@ -2817,7 +2817,7 @@ input::placeholder {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.3);
   font-family: "Syncopate", sans-serif;
   font-weight: 700;
   font-size: 16px;
@@ -2946,12 +2946,12 @@ input::placeholder {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: #fcfcfc;
+  /* Figma sets the rows group to 75% opacity over #fcfcfc text. */
+  color: rgba(252, 252, 252, 0.75);
   font-family: "Roboto Mono", monospace;
   font-weight: 700;
   font-size: 13px;
   line-height: 1.5;
-  letter-spacing: 0.083em;
 }
 
 .vault-line dt,
@@ -2964,12 +2964,6 @@ input::placeholder {
 .vault-line-when {
   text-align: right;
   white-space: pre;
-}
-
-/* The withdraw frame's rows carry no tracking; with the deposit rows' 0.083em
-   "Expected to receive at" and its date overrun a phone-width widget. */
-.vault-rows-withdraw .vault-line {
-  letter-spacing: 0;
 }
 
 .vault-line-label {
@@ -3023,7 +3017,7 @@ input::placeholder {
   border: none;
   border-radius: 10px;
   background: var(--brand-lime);
-  color: #07101c;
+  color: var(--brand-navy);
   font-family: "Syncopate", sans-serif;
   font-weight: 700;
   font-size: 16px;
@@ -3952,10 +3946,12 @@ input::placeholder {
   }
 
   .dash-badge-phone {
-    display: flex;
-    width: fit-content;
-    margin-top: 4px;
+    display: inline-flex;
     padding: 0 8px;
+  }
+
+  .dash-date-pending {
+    display: none;
   }
 
   /* Syncopate is wide: "+ Deposit More" wraps at 11px+ on a 390px screen. */
