@@ -30,6 +30,7 @@ import {
 import {
   acceptedAta,
   bn,
+  freeLeavesAddress,
   jackpotVaultAddress,
   method,
   playerAddress,
@@ -425,6 +426,7 @@ export async function deposit(
       pool: pool.address,
       player: playerAddress(pool.address, o),
       weightTree: pool.weightTree,
+      freeLeaves: freeLeavesAddress(pool.address),
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),

@@ -124,8 +124,14 @@ One zero-copy account per pool that holds every Player's Tickets as a Fenwick tr
 _Avoid_: Sum tree (the general structure), registration, snapshot, Merkle tree
 
 **Leaf**:
-A Player's place in the Weight tree: an index assigned at first deposit, stored on the Player, never reused. A Fenwick entry holds a range sum, not one Player's value, so a Player's own Tickets in the tree are the difference of two prefix sums; the Indexer reads the Player's Tickets directly. `payout` checks that the winner's Leaf range holds the draw's target.
+A Player's place in the Weight tree: an index assigned at first deposit and stored on the Player, 0 once released. A Leaf has one owner at a time. A Fenwick entry holds a range sum, not one Player's value, so a Player's own Tickets in the tree are the difference of two prefix sums; the Indexer reads the Player's Tickets directly. `payout` checks that the winner's Leaf range holds the draw's target.
 _Avoid_: Node, entry (a tree slot that sums a range), slot (one epoch-parity half of an entry), registration interval
+
+**FreeLeaves**:
+One zero-copy account per pool (seeds `["free_leaves", pool]`, created by `create_pool`) that holds a stack of released Leaf indices. `deposit` pops from it when a Player has no Leaf, and appends to the Weight tree only when it is empty, so a refunded wallet's Leaf serves the next depositor and the tree stops growing. The account only grows, one 4-byte entry per release, paid for by whoever called `release_leaf`.
+
+**Leaf release**:
+`release_leaf(player)`, callable by anyone, moves an empty Player's Leaf onto FreeLeaves and sets the Player's `leaf_index` to 0. It needs zero Principal, no queued withdrawal, no open Position, and no Tickets on that Leaf in the current epoch or the one before it, and it refuses the House. The Operator releases one empty Player's Leaf per tick once the Player has been empty for more than one epoch.
 
 **Epoch**:
 One lottery cycle. Its boundaries are points on a fixed grid: the pool's Anchor sets where the grid sits, and the cycle length, a pool parameter, sets the spacing. Epochs are contiguous, and a late crank lands on the same grid a punctual one would, so an operator outage skips whole epochs instead of moving the boundary. A pool's first epoch is the short stub from launch to the next grid point.
