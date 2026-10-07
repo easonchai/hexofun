@@ -75,6 +75,14 @@ What that means if you deposit:
   at the reduced value or wait for a recovery. If klend stops responding, every instruction that
   syncs the venue fails, withdrawals included, until it answers. There is no bypass before a
   program upgrade.
+- The venue can change. A pool holds one venue at a time, either a klend reserve or a Kamino Earn
+  vault (kVault), and the admin can propose another. The proposal is public on chain and starts a
+  48 hour lock that the program enforces, so you have two days to withdraw if you dislike the target.
+  Deposits and withdrawals keep working, and the pool keeps earning at the old venue until the lock
+  ends. Then anyone can drain the old position into the pool's own vault and run the migration,
+  which moves no money. The admin or the operator can also drain to idle at any time to leave a
+  venue that is going bad, but moving the money somewhere new always waits out the lock. A vault
+  adds a curator who can change its fees without notice, and the team accepts that (ADR 0023).
 - Withdrawing is one call, `request_withdraw`. The part up to what you deposited today is
   refunded at once. The rest queues, stays in the draw and the game and keeps earning, and pays
   after the next epoch starts. Anyone can push that payment, including you from the vault

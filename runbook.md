@@ -95,6 +95,116 @@
 
   Setting the deploy pause from the operator key is pending yield-claimer ticket 10, which adds the instruction.
 
+  Changing a pool's venue (ADR 0023)
+
+  Status: rehearsed on localnet (stub to stub); fork rehearsal pending. Treat every step below as unproven against
+  real klend and kVault accounts until the fork transcript is pasted here.
+
+  A pool holds one venue, a klend reserve or a Kamino Earn vault. Moving it takes a proposal, a 48 hour lock the
+  program enforces, a drain and a migration. Every command is the admin CLI, `pnpm --filter @hexvault/backend admin
+  <command>`, run with the target environment's env exported as in "Admin actions through Squads" below. On mainnet,
+  export `ADMIN_ADDRESS=<squads-vault>` and the admin-gated ones (propose-venue, cancel-venue, set-venue-params,
+  start-deploy) print a base58 transaction for Squads to import. `migrate-venue` and the Operator's `drain-venue` need no
+  multisig. Read the pool's state from `GET /ops/summary`: `venueKind`, `venueValue`, `venueProposal` (with `unlocksAt`,
+  chain unix seconds) and `venueParams`.
+
+  Migration
+
+    1. Prepare the target. For a kVault, read its state account and shares mint from Kamino's API and from the vault
+       account, and create the pool's shares account before proposing, since nothing creates it later:
+
+         spl-token create-account <SHARES_MINT> --owner <POOL_PDA> --fee-payer <FUNDED_KEYPAIR>
+
+       Check: `spl-token account-info --address <ATA>` (or `solana account <ATA>`) shows the shares mint and the pool PDA as
+       owner. The Squads vault also needs a little SOL, because the Admin pays the proposal account's rent. The rent
+       returns to the Admin when the proposal closes.
+
+    2. Propose. The four flags are positional pins: for a kVault, `--program` is the kVault program, `--market` the vault
+       state, `--reserve` the shares mint and `--ctoken` the pool's shares account. For klend they are the klend
+       program, market, USDC reserve and the pool's cToken account.
+
+         admin propose-venue --kind kvault \
+           --program KvauGMspG5k6rtzrqqn7WNn3oZdyKqLKwK2XWQ8FLjd \
+           --market <VAULT_STATE> --reserve <SHARES_MINT> --ctoken <POOL_SHARES_ATA>
+
+       Check: `/ops/summary` shows `venueProposal` with the right kind and pins and `unlocksAt` exactly 172800 seconds
+       after `proposedAt`. The operator's log shows deploys skipped with `VenueProposalOpen`, and `venueValue` keeps
+       growing, because the old venue earns until the lock ends. A second `propose-venue` replaces the proposal and
+       restarts the lock. Do not do that by accident.
+
+    3. Lower the dust line. The Operator migrates by itself as soon as the old position is at or under
+       `min_venue_move`, and the migration then leaves that much untracked at the old venue. The default is 100 USDC.
+       Lower it so the drain empties the position, and put it back in step 8:
+
+         admin set-venue-params --min-venue-move 10000
+
+       Check: `venueParams.minVenueMove` in `/ops/summary` reads 10000.
+
+    4. Wait out the lock. Deposits and withdrawals work throughout. Watch the target the whole time. If it turns bad
+       (the vault's fee or penalty changes, an allocation reserve is deprecated), run `admin cancel-venue`. It closes the
+       proposal and deploys resume. Check: `venueProposal` is null.
+
+    5. Drain. After `unlocksAt` the Operator's tick drains in steps sized by the old venue's free liquidity, and anyone
+       may drain by hand (`drain-venue` also sets the deploy pause, which the open proposal already enforces):
+
+         admin drain-venue --amount <ATOMIC_USDC>
+
+       Check after each step: `venueValue` falls, the principal vault balance rises by about the same amount, and the
+       `VenueDrained` event shows `received` against `asked`. A klend reserve that cannot pay fails with
+       `VenueIlliquid` and nothing moves, so retry smaller once `reserveFreeLiquidity` recovers. A kVault may hand back less than asked, and the book
+       falls only by what came back. Keep draining until `venueValue` is at or under the line from step 3. Do not
+       migrate with a larger position and expect to come back for it: nothing redeems the old position afterwards.
+
+    6. Migrate. If the Operator has not already:
+
+         admin migrate-venue
+
+       Check: the `VenueMigrated` event shows `left_behind` at or under the step 3 line, ideally 0. `/ops/summary`
+       shows the new `venueKind`, `venueProposal` null and `venueValue` 0. The old venue's token account for the
+       pool (the cToken or shares account) holds at most that dust. The Admin's SOL balance rises by the proposal's
+       rent. The migration is refused by name if the lock has not elapsed (`VenueLockNotElapsed`) or the position is
+       too large (`VenuePositionNotEmpty`). Then drain again.
+
+    7. Resume deploys. A hand drain left the deploy pause on. Clear it, then let the Operator's deploy crank move the idle
+       USDC to the new venue under the idle band and the deploy caps:
+
+         admin start-deploy
+
+       Check: `DEPLOY_PAUSED` leaves `/alerts`, a `VenueDeployed` event follows within a tick or two, `venueValue` rises
+       toward the whole non-idle share, and `freeIdleBps` settles near the idle target. The gap between the last drain
+       and this deploy earned nothing, so do not leave it open.
+
+    8. Restore the dust line, and record the move here with the signatures and the fork's CU numbers:
+
+         admin set-venue-params --min-venue-move 100000000
+
+  Emergency park
+
+  Status: rehearsed on localnet; fork rehearsal pending.
+
+  Use it when the venue is going bad: a reserve being deprecated, a curator raising fees, a market losing liquidity. It
+  needs no proposal and no lock, because the USDC only goes into the pool's own principal vault. It also earns nothing
+  until the pool has a new venue, so do not park for a wobble. See "The venue is going bad" in docs/ops/incidents.md.
+
+    1. Run it from the Operator key on the box, so nobody waits for multisig approvals. Unset `ADMIN_ADDRESS` (an env file
+       that sets it makes the CLI print a Squads transaction instead). The CLI then signs with the loaded key, and the Operator may drain. Start with the whole position:
+
+         admin drain-venue --amount <venueValue from /ops/summary>
+
+       The transaction sets the deploy pause first and drains second, so the crank cannot put the money back.
+       Check: `DEPLOY_PAUSED` appears in `/alerts`, `venueValue` falls and the principal vault balance rises.
+
+    2. If the venue cannot pay that much, the call fails and nothing moves (`VenueIlliquid` on klend). Repeat with
+       smaller amounts as liquidity allows. A kVault may return less than asked, and the book falls by what returned.
+       Check after each: the `VenueDrained` event, and `venueValue` against the vault balance.
+
+    3. Watch solvency while it runs. `/ops/summary` `solvencyMargin` must stay non-negative. A real loss shows as
+       Impaired, which has its own playbook (docs/ops/incidents.md, "Venue loss"). Withdrawals pay from the vault the
+       whole time, and the idle USDC earns nothing.
+
+    4. Pick the new venue, then run the Migration above from step 1. Step 7 clears the pause. Only the Admin can. If
+       the old venue recovers and the team stays, `admin start-deploy` alone resumes deploying.
+
   Daily referral bonus (docs/plan/hexo-referrals ticket 08)
 
   Fully automatic, no manual step: the operator's own crank grants it, right after begin_epoch opens each new epoch, off

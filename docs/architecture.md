@@ -47,10 +47,10 @@ mainnet, a Ledger locally) never runs on the backend box.
 
 There is no separate adapter program. The venue is a module inside `hex_vault`
 (`venue.rs`, three operations: `value`, `deposit`, `redeem`), backed by klend in `klend.rs` and
-by a stub in `test_venue.rs` on localnet. The pool PDA holds the klend cTokens itself. Swapping
-or adding a venue means a new backing behind those three operations and a program upgrade,
-because the four klend addresses are pinned on the `Pool` at `create_pool` and no instruction
-changes them.
+by a kVault in `kvault.rs` and by a stub in `test_venue.rs` on localnet. The pool PDA holds the
+klend cTokens or the kVault shares itself. A new kind of backing still means a program upgrade.
+Pointing a pool at another klend reserve or kVault does not: the four venue addresses sit on the
+`Pool` and only `migrate_venue` rewrites them, after a proposal and a 48 hour lock (ADR 0023).
 
 ## Fund flow
 
@@ -227,8 +227,9 @@ All seeds are declared in `programs/hex_vault/src/constants.rs`. `pool_id`, `epo
 `treasury` and `buyback_reserve` are plain token accounts passed into `create_pool` and changed
 by `set_treasury_accounts`. On mainnet they are the admin multisig's own associated token
 accounts. `klend_program`, `klend_market`, `klend_reserve` and `klend_ctoken` (the pool's cToken
-account) are pinned at `create_pool`, and every instruction that syncs checks the accounts it
-was handed against them.
+account) are set at `create_pool` and change only through `migrate_venue` (ADR 0023). Every
+instruction that syncs checks the accounts it was handed against them. For a kVault pool the
+four hold the kVault program, the vault state, the shares mint and the pool's shares account.
 
 `Pool`, `Player`, `Round` and `Position` are layout version 2 with their own discriminators
 (`HVPool02` and so on), so a version-1 account fails to load instead of being misread. Each

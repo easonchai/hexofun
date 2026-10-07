@@ -1,6 +1,6 @@
 # Depositors earn what the venue paid through a live Yield index, and withdraw at once
 
-Superseded in part by ADR 0020: the instant withdraw and its Tickets rule are removed; the Yield index, Idle band, deploy, recall, harvest and venue loss stand. Amended by ADR 0021: the Impaired rules for deposits and Haircut exits, and the solvency formula.
+Superseded in part by ADR 0020: the instant withdraw and its Tickets rule are removed; the Yield index, Idle band, deploy, recall, harvest and venue loss stand. Amended by ADR 0021: the Impaired rules for deposits and Haircut exits, and the solvency formula. Amended by ADR 0023: the venue pins are no longer permanent, since a pool can change its venue behind a 48 hour lock, and a Kamino Earn vault is no longer rejected. Read "pinned at creation, no caller can substitute another" and the rejection of Earn vaults below as history.
 
 Until now yield worked in three manual steps. The Admin pulled USDC out of the principal vault with
 `admin_withdraw` and lent it at Kamino off the program (ADR 0010). The Admin funded a Yield budget

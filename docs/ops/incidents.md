@@ -233,6 +233,25 @@ failure. There is no code of its own, and `RPC_DOWN` may stay quiet.
    rata. It is not built. Decide on it as a team before any upgrade, and ship it with
    `scripts/deploy.sh <env> --upgrade` ([`docs/ops/deploy.md`](deploy.md#upgrading)).
 
+## The venue is going bad
+
+No alert code of its own. It starts with news or a signal outside the pool: a klend reserve deprecated or
+its utilization near 100%, a Kamino Earn vault whose curator raised fees or set a withdrawal penalty, an
+allocation market losing liquidity, or `RESERVE_LIQUIDITY_LOW` that does not clear. `POOL_IMPAIRED` means
+the loss already happened, so go to "Venue loss" first.
+
+1. Decide to park, not to wait. Parking brings the position home and earns nothing, so it fits a venue the
+   team no longer trusts, not a bad day.
+2. Run the emergency park in [`runbook.md`](../../runbook.md), "Emergency park". It needs no proposal and no
+   lock. The Operator key signs it on the box, and the CLI sets the deploy pause in the same transaction
+   as the first drain. Keep draining until `venueValue` in `GET /ops/summary` is zero or dust. A klend
+   reserve that cannot pay fails with `VenueIlliquid` and moves nothing, so retry in smaller steps.
+3. `DEPLOY_PAUSED` will fire for as long as the pause stands. That is expected.
+4. Pick the new venue and run the migration in the same runbook section. It waits out a 48 hour lock that
+   nobody can shorten, so the idle USDC earns nothing for at least two days. Tell depositors the principal
+   is safe in the pool's own vault and that withdrawals still pay.
+5. If the old venue recovers, `admin start-deploy` resumes deploys and no proposal is needed.
+
 ## Deployment paused
 
 Starts with `DEPLOY_PAUSED`.

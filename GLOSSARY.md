@@ -11,7 +11,7 @@ Player-facing words differ from mechanism names in three places, on purpose: the
 ### Custody
 
 **Pool**:
-One deployed instance of the product: one accepted asset, one principal vault, one jackpot vault, one epoch schedule. The demo runs a single hexUSDC pool.
+One deployed instance of the product: one accepted asset, one principal vault, one jackpot vault, one epoch schedule. The demo runs a single hexUSDC pool. It holds one venue at a time. The Admin can change which one through a Proposal and its 48 hour lock (ADR 0023), so the four venue pins on the Pool are not permanent.
 _Avoid_: Vault (ambiguous with the token accounts), protocol
 
 **Deposit**:
@@ -69,6 +69,18 @@ _Avoid_: House cut (a game cut, paid in Tickets), performance fee, rake, protoco
 **Idle band**:
 The share of the pool's USDC kept in the principal vault instead of at the venue, between a floor of 5% and a target of 10% by default. Free idle is the vault balance minus Pending withdrawals. Anyone may deploy what sits above the target to the venue, and anyone may recall from the venue while free idle is under the target. Either key can pause deployment; only the Admin restarts it.
 _Avoid_: Buffer, reserve (klend's lending reserve), float, Deployed principal (retired)
+
+**Venue kind**:
+The byte on the Pool, `venue_kind`, that says what the four venue pubkeys point at. 0 is a klend reserve, 1 is the localnet stub (only a `test-venue` build accepts it), 2 is a Kamino Earn vault (kVault). Zero is klend, so every pool created before the byte existed reads as klend. The pubkeys keep their klend names on chain, and each kind gives them its own meaning. The program dispatches value, deposit and redeem on the kind at run time.
+_Avoid_: Venue type, backend (the NestJS service), adapter (there is no adapter program)
+
+**Proposal**:
+The Admin's announced venue change: a `VenueProposal` account at the PDA `["venue_proposal", pool]` that holds the new Venue kind, the four new pubkeys and the time it was made. It starts a lock of 48 hours (`VENUE_LOCK_SECONDS`, a program constant). Proposing again replaces it and restarts the lock, and `cancel_venue` closes it. It has no expiry, so after the lock it stays executable until cancelled or executed by `migrate_venue`. While it exists, deploys are refused.
+_Avoid_: Vote, governance proposal, pending venue, Pool cutover (a new pool, not a new venue)
+
+**Drain**:
+`drain_venue(amount)`: redeems `amount` from the pool's current venue into the principal vault and lowers the venue value by what arrived. It is partial and repeatable, and the USDC lands only in the principal vault. The Admin or the Operator may drain at any time, and anyone may while a Proposal is open. A drain with no Proposal is the emergency park, and the admin CLI sets the deploy pause in the same transaction. The last step before `migrate_venue` is a drain that empties the position.
+_Avoid_: Recall (the Operator's top-up of free idle), Sweep (a shut-down jackpot move), withdraw (a Player's exit), liquidate
 
 **Harvest**:
 The permissionless instruction that redeems the Yield fee owed and the prize share owed from the venue, sends the first to the Treasury and the second to the jackpot vault, and emits both amounts. The Operator runs it once per epoch before `epoch_end`; a missed one makes that day's Prize smaller and the next one larger. It touches no Player and is refused while Impaired.
@@ -257,7 +269,7 @@ _Avoid_: Force withdraw, bailout, rescue
 
 **Sweep**:
 The admin-only `sweep_house`, valid only once a pool is shut down, that moves the jackpot vault's surplus over `jackpot_reserved` to the Treasury. Never touches Principal; callable more than once.
-_Avoid_: Drain, liquidate, close out
+_Avoid_: Drain (a venue operation), liquidate, close out
 
 **Environment**:
 One deployment of the whole stack: its own program keypair, its own pools, its own Postgres database and its own env file. Dev, staging and mainnet share nothing but the box and Traefik. See `docs/ops/environments.md`.

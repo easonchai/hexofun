@@ -225,14 +225,15 @@ bootstrap --admin <squads-vault> --treasury <treasury-address> --buyback-reserve
 
 ## The venue a Pool pins
 
-`create_pool` pins four klend addresses on the Pool for good (`klend_program`, `klend_market`,
-`klend_reserve`, `klend_ctoken`), and a wrong pin cannot be fixed afterwards. Bootstrap takes them
+`create_pool` sets four venue addresses on the Pool (`klend_program`, `klend_market`,
+`klend_reserve`, `klend_ctoken`). A wrong pin is fixed by a venue change, not an upgrade: propose the
+right venue, wait the 48 hour lock, drain and migrate (`runbook.md`, "Changing a pool's venue"). Bootstrap takes them
 from `KLEND_PROGRAM`, `KLEND_MARKET`, `KLEND_RESERVE` and `KLEND_CTOKEN`. On mainnet each defaults
 to Kamino's USDC reserve on the main market, and `KLEND_CTOKEN` to the pool PDA's ATA of the
 reserve's cToken mint, which bootstrap creates before `create_pool`. Overriding `KLEND_RESERVE`
 there requires `KLEND_CTOKEN` too. Any other cluster has no default and bootstrap names the
-missing variables. `VENUE_KIND` (`klend`, the default, or `stub`) is the Pool's venue kind byte,
-0 or 1, stored at `create_pool`; the program refuses a kind its build does not support. On a
+missing variables. `VENUE_KIND` (`klend`, the default, `stub` or `kvault`) is the Pool's venue kind byte,
+0, 1 or 2, stored at `create_pool`; the program refuses a kind its build does not support. On a
 localnet built with `--features test-vrf,test-venue`, `VENUE_KIND=stub` pins the stub venue and
 runs `test_venue_init` (`apps/backend/scripts/bootstrap-localnet.sh` sets it; `KLEND_VENUE=test`
 still works as the old spelling). Bootstrap refuses the stub on mainnet. Bootstrap prints `WEIGHT_TREE` and the four pins as the chain recorded them, for a second
