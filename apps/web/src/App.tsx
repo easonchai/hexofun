@@ -236,7 +236,6 @@ export function App() {
   // the Player's next transaction touches it, and today the draw counts it.
   const entries = player ? BigInt(player.weight) : 0n;
   const pendingWithdraw = player ? BigInt(player.pendingWithdraw) : 0n;
-  const pendingEpoch = player ? BigInt(player.pendingEpoch) : 0n;
   const fmt = useCallback((value: bigint) => formatAtomic2(value, DECIMALS), []);
 
   // Header chip copies the full address; the truncated form is unusable for
@@ -731,7 +730,6 @@ export function App() {
             shutdown={shutdown}
             currentEpoch={state?.currentEpoch ?? null}
             pendingWithdraw={pendingWithdraw}
-            pendingEpoch={pendingEpoch}
             initialMode={vaultMode}
             onConnect={() => signer.connect()}
             onDone={statePoll.kick}

@@ -4,9 +4,9 @@
  * WITHDRAW sends `request_withdraw` (ADR 0020): the part that is still a
  * pending deposit pays in the same transaction and the rest queues and pays
  * after the epoch ends (ADR 0009). The sheet previews that split from the
- * pending deposit (`splitWithdraw`). The pending row below the widget carries
- * the wait: the amount, about when it pays, and a "pay out now" button that
- * sends the permissionless `process_withdraw` when the operator has not.
+ * pending deposit (`splitWithdraw`). Fork-run-fixes 09: no pending row, so no
+ * Cancel or Pay out now here; `cancel_withdraw` stays on chain and
+ * `process_withdraw` stays an operator crank.
  *
  * Ticket 07: `currentEpoch` comes from App's one `GET /state` poll instead
  * of a duplicate `/epochs/current` poll of its own; `onDone` tightens that
@@ -23,8 +23,6 @@ import type { PublicKey } from "@solana/web3.js";
 import {
   awaitSendResult,
   deposit,
-  processWithdraw,
-  cancelWithdraw,
   requestWithdraw,
   shutdownWithdraw,
   type SendResult,
@@ -45,17 +43,13 @@ import {
   haircutValue,
   parseAtomic,
   pendingTickets,
-  canCancelWithdraw,
-  pendingWithdrawal,
   splitWithdraw,
   unsettledYieldLine,
 } from "../lib/money.js";
 import {
-  decodeErrorCode,
   decodePlayerError,
   decodeSendFailure,
   failureReason,
-  NOTHING_PENDING_CODE,
   thrownReason,
 } from "../playerErrors.js";
 import { solRentWarning, type PoolLike } from "../read.js";
@@ -100,13 +94,6 @@ export const apyFromBaseRateBps = (baseRateBps: number): number =>
 const yearlyYield = (amount: bigint, apy: number): bigint =>
   BigInt(Math.floor((Number(amount) * apy) / 100));
 
-/**
- * `NothingPending` (playerErrors.ts, ticket 09 — this used to be this file's
- * own `payoutError`): the operator's crank paid this withdrawal before the
- * click landed. `payOutNow` below treats that as a success, not an error.
- */
-const NOTHING_PENDING_NOTE = decodeErrorCode(NOTHING_PENDING_CODE);
-
 /** Ticket 15: shown while an `"unknown"` `SendResult` is being polled to a
  *  real outcome, with a link so the depositor can check for themselves too. */
 const explorerUrl = (signature: string): string =>
@@ -127,14 +114,6 @@ export function receiveTime(unixSeconds: number, gap = ""): string {
   const zone = `GMT${offset < 0 ? "-" : "+"}${Math.floor(abs / 60)}${abs % 60 ? `:${String(abs % 60).padStart(2, "0")}` : ""}`;
   return `${at.getDate()} ${MONTHS[at.getMonth()]}, ${clock} (${zone})`;
 }
-
-/** Local HH:MM of a unix-seconds time; the preview and the pending row say "about". */
-const clockTime = (unixSeconds: number): string =>
-  new Date(unixSeconds * 1000).toLocaleTimeString([], {
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
 
 export type VaultMode = "deposit" | "withdraw";
 type Mode = VaultMode;
@@ -159,8 +138,6 @@ export interface VaultScreenProps {
   currentEpoch: CurrentEpochDto | null;
   /** Requested but unpaid Principal; 0 when nothing is pending. */
   pendingWithdraw: bigint;
-  /** The epoch that pending amount was requested in, so the day it pays after. */
-  pendingEpoch: bigint;
   /**
    * Which tab the widget opens on. The dashboard's two buttons are the only
    * way in, and they arrive with an intent already; App unmounts the screen on
@@ -184,7 +161,6 @@ export function Vault(props: VaultScreenProps) {
     shutdown,
     currentEpoch,
     pendingWithdraw,
-    pendingEpoch,
     initialMode,
     onConnect,
     onDone,
@@ -201,12 +177,6 @@ export function Vault(props: VaultScreenProps) {
   >(null);
   /** Atomic amount of the deposit that just landed; null closes the modal. */
   const [confirmed, setConfirmed] = useState<bigint | null>(null);
-  /**
-   * A `process_withdraw` has been sent and the read model has not caught up.
-   * Keyed on the pending amount so the flag clears itself the moment the
-   * payout lands (or a fresh request books a different amount).
-   */
-  const [payoutSent, setPayoutSent] = useState<bigint | null>(null);
 
   const connected = owner !== null && program !== null && pool !== null;
   const amount = parseAtomic(amountText, DECIMALS);
@@ -239,20 +209,6 @@ export function Vault(props: VaultScreenProps) {
   const livePool = useLivePool();
   const haircutFactor = livePool?.live.haircutFactor ?? null;
   const impaired = livePool?.pool.impaired ?? false;
-
-  // The payout landed (or the request was never there): drop the flag, so a
-  // later request for the same amount does not inherit this one's state.
-  useEffect(() => {
-    if (pendingWithdraw === 0n) setPayoutSent(null);
-  }, [pendingWithdraw]);
-
-  const pending = pendingWithdrawal(
-    pendingWithdraw,
-    pendingEpoch,
-    currentEpoch ? BigInt(currentEpoch.id) : null,
-    payoutSent !== null && payoutSent === pendingWithdraw,
-    shutdown,
-  );
 
   const switchMode = (next: Mode) => {
     if (next === mode) return;
@@ -344,7 +300,6 @@ export function Vault(props: VaultScreenProps) {
       : epochAhead
         ? receiveTime(epochEnd).replace(" (", "\n(")
         : "After today's draw";
-  const queuedMaturesAt = playerExtras.data?.pendingMaturesAt;
   const yieldEarned = unsettledYieldLine(playerExtras.data?.unsettledYield, DECIMALS);
 
   const submit = () => {
@@ -370,66 +325,6 @@ export function Vault(props: VaultScreenProps) {
       void run(label, program, () =>
         requestWithdraw(program, signer, pool, amount),
       );
-    }
-  };
-
-  const payOutNow = async () => {
-    if (!connected) return;
-    setBusy(true);
-    setNote(null);
-    setPayoutSent(pendingWithdraw);
-    try {
-      let result = await processWithdraw(program, { publicKey: owner, sendTransaction }, pool);
-      if (result.kind === "unknown") {
-        setNote({ tone: "ok", text: CHECKING_NOTE, href: explorerUrl(result.signature) });
-        result = await awaitSendResult(program, result);
-      }
-      if (result.kind === "landed") {
-        track("withdraw_paid_out");
-        setNote({ tone: "ok", text: "Payout sent." });
-        onDone();
-      } else if (result.kind === "failed" && result.code === NOTHING_PENDING_CODE) {
-        // Already paid by the operator: the read model is stale, so refresh
-        // it the same way a successful payout does instead of offering the
-        // button again.
-        setNote({ tone: "ok", text: NOTHING_PENDING_NOTE });
-        onDone();
-      } else {
-        setPayoutSent(null);
-        setNote({ tone: "err", text: decodeSendFailure(result) });
-      }
-    } catch (error) {
-      setPayoutSent(null);
-      setNote({ tone: "err", text: decodePlayerError(error) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const cancelNow = async () => {
-    if (!connected) return;
-    setBusy(true);
-    setNote(null);
-    try {
-      let result = await cancelWithdraw(program, { publicKey: owner, sendTransaction }, pool);
-      if (result.kind === "unknown") {
-        setNote({ tone: "ok", text: CHECKING_NOTE, href: explorerUrl(result.signature) });
-        result = await awaitSendResult(program, result);
-      }
-      if (result.kind === "landed") {
-        setNote({ tone: "ok", text: "Withdrawal cancelled. Your money stays in the vault." });
-        onDone();
-      } else if (result.kind === "failed" && result.code === NOTHING_PENDING_CODE) {
-        // The crank paid it first. Same refresh as a landed cancel.
-        setNote({ tone: "ok", text: NOTHING_PENDING_NOTE });
-        onDone();
-      } else {
-        setNote({ tone: "err", text: decodeSendFailure(result) });
-      }
-    } catch (error) {
-      setNote({ tone: "err", text: decodePlayerError(error) });
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -589,56 +484,6 @@ export function Vault(props: VaultScreenProps) {
                 <div className="vault-line" data-testid="unsettled-yield">
                   <dt>Yield</dt>
                   <dd>${yieldEarned}</dd>
-                </div>
-              )}
-              {pending.kind === "none" ? null : (
-                <div className="vault-line" data-testid="pending-withdraw">
-                  <dt>
-                    Pending {fmt2(pending.amount)} {SYMBOL}
-                  </dt>
-                  <dd className="vault-pending-state">
-                    <span data-testid="pending-withdraw-state">
-                      {pending.kind === "pending"
-                        ? queuedMaturesAt
-                          ? `pays after today's draw, about ${clockTime(Number(queuedMaturesAt))}`
-                          : "pays after today's draw"
-                        : pending.kind === "processing"
-                          ? "paying out…"
-                          : "ready"}
-                    </span>
-                    {pending.kind === "due" && impaired ? (
-                      <span data-testid="pending-withdraw-haircut">
-                        pays {fmt2(haircutValue(pending.amount, haircutFactor))} {SYMBOL} now
-                      </span>
-                    ) : null}
-                    {pending.kind === "due" ? (
-                      <button
-                        type="button"
-                        className="vault-pill vault-payout"
-                        data-testid="pay-out-now"
-                        disabled={busy}
-                        onClick={() => void payOutNow()}
-                      >
-                        {impaired ? "TAKE IT NOW" : "PAY OUT NOW"}
-                      </button>
-                    ) : null}
-                    {canCancelWithdraw(pending) ? (
-                      <button
-                        type="button"
-                        className="vault-pill"
-                        data-testid="cancel-withdraw"
-                        disabled={busy}
-                        onClick={() => void cancelNow()}
-                      >
-                        CANCEL
-                      </button>
-                    ) : null}
-                    {canCancelWithdraw(pending) ? (
-                      <span data-testid="cancel-withdraw-hint">
-                        Cancel and your money stays in the vault, still earning.
-                      </span>
-                    ) : null}
-                  </dd>
                 </div>
               )}
             </dl>

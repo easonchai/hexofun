@@ -169,7 +169,7 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   expect(shownWithdrawable).toBeGreaterThan(0);
 
   // 6. Withdraw that much. Today's deposit never held a Ticket, so the form
-  // says it pays now, the USDC lands in the wallet and there is no pending row.
+  // says it pays now and the USDC lands in the wallet.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
   await expect(page.getByTestId("withdraw-expected")).toContainText("Now");
   const withdrawSubmit = page.getByTestId("withdraw-submit");
@@ -178,5 +178,4 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   await expect(page.getByTestId("vault-note")).toContainText(/withdraw requested/i, {
     timeout: 30_000,
   });
-  await expect(page.getByTestId("pending-withdraw")).toHaveCount(0);
 });
