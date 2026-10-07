@@ -194,6 +194,9 @@ sequenceDiagram
 - **`process_withdraw`** is permissionless and pays to the owner's own token account. It
   lowers Principal, and Tickets with a floor at zero, so a Player who lost Tickets in the game
   still gets every unit of Principal.
+- **`cancel_withdraw`** is owner-signed and takes back the whole queued amount before it pays.
+  It zeroes `pending_withdraw` and lowers `pending_withdrawals`, so free idle rises by the same
+  amount. Nothing else moves, because the queued Principal never left.
 - **`touch`** is the lazy reset. The first time anything touches a Player in a later epoch,
   Tickets are set to Principal. Nothing sweeps Players at the boundary.
 
@@ -253,6 +256,7 @@ steer it by being the one who sends the transaction.
 | `accept_admin` | the proposed `pending_admin` | Two-step handover |
 | `deposit` | owner | Refused while paused, shut down or impaired |
 | `request_withdraw` | owner | Allowed while paused and while shut down |
+| `cancel_withdraw` | owner | Allowed while paused, shut down, impaired and with a Position open |
 | `process_withdraw` | anyone, or the owner while impaired | Destination is pinned to `player.owner`. Fails while the Player has a Position open |
 | `emergency_withdraw` | anyone, or the owner while impaired | Only valid while shut down; destination pinned to `player.owner`; House excluded |
 | `sweep_house` | admin | Only valid while shut down |
