@@ -10,10 +10,11 @@
 /** Every value a production build needs a real one for; each also has its
  *  own build-time or load-time check (VITE_CLUSTER via `clusterFrom`,
  *  VITE_PROGRAM_ID via `programIdFrom`) — this is the one place that checks all of them are
- *  present together. VITE_PUBLIC_RPC_URL is optional: `chain.ts` falls back
- *  to the cluster's public endpoint. */
+ *  present together. VITE_PUBLIC_RPC_URL is required so a build never falls
+ *  back to the cluster's rate-limited public endpoint without anyone choosing it. */
 const REQUIRED_IN_PRODUCTION = [
   "VITE_CLUSTER",
+  "VITE_PUBLIC_RPC_URL",
   "VITE_API_URL",
   "VITE_PRIVY_APP_ID",
   "VITE_PROGRAM_ID",

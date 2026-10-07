@@ -41,7 +41,7 @@ const mode = walletModeFor(ENV, import.meta.env.PROD);
 
 // Dev-only burner wallet: opt-in via env, local RPC only (see dev-burner.ts).
 // It augments (never replaces) the standard wallets in the fallback path.
-const wallets = burnerEnabled(ENV) ? [new BurnerWalletAdapter()] : [];
+const wallets = burnerEnabled(ENV, import.meta.env.DEV) ? [new BurnerWalletAdapter()] : [];
 
 // No-op without VITE_POSTHOG_KEY (posthog-analytics ticket 02).
 initAnalytics();
