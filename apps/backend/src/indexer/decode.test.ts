@@ -164,6 +164,11 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "WithdrawCancelled",
+    fields: [key(OWNER), u64(750_000n), u64(4n)],
+    data: { owner: OWNER, amount: "750000", pendingEpoch: "4" },
+  },
+  {
     name: "Withdrawn",
     fields: [key(OWNER), u64(500_000n), u64(2_500_000n), u64(2_500_000n)],
     data: { owner: OWNER, amount: "500000", principal: "2500000", entries: "2500000" },
