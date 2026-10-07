@@ -24,6 +24,7 @@ import {
   roundAddress,
   venueProposalAddress,
 } from "../chain/pda";
+import { kvaultRemaining } from "../chain/kvault";
 import { VENUE_KIND } from "../chain/venue-kind";
 import type { EpochState, PoolState, RoundState } from "./chain-state";
 import {
@@ -35,6 +36,14 @@ import {
 } from "./vrf";
 
 const bn = (value: bigint): BN => new BN(value.toString());
+
+/**
+ * What an instruction does at the venue, which decides the remaining accounts
+ * a kVault pool needs: `sync` only values the position, `move` also deposits,
+ * `redeem` may withdraw. klend and the stub take the same accounts for the
+ * last two and none for the first.
+ */
+type VenueUse = "sync" | "move" | "redeem";
 
 /** The calls this file makes on an Anchor methods builder. */
 interface BuiltAccounts {
@@ -112,9 +121,28 @@ export class OperatorInstructions {
    * needed, and the program checks each against the reserve itself
    * (`KlendAccountMismatch`). The stub kind ignores remaining accounts. The
    * builder switches on the pool's venue kind, not on which program is pinned.
+   *
+   * A kVault pool (kvault.rs) takes the klend program, every allocation
+   * reserve and market of the vault, then the vault's own accounts and the
+   * source reserve's, all derived from `pool.kvault`, the vault state the
+   * operator read this tick (`chain/kvault.ts`). Every instruction that syncs
+   * needs the reserve and market blocks, because the vault's value is read
+   * from them.
    */
-  private venueRemaining(pool: PoolState): AccountMeta[] {
+  private venueRemaining(pool: PoolState, use: VenueUse = "move"): AccountMeta[] {
     if (pool.venueKind === VENUE_KIND.stub) return [];
+    if (pool.venueKind === VENUE_KIND.kvault) {
+      // Derived from the vault state the operator read this tick, never from
+      // env: the curator can change the allocation list at any time.
+      if (!pool.kvault) {
+        throw new Error(`pool ${pool.address.toBase58()} is a kVault pool, but its vault was not read`);
+      }
+      return kvaultRemaining(pool.kvault, {
+        valueOnly: use === "sync",
+        ...(use === "redeem" ? { writableMint: pool.acceptedMint } : {}),
+      });
+    }
+    if (use === "sync") return [];
     if (pool.venueKind !== VENUE_KIND.klend) {
       throw new Error(`pool ${pool.address.toBase58()} has venue kind ${pool.venueKind}, which this operator cannot build accounts for`);
     }
@@ -221,6 +249,7 @@ export class OperatorInstructions {
               ...this.venue(pool),
               tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .remainingAccounts(this.venueRemaining(pool, "sync"))
             .instruction(),
         ];
       }),
@@ -316,6 +345,7 @@ export class OperatorInstructions {
           ...this.venue(pool),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }
@@ -504,7 +534,7 @@ export class OperatorInstructions {
           ...this.venue(pool),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
-        .remainingAccounts(this.venueRemaining(pool))
+        .remainingAccounts(this.venueRemaining(pool, "redeem"))
         .instruction(),
     ];
   }
@@ -597,7 +627,7 @@ export class OperatorInstructions {
           ...this.venue(pool),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
-        .remainingAccounts(this.venueRemaining(pool))
+        .remainingAccounts(this.venueRemaining(pool, "redeem"))
         .instruction(),
     ];
   }

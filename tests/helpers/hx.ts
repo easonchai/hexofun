@@ -146,7 +146,7 @@ export interface VenueAccounts {
 }
 
 /** `Pool.venue_kind` values (`constants::venue_kind`). Fixtures run the stub. */
-export const VENUE_KIND = { klend: 0, stub: 1, unsupported: 2 } as const;
+export const VENUE_KIND = { klend: 0, stub: 1, kvault: 2, unsupported: 3 } as const;
 
 export function venueAccountsFor(pool: PublicKey): VenueAccounts {
   return {

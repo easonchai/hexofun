@@ -72,8 +72,12 @@ pub struct CreatePoolParams {
     /// `grant_tickets` call may credit pool-wide per epoch. Capped at
     /// `BPS_DENOMINATOR`.
     pub bonus_cap_bps: u16,
-    /// A `constants::venue_kind` value: which backing the four venue accounts
-    /// belong to. Refused unless this build supports it.
+    /// A `constants::venue_kind` value: 0 klend, 1 stub (a `test-venue` build
+    /// only), 2 kVault. Which backing the four venue accounts belong to, and so
+    /// what each is: see `Pool::klend_program` to `klend_ctoken`. Refused unless
+    /// this build supports it. A kVault pool's four pins are checked against
+    /// the vault state (`VaultPinMismatch`, `VaultMintMismatch`,
+    /// `VaultStateUnreadable`).
     pub venue_kind: u8,
 }
 
@@ -172,6 +176,18 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
                     .map_or(false, |a| a.owner == ctx.accounts.pool.key()),
             HexVaultError::InvalidParameter
         );
+    }
+    // A kVault pool pins its vault state, shares mint and shares account too:
+    // each is checked against the vault state, with named errors.
+    if params.venue_kind == venue_kind::KVAULT {
+        venue::check_kvault_pins(
+            &ctx.accounts.klend_program.to_account_info(),
+            &ctx.accounts.klend_market.to_account_info(),
+            &ctx.accounts.klend_reserve.to_account_info(),
+            &ctx.accounts.klend_ctoken.to_account_info(),
+            &ctx.accounts.accepted_mint.key(),
+            &ctx.accounts.pool.key(),
+        )?;
     }
     // Same bound `set_params` holds.
     require!(
@@ -1755,15 +1771,25 @@ pub struct CreatePool<'info> {
     #[account(constraint = buyback_reserve.mint == accepted_mint.key() @ HexVaultError::MintMismatch)]
     pub buyback_reserve: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    // The venue, pinned onto the Pool below. Nothing here is checked beyond
-    // not being the default key: on mainnet these are klend's own accounts,
-    // which only the Admin's choice of arguments can vouch for.
+    // The venue, pinned onto the Pool below. A klend or stub pool is checked
+    // for nothing beyond the default key (on mainnet these are klend's own
+    // accounts, which only the Admin's choice of arguments can vouch for); a
+    // kVault pool's four are checked against the vault state.
+    /// The venue program. klend: the klend program. kVault: the kVault program.
+    /// Stub: this program.
     /// CHECK: pinned to `pool.klend_program`.
     pub klend_program: UncheckedAccount<'info>,
+    /// The venue market. klend: the lending market. kVault: the vault state
+    /// account. Stub: the pool PDA.
     /// CHECK: pinned to `pool.klend_market`.
     pub klend_market: UncheckedAccount<'info>,
+    /// The venue reserve. klend: the reserve. kVault: the vault's shares mint.
+    /// Stub: the stub reserve PDA.
     /// CHECK: pinned to `pool.klend_reserve`.
     pub klend_reserve: UncheckedAccount<'info>,
+    /// The pool's position token account. klend: the pool's cToken account.
+    /// kVault: the pool's token account of the shares mint. Stub: the stub
+    /// vault PDA.
     /// CHECK: pinned to `pool.klend_ctoken`.
     pub klend_ctoken: UncheckedAccount<'info>,
 

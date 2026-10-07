@@ -1,6 +1,7 @@
 // The pool parameters bootstrap passes to `create_pool`, and the two CLI
 // flags that override them. Split out of bootstrap.ts so a unit test can
 // import it without the script's chain calls running on import.
+import { KVAULT_PROGRAM_ID, sharesMintAddress } from "../chain/kvault";
 import { VENUE_KIND } from "../chain/venue-kind";
 import { parseArgs } from "node:util";
 
@@ -203,9 +204,12 @@ const MAINNET_KLEND = {
  * KLEND_CTOKEN overriding its own; with KLEND_RESERVE set, KLEND_CTOKEN has to
  * be too, since the cToken account belongs to the reserve. Every other cluster
  * must name all four, because a wrong pin is permanent and there is no safe
- * guess. `VENUE_KIND` (klend, the default, or stub) names the backing;
+ * guess. `VENUE_KIND` (klend, the default, stub or kvault) names the backing;
  * `stub` pins the `test-venue` build's stub (localnet only, bootstrap then runs
  * `test_venue_init`), and `KLEND_VENUE=test` is the older spelling of it.
+ * `kvault` pins a Kamino Earn vault: `KVAULT_ADDRESS` (the vault state, required,
+ * no default) and optionally `KVAULT_PROGRAM`; the four KLEND_* variables are
+ * not read.
  * `env` is handed in so this stays pure.
  */
 export function venuePinsFor(
@@ -244,6 +248,25 @@ export function venuePinsFor(
       throw new Error(`${key} must be a base58 pubkey, got "${raw}"`, { cause });
     }
   };
+  if (named === "kvault") {
+    // The vault is the one input; the shares mint is a PDA of it and the
+    // pool's shares account is the pool's ATA of that mint, which bootstrap
+    // creates. No default vault, even on mainnet: which Earn vault holds the
+    // pool's money is the team's call, and the program checks all four pins
+    // against the vault state either way.
+    const vault = read("KVAULT_ADDRESS");
+    if (!vault) throw new Error("VENUE_KIND=kvault needs KVAULT_ADDRESS, the Earn vault's state account");
+    const program = read("KVAULT_PROGRAM") ?? KVAULT_PROGRAM_ID;
+    const sharesMint = sharesMintAddress(vault, program);
+    return {
+      klendProgram: program,
+      klendMarket: vault,
+      klendReserve: sharesMint,
+      klendCtoken: getAssociatedTokenAddressSync(sharesMint, pool, true),
+      kind: VENUE_KIND.kvault,
+      ctokenMint: sharesMint,
+    };
+  }
   const klendProgram = read("KLEND_PROGRAM") ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_PROGRAM) : undefined);
   const klendMarket = read("KLEND_MARKET") ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_MARKET) : undefined);
   const reserve = read("KLEND_RESERVE");

@@ -250,4 +250,16 @@ pub enum HexVaultError {
     VenueLockNotElapsed,
     #[msg("the old venue still holds more than the minimum venue move; drain it first")]
     VenuePositionNotEmpty,
+
+    // venue-switch ticket 06, the kVault backing. Appended too.
+    #[msg("the kVault state account is not a VaultState this program can read")]
+    VaultStateUnreadable,
+    #[msg("a kVault pin does not match the vault state")]
+    VaultPinMismatch,
+    #[msg("the kVault does not hold the pool's accepted mint")]
+    VaultMintMismatch,
+    #[msg("a kVault account does not match the vault state")]
+    VaultAccountMismatch,
+    #[msg("the kVault state account must be passed writable")]
+    VaultStateNotWritable,
 }

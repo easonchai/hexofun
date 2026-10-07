@@ -120,11 +120,17 @@ export interface PoolDto {
   /** The Weight tree and the four pinned klend accounts every Player
    *  instruction that syncs names. Empty strings on a row not yet indexed. */
   weightTree: string;
+  /** The four pinned venue accounts. The names are klend's, the meaning follows
+   *  `venueKind`. klend: program, lending market, reserve, the pool's cToken
+   *  account. kVault: the kVault program, the vault state account, the vault's
+   *  shares mint, the pool's token account of the shares mint. Stub: this
+   *  program, the pool, the stub reserve, the stub vault. */
   klendProgram: string;
   klendMarket: string;
   klendReserve: string;
   klendCtoken: string;
-  /** Which backing the four pins point at: 0 klend, 1 the localnet stub. */
+  /** Which backing the four pins point at: 0 klend, 1 the localnet stub, 2 a
+   *  Kamino Earn vault (kVault). */
   venueKind: number;
 }
 

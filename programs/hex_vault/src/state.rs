@@ -129,12 +129,24 @@ pub struct Pool {
     // writes; ticket 05's sync is the first thing to move them.
     /// The pool's [`WeightTree`] account, created at `create_pool`.
     pub weight_tree: Pubkey,
-    /// The pinned klend program, lending market, reserve and the pool's
-    /// cToken account. `create_pool` takes them (never the default key) and
-    /// every venue instruction checks its accounts against them.
+    /// The four pinned venue accounts. The names are klend's and stay, because
+    /// renaming a field breaks every client's IDL; what each one is depends on
+    /// `venue_kind`. `create_pool` takes them (never the default key) and every
+    /// venue instruction checks its accounts against them.
+    ///
+    /// Venue program. klend: the klend program. kVault: the kVault program.
+    /// Stub: this program.
     pub klend_program: Pubkey,
+    /// Venue market. klend: the lending market. kVault: the vault state
+    /// account (a deposit and a redeem write it, so the client passes it
+    /// writable). Stub: the pool PDA.
     pub klend_market: Pubkey,
+    /// Venue reserve. klend: the reserve. kVault: the vault's shares mint.
+    /// Stub: the stub reserve PDA.
     pub klend_reserve: Pubkey,
+    /// The pool's position token account. klend: the pool's cToken account.
+    /// kVault: the pool's token account of the shares mint. Stub: the stub
+    /// vault PDA.
     pub klend_ctoken: Pubkey,
     /// Depositor share per unit of Principal, scaled by 1e18. Only rises.
     pub yield_index: u128,
@@ -185,8 +197,9 @@ pub struct Pool {
     /// operator grants until an epoch exists.
     pub epoch_start_principal: u64,
     /// Which backing the four pinned venue keys point at, a
-    /// `constants::venue_kind` value. Zero is klend, so a pool made before the
-    /// byte existed reads as klend. `create_pool` sets it.
+    /// `constants::venue_kind` value: 0 klend, 1 stub (localnet only), 2 kVault.
+    /// Zero is klend, so a pool made before the byte existed reads as klend.
+    /// `create_pool` sets it.
     pub venue_kind: u8,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.

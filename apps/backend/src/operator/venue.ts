@@ -104,6 +104,10 @@ export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // A venue change is proposed: deploys wait for the Admin to cancel or
   // execute it. Expected, so a warning and a cool-down, not an alert.
   "VenueProposalOpen",
+  // A kVault that cannot pay the whole recall now (its idle tokens and the
+  // source reserve's liquidity are short): the redeem paid less, the program
+  // reverted it, and a later tick tries again.
+  "VenueShortReturn",
 ]);
 
 /** An unpinned pool has `Pubkey::default()` for its klend program. */

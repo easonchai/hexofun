@@ -844,6 +844,7 @@ dependencies = [
  "anchor-spl",
  "bytemuck",
  "klend-interface",
+ "kvault-interface",
  "solana-keccak-hasher",
  "solana-security-txt",
  "solana-sha256-hasher 2.3.0",
@@ -943,6 +944,22 @@ dependencies = [
  "borsh 0.10.4",
  "bytemuck",
  "fixed",
+ "sha2 0.10.9",
+ "solana-instruction 2.3.3",
+ "solana-pubkey 2.4.0",
+ "spl-discriminator",
+]
+
+[[package]]
+name = "kvault-interface"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e65e70fd669089f8c03eafa3d40309bf792992b5d744eefcf380bcf235f9ed35"
+dependencies = [
+ "borsh 0.10.4",
+ "bytemuck",
+ "fixed",
+ "klend-interface",
  "sha2 0.10.9",
  "solana-instruction 2.3.3",
  "solana-pubkey 2.4.0",

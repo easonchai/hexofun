@@ -12,10 +12,15 @@ import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
 import { Prisma } from "@prisma/client";
 import { getAccount, TokenAccountNotFoundError } from "@solana/spl-token";
-import { PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
+import {
+  PublicKey,
+  SYSVAR_CLOCK_PUBKEY,
+  type AddressLookupTableAccount,
+} from "@solana/web3.js";
 
 import { decodeReserve } from "../api/live-yield";
 import { ChainService } from "../chain/chain.service";
+import { fetchKvaultView, withdrawable } from "../chain/kvault";
 import { VENUE_KIND } from "../chain/venue-kind";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
@@ -68,6 +73,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OperatorService.name);
   private readonly instructions: OperatorInstructions;
   private readonly testVrf: boolean;
+  private readonly lookupTables = new Map<string, AddressLookupTableAccount>();
   /** Single-flight: an overrunning tick skips the one that would overlap it. */
   private running = false;
   /** The in-flight tick, if any (ticket 10): `onModuleDestroy` awaits this
@@ -322,7 +328,21 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         `pool ${poolAddress.toBase58()} does not exist; run bootstrap first`,
       );
     }
-    const pool = decodePool(this.chain.program, poolAddress, poolInfo.data);
+    const decoded = decodePool(this.chain.program, poolAddress, poolInfo.data);
+    // A kVault pool's accounts come from the vault state, read fresh every
+    // tick because the curator can change the allocation list, and its
+    // transactions need the vault's lookup table (venue-switch ticket 06).
+    const tables: AddressLookupTableAccount[] = [];
+    let pool = decoded;
+    if (decoded.venueKind === VENUE_KIND.kvault) {
+      const kvault = await fetchKvaultView(
+        this.chain.connection,
+        decoded.klendMarket,
+        decoded.klendProgram,
+      );
+      pool = { ...decoded, kvault };
+      tables.push(await this.lookupTable(kvault.lookupTable));
+    }
     const now = clockUnixTimestamp(clockInfo?.data);
     this.chain.recordChainTime(now);
 
@@ -376,9 +396,22 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         this.closingRounds.set(id, now);
       },
       winner: (epoch) => this.winner(pool, epoch),
-      send: (instructions) => this.chain.send(instructions),
+      send: (instructions) =>
+        tables.length === 0
+          ? this.chain.send(instructions)
+          : this.chain.send(instructions, undefined, tables),
       warn: (message) => this.logger.warn(message),
     };
+  }
+
+  /** The vault's lookup table changes rarely; one read per process. */
+  private async lookupTable(key: PublicKey): Promise<AddressLookupTableAccount> {
+    const cached = this.lookupTables.get(key.toBase58());
+    if (cached) return cached;
+    const { value } = await this.chain.connection.getAddressLookupTable(key);
+    if (!value) throw new Error(`lookup table ${key.toBase58()} does not exist`);
+    this.lookupTables.set(key.toBase58(), value);
+    return value;
   }
 
   /** Current epoch, previous epoch, open round and last round in one
@@ -477,11 +510,19 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * The pinned klend reserve's free liquidity, which sizes a drain step. Null
+   * The venue's free liquidity, which sizes a drain step: the pinned klend
+   * reserve's, or what the kVault can pay out now (read this tick). Null
    * for any other kind and when the read fails: the drain then asks for the
    * whole position and the program's `VenueIlliquid` is the judge.
    */
   private async venueAvailable(pool: PoolState): Promise<bigint | null> {
+    if (pool.venueKind === VENUE_KIND.kvault && pool.kvault) {
+      try {
+        return withdrawable(pool.kvault);
+      } catch {
+        return null; // no funded allocation: the drain asks for the lot and the program judges
+      }
+    }
     if (pool.venueKind !== VENUE_KIND.klend) return null;
     try {
       const info = await this.chain.connection.getAccountInfo(pool.klendReserve);

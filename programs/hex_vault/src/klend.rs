@@ -54,7 +54,7 @@ const TOKEN_AMOUNT: usize = 64;
 const TOKEN_ACCOUNT_LEN: usize = 165;
 
 /// klend's `Fraction` has 60 fractional bits.
-const FRACTION_BITS: u32 = 60;
+pub(super) const FRACTION_BITS: u32 = 60;
 
 /// Rebuilds a klend-interface instruction as an Anchor one. The crate's
 /// `Pubkey` and `Instruction` come from solana-pubkey 2.x and
@@ -79,9 +79,11 @@ macro_rules! rebuild {
         }
     }};
 }
+// The kVault backing rebuilds its instructions the same way.
+pub(super) use rebuild;
 
 /// Key equality across the two `Pubkey` types.
-fn same(a: &Pubkey, b: &impl AsRef<[u8]>) -> bool {
+pub(super) fn same(a: &Pubkey, b: &impl AsRef<[u8]>) -> bool {
     a.as_ref() == b.as_ref()
 }
 
@@ -123,7 +125,7 @@ fn read_reserve<'a>(venue: &Venue<'_, '_>, data: &'a [u8]) -> Result<&'a Reserve
 /// The reserve must have been refreshed in this very slot, with no stale flag.
 /// klend's own deposit and redeem require the same and nothing about the price
 /// status.
-fn check_fresh(last_update: &LastUpdate, slot: u64) -> Result<()> {
+pub(super) fn check_fresh(last_update: &LastUpdate, slot: u64) -> Result<()> {
     require!(
         last_update.stale == 0 && last_update.slot == slot,
         HexVaultError::ReserveStale
@@ -133,7 +135,7 @@ fn check_fresh(last_update: &LastUpdate, slot: u64) -> Result<()> {
 
 /// klend's total supply, `available + borrowed - protocol fees - referrer fees
 /// - pending referrer fees`, as a fixed-point number with 60 fractional bits.
-fn total_supply_sf(reserve: &Reserve) -> Result<u128> {
+pub(super) fn total_supply_sf(reserve: &Reserve) -> Result<u128> {
     let l = &reserve.liquidity;
     (u128::from(l.total_available_amount) << FRACTION_BITS)
         .checked_add(u128::from(l.borrowed_amount_sf))
@@ -145,7 +147,7 @@ fn total_supply_sf(reserve: &Reserve) -> Result<u128> {
 
 /// `floor(ctokens x total supply / cToken supply)` in USDC atomic units. An
 /// empty reserve exchanges 1:1, as in klend.
-fn ctoken_value(ctokens: u64, supply_sf: u128, ctoken_supply: u64) -> Result<u64> {
+pub(super) fn ctoken_value(ctokens: u64, supply_sf: u128, ctoken_supply: u64) -> Result<u64> {
     if ctoken_supply == 0 || supply_sf == 0 {
         return Ok(ctokens);
     }
@@ -384,7 +386,7 @@ pub fn redeem<'info>(
     )
 }
 
-fn invoke_pool_signed<'info>(
+pub(super) fn invoke_pool_signed<'info>(
     pool: &Account<'info, Pool>,
     ix: &Instruction,
     infos: &[AccountInfo<'info>],

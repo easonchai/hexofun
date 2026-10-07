@@ -111,12 +111,13 @@ pub mod venue_kind {
     pub const KLEND: u8 = 0;
     /// The localnet stub. Only a `test-venue` build accepts it.
     pub const STUB: u8 = 1;
-    // 2 is reserved for the kVault backing (venue-switch ticket 06).
+    /// A Kamino Earn vault (kVault). Every build accepts it.
+    pub const KVAULT: u8 = 2;
 
     /// Whether this build can back a pool with `kind`.
     pub const fn supported(kind: u8) -> bool {
         match kind {
-            KLEND => true,
+            KLEND | KVAULT => true,
             STUB => cfg!(feature = "test-venue"),
             _ => false,
         }

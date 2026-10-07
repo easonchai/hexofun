@@ -6,6 +6,8 @@ import { PublicKey } from "@solana/web3.js";
 
 import type { VenueProposalState } from "./venue";
 
+import type { KvaultView } from "../chain/kvault";
+
 export const EPOCH_STATUS = {
   OPEN: 0,
   ENDED: 1,
@@ -55,8 +57,13 @@ export interface PoolState {
    *  A new pool starts with it on. */
   readonly jackpotPaused: boolean;
   /** The pool's Weight tree account (`has_one` on every instruction that
-   *  changes Tickets), and the four klend addresses pinned at `create_pool`.
-   *  Under a `test-venue` build `klendProgram` is the hex_vault program. */
+   *  changes Tickets), and the four venue addresses pinned at `create_pool`
+   *  (`migrate_venue` repins them).
+   *  The names are klend's; what each is follows `venueKind`. klend: the klend
+   *  program, the lending market, the reserve, the pool's cToken account.
+   *  kVault: the kVault program, the vault state, the vault's shares mint, the
+   *  pool's shares token account. Under a `test-venue` build `klendProgram` is
+   *  the hex_vault program. */
   readonly weightTree: PublicKey;
   readonly klendProgram: PublicKey;
   readonly klendMarket: PublicKey;
@@ -65,6 +72,9 @@ export interface PoolState {
   /** Which backing those four point at (`VENUE_KIND`). Read from the pool,
    *  never from env, so a venue change needs no restart. */
   readonly venueKind: number;
+  /** The vault behind a kVault pool (`venueKind` 2), read from chain by the
+   *  operator before it builds an instruction. Absent for every other kind. */
+  readonly kvault?: KvaultView;
   /** Withdrawals requested and not yet paid; not free idle. */
   readonly pendingWithdrawals: bigint;
   /** The pool's position at the venue as of the last sync. */
