@@ -299,8 +299,13 @@ crank is due" below.
 Starts with `WEIGHT_TREE_NEARLY_FULL`.
 
 1. `GET /status`'s `treeNodeCount` against `treeCapacity` (187,244 Players). Past the capacity
-   deposits from a new wallet fail with `WeightTreeFull`. A second tree is out of scope for the
-   current program, so this needs a design decision well before the last leaf is taken.
+   deposits from a new wallet fail with `WeightTreeFull`. The alert fires at 80% of capacity.
+2. The Operator releases one empty Player's leaf per tick (`release_leaf`, after the Player has been
+   empty for more than one epoch), and `deposit` reuses released leaves before growing the tree.
+   Many wallets that deposited and refunded in one epoch therefore come back on their own. Anyone can
+   also call `release_leaf` for a Player with no Principal, no queued withdrawal and no open Position.
+3. A second tree is out of scope for the current program. If the count still climbs with real
+   Players, that needs a design decision well before the last leaf is taken.
 
 <a id="venue-proposed"></a>
 ## A venue proposal is open

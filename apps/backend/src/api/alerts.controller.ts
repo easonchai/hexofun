@@ -54,8 +54,9 @@ export const OPERATOR_FAILING_SECONDS = 5 * 60;
  *  principal-out conditions, straight from spec.md's own wording. */
 export const NEAR_CLOSE_SECONDS = 60 * 60;
 /** Yield-claimer ticket 14: the Weight tree alerts above this share of its
- *  capacity, in basis points (90%). */
-export const TREE_NEARLY_FULL_BPS = 9_000;
+ *  capacity, in basis points (80% since mainnet-readiness-fixes 08, which
+ *  also lets the Operator release empty leaves). */
+export const TREE_NEARLY_FULL_BPS = 8_000;
 /** A negative solvency margin smaller than this is rounding dust from a
  *  redeem, which the program charges to the fee owed (spec "Sync"). */
 export const SOLVENCY_DUST = 10n;
@@ -321,7 +322,7 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
   if (inputs.treeUsedBps > TREE_NEARLY_FULL_BPS) {
     alerts.push({
       code: "WEIGHT_TREE_NEARLY_FULL",
-      message: "The Weight tree is over 90% of its capacity.",
+      message: "The Weight tree is over 80% of its capacity.",
     });
   }
   if (inputs.venueProposal !== null) {

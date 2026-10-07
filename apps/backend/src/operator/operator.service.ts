@@ -37,6 +37,7 @@ import {
 } from "./chain-state";
 import { type GrantReclaimState, reclaimUnlandedGrants } from "./grant-reclaim";
 import { INDEXER_QUERIES, type IndexerQueries } from "./indexer-queries";
+import { decodeLeafHolder, firstReleasable, RELEASE_CANDIDATES } from "./leaf-release";
 import { OperatorInstructions } from "./instructions";
 import { SparringService } from "./sparring";
 import {
@@ -99,6 +100,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   /** Epoch id to the owner whose leaf held its target. A target never moves
    *  once drawn, so a retried payout does not re-read the whole tree. */
   private winners = new Map<bigint, { owner: string; isHouse: boolean }>();
+  /** Mainnet-readiness-fixes 08: owners `leafToRelease` has examined or
+   *  released this epoch, mapped to that epoch, so each tick looks at fresh
+   *  candidates. Emptied of old epochs as it is read. */
+  private skippedLeaves = new Map<string, bigint>();
   /** Ticket 06: withdrawal-cranking state across ticks (see `WithdrawState`). */
   private lastWithdrawState: WithdrawState | null = null;
   /** Ticket 12: expected-error repeat counts across ticks, by `action:target`. */
@@ -407,6 +412,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         this.closingRounds.set(id, now);
       },
       winner: (epoch) => this.winner(pool, epoch),
+      leafToRelease: () => this.leafToRelease(pool),
+      skipLeaf: (owner) => {
+        this.skippedLeaves.set(owner, pool.currentEpochId);
+      },
       send: (instructions, hooks) =>
         tables.length === 0 && !hooks
           ? this.chain.send(instructions)
@@ -590,6 +599,46 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Mainnet-readiness-fixes 08: one Player whose Weight tree leaf may go back
+   * to the free stack. The Read model nominates the oldest empty Players with
+   * a leaf; each is then read off the chain, and only one that is still empty
+   * there is returned. Every examined owner is skipped for the rest of the
+   * epoch, so a stale mirror row cannot hold the same slot every tick.
+   */
+  private async leafToRelease(pool: PoolState): Promise<string | null> {
+    for (const [owner, epoch] of this.skippedLeaves) {
+      if (epoch !== pool.currentEpochId) this.skippedLeaves.delete(owner);
+    }
+    const rows = await this.prisma.player.findMany({
+      where: {
+        poolAddress: pool.address.toBase58(),
+        leafIndex: { gt: 0 },
+        isHouse: false,
+        principal: 0n,
+        pendingWithdraw: 0n,
+        epochId: { lte: pool.currentEpochId - 2n },
+        owner: { notIn: [...this.skippedLeaves.keys()] },
+      },
+      orderBy: { epochId: "asc" },
+      take: RELEASE_CANDIDATES,
+      select: { owner: true },
+    });
+    if (rows.length === 0) return null;
+    const infos = await this.chain.connection.getMultipleAccountsInfo(
+      rows.map((row) => this.chain.playerAddress(new PublicKey(row.owner))),
+    );
+    const holders = rows.map((row, i) => {
+      const info = infos[i];
+      return info ? decodeLeafHolder(this.chain.program, row.owner, info.data) : null;
+    });
+    const pick = firstReleasable(holders, pool.currentEpochId);
+    for (const row of rows) {
+      if (row.owner !== pick) this.skippedLeaves.set(row.owner, pool.currentEpochId);
+    }
+    return pick;
+  }
+
+  /**
    * The owner of the leaf that holds the drawn epoch's target (spec §3.4 step
    * 6, ADR 0018). The target indexes into the epoch's Weight, so the answer
    * comes from the Weight tree: find the leaf, then the Player account that
@@ -627,10 +676,17 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     >;
     const playerAccounts = accountNamespace.player;
     if (!playerAccounts) throw new Error("player account namespace is missing from the IDL");
-    const hit = (await playerAccounts.all()).find(
+    const hits = (await playerAccounts.all()).filter(
       ({ publicKey, account }) =>
         account.leafIndex === leaf && publicKey.equals(this.chain.playerAddress(account.owner)),
     );
+    // Leaf reuse (mainnet-readiness-fixes 08) must leave one owner per leaf: a
+    // released Player has leaf_index 0. Two would mean the prize could go to
+    // the wrong wallet, so refuse to pick one.
+    if (hits.length > 1) {
+      throw new Error(`leaf ${leaf} is held by ${hits.length} Players; refusing to pick a winner`);
+    }
+    const hit = hits[0];
     if (!hit) return null;
 
     // The House Player's `owner` is the operator key, not `pool.house` (its

@@ -23,7 +23,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { loadIdl } from "../chain/idl";
-import { poolAddress, venueProposalAddress } from "../chain/pda";
+import { playerAddress, poolAddress, venueProposalAddress } from "../chain/pda";
 import {
   EPOCH_STATUS,
   ROUND_STATUS,
@@ -1496,6 +1496,92 @@ describe("runTick", () => {
       lastRound: round({ status: ROUND_STATUS.VOIDED, endsAt: NOW }),
     });
     expect(result.labels).toEqual(["create_round"]);
+  });
+
+  // --- 8. Release a leaf (mainnet-readiness-fixes 08): lowest priority, one
+  // per tick, only for the owner `leafToRelease` names.
+
+  describe("8. release_leaf", () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+
+    it("releases the named owner's leaf on an otherwise idle tick", async () => {
+      const { ctx, sent } = context({ leafToRelease: async () => owner });
+      const outcome = await runTick(ctx);
+      expect(outcome.action).toBe("release_leaf");
+      expect(sent.map((ixs) => ixs.map(label))).toEqual([["release_leaf"]]);
+      expect(keysOfIx(sent[0] ?? [])).toContain(
+        playerAddress(PROGRAM_ID, POOL, new PublicKey(owner)).toBase58(),
+      );
+    });
+
+    it("sends one release per tick and paces the next by the safety interval", async () => {
+      const asked: string[] = [];
+      const skipped: string[] = [];
+      const queue = [owner, Keypair.generate().publicKey.toBase58()];
+      const { ctx, sent } = context({
+        leafToRelease: async () => {
+          const next = queue.shift() ?? null;
+          if (next !== null) asked.push(next);
+          return next;
+        },
+        skipLeaf: (o) => skipped.push(o),
+      });
+      const outcome = await runTick(ctx);
+      expect(sent).toHaveLength(1);
+      expect(asked).toEqual([owner]);
+      expect(skipped).toEqual([owner]);
+      // Not "now": a backlog must not become a hot loop.
+      expect(outcome.nextWakeAt).toBeGreaterThan(NOW);
+    });
+
+    it("sends nothing when no leaf is due", async () => {
+      const { ctx, sent } = context({ leafToRelease: async () => null });
+      const outcome = await runTick(ctx);
+      expect(sent).toHaveLength(0);
+      expect(outcome.action).toBeNull();
+    });
+
+    it("yields to every crank: never asks while another step sends", async () => {
+      let asked = 0;
+      const result = await tickLabels({
+        pool: pool({ openRoundId: 0n }),
+        openRound: null,
+        leafToRelease: async () => {
+          asked += 1;
+          return owner;
+        },
+      });
+      expect(result.labels).toEqual(["create_round"]);
+      expect(asked).toBe(0);
+    });
+
+    it("does not run once the pool is shut down", async () => {
+      let asked = 0;
+      const result = await tickLabels({
+        pool: pool({ shutdown: true }),
+        leafToRelease: async () => {
+          asked += 1;
+          return owner;
+        },
+      });
+      expect(result.transactions).toBe(0);
+      expect(asked).toBe(0);
+    });
+
+    it("records a refused release without throwing and skips the owner", async () => {
+      const skipped: string[] = [];
+      const { ctx } = context({
+        leafToRelease: async () => owner,
+        skipLeaf: (o) => skipped.push(o),
+        send: async () => {
+          throw new Error("some unexpected refusal");
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.action).toBeNull();
+      expect(outcome.stepError).toContain(`release_leaf:${owner}`);
+      expect(skipped).toEqual([owner]);
+    });
   });
 
   // --- Ticket 09: epochNoProgress and drawnUnpaid are computed off the

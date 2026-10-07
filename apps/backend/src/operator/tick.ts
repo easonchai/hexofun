@@ -270,6 +270,17 @@ export interface TickContext {
   unsettledPositions(): Promise<
     { address: string; owner: string; roundId: bigint }[]
   >;
+  /**
+   * Mainnet-readiness-fixes 08: the owner of one Player that holds a Weight
+   * tree leaf and has been empty for more than one epoch, checked against the
+   * Player account on chain, or null when none is. Never a live Player: the
+   * answer is only as stale as the account read inside it. Absent runs no
+   * release step.
+   */
+  leafToRelease?(): Promise<string | null>;
+  /** Keeps an owner out of later `leafToRelease` answers: its release was
+   *  just sent or just refused. */
+  skipLeaf?(owner: string): void;
   /** Positions a confirmed `settle_position` just closed; keep them out of
    *  later `unsettledPositions` results. */
   forgetPositions(addresses: string[]): Promise<void>;
@@ -421,7 +432,11 @@ export function msUntilWake(now: bigint, deadline: bigint): number {
 
 export async function runTick(ctx: TickContext): Promise<TickOutcome> {
   const decision = await decide(ctx);
-  return { ...decision, nextWakeAt: nextWakeAt(ctx, decision.action !== null) };
+  // A release does not wake the next tick at once: it is housekeeping paced
+  // by the safety interval, so a long backlog never turns into a hot loop
+  // against the RPC budget.
+  const acted = decision.action !== null && decision.action !== "release_leaf";
+  return { ...decision, nextWakeAt: nextWakeAt(ctx, acted) };
 }
 
 async function decide(ctx: TickContext): Promise<Decision> {
@@ -908,6 +923,29 @@ async function decide(ctx: TickContext): Promise<Decision> {
     withdrawStateOut = withdrawStateIn;
   }
 
+  /**
+   * 8. Release one empty Player's Weight tree leaf (mainnet-readiness-fixes
+   * 08). The lowest priority: it only runs on a tick that has nothing else to
+   * send, at most one per tick, so a refunded attacker's leaves come back a
+   * tick at a time without a human and without crowding out a crank. The
+   * program refuses a live Player, and `leafToRelease` has already checked
+   * the account, so a refusal here is a race and is recorded like any step's.
+   */
+  async function releaseOne(decision: Decision): Promise<Decision> {
+    if (pool.shutdown || ctx.leafToRelease === undefined) return finish(decision);
+    const owner = await ctx.leafToRelease();
+    if (owner === null) return finish(decision);
+    const sent = await attempt(
+      `release_leaf:${owner}`,
+      async () => {
+        await ctx.send(await ctx.ix.releaseLeaf(pool, owner));
+      },
+      async () => {},
+    );
+    ctx.skipLeaf?.(owner);
+    return sent ? finish({ ...decision, action: "release_leaf" }) : finish(decision);
+  }
+
   // 7. Open the next round, if a whole one still fits in this epoch, and the
   // previous Round's reveal has had time to play: no viewer should see a new
   // countdown while the last Round's laser is still landing.
@@ -937,10 +975,10 @@ async function decide(ctx: TickContext): Promise<Decision> {
       ctx.lastRoundSkipEpochId !== currentEpoch.epochId
         ? { roundSkip: { epochId: currentEpoch.epochId, endsAt: currentEpoch.endsAt } }
         : {};
-    return finish({ ...NOTHING, withdrawShortfall, ...skip });
+    return releaseOne({ ...NOTHING, withdrawShortfall, ...skip });
   }
 
-  return finish({ ...NOTHING, withdrawShortfall });
+  return releaseOne({ ...NOTHING, withdrawShortfall });
 }
 
 /**
@@ -956,6 +994,11 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // `RoundClosed` may not have landed yet either, so `roundsToClose` can
   // still hand back an id whose account is already gone on chain.
   "AccountNotInitialized",
+  // `release_leaf` for a Player that deposited or took Tickets between the
+  // tick's read of its account and the release landing (mainnet-readiness-fixes
+  // 08), or whose leaf another release already freed.
+  "LeafInUse",
+  "PlayerHasNoLeaf",
   // `request_draw` resent for an epoch a previous tick already sent to the draw.
   "EpochNotAwaitingDraw",
   "EpochNotDrawing",

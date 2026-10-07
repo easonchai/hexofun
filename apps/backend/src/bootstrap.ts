@@ -45,6 +45,7 @@ import {
 import { assertPoolMatchesExpected } from "./boot-guard";
 import { loadIdl } from "./chain/idl";
 import {
+  freeLeavesAddress,
   jackpotVaultAddress,
   playerAddress,
   poolAddress,
@@ -306,6 +307,7 @@ async function createPool(
       treasury,
       buybackReserve,
       weightTree: weightTree.publicKey,
+      freeLeaves: freeLeavesAddress(program.programId, pool),
       klendProgram: venue.klendProgram,
       klendMarket: venue.klendMarket,
       klendReserve: venue.klendReserve,

@@ -332,6 +332,11 @@ const CASES: Case[] = [
     },
   },
   {
+    name: "LeafReleased",
+    fields: [key(POOL), key(OWNER), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(7); return b; })()],
+    data: { pool: POOL, owner: OWNER, leafIndex: 7 },
+  },
+  {
     name: "VenueProposed",
     fields: [key(POOL), Buffer.from([2]), key(OWNER), key(MINT), key(OWNER), key(MINT), i64(1_800_000_000n), i64(1_800_172_800n)],
     data: {

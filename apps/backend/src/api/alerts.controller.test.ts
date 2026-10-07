@@ -250,7 +250,7 @@ describe("evaluateAlerts", () => {
     ]);
   });
 
-  it("WEIGHT_TREE_NEARLY_FULL fires over 90% of capacity", () => {
+  it("WEIGHT_TREE_NEARLY_FULL fires over 80% of capacity", () => {
     expect(evaluateAlerts({ ...HEALTHY, treeUsedBps: TREE_NEARLY_FULL_BPS + 1 }, THRESHOLDS)).toEqual([
       { code: "WEIGHT_TREE_NEARLY_FULL", message: expect.any(String) },
     ]);
