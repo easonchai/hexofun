@@ -1393,6 +1393,58 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         }
       });
 
+      it("fires VENUE_PROPOSED while a proposal row exists, carrying its pins", async () => {
+        await quiet();
+        await prisma.venueProposal.create({
+          data: {
+            poolAddress: POOL_ADDRESS,
+            venueKind: 0,
+            klendProgram: "KlendProgramPin",
+            klendMarket: "KlendMarketPin",
+            klendReserve: "KlendReservePin",
+            klendCtoken: "KlendCtokenPin",
+            proposedAt: 1_800_000_000n,
+            updatedSlot: 1n,
+          },
+        });
+        try {
+          const { body } = await http.get("/alerts").expect(503);
+          expect(body.alerts).toEqual([{ code: "VENUE_PROPOSED", message: expect.any(String) }]);
+          expect(body.alerts[0].message).toContain("KlendProgramPin");
+          // proposedAt plus the 48 hour lock.
+          expect(body.alerts[0].message).toContain("1800172800");
+        } finally {
+          await prisma.venueProposal.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+          await restore({});
+        }
+      });
+
+      it("fires PARAMS_CHANGED for a ParamsSet in the last hour, not an older one", async () => {
+        await quiet();
+        const row = (signature: string, blockTime: bigint, epochSeconds: string) => ({
+          slot: 950n,
+          signature,
+          index: 0,
+          poolAddress: POOL_ADDRESS,
+          name: "ParamsSet",
+          data: { pool: POOL_ADDRESS, epochSeconds, houseCutBps: 600 },
+          blockTime,
+        });
+        await prisma.event.createMany({ data: [row("sigParamsOld", NOW - 7_200n, "1")] });
+        try {
+          await http.get("/alerts").expect(200);
+          await prisma.event.createMany({ data: [row("sigParamsNew", NOW - 60n, "604800")] });
+          const { body } = await http.get("/alerts").expect(503);
+          expect(body.alerts).toEqual([{ code: "PARAMS_CHANGED", message: expect.any(String) }]);
+          expect(body.alerts[0].message).toContain("epochSeconds=604800");
+        } finally {
+          await prisma.event.deleteMany({
+            where: { signature: { in: ["sigParamsOld", "sigParamsNew"] } },
+          });
+          await restore({});
+        }
+      });
+
       it("fires WEIGHT_TREE_NEARLY_FULL over 90% of the tree's capacity", async () => {
         await quiet();
         await prisma.weightTreeState.update({

@@ -302,6 +302,26 @@ Starts with `WEIGHT_TREE_NEARLY_FULL`.
    deposits from a new wallet fail with `WeightTreeFull`. A second tree is out of scope for the
    current program, so this needs a design decision well before the last leaf is taken.
 
+<a id="venue-proposed"></a>
+## A venue proposal is open
+
+Starts with `VENUE_PROPOSED`. The message carries the proposed kind, the klend program, market, reserve
+and cToken accounts, and the unix time the migration unlocks (48 hours after the proposal).
+
+1. Check the accounts against the venue you meant to move to. The only other readers of this alert are
+   the two keys that can propose, so an unexpected one means the Admin key signed something you did not.
+2. If it is wrong, run `admin cancel-venue` before the unlock time. The alert ends when the proposal
+   account closes, by cancel or by the migration.
+
+<a id="params-changed"></a>
+## Pool parameters changed
+
+Starts with `PARAMS_CHANGED`. It stays up for an hour after any `set_params`, with the new values in
+the message.
+
+1. Compare the values with the change you made. If you made none, treat it as an Admin key incident:
+   run the key-compromise steps above, then set the values back with `admin set-params`.
+
 <a id="sparring-sol-low"></a>
 ## Sparring player out of SOL
 
