@@ -168,6 +168,9 @@ async function submit(
   // a few slots behind, and Squads simulates the import against its own.
   const { blockhash } = await chain.connection.getLatestBlockhash("finalized");
   process.stdout.write(`${encodeForSquads(instructions, mode.signer, blockhash)}\n`);
+  // Said here, not in main(): only the commands that reach this branch send
+  // nothing. `pause` and the other local-signing commands send in multisig mode too.
+  log(`admin is ${mode.signer.toBase58()}, not the loaded key: nothing will be sent`);
   log(summary);
   log(
     `unsigned, signer and fee payer ${mode.signer.toBase58()}; paste into Squads' "Import base58 encoded tx" now, the blockhash expires in about a minute`,
@@ -968,9 +971,6 @@ export async function main(): Promise<void> {
   );
   if (ledger) {
     log(`admin signer is the Ledger at ${ledger.publicKey.toBase58()}`);
-  }
-  if (mode.multisig) {
-    log(`admin is ${mode.signer.toBase58()}, not the loaded key: nothing will be sent`);
   }
 
   await run(command, chain, mode, ledger);

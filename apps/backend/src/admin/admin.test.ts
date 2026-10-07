@@ -634,6 +634,19 @@ describe("admin run", () => {
     expect(stderr).toContain("deploy paused");
   });
 
+  // fork-run-fixes ticket 04: the operator key still signs and sends when
+  // ADMIN_ADDRESS is the multisig, so the CLI must not say nothing is sent.
+  it("pause-deploy in multisig mode signs with the loaded key and does not say nothing will be sent", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: Keypair.generate().publicKey, multisig: true };
+
+    const { stdout, stderr } = await capture(() => run({ kind: "pause-deploy" }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual(["signature signature", "deploy paused"]);
+  });
+
   it("start-deploy refuses an operator signer before sending", async () => {
     const { chain, sent, rawSent } = await harness();
     const mode: AdminMode = { signer: poolFields.operator, multisig: false };
@@ -650,12 +663,15 @@ describe("admin run", () => {
     const { chain, sent } = await harness({ pool: { admin: multisigVault } });
     const mode: AdminMode = { signer: multisigVault, multisig: true };
 
-    const { stdout } = await capture(() => run({ kind: "start-deploy" }, chain, mode));
+    const { stdout, stderr } = await capture(() => run({ kind: "start-deploy" }, chain, mode));
 
     expect(sent).toEqual([]);
     expect(stdout).toHaveLength(1);
     const tx = Transaction.from(bs58.decode(stdout[0] as string));
     expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+    expect(stderr).toContain(
+      `admin is ${multisigVault.toBase58()}, not the loaded key: nothing will be sent`,
+    );
   });
 
   it("start-jackpot refuses an operator signer before sending", async () => {
