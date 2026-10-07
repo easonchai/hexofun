@@ -515,6 +515,72 @@
   the old operator's ATA open after every rotation; close it and a House win is unpayable until `payout_timeout` lets the epoch roll
   over.
 
+  The Ops console
+
+  The console is the web app's `/ops` page: http://localhost:5173/ops in dev, and the same path on the deployed site
+  (apps/web/vercel.json rewrites it to ops.html, and the page is noindex). It reads `GET /ops/summary` and `GET /alerts`
+  every 15 seconds. Connect a wallet to act. Without one the page still reads.
+
+  The banner at the top answers whether anything needs a person.
+
+    green    "Nothing needs you". No alert is firing and no action is due that the bot cannot be trusted with.
+    amber    An action is due now, or a lesser alert fires. Each line names the button that clears it. Click the
+             name and the page scrolls to the button, opening Advanced if it lives there.
+    red      One of nine alerts fires: SOLVENCY_NEGATIVE, POOL_IMPAIRED, WITHDRAW_SHORTFALL, OPERATOR_STALE,
+             OPERATOR_FAILING, RPC_DOWN, INDEXER_STALE, DRAWN_UNPAID, EPOCH_NO_PROGRESS.
+    grey     A routine crank is due and the Operator will send it on its next tick. It does not count against green.
+             Leave it alone. It turns amber once the Operator is stale or failing, or the condition outlasts
+             ALERT_TICK_STALE_S.
+
+  The banner takes the colour of its worst line. Every red and amber line links its playbook in docs/ops/incidents.md.
+  If the backend could not read the chain, the banner says so in amber, because an empty list would read as green
+  when it may only be missing items.
+
+  The badge in the header says what the connected wallet can do on this pool.
+
+    Admin              Signs every action itself, including starting a paused switch.
+    Operator           Signs a pause of Pool, Game, Jackpot or Deployment. Cannot pause Bought tickets and cannot
+                       start anything.
+    Fast pause signer  A wallet on the backend's OPS_WALLETS list (comma separated public keys; empty or unset turns
+                       the route off, and the page says "Fast pause is not enabled on this env"). Pauses the same
+                       four switches by signing a message. The backend sends the pause with the Operator key.
+    Viewer             Any other wallet. It can read everything and run the permissionless actions: the four routine
+                       cranks, Fund jackpot, Cover deficit, Void round, Roll over epoch and Migrate, and Drain while a
+                       venue proposal is open. The badge reads "Viewer, can run cranks".
+
+  Each switch in the Pause block shows its state and one button, picked from the badge.
+
+    1. Admin: the wallet signs the pause or the start.
+    2. Operator: the wallet signs a pause, except Bought tickets.
+    3. Fast pause signer: "Fast pause". Pool, Game, Jackpot and Deployment only.
+    4. Anyone else: "Prepare for Squads". The page shows a base58 transaction with the Admin as signer, to import
+       into Squads.
+
+  Only the Admin restarts. A paused switch shows "Prepare for Squads" to every wallet except the Admin's, and the
+  confirm box names the path and says so before anything is signed. Bought tickets has no Fast pause path.
+
+  Under the Pause block sit the routine cranks: Deploy to venue, Recall, Harvest and Process withdraw. A button is lit
+  only when the banner says it is due. Every disabled button says why underneath. Details (collapsed) holds the
+  Pool, Venue, Yield and Rate chart panels. Advanced (collapsed) holds the rare actions:
+
+    Set params, Set venue params   Admin, as a form that shows each field's change before it is sent. Signs, or
+                                   prepares for Squads.
+    Grant tickets                  Admin. Signs, or prepares for Squads.
+    Fund jackpot                   Any wallet, from its own USDC.
+    Cover deficit                  Any funded wallet. Clears Impaired once the deficit reaches zero.
+    Void round, Roll over epoch    Permissionless once the program's timeout has passed. The page says "No stuck
+                                   Round" or "No stuck epoch" until then.
+    Venue switch                   The eight steps of "Changing a pool's venue" above, the current one marked. CLI
+                                   steps show their command as text. Drain and Migrate are buttons in the steps.
+
+  The header has two tools for debugging. "Show raw" puts the slot, lamport, basis point or PDA value beside each
+  figure that the page shows in plain units, and the browser remembers the setting. "Copy JSON" puts the whole
+  `/ops/summary` response on the clipboard, to paste into a chat.
+
+  Eight commands never got a button and stay in the CLI: shutdown, sweep-house, emergency-crank, set-operator,
+  propose-admin, accept-admin, set-treasury-accounts and create-invite. The venue switch also starts and cancels in
+  the CLI, with propose-venue and cancel-venue. The footer of Advanced's Admin actions panel lists the same eight.
+
   Launch week
 
   A new pool starts with the game and the jackpot both paused; start each on chain with the admin CLI's `pause-game`,

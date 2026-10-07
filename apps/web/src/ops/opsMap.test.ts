@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import type { TodoItem } from "../api.js";
-import { ALERT_CODES, bannerOf, dueFor, entryOf, OPS_MAP } from "./opsMap.js";
+import { ALERT_CODES, bannerOf, dueFor, entryOf, OPS_MAP, playbookAnchor } from "./opsMap.js";
 
 const repo = (path: string) => readFileSync(fileURLToPath(new URL(`../../../../${path}`, import.meta.url)), "utf8");
 
@@ -41,6 +41,12 @@ describe("opsMap", () => {
 
   it("treats an unknown code as amber with no button", () => {
     expect(entryOf("SOMETHING_NEW")).toEqual({ severity: "amber", action: null });
+  });
+
+  it("places an anchor in incidents.md for every code", () => {
+    const doc = repo("docs/ops/incidents.md");
+    const missing = Object.keys(OPS_MAP).filter((c) => !doc.includes(`id="${playbookAnchor(c)}"`));
+    expect(missing).toEqual([]);
   });
 });
 
