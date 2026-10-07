@@ -1648,14 +1648,14 @@ describe("venue cranks (ticket 13)", () => {
     expect((sent[0] ?? []).map(label)).toEqual(["migrate_venue"]);
     const keys = keysOfIx(sent[0] ?? []);
     const old = heldPool();
-    // The OLD pins and extras (the sync inside values the old venue), the
+    // The OLD pins (the sync inside values the old venue), the
     // proposal, and the Admin who gets the rent back.
     for (const pinned of [old.klendProgram, old.klendMarket, old.klendReserve, old.klendCtoken, old.admin]) {
       expect(keys).toContain(pinned.toBase58());
     }
     expect(keys).toContain(venueProposalAddress(PROGRAM_ID, old.address).toBase58());
-    expect(keys.slice(-4)).toEqual([LMA, LIQ_SUPPLY, CMINT].map((k) => k.toBase58()).concat(SYSVAR_IX));
-
+    // The sync inside only values the position, which klend does without extras.
+    expect(keys).not.toContain(LMA.toBase58());
   });
 
   it("a migration clears a deploy cool-down earned before it, and deploys run again once the proposal is gone", async () => {
@@ -1789,6 +1789,21 @@ describe("venue cranks (ticket 13)", () => {
       const recall = venueTick(100n * U, { pool: kvaultPool({ venueValue: 9_900n * U }) });
       await runTick(recall.ctx);
       expect(recall.sent[0]?.[0]?.keys.filter((k) => k.pubkey.equals(USDC) && k.isWritable)).not.toHaveLength(0);
+    });
+
+    it("drains with the redeem accounts and migrates with the value-only ones", async () => {
+      const drain = drainTick({ pool: kvaultPool({ venueValue: 5_000n * U }) });
+      await runTick(drain.ctx);
+      const dk = drain.sent[0]?.[0]?.keys ?? [];
+      // Accepted mint writable (the vault's withdraw writes it), vault state writable.
+      expect(dk.filter((k) => k.pubkey.equals(USDC) && k.isWritable)).not.toHaveLength(0);
+      expect(dk.at(-1)?.pubkey.toBase58()).toBe(USDC.toBase58());
+
+      const migrate = drainTick({ pool: kvaultPool({ venueValue: 40n * U }) });
+      await runTick(migrate.ctx);
+      const mk = (migrate.sent[0]?.[0]?.keys ?? []).map((k) => k.pubkey.toBase58());
+      expect(mk).toContain(f.view.allocations[0]!.reserve.toBase58());
+      expect(mk).not.toContain(f.view.tokenVault.toBase58());
     });
 
     it("refuses to build when the vault was not read", async () => {

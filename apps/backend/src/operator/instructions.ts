@@ -561,7 +561,7 @@ export class OperatorInstructions {
           venueProposal: venueProposalAddress(this.programId, pool.address),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
-        .remainingAccounts(this.venueRemaining(pool))
+        .remainingAccounts(this.venueRemaining(pool, "redeem"))
         .instruction(),
     ];
   }
@@ -581,7 +581,7 @@ export class OperatorInstructions {
           proposal: venueProposalAddress(this.programId, pool.address),
           ...this.venue(pool),
         })
-        .remainingAccounts(this.venueRemaining(pool))
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }

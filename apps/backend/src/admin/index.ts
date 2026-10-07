@@ -30,6 +30,8 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
+  type AccountMeta,
+  type AddressLookupTableAccount,
   Connection,
   PublicKey,
   Transaction,
@@ -39,7 +41,9 @@ import bs58 from "bs58";
 
 import { generateInviteCode } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
+import { fetchKvaultView } from "../chain/kvault";
 import { venueProposalAddress } from "../chain/pda";
+import { VENUE_KIND } from "../chain/venue-kind";
 import { rpcStatus, withRpcFallback } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { validateEnv } from "../config/env";
@@ -79,6 +83,9 @@ const log = (message: string): void => {
  */
 interface MethodBuilder {
   accountsPartial(accounts: Record<string, PublicKey | null>): {
+    remainingAccounts(accounts: AccountMeta[]): {
+      instruction(): Promise<TransactionInstruction>;
+    };
     instruction(): Promise<TransactionInstruction>;
   };
 }
@@ -108,6 +115,27 @@ async function readPool(chain: ChainService): Promise<PoolState> {
 }
 
 /**
+ * A kVault pool's venue instructions name too many accounts for a legacy
+ * transaction (venue-switch ticket 06), so they go as v0 with the vault's
+ * lookup table. This reads the pool, its vault and the table. Any other pool
+ * gets no tables.
+ */
+async function readVenuePool(
+  chain: ChainService,
+): Promise<{ pool: PoolState; tables: AddressLookupTableAccount[] }> {
+  const decoded = await readPool(chain);
+  if (decoded.venueKind !== VENUE_KIND.kvault) return { pool: decoded, tables: [] };
+  const kvault = await fetchKvaultView(
+    chain.connection,
+    decoded.klendMarket,
+    decoded.klendProgram,
+  );
+  const { value } = await chain.connection.getAddressLookupTable(kvault.lookupTable);
+  if (!value) throw new Error(`lookup table ${kvault.lookupTable.toBase58()} does not exist`);
+  return { pool: { ...decoded, kvault }, tables: [value] };
+}
+
+/**
  * Every admin-gated command ends here. Local mode signs and sends with the
  * loaded key, as it always did, unless a Ledger is loaded (ticket 09), in
  * which case it signs and sends through that instead. Multisig mode prints
@@ -119,11 +147,18 @@ async function submit(
   instructions: TransactionInstruction[],
   summary: string,
   ledger?: AdminSigner,
+  tables: readonly AddressLookupTableAccount[] = [],
 ): Promise<void> {
+  if (tables.length > 0 && (mode.multisig || ledger)) {
+    // The Ledger and Squads paths build legacy transactions.
+    throw new Error(
+      "this kVault pool's transaction needs v0 with the vault's lookup table, which the Ledger and Squads paths cannot build yet; run it with the Admin or Operator key loaded locally",
+    );
+  }
   if (!mode.multisig) {
     const signature = ledger
       ? await sendWithLedger(chain, ledger, instructions)
-      : await chain.send(instructions);
+      : await chain.send(instructions, chain.keypair, tables);
     log(`signature ${signature}`);
     log(summary);
     return;
@@ -793,6 +828,15 @@ export async function run(
           pool: chain.poolAddress(),
           proposal: venueProposalAddress(chain.programId, chain.poolAddress()),
         })
+        // A kVault proposal passes its four pins so the program can check
+        // them against the vault state.
+        .remainingAccounts(
+          command.venueKind === VENUE_KIND.kvault
+            ? [command.program, command.market, command.reserve, command.ctoken].map(
+                (pubkey) => ({ pubkey, isSigner: false, isWritable: false }),
+              )
+            : [],
+        )
         .instruction();
       return submit(
         chain,
@@ -806,7 +850,7 @@ export async function run(
     // before the drain, so the Operator's crank cannot put the USDC back.
     // Whichever of Admin or Operator signs, both may do both.
     case "drain-venue": {
-      const pool = await readPool(chain);
+      const { pool, tables } = await readVenuePool(chain);
       const instructions = new OperatorInstructions(
         chain.program,
         chain.programId,
@@ -823,12 +867,13 @@ export async function run(
         [pause, ...drain],
         `pause deploys and drain ${command.amount} atomic units from the venue into the principal vault; start-deploy resumes deploys`,
         ledger,
+        tables,
       );
     }
     // venue-switch ticket 05. Permissionless: the signer only pays the fee.
     // The proposal's rent goes to the pool's Admin, not to the signer.
     case "migrate-venue": {
-      const pool = await readPool(chain);
+      const { pool, tables } = await readVenuePool(chain);
       const instructions = new OperatorInstructions(
         chain.program,
         chain.programId,
@@ -841,6 +886,7 @@ export async function run(
         await instructions.migrateVenue(pool),
         "migrate the pool to the proposed venue; the program checks the lock and the old position, and refuses by name if either is not ready",
         ledger,
+        tables,
       );
     }
     case "cancel-venue": {

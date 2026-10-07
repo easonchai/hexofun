@@ -22,6 +22,7 @@ const VAULT = {
   baseVaultAuthority: 40,
   tokenMint: 80,
   tokenVault: 120,
+  tokenAvailable: 224,
   sharesMint: 184,
   allocations: 312,
   allocationSize: 2160,
@@ -65,6 +66,8 @@ export interface KvaultView {
   readonly tokenVault: PublicKey;
   readonly baseVaultAuthority: PublicKey;
   readonly sharesMint: PublicKey;
+  /** The vault's idle tokens, USDC atomic units. */
+  readonly idle: bigint;
   /** The vault's own address lookup table; the pool's transactions need it. */
   readonly lookupTable: PublicKey;
   /** Non-empty allocation slots, in slot order: the order the program reads. */
@@ -121,6 +124,7 @@ export function decodeKvaultView(
     tokenVault: pk(vaultData, VAULT.tokenVault),
     baseVaultAuthority: pk(vaultData, VAULT.baseVaultAuthority),
     sharesMint: pk(vaultData, VAULT.sharesMint),
+    idle: vaultData.readBigUInt64LE(VAULT.tokenAvailable),
     lookupTable: pk(vaultData, VAULT.lookupTable),
     allocations,
   };
@@ -156,6 +160,16 @@ export function pickSource(view: KvaultView): KvaultAllocation {
   const [best] = [...funded].sort((a, b) => (a.available > b.available ? -1 : a.available < b.available ? 1 : 0));
   if (!best) throw new Error(`kVault ${view.vault.toBase58()} has no funded allocation to redeem from`);
   return best;
+}
+
+/**
+ * What a redeem can pay now: the vault's idle tokens plus the source reserve's
+ * free liquidity (the program's `withdrawable`, without capping the reserve
+ * term by the vault's holding there, so it can read a little high). A drain
+ * step sized by it pays in full or, if high, short, which the program books.
+ */
+export function withdrawable(view: KvaultView): bigint {
+  return view.idle + pickSource(view).available;
 }
 
 const meta = (pubkey: PublicKey, isWritable: boolean): AccountMeta => ({

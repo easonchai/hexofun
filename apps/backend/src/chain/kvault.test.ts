@@ -8,8 +8,9 @@ import {
   KVAULT_PROGRAM_ID,
   kvaultRemaining,
   pickSource,
+  withdrawable,
 } from "./kvault";
-import { kvaultFixture } from "./kvault.fixture";
+import { IDLE, kvaultFixture } from "./kvault.fixture";
 
 describe("the kVault view", () => {
   const f = kvaultFixture([
@@ -18,6 +19,11 @@ describe("the kVault view", () => {
     { ctokens: 10n, available: 9_000n, emptyBefore: true },
     { ctokens: 10n, available: 400n },
   ]);
+
+  it("what a redeem can pay now is the idle tokens plus the source reserve's liquidity", () => {
+    expect(f.view.idle).toBe(IDLE);
+    expect(withdrawable(f.view)).toBe(IDLE + 9_000n);
+  });
 
   it("lists the non-empty allocation slots in slot order, skipping gaps", () => {
     expect(allocationReserves(f.vaultData).map((k) => k.toBase58())).toEqual(

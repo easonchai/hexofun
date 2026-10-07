@@ -7,6 +7,8 @@ import { decodeKvaultView, KVAULT_PROGRAM_ID, type KvaultView } from "./kvault";
 
 const ALLOCATIONS = 312;
 const ALLOCATION_SIZE = 2160;
+/** The fixture vault's idle tokens. */
+export const IDLE = 700n;
 
 export interface FixtureAllocation {
   readonly ctokens: bigint;
@@ -33,6 +35,7 @@ export function kvaultFixture(allocations: readonly FixtureAllocation[]): Kvault
   put(120, key()); // token vault
   put(184, key()); // shares mint
   put(58_568, key()); // lookup table
+  data.writeBigUInt64LE(IDLE, 224); // idle tokens
 
   const reserveData = new Map<string, Buffer>();
   const reserves: PublicKey[] = [];
