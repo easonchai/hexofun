@@ -11,6 +11,7 @@ const ACTION_LABEL: Record<OpsAction, string> = {
   rollover: "Roll over epoch",
   venueSwitch: "Venue switch",
   fundJackpot: "Fund jackpot",
+  setVenueParams: "Set venue params",
   "pause-deploy": "Deployment switch",
 };
 

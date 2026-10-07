@@ -74,6 +74,20 @@ export function useStoredFlag(key: string, initial = false): [boolean, (next: bo
   return [value, set];
 }
 
+/**
+ * A collapsed group (Details, Advanced) that remembers whether it was open.
+ * `goToAction` opens it by setting `open` on the element, which `onToggle` keeps.
+ */
+export function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  const [open, setOpen] = useStoredFlag(`ops.open.${id}`);
+  return (
+    <details className="ops-section" data-testid={`section-${id}`} open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>{title}</summary>
+      <div className="ops-grid">{children}</div>
+    </details>
+  );
+}
+
 /** The first reason whose condition holds, or null: why an action is off. */
 export const whyOff = (...checks: readonly (readonly [boolean, string])[]): string | null =>
   checks.find(([off]) => off)?.[1] ?? null;

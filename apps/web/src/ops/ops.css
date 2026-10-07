@@ -342,6 +342,98 @@ body.ops #root {
   margin: 0;
 }
 
+/* Routine cranks sit in the open under the pause block. */
+.ops-page > [data-testid="panel-cranks"] {
+  margin-bottom: 16px;
+}
+
+.ops-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ops-panel input {
+  min-height: 40px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.ops-panel h3 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+}
+
+.ops-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.ops-actions button {
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+/* Details and Advanced: collapsed groups below the operator's sections. */
+.ops-section {
+  margin-bottom: 16px;
+}
+
+.ops-section > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-family: "Syncopate", sans-serif;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: var(--accent-text);
+}
+
+/* Each panel in Advanced is a long form, so it takes the full width. */
+[data-testid="section-advanced"] > .ops-grid > .ops-panel {
+  grid-column: 1 / -1;
+}
+
+/* Venue switch stepper: the current step marked, done steps muted. */
+.ops-steps {
+  margin: 8px 0 0;
+  padding-left: 24px;
+  font-size: 13px;
+}
+
+.ops-steps li {
+  padding: 8px 0;
+  border-top: 1px solid var(--divider);
+}
+
+.ops-steps li[data-done] {
+  color: var(--text-muted);
+}
+
+.ops-steps li[data-current] {
+  border-left: 3px solid var(--ops-amber);
+  margin-left: -12px;
+  padding-left: 9px;
+}
+
+.ops-steps .ops-sync {
+  margin: 4px 0 0;
+}
+
+.ops-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
 @media (max-width: 640px) {
   .ops-pause {
     grid-template-columns: repeat(2, minmax(0, 1fr));

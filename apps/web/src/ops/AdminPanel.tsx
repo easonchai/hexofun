@@ -21,6 +21,7 @@ import {
   type Values,
 } from "./admin.js";
 import { usdc } from "./format.js";
+import { paramsConfirm } from "./opsCopy.js";
 import { PreparedTx } from "./PreparedTx.js";
 import { useSendTx } from "./tx.js";
 import { Panel, Why, whyOff } from "./ui.js";
@@ -145,7 +146,9 @@ export function AdminPanel() {
             mode={mode}
             disabled={disabled}
             onSubmit={(changes) =>
-              run("Set params", async (signer) => [await setParamsIx(program, signer, poolKey, changes)])
+              window.confirm(paramsConfirm("Set params", changes, POOL_ID.toString()))
+                ? run("Set params", async (signer) => [await setParamsIx(program, signer, poolKey, changes)])
+                : Promise.resolve()
             }
             sent={result?.signature}
           />
@@ -158,7 +161,9 @@ export function AdminPanel() {
             mode={mode}
             disabled={disabled}
             onSubmit={(changes) =>
-              run("Set venue params", async (signer) => [await setVenueParamsIx(program, signer, poolKey, changes)])
+              window.confirm(paramsConfirm("Set venue params", changes, POOL_ID.toString()))
+                ? run("Set venue params", async (signer) => [await setVenueParamsIx(program, signer, poolKey, changes)])
+                : Promise.resolve()
             }
             sent={result?.signature}
           />
@@ -250,6 +255,8 @@ function ParamForm({
   return (
     <form
       className="ops-admin-form"
+      id={id === "venue" ? "ops-action-setVenueParams" : undefined}
+      tabIndex={-1}
       data-testid={`admin-form-${id}`}
       onSubmit={(e) => {
         e.preventDefault();

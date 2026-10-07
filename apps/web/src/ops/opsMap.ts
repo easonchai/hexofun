@@ -44,6 +44,7 @@ export type OpsAction =
   | "rollover"
   | "venueSwitch"
   | "fundJackpot"
+  | "setVenueParams"
   | "pause-deploy";
 
 export type Severity = "red" | "amber";

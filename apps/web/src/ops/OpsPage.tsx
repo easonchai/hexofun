@@ -10,15 +10,19 @@ import { HeadlinePanel } from "./HeadlinePanel.js";
 import { PausePanel } from "./PausePanel.js";
 import { PoolPanel } from "./PoolPanel.js";
 import { RateChartPanel } from "./RateChartPanel.js";
+import { RecoveryPanel } from "./RecoveryPanel.js";
 import { ROLE_LABEL, roleOf } from "./role.js";
-import { useStoredFlag } from "./ui.js";
+import { Section, useStoredFlag } from "./ui.js";
 import { useOps } from "./useOps.js";
 import { VenuePanel } from "./VenuePanel.js";
+import { VenueSwitchStepper } from "./VenueSwitchStepper.js";
 import { YieldPanel } from "./YieldPanel.js";
 
 /**
  * Layout only. Each panel is one file that reads `useOps()`. To add a panel,
- * create its file and add one line to the matching slot below.
+ * create its file and add one line to the matching slot below. Order, top to
+ * bottom: header, banner, headline, pauses, routine cranks, then Details and
+ * Advanced collapsed.
  */
 export function OpsPage() {
   const { error, summary } = useOps();
@@ -64,15 +68,19 @@ export function OpsPage() {
       <HeadlinePanel />
 
       <PausePanel />
+      <CranksPanel />
 
-      <div className="ops-grid">
+      <Section id="details" title="Details">
         <PoolPanel />
         <VenuePanel />
         <YieldPanel />
         <RateChartPanel />
-        <CranksPanel />
+      </Section>
+      <Section id="advanced" title="Advanced">
         <AdminPanel />
-      </div>
+        <RecoveryPanel />
+        <VenueSwitchStepper />
+      </Section>
     </main>
   );
 }

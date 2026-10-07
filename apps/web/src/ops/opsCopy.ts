@@ -22,3 +22,27 @@ export function pauseConfirm(kind: PausePathKind, sw: PauseSwitch, paused: boole
   const verb = paused ? "Start" : "Pause";
   return `${verb} ${PAUSE_LABEL[sw].toLowerCase()} on pool ${pool}? Path: ${PATH_NAME[kind]}. Only the Admin can restart a paused switch.`;
 }
+
+/** `window.confirm` before a hand drain. */
+export function drainConfirm(amount: string, pool: string): string {
+  return `Drain ${amount} from the venue into pool ${pool}'s own vault? It also pauses deployment, and only the Admin can restart it. Players' balances do not change, but the drained USDC earns nothing until it is deployed again.`;
+}
+
+/** `window.confirm` before `migrate_venue`. */
+export function migrateConfirm(kind: string, pool: string): string {
+  return `Move pool ${pool} to the proposed ${kind} venue? Anything left at the old venue stays there for good. Players' balances do not change; the idle USDC earns nothing until deploys resume.`;
+}
+
+/** `window.confirm` before Set params or Set venue params, listing each change. */
+export function paramsConfirm(
+  title: string,
+  changes: readonly { label: string; old: bigint; next: bigint }[],
+  pool: string,
+): string {
+  const effect =
+    title === "Set venue params"
+      ? "This changes how the pool keeps and moves its idle USDC. Players' balances do not change."
+      : "Players see the new rules from the next Round or epoch that reads them.";
+  const lines = changes.map((c) => `${c.label}: ${c.old} to ${c.next}`).join("\n");
+  return `${title} on pool ${pool}?\n${lines}\n${effect}`;
+}

@@ -104,3 +104,27 @@ export function migrateAccess(
   }
   return { allowed: true };
 }
+
+/** `min_venue_move`'s default, 100 USDC: above it, step 3 has not lowered the dust line yet. */
+export const DEFAULT_MIN_VENUE_MOVE = 100_000_000n;
+
+/**
+ * The venue switch step the pool is on, numbered as runbook.md's "Migration"
+ * (1 prepare, 2 propose, 3 lower the dust line, 4 wait out the lock, 5 drain,
+ * 6 migrate, 7 resume deploys, 8 restore the dust line). Null when the summary
+ * cannot tell. With no proposal and nothing left to finish, 1: the next move
+ * is the CLI's.
+ */
+export function venueStep(
+  summary: Pick<OpsSummaryDto, "venueProposal" | "venueValue" | "venueParams" | "deployPaused">,
+  nowSeconds: number,
+): number | null {
+  const view = proposalView(summary, nowSeconds);
+  if (view.state === "unavailable" || !summary.venueParams) return null;
+  const minMove = BigInt(summary.venueParams.minVenueMove);
+  const lowered = minMove < DEFAULT_MIN_VENUE_MOVE;
+  if (view.state === "locked") return lowered ? 4 : 3;
+  if (view.state === "unlocked") return BigInt(summary.venueValue) > minMove ? 5 : 6;
+  if (summary.deployPaused) return 7;
+  return lowered ? 8 : 1;
+}
