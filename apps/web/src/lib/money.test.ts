@@ -11,6 +11,7 @@ import {
   haircutValue,
   parseAtomic,
   pendingTickets,
+  canCancelWithdraw,
   pendingWithdrawal,
   splitWithdraw,
 } from "./money.js";
@@ -111,6 +112,13 @@ describe("pending withdrawal row", () => {
       amount: 5_000_000n,
       epoch: 7n,
     });
+  });
+
+  it("offers cancel while pending or due, not while processing or empty", () => {
+    expect(canCancelWithdraw(pendingWithdrawal(5n, 7n, 7n, false, false))).toBe(true);
+    expect(canCancelWithdraw(pendingWithdrawal(5n, 7n, 8n, false, false))).toBe(true);
+    expect(canCancelWithdraw(pendingWithdrawal(5n, 7n, 8n, true, false))).toBe(false);
+    expect(canCancelWithdraw(pendingWithdrawal(0n, 7n, 8n, false, false))).toBe(false);
   });
 
   it("stays pending when the current epoch is unknown", () => {

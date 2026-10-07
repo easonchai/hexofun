@@ -151,6 +151,13 @@ export function pendingWithdrawal(
   return { kind: due ? "due" : "pending", amount, epoch: pendingEpoch };
 }
 
+/**
+ * `cancel_withdraw` only clears the queued flag, so it works until a payout is
+ * in flight. `processing` is the one state where it would race that payout.
+ */
+export const canCancelWithdraw = (p: PendingWithdrawal): boolean =>
+  p.kind === "pending" || p.kind === "due";
+
 /** The program refuses `deposit` while the pool is paused or impaired. */
 export const depositOpen = (paused: boolean, impaired: boolean): boolean => !paused && !impaired;
 
