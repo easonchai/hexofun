@@ -43,6 +43,7 @@ import {
   vrfSeed,
   WEIGHT_TREE_SPACE,
   type PoolCtx,
+  PROGRAM_DATA,
 } from "./helpers/hx.js";
 
 const TIMEOUT = 30_000;
@@ -996,7 +997,13 @@ describe("create_pool guards", () => {
     });
     return program.methods
       .createPool(p)
-      .accountsPartial({ ...accounts, weightTree: tree.publicKey })
+      // The deploy wallet is the upgrade authority, so it pays and signs.
+      .accountsPartial({
+        ...accounts,
+        payer: program.provider.publicKey,
+        programData: PROGRAM_DATA,
+        weightTree: tree.publicKey,
+      })
       .preInstructions([createTree])
       .signers([payer, tree])
       .rpc();

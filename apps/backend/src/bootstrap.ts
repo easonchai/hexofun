@@ -49,6 +49,7 @@ import {
   playerAddress,
   poolAddress,
   principalVaultAddress,
+  programDataAddress,
 } from "./chain/pda";
 
 /** spec.md §2.5. Pinned on the Pool; the localnet test-vrf build ignores it. */
@@ -293,7 +294,10 @@ async function createPool(
     venueKind: venue.kind,
   })
     .accountsPartial({
+      // create_pool takes only the program's upgrade authority as payer, so
+      // bootstrap runs with the deploy key (mainnet-readiness-fixes 06).
       payer: payer.publicKey,
+      programData: programDataAddress(program.programId),
       pool,
       acceptedMint: mint,
       principalVault: principalVaultAddress(program.programId, pool),

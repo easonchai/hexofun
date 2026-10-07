@@ -35,6 +35,8 @@ import { describe, expect, it } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
+import { deployWallet } from "../chain/deploy-wallet.fixture";
+import { programDataAddress } from "../chain/pda";
 import {
   DEFAULT_PRIORITY_FEE_MAX_MICROLAMPORTS,
   DEFAULT_RPC_TIMEOUT_MS,
@@ -123,6 +125,7 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
         return factory(...args);
       };
 
+      const deploy = deployWallet();
       await method("createPool", {
         poolId: new BN(poolId.toString()),
         admin: authority.publicKey,
@@ -143,7 +146,9 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
         venueKind: 1, // the stub, which is what these suites pin
       })
         .accountsPartial({
-          payer: authority.publicKey,
+          // The deploy wallet is the upgrade authority, so it pays.
+          payer: deploy.publicKey,
+          programData: programDataAddress(chain.programId),
           pool,
           acceptedMint: mint,
           principalVault: chain.principalVaultAddress(),
@@ -165,7 +170,7 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
             programId: chain.programId,
           }),
         ])
-        .signers([authority, weightTree])
+        .signers([authority, weightTree, deploy])
         .rpc();
       await method("testVenueInit")
         .accountsPartial({

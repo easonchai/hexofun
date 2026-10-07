@@ -37,7 +37,8 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
-import { positionAddress } from "../chain/pda";
+import { positionAddress, programDataAddress } from "../chain/pda";
+import { deployWallet } from "../chain/deploy-wallet.fixture";
 import {
   DEFAULT_PRIORITY_FEE_MAX_MICROLAMPORTS,
   DEFAULT_RPC_TIMEOUT_MS,
@@ -207,6 +208,7 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
           chain.programId,
         )[0],
       };
+      const deploy = deployWallet();
       await method("createPool", {
         poolId: new BN(poolId.toString()),
         // One key plays both roles here: it pays, cranks and administers.
@@ -239,7 +241,9 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
         venueKind: 1, // the stub, which is what these suites pin
       })
         .accountsPartial({
-          payer: authority.publicKey,
+          // The deploy wallet is the upgrade authority, so it pays.
+          payer: deploy.publicKey,
+          programData: programDataAddress(chain.programId),
           pool,
           acceptedMint: mint,
           principalVault: chain.principalVaultAddress(),
@@ -261,7 +265,7 @@ describe.skipIf(!RPC_URL)("operator on localnet", () => {
             programId: chain.programId,
           }),
         ])
-        .signers([authority, weightTree])
+        .signers([authority, weightTree, deploy])
         .rpc();
       await method("testVenueInit")
         .accountsPartial({

@@ -69,6 +69,7 @@ import {
   sleep,
   sleepUntilOnChain,
   WEIGHT_TREE_SPACE,
+  PROGRAM_DATA,
 } from "../helpers/hx.js";
 
 const run = promisify(execFile);
@@ -450,7 +451,8 @@ describe("kVault backing on a mainnet fork", () => {
           venueKind: 2,
         })
         .accountsPartial({
-          payer: operator.publicKey,
+          payer: provider.wallet.publicKey,
+          programData: PROGRAM_DATA,
           pool,
           acceptedMint: USDC,
           principalVault: principalVaultPda(pool),

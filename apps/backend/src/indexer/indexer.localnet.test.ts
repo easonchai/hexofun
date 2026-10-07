@@ -37,6 +37,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
+import { deployWallet } from "../chain/deploy-wallet.fixture";
+import { programDataAddress } from "../chain/pda";
 import type { HexVaultEnv } from "../config/env";
 import { randomNonce, vrfSeed } from "../operator/vrf";
 import { PrismaService } from "../prisma/prisma.service";
@@ -202,6 +204,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         chain.programId,
       )[0],
     };
+    const deploy = deployWallet();
     await methods
       .createPool({
         poolId: new BN(poolId.toString()),
@@ -229,7 +232,9 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         venueKind: 1, // the stub, which is what these suites pin
       })
       .accountsPartial({
-        payer: authority.publicKey,
+        // The deploy wallet is the upgrade authority, so it pays.
+        payer: deploy.publicKey,
+        programData: programDataAddress(chain.programId),
         pool,
         acceptedMint: mint,
         principalVault: chain.principalVaultAddress(),
@@ -251,7 +256,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
           programId: chain.programId,
         }),
       ])
-      .signers([authority, weightTree])
+      .signers([authority, weightTree, deploy])
       .rpc();
     await methods
       .testVenueInit()

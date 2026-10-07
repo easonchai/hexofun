@@ -777,10 +777,19 @@
         {
           "name": "payer",
           "docs": [
-            "Pays rent only. The admin and operator come in through `params`."
+            "Pays rent, and must be the program's upgrade authority, so nobody else",
+            "can create a pool under our operator key (mainnet-readiness ticket 06).",
+            "The admin and operator come in through `params`."
           ],
           "writable": true,
           "signer": true
+        },
+        {
+          "name": "program",
+          "address": "H2iWyng2orJpHNGGWhrR7rBQNDqixThpTpAwF4dnPXax"
+        },
+        {
+          "name": "program_data"
         },
         {
           "name": "pool",
@@ -5085,6 +5094,16 @@
       "code": 6098,
       "name": "AlreadyGranted",
       "msg": "this player already received a grant in the current epoch"
+    },
+    {
+      "code": 6099,
+      "name": "KlendProgramMismatch",
+      "msg": "a klend venue must pin the klend program"
+    },
+    {
+      "code": 6100,
+      "name": "NotUpgradeAuthority",
+      "msg": "only the program's upgrade authority can create a pool"
     }
   ],
   "types": [

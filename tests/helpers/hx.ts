@@ -36,6 +36,13 @@ export const provider = new AnchorProvider(connection, new Wallet(Keypair.fromSe
 export const program = new Program(idl as typeof idl, provider);
 export const PROGRAM_ID = program.programId;
 
+/** The program's upgradeable-loader data account, which `create_pool` reads
+ *  for the upgrade authority (mainnet-readiness 06). */
+export const PROGRAM_DATA = PublicKey.findProgramAddressSync(
+  [PROGRAM_ID.toBuffer()],
+  new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111"),
+)[0];
+
 // Pinned on every pool at create_pool; test-vrf never reads it, since
 // test_fulfill fabricates the randomness account directly.
 export const DEVNET_VRF_NETWORK_STATE = new PublicKey(
@@ -611,7 +618,9 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       venueKind: VENUE_KIND.stub,
     })
     .accountsPartial({
-      payer: operator.publicKey,
+      // The deploy wallet is the upgrade authority, so it pays and signs.
+      payer: provider.wallet.publicKey,
+      programData: PROGRAM_DATA,
       pool,
       acceptedMint: mint,
       principalVault,

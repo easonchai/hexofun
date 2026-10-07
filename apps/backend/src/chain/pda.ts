@@ -20,6 +20,14 @@ const leU64 = (value: bigint): Buffer => {
 const pda = (programId: PublicKey, seeds: (Buffer | Uint8Array)[]): PublicKey =>
   PublicKey.findProgramAddressSync(seeds, programId)[0];
 
+/** The upgradeable loader's data account for the program. `create_pool` reads
+ *  its upgrade authority. */
+export const programDataAddress = (programId: PublicKey): PublicKey =>
+  PublicKey.findProgramAddressSync(
+    [programId.toBuffer()],
+    new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111"),
+  )[0];
+
 export const poolAddress = (programId: PublicKey, poolId: bigint): PublicKey =>
   pda(programId, [SEED_POOL, leU64(poolId)]);
 

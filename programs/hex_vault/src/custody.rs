@@ -774,6 +774,12 @@ pub fn request_withdraw<'info>(
     Ok(())
 }
 
+/// Whether `payer` holds the program's upgrade authority. A frozen program
+/// (`None`) has none, so nobody can create a pool on it.
+fn is_upgrade_authority(authority: Option<Pubkey>, payer: &Pubkey) -> bool {
+    authority == Some(*payer)
+}
+
 /// `create_pool` and `set_params` take an `epoch_seconds` in (0, 7 days].
 fn valid_epoch_seconds(v: i64) -> bool {
     v > 0 && v <= MAX_EPOCH_SECONDS
@@ -1769,9 +1775,21 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
 #[derive(Accounts)]
 #[instruction(params: CreatePoolParams)]
 pub struct CreatePool<'info> {
-    /// Pays rent only. The admin and operator come in through `params`.
+    /// Pays rent, and must be the program's upgrade authority, so nobody else
+    /// can create a pool under our operator key (mainnet-readiness ticket 06).
+    /// The admin and operator come in through `params`.
     #[account(mut)]
     pub payer: Signer<'info>,
+
+    pub program: Program<'info, crate::program::HexVault>,
+
+    #[account(
+        constraint = program.programdata_address()? == Some(program_data.key())
+            @ HexVaultError::NotUpgradeAuthority,
+        constraint = is_upgrade_authority(program_data.upgrade_authority_address, &payer.key())
+            @ HexVaultError::NotUpgradeAuthority,
+    )]
+    pub program_data: Account<'info, ProgramData>,
 
     #[account(
         init,
@@ -2561,6 +2579,14 @@ pub struct GrantTickets<'info> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_upgrade_authority_may_create_a_pool() {
+        let authority = Pubkey::new_unique();
+        assert!(is_upgrade_authority(Some(authority), &authority));
+        assert!(!is_upgrade_authority(Some(authority), &Pubkey::new_unique()));
+        assert!(!is_upgrade_authority(None, &authority));
+    }
 
     #[test]
     fn epoch_seconds_above_seven_days_are_refused() {

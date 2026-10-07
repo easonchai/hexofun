@@ -270,4 +270,6 @@ pub enum HexVaultError {
     // mainnet-readiness-fixes tickets 04 and 06. Appended too.
     #[msg("a klend venue must pin the klend program")]
     KlendProgramMismatch,
+    #[msg("only the program's upgrade authority can create a pool")]
+    NotUpgradeAuthority,
 }

@@ -246,6 +246,13 @@ up_fresh() {
       --fee-payer "$wallet" --url "$rpc" >/dev/null
   done
 
+  # create_pool takes only the upgrade authority as payer and admin pays here,
+  # so hand it the program, the way the mainnet launch hands it to the Ledger
+  # after bootstrap.
+  solana --url "$rpc" program set-upgrade-authority "$program_id" \
+    --keypair "$wallet" --upgrade-authority "$wallet" \
+    --new-upgrade-authority "$admin" --skip-new-upgrade-authority-signer-check >/dev/null
+
   # Admin signs (the mainnet guard wants admin != operator); no --start, so the
   # pool comes up jackpot- and game-paused with buy_tickets paused.
   (cd "$root/apps/backend" && \

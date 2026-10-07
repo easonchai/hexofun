@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { BN } from "@anchor-lang/core";
-import { Keypair, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, Transaction, sendAndConfirmTransaction } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
   createAccount,
@@ -27,16 +27,23 @@ import {
   poolPda,
   principalVaultPda,
   program,
+  PROGRAM_DATA,
+  provider,
   weightTreeAccount,
   VENUE_KIND,
 } from "./helpers/hx.js";
 
 const TIMEOUT = 60_000;
+const KLEND_PROGRAM = new PublicKey("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
 
 async function createPoolWith(opts: {
   ctokenOwner?: "pool" | "other";
   payoutTimeout?: number;
   venueKind?: number;
+  epochSeconds?: number;
+  klendProgram?: PublicKey;
+  /** Pay with a key that is not the upgrade authority. */
+  payer?: Keypair;
 }) {
   const poolId = nextPoolId();
   const pool = poolPda(poolId);
@@ -70,7 +77,7 @@ async function createPoolWith(opts: {
       admin: admin.publicKey,
       operator: operator.publicKey,
       vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-      epochSeconds: new BN(p.epochSeconds),
+      epochSeconds: new BN(opts.epochSeconds ?? p.epochSeconds),
       epochAnchor: new BN(await onChainNowSeconds()),
       roundSeconds: new BN(p.roundSeconds),
       closeBuffer: new BN(p.closeBuffer),
@@ -85,7 +92,8 @@ async function createPoolWith(opts: {
       venueKind: opts.venueKind ?? VENUE_KIND.klend,
     })
     .accountsPartial({
-      payer: operator.publicKey,
+      payer: opts.payer?.publicKey ?? provider.wallet.publicKey,
+      programData: PROGRAM_DATA,
       pool,
       acceptedMint: mint,
       principalVault: principalVaultPda(pool),
@@ -94,7 +102,11 @@ async function createPoolWith(opts: {
       weightTree: weightTree.keypair.publicKey,
       treasury,
       buybackReserve,
-      klendProgram: Keypair.generate().publicKey,
+      klendProgram:
+        opts.klendProgram ??
+        (opts.venueKind === undefined || opts.venueKind === VENUE_KIND.klend
+          ? KLEND_PROGRAM
+          : Keypair.generate().publicKey),
       klendMarket: Keypair.generate().publicKey,
       klendReserve: Keypair.generate().publicKey,
       klendCtoken,
@@ -102,11 +114,29 @@ async function createPoolWith(opts: {
       systemProgram: SystemProgram.programId,
     })
     .preInstructions([weightTree.ix])
-    .signers([operator, weightTree.keypair])
+    .signers([operator, weightTree.keypair, ...(opts.payer ? [opts.payer] : [])])
     .rpc();
 }
 
 describe("create_pool checks", () => {
+  it("refuses a payer that is not the program's upgrade authority", async () => {
+    const stranger = Keypair.generate();
+    await airdrop(stranger.publicKey, 10);
+    await expect(createPoolWith({ payer: stranger })).rejects.toThrow(/NotUpgradeAuthority/);
+  }, TIMEOUT);
+
+  it("refuses a klend pool pinned to any program but klend", async () => {
+    await expect(createPoolWith({ klendProgram: Keypair.generate().publicKey })).rejects.toThrow(
+      /KlendProgramMismatch/,
+    );
+  }, TIMEOUT);
+
+  it("refuses an epoch_seconds above seven days", async () => {
+    await expect(createPoolWith({ epochSeconds: 7 * 86_400 + 1 })).rejects.toThrow(
+      /InvalidParameter/,
+    );
+  }, TIMEOUT);
+
   it("refuses a cToken account owned by another key", async () => {
     await expect(createPoolWith({ ctokenOwner: "other" })).rejects.toThrow(/InvalidParameter/);
   }, TIMEOUT);
