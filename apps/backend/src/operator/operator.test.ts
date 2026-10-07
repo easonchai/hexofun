@@ -742,6 +742,37 @@ describe("runTick", () => {
     expect(result.action).toBeNull();
   });
 
+  // mainnet-readiness-fixes 02: a global pause refuses grant_tickets, and a
+  // due grant must not hold the withdrawals below it.
+  it("3b. skips grants while the pool is paused and still pays a due withdrawal", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    const owner = Keypair.generate().publicKey.toBase58();
+    const { ctx, sent } = context({
+      pool: pool({ paused: true }),
+      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
+      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.action).toBe("process_withdraw");
+    expect(sent.flat().map(label)).not.toContain("grant_tickets");
+  });
+
+  it("3b. records an unknown grant failure and still reaches the withdrawals", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    const owner = Keypair.generate().publicKey.toBase58();
+    const { ctx } = context({
+      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
+      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
+      send: async (ixs) => {
+        if (ixs.some((ix) => label(ix) === "grant_tickets")) throw new Error("PoolPaused");
+        return "signature";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toMatch(/PoolPaused/);
+    expect(outcome.action).toBe("process_withdraw");
+  });
+
   // --- 4. request_draw: the ended epoch goes to the draw straight away. There
   // is no registration, no indexer wait and no window (ticket 13).
 

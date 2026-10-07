@@ -616,8 +616,10 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // shutdown (ops-and-envs ticket 02), so this stops with the rest of the
   // epoch loop. It is refused while the jackpot is paused too
   // (game-jackpot-pause ticket 02); the grants stay due and go out once the
-  // jackpot restarts.
-  if (!pool.shutdown && !pool.jackpotPaused && currentEpoch) {
+  // jackpot restarts. The same goes for the global pause (mainnet-readiness-fixes
+  // 02), and any other refusal here is recorded, not thrown, so it never
+  // blocks steps 4 to 7.
+  if (!pool.shutdown && !pool.jackpotPaused && !pool.paused && currentEpoch) {
     const grants = await ctx.referralGrantsDue(currentEpoch.epochId);
     if (grants.length > 0) {
       const batch = grants.slice(0, BATCH_SIZE);
@@ -630,23 +632,27 @@ async function decide(ctx: TickContext): Promise<Decision> {
         );
         return finish({ action: "grant_tickets" });
       } catch (cause) {
-        if (!capExceeded(cause)) throw cause;
-        // referralGrantsDue re-clamps every grant against the freshest
-        // Player data it has before handing it back, so this should now
-        // only fire on drift the indexer has not caught up with yet (a very
-        // recent withdrawal), not the stale-forever case it used to. The
-        // error itself does not say which referrer in the batch tripped it,
-        // so every one of them is logged with the amount that was tried;
-        // ponytail: still one atomic transaction, so all of them wait for
-        // the next tick's freshly re-clamped retry rather than just the
-        // culprit. Splitting the batch on a repeated failure is the upgrade
-        // path if that ever bites in practice.
-        ctx.warn(
-          `referral bonus grant for epoch ${currentEpoch.epochId} exceeded the on-chain cap ` +
-            `for one of [${batch.map((grant) => `${grant.referrer}:${grant.amount}`).join(", ")}]: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`,
-        );
+        if (!capExceeded(cause)) {
+          stepError = stepError ?? `grant_tickets failed: ${errorMessage(cause)}`;
+          // Fall through to step 4 and below.
+        } else {
+          // referralGrantsDue re-clamps every grant against the freshest
+          // Player data it has before handing it back, so this should now
+          // only fire on drift the indexer has not caught up with yet (a very
+          // recent withdrawal), not the stale-forever case it used to. The
+          // error itself does not say which referrer in the batch tripped it,
+          // so every one of them is logged with the amount that was tried;
+          // ponytail: still one atomic transaction, so all of them wait for
+          // the next tick's freshly re-clamped retry rather than just the
+          // culprit. Splitting the batch on a repeated failure is the upgrade
+          // path if that ever bites in practice.
+          ctx.warn(
+            `referral bonus grant for epoch ${currentEpoch.epochId} exceeded the on-chain cap ` +
+              `for one of [${batch.map((grant) => `${grant.referrer}:${grant.amount}`).join(", ")}]: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`,
+          );
+        }
       }
     }
   }
