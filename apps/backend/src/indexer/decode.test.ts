@@ -674,7 +674,7 @@ describe("playerRow", () => {
       pendingEpoch: new BN(4),
       requestedAt: new BN(1_700_000_000),
     });
-    expect(playerRow(player, POOL)).toMatchObject({
+    expect(playerRow(player, POOL, 0n)).toMatchObject({
       poolAddress: POOL,
       pendingWithdraw: 750_000n,
       pendingEpoch: 4n,
@@ -690,7 +690,7 @@ describe("playerRow", () => {
       bonusEpoch: new BN(4),
       bonusGranted: new BN(50_000),
     });
-    expect(playerRow(player, POOL)).toMatchObject({
+    expect(playerRow(player, POOL, 0n)).toMatchObject({
       boughtEpoch: 4n,
       boughtAmount: 200_000n,
       bonusEpoch: 4n,
@@ -702,7 +702,7 @@ describe("playerRow", () => {
   // so one past 2^64 proves the string path.
   it("carries the yield index at the last settle and the tree leaf", () => {
     const player = decodedPlayer({ yieldIndex: new BN("18446744073709551617"), leafIndex: 9 });
-    expect(playerRow(player, POOL)).toMatchObject({
+    expect(playerRow(player, POOL, 0n)).toMatchObject({
       yieldIndex: "18446744073709551617",
       leafIndex: 9,
     });
@@ -711,7 +711,7 @@ describe("playerRow", () => {
   // Ticket 20: the Read model folds the pending deposit by its epoch.
   it("carries the pending deposit and the epoch it was made in", () => {
     const player = decodedPlayer({ pendingDeposit: new BN(2_000_000), pendingDepositEpoch: new BN(4) });
-    expect(playerRow(player, POOL)).toMatchObject({
+    expect(playerRow(player, POOL, 0n)).toMatchObject({
       pendingDeposit: 2_000_000n,
       pendingDepositEpoch: 4n,
     });

@@ -780,7 +780,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         break;
       }
       case "player": {
-        const row = playerRow(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress);
+        const row = playerRow(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress, slot);
         await this.prisma.player.upsert({
           where: { poolAddress_owner: { poolAddress, owner: row.owner } },
           create: row,
@@ -1022,7 +1022,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
             !this.behindLogPath(pubkey, slot),
         )
         .map(({ account }) => {
-          const row = playerRow(account, poolAddress);
+          const row = playerRow(account, poolAddress, slot);
           return this.prisma.player.upsert({
             where: { poolAddress_owner: { poolAddress, owner: row.owner } },
             create: row,
@@ -1425,9 +1425,15 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           existing.map((row) => [row.referee, { principal: row.principal, aboveSince: row.aboveSince }]),
         );
         const blockTime = batch.blockTime ?? nowSeconds();
+        const seedSlots = new Map(existing.map((row) => [row.referee, row.seedSlot]));
         for (const { owner, event } of referralEvents) {
           const current = state.get(owner);
           if (current === undefined) continue; // not a referee
+          // The bind seeded principal from a Player mirror read at this slot
+          // or later, so an event at or before it is already in the seed
+          // (mainnet-readiness-fixes 11).
+          const seedSlot = seedSlots.get(owner) ?? 0n;
+          if (seedSlot > 0n && batch.slot <= seedSlot) continue;
           state.set(owner, applyReferralEvent(current, event, blockTime));
         }
         for (const [referee, next] of state) {
