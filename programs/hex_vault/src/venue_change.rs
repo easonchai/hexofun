@@ -26,7 +26,15 @@ pub struct ProposeVenueArgs {
 
 /// Admin only. Creates the proposal, or replaces the open one the way
 /// `propose_admin` replaces a pending admin, and restarts the lock either way.
-pub fn propose_venue(ctx: Context<ProposeVenue>, args: ProposeVenueArgs) -> Result<()> {
+///
+/// A kVault proposal also passes its four pinned accounts as the remaining
+/// accounts, in pin order (kVault program, vault state, shares mint, the
+/// pool's shares account), and they get the checks `create_pool` runs. A
+/// klend proposal passes none.
+pub fn propose_venue<'info>(
+    ctx: Context<'info, ProposeVenue<'info>>,
+    args: ProposeVenueArgs,
+) -> Result<()> {
     // The same gate `create_pool` holds, so a proposal can never name a kind
     // this build cannot back.
     require!(
@@ -41,6 +49,26 @@ pub fn propose_venue(ctx: Context<ProposeVenue>, args: ProposeVenueArgs) -> Resu
             && args.klend_ctoken != Pubkey::default(),
         HexVaultError::InvalidParameter
     );
+
+    if args.venue_kind == venue_kind::KVAULT {
+        let r = ctx.remaining_accounts;
+        require!(r.len() >= 4, HexVaultError::VaultAccountMismatch);
+        require!(
+            r[0].key() == args.klend_program
+                && r[1].key() == args.klend_market
+                && r[2].key() == args.klend_reserve
+                && r[3].key() == args.klend_ctoken,
+            HexVaultError::VaultPinMismatch
+        );
+        venue::check_kvault_pins(
+            &r[0],
+            &r[1],
+            &r[2],
+            &r[3],
+            &ctx.accounts.pool.accepted_mint,
+            &ctx.accounts.pool.key(),
+        )?;
+    }
 
     let now = Clock::get()?.unix_timestamp;
     let proposal = &mut ctx.accounts.proposal;

@@ -298,7 +298,10 @@ pub mod hex_vault {
     /// Admin-only (venue-switch ticket 03): announces a venue change, or
     /// replaces the open announcement and restarts its 48 hour lock. Deploys
     /// are refused while it stands.
-    pub fn propose_venue(ctx: Context<ProposeVenue>, args: ProposeVenueArgs) -> Result<()> {
+    pub fn propose_venue<'info>(
+        ctx: Context<'info, ProposeVenue<'info>>,
+        args: ProposeVenueArgs,
+    ) -> Result<()> {
         venue_change::propose_venue(ctx, args)
     }
 
