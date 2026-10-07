@@ -244,4 +244,10 @@ pub enum HexVaultError {
     // venue-switch ticket 03. Appended too.
     #[msg("a venue change is proposed; deploys wait until it is cancelled or executed")]
     VenueProposalOpen,
+
+    // venue-switch ticket 05. Appended too.
+    #[msg("the venue proposal's lock has not elapsed")]
+    VenueLockNotElapsed,
+    #[msg("the old venue still holds more than the minimum venue move; drain it first")]
+    VenuePositionNotEmpty,
 }

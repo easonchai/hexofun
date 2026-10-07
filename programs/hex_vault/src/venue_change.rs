@@ -10,8 +10,9 @@ use crate::constants::{
     venue_kind, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL, VENUE_LOCK_SECONDS,
 };
 use crate::errors::HexVaultError;
-use crate::events::{VenueDrained, VenueProposalCancelled, VenueProposed};
+use crate::events::{VenueDrained, VenueMigrated, VenueProposalCancelled, VenueProposed};
 use crate::state::{Pool, VenueProposal};
+use crate::utils;
 use crate::venue::{self, Funds, Venue};
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -142,6 +143,109 @@ pub fn drain_venue<'info>(ctx: Context<'info, DrainVenue<'info>>, amount: u64) -
         venue_value: pool.venue_value,
     });
     Ok(())
+}
+
+/// Venue-switch ticket 05. Permissionless. Once the proposal's lock has
+/// elapsed and the old position is down to `min_venue_move`, repins the four
+/// keys and the kind from the proposal, sets the venue value to zero and
+/// closes the proposal, its rent going to the Admin who paid it.
+///
+/// No USDC moves. Whatever the old position still holds (at most
+/// `min_venue_move`, reported as `left_behind`) stays at the old venue and is
+/// no longer tracked: the pool books nothing against it and writes nothing
+/// off, so a drain that empties the position first is what keeps it at zero.
+/// Deploys read the new venue from here on.
+pub fn migrate_venue<'info>(ctx: Context<'info, MigrateVenue<'info>>) -> Result<()> {
+    let a = &mut *ctx.accounts;
+    let venue = Venue {
+        program: &a.klend_program,
+        market: &a.klend_market,
+        reserve: &a.klend_reserve,
+        ctoken: &a.klend_ctoken,
+        remaining: ctx.remaining_accounts,
+    };
+
+    // The old venue's own value, current: the book may lag a same-second sync.
+    let (_, read) = venue::sync(&mut a.pool, &venue)?;
+
+    let unlocks_at = a
+        .proposal
+        .proposed_at
+        .checked_add(VENUE_LOCK_SECONDS)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    require!(
+        utils::now()? >= unlocks_at,
+        HexVaultError::VenueLockNotElapsed
+    );
+    require!(
+        read <= a.pool.min_venue_move,
+        HexVaultError::VenuePositionNotEmpty
+    );
+    // `propose_venue` already refused a kind this build lacks; the second line
+    // keeps a pool from being pinned to a backing it cannot dispatch.
+    require!(
+        venue_kind::supported(a.proposal.venue_kind),
+        HexVaultError::UnsupportedVenueKind
+    );
+
+    let pool = &mut a.pool;
+    let proposal = &a.proposal;
+    emit!(VenueMigrated {
+        pool: pool.key(),
+        old_venue_kind: pool.venue_kind,
+        old_klend_program: pool.klend_program,
+        old_klend_market: pool.klend_market,
+        old_klend_reserve: pool.klend_reserve,
+        old_klend_ctoken: pool.klend_ctoken,
+        new_venue_kind: proposal.venue_kind,
+        new_klend_program: proposal.klend_program,
+        new_klend_market: proposal.klend_market,
+        new_klend_reserve: proposal.klend_reserve,
+        new_klend_ctoken: proposal.klend_ctoken,
+        left_behind: read,
+    });
+    pool.venue_kind = proposal.venue_kind;
+    pool.klend_program = proposal.klend_program;
+    pool.klend_market = proposal.klend_market;
+    pool.klend_reserve = proposal.klend_reserve;
+    pool.klend_ctoken = proposal.klend_ctoken;
+    pool.venue_value = 0;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct MigrateVenue<'info> {
+    #[account(
+        mut,
+        seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
+        bump = pool.bump,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    /// The proposal closes into the Admin, who paid its rent. Anyone can name
+    /// it because the address is pinned to the Pool's.
+    #[account(mut, address = pool.admin)]
+    pub admin: SystemAccount<'info>,
+
+    #[account(
+        mut,
+        close = admin,
+        seeds = [SEED_VENUE_PROPOSAL, pool.key().as_ref()],
+        bump = proposal.bump,
+    )]
+    pub proposal: Box<Account<'info, VenueProposal>>,
+
+    /// CHECK: `venue::check` pins it to the OLD `pool.klend_program`, which
+    /// the sync reads before the repin.
+    pub klend_program: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to the old `pool.klend_market`.
+    pub klend_market: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to the old `pool.klend_reserve`.
+    #[account(mut)]
+    pub klend_reserve: UncheckedAccount<'info>,
+    /// CHECK: `venue::check` pins it to the old `pool.klend_ctoken`.
+    #[account(mut)]
+    pub klend_ctoken: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]

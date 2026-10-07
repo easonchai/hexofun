@@ -1843,6 +1843,105 @@
       "args": []
     },
     {
+      "name": "migrate_venue",
+      "docs": [
+        "Venue-switch ticket 05: repins the pool to the proposed venue once the",
+        "lock has elapsed and the old position is down to dust. Permissionless;",
+        "no USDC moves. Closes the proposal into the Admin."
+      ],
+      "discriminator": [
+        8,
+        93,
+        96,
+        155,
+        81,
+        47,
+        10,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool.pool_id",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "docs": [
+            "The proposal closes into the Admin, who paid its rent. Anyone can name",
+            "it because the address is pinned to the Pool's."
+          ],
+          "writable": true
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  101,
+                  110,
+                  117,
+                  101,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "klend_program",
+          "docs": [
+            "the sync reads before the repin."
+          ]
+        },
+        {
+          "name": "klend_market"
+        },
+        {
+          "name": "klend_reserve",
+          "writable": true
+        },
+        {
+          "name": "klend_ctoken",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "payout",
       "discriminator": [
         149,
@@ -4298,6 +4397,19 @@
       ]
     },
     {
+      "name": "VenueMigrated",
+      "discriminator": [
+        76,
+        46,
+        210,
+        31,
+        172,
+        90,
+        166,
+        203
+      ]
+    },
+    {
       "name": "VenueParamsSet",
       "discriminator": [
         129,
@@ -4831,6 +4943,16 @@
       "code": 6090,
       "name": "VenueProposalOpen",
       "msg": "a venue change is proposed; deploys wait until it is cancelled or executed"
+    },
+    {
+      "code": 6091,
+      "name": "VenueLockNotElapsed",
+      "msg": "the venue proposal's lock has not elapsed"
+    },
+    {
+      "code": 6092,
+      "name": "VenuePositionNotEmpty",
+      "msg": "the old venue still holds more than the minimum venue move; drain it first"
     }
   ],
   "types": [
@@ -6950,6 +7072,68 @@
           },
           {
             "name": "venue_value",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VenueMigrated",
+      "docs": [
+        "`migrate_venue` repinned the pool to the proposed venue (venue-switch",
+        "ticket 05). Carries both sides, so the log alone says what changed.",
+        "`left_behind` is the old position's value at the migration, at most",
+        "`min_venue_move`: it stays in the old venue and is no longer tracked."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_venue_kind",
+            "type": "u8"
+          },
+          {
+            "name": "old_klend_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_klend_ctoken",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_venue_kind",
+            "type": "u8"
+          },
+          {
+            "name": "new_klend_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_klend_market",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_klend_reserve",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_klend_ctoken",
+            "type": "pubkey"
+          },
+          {
+            "name": "left_behind",
             "type": "u64"
           }
         ]

@@ -314,11 +314,32 @@ pub mod hex_vault {
         venue_change::drain_venue(ctx, amount)
     }
 
+    /// Venue-switch ticket 05: repins the pool to the proposed venue once the
+    /// lock has elapsed and the old position is down to dust. Permissionless;
+    /// no USDC moves. Closes the proposal into the Admin.
+    pub fn migrate_venue<'info>(ctx: Context<'info, MigrateVenue<'info>>) -> Result<()> {
+        venue_change::migrate_venue(ctx)
+    }
+
     // Localnet only: the stub venue behind `venue.rs` (yield-claimer ticket
     // 05). Created once after `create_pool`, repriced by the tests.
     #[cfg(feature = "test-venue")]
     pub fn test_venue_init(ctx: Context<TestVenueInit>) -> Result<()> {
         test_venue::test_venue_init(ctx)
+    }
+
+    /// A second stub venue with its own reserve and vault PDAs, for the
+    /// stub-to-stub migration (venue-switch ticket 05).
+    #[cfg(feature = "test-venue")]
+    pub fn test_venue_init_alt(ctx: Context<TestVenueInitAlt>) -> Result<()> {
+        test_venue::test_venue_init_alt(ctx)
+    }
+
+    /// Moves the open proposal's start back by `seconds`, standing in for the
+    /// 48 hours a localnet clock cannot wait out.
+    #[cfg(feature = "test-venue")]
+    pub fn test_backdate_proposal(ctx: Context<TestBackdateProposal>, seconds: i64) -> Result<()> {
+        test_venue::test_backdate_proposal(ctx, seconds)
     }
 
     #[cfg(feature = "test-venue")]

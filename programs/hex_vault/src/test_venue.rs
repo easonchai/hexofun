@@ -11,13 +11,16 @@ use anchor_spl::token_interface::{
     self, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
 
-use crate::constants::SEED_POOL;
+use crate::constants::{SEED_POOL, SEED_VENUE_PROPOSAL};
 use crate::errors::HexVaultError;
-use crate::state::Pool;
+use crate::state::{Pool, VenueProposal};
 use crate::venue::{self, Funds, ReserveStats, Venue};
 
 pub const SEED_TEST_RESERVE: &[u8] = b"test-venue-reserve";
 pub const SEED_TEST_VAULT: &[u8] = b"test-venue-vault";
+/// The second stub venue (`test_venue_init_alt`).
+pub const SEED_TEST_RESERVE_ALT: &[u8] = b"test-venue-reserve-alt";
+pub const SEED_TEST_VAULT_ALT: &[u8] = b"test-venue-vault-alt";
 
 /// `TestReserve::rate` is USDC per share scaled by this.
 pub const RATE_SCALE: u128 = 1_000_000_000_000_000_000;
@@ -150,6 +153,32 @@ fn move_usdc<'info>(
     )
 }
 
+/// A second stub venue for the pool, with its own reserve and vault PDAs, so a
+/// stub-to-stub migration repins to keys the pool did not hold before
+/// (venue-switch ticket 05).
+pub fn test_venue_init_alt(ctx: Context<TestVenueInitAlt>) -> Result<()> {
+    let reserve = &mut ctx.accounts.reserve;
+    reserve.pool = ctx.accounts.pool.key();
+    reserve.shares = 0;
+    reserve.rate = RATE_SCALE;
+    reserve.bump = ctx.bumps.reserve;
+    reserve.supply = u64::MAX;
+    reserve.available = u64::MAX;
+    Ok(())
+}
+
+/// The clock cannot be warped on localnet, so a test moves the proposal's
+/// start back instead: the 48 hour lock is then past without a program build
+/// that shortens the real constant. Permissionless, localnet only.
+pub fn test_backdate_proposal(ctx: Context<TestBackdateProposal>, seconds: i64) -> Result<()> {
+    let proposal = &mut ctx.accounts.proposal;
+    proposal.proposed_at = proposal
+        .proposed_at
+        .checked_sub(seconds)
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    Ok(())
+}
+
 pub fn test_venue_init(ctx: Context<TestVenueInit>) -> Result<()> {
     let reserve = &mut ctx.accounts.reserve;
     reserve.pool = ctx.accounts.pool.key();
@@ -226,6 +255,54 @@ pub struct TestVenueInit<'info> {
 
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct TestVenueInitAlt<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+
+    #[account(
+        init,
+        payer = payer,
+        seeds = [SEED_TEST_RESERVE_ALT, pool.key().as_ref()],
+        bump,
+        space = 8 + TestReserve::INIT_SPACE,
+    )]
+    pub reserve: Box<Account<'info, TestReserve>>,
+
+    #[account(
+        init,
+        payer = payer,
+        seeds = [SEED_TEST_VAULT_ALT, pool.key().as_ref()],
+        bump,
+        token::mint = accepted_mint,
+        token::authority = pool,
+        token::token_program = token_program,
+    )]
+    pub venue_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct TestBackdateProposal<'info> {
+    #[account(seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()], bump = pool.bump)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [SEED_VENUE_PROPOSAL, pool.key().as_ref()],
+        bump = proposal.bump,
+    )]
+    pub proposal: Box<Account<'info, VenueProposal>>,
 }
 
 #[derive(Accounts)]

@@ -398,3 +398,23 @@ pub struct VenueDrained {
     pub received: u64,
     pub venue_value: u64,
 }
+
+/// `migrate_venue` repinned the pool to the proposed venue (venue-switch
+/// ticket 05). Carries both sides, so the log alone says what changed.
+/// `left_behind` is the old position's value at the migration, at most
+/// `min_venue_move`: it stays in the old venue and is no longer tracked.
+#[event]
+pub struct VenueMigrated {
+    pub pool: Pubkey,
+    pub old_venue_kind: u8,
+    pub old_klend_program: Pubkey,
+    pub old_klend_market: Pubkey,
+    pub old_klend_reserve: Pubkey,
+    pub old_klend_ctoken: Pubkey,
+    pub new_venue_kind: u8,
+    pub new_klend_program: Pubkey,
+    pub new_klend_market: Pubkey,
+    pub new_klend_reserve: Pubkey,
+    pub new_klend_ctoken: Pubkey,
+    pub left_behind: u64,
+}

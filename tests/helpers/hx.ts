@@ -121,6 +121,21 @@ export function testVenueVaultPda(pool: PublicKey): PublicKey {
   )[0];
 }
 
+/** The second stub venue (`test_venue_init_alt`): another reserve and vault,
+ *  for a stub-to-stub migration (venue-switch ticket 05). */
+export function testVenueAltAccountsFor(pool: PublicKey, mint: PublicKey): VenueAccounts {
+  const pda = (seed: string) =>
+    PublicKey.findProgramAddressSync([Buffer.from(seed), pool.toBuffer()], PROGRAM_ID)[0];
+  return {
+    klendProgram: PROGRAM_ID,
+    // Any account the stub never reads; the mint makes the market pin differ
+    // from the first venue's too.
+    klendMarket: mint,
+    klendReserve: pda("test-venue-reserve-alt"),
+    klendCtoken: pda("test-venue-vault-alt"),
+  };
+}
+
 /** The four addresses `create_pool` pins and every syncing instruction is
  *  handed. Under test-venue: this program, the pool, and the stub's two PDAs. */
 export interface VenueAccounts {
@@ -884,6 +899,21 @@ export function drainVenueMethod(
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([signer]);
+}
+
+/** Builder for `migrate_venue` (venue-switch ticket 05). Permissionless, so no
+ *  signer; `venue` is the OLD venue, the one the pool is pinned to until it runs. */
+export function migrateVenueMethod(
+  ctx: PoolCtx,
+  venue: VenueAccounts = ctx.venue,
+  admin: PublicKey = ctx.admin.publicKey,
+) {
+  return program.methods.migrateVenue().accountsPartial({
+    pool: ctx.pool,
+    admin,
+    proposal: venueProposalPda(ctx.pool),
+    ...venue,
+  });
 }
 
 /** Builder for `harvest`. `treasury` overrides the pool's own for the
