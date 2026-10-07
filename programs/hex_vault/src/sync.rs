@@ -121,7 +121,9 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
         pool.prize_owed = prize_owed;
         if deficit_repaid > 0 {
             pool.deficit -= deficit_repaid;
-            if pool.deficit == 0 {
+            // A deficit under the tolerance never impaired the pool, so
+            // repaying it clears nothing.
+            if pool.deficit == 0 && pool.impaired {
                 pool.impaired = false;
                 out.cleared = true;
             }
@@ -140,12 +142,15 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
     } else if value_now < before {
         let loss = before - value_now;
         out.loss = loss;
-        // `loss_tolerance_bps` of the value is rounding dust, never a loss.
-        // The fee owed bears it, floored at zero, as at a deploy or a redeem.
+        // `loss_tolerance_bps` of the value is rounding dust: the fee owed
+        // bears it and the rest is booked as deficit, but the pool stays
+        // unimpaired. Without the booking, dust that `fee_owed` cannot cover
+        // would add up unrecorded, sync after sync.
         let tolerance = u128::from(before) * u128::from(pool.loss_tolerance_bps)
             / u128::from(BPS_DENOMINATOR);
         if u128::from(loss) <= tolerance {
-            pool.fee_owed = pool.fee_owed.saturating_sub(loss);
+            out.fee_absorbed = loss.min(pool.fee_owed);
+            out.deficit_added = absorb_dust(pool, loss)?;
         } else {
             // First loss: the prize share owed, then the fee owed. Only what
             // they cannot cover is recorded against depositors. The index
@@ -168,6 +173,18 @@ pub fn apply_sync(pool: &mut Pool, value_now: u64, now: i64) -> Result<SyncOutco
     pool.venue_value = value_now;
     pool.last_sync_at = now;
     Ok(out)
+}
+
+/// Charges `dust`, value a venue move lost to rounding, to the fee owed first
+/// and books whatever the fee cannot cover as deficit, so a leak never goes
+/// unrecorded. Does not touch `impaired`; the callers decide that. Returns the
+/// part booked as deficit.
+pub fn absorb_dust(pool: &mut Pool, dust: u64) -> Result<u64> {
+    let from_fee = dust.min(pool.fee_owed);
+    let rest = dust - from_fee;
+    pool.deficit = pool.deficit.checked_add(rest).ok_or(HexVaultError::ArithmeticOverflow)?;
+    pool.fee_owed -= from_fee;
+    Ok(rest)
 }
 
 /// Pays `player` its share of the Yield index rise since its last settle and
@@ -257,7 +274,12 @@ pub fn settle_before_growth(pool: &mut Pool, player: &mut Player) -> Result<u64>
 /// balance as it stands before the call moves anything. A redeem from the
 /// venue swaps venue value for vault balance, so it does not change the sum.
 pub fn haircut(pool: &Pool, vault_balance: u64, amount: u64) -> u64 {
-    if !pool.impaired {
+    // After shutdown the haircut applies even unimpaired. Dust booked as
+    // deficit under the tolerance never set the flag, and a pool that pays at
+    // par would leave the last depositor short. With no deficit the net
+    // assets equal the claims, so this still pays `amount`. It needs no owner
+    // signature, which `impaired` would.
+    if !pool.impaired && !pool.shutdown {
         return amount;
     }
     let assets = u128::from(vault_balance) + u128::from(pool.venue_value);
@@ -291,6 +313,7 @@ pub fn realise_loss(pool: &mut Pool, loss: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::DEFAULT_LOSS_TOLERANCE_BPS;
     use crate::touch::tests::zeroed;
 
     /// SplitMix64, same shape as `weight_tree_proto`.
@@ -380,8 +403,9 @@ mod tests {
         for seed in 0..200 {
             let mut rng = Rng(seed);
             let mut p = pool(rng.next() >> 20, rng.below(3_000) as u16, 500);
-            // Assets start equal to Principal and no fall counts as dust, so
-            // the solvency identity is exact at every step.
+            p.loss_tolerance_bps = DEFAULT_LOSS_TOLERANCE_BPS;
+            // Assets start equal to Principal, so the solvency identity is
+            // exact at every step, dust included.
             p.venue_value = p.total_principal;
             let mut now = 0i64;
             for _ in 0..50 {
@@ -401,7 +425,8 @@ mod tests {
                     p.total_principal as u128 + owed,
                     "seed {seed}"
                 );
-                assert_eq!(p.impaired, p.deficit > 0, "seed {seed}");
+                // Dust under the tolerance books a deficit without impairing.
+                assert!(!p.impaired || p.deficit > 0, "seed {seed}");
             }
         }
     }
@@ -415,12 +440,12 @@ mod tests {
         p.last_sync_at = 5;
         // 1 bps of 1,000,000 is 100. A fall of 100 is still inside.
         let out = apply_sync(&mut p, 999_900, 6).unwrap();
-        assert_eq!((out.loss, out.deficit_added, out.prize_absorbed), (100, 0, 0));
-        assert_eq!((p.venue_value, p.prize_owed, p.deficit, p.impaired), (999_900, 500, 0, false));
+        assert_eq!((out.loss, out.deficit_added, out.prize_absorbed), (100, 100, 0));
+        assert_eq!((p.venue_value, p.prize_owed, p.deficit, p.impaired), (999_900, 500, 100, false));
         // 101 is past 1 bps of 999,900 (99), so it is a loss and the prize takes it.
         let out = apply_sync(&mut p, 999_799, 7).unwrap();
         assert_eq!((out.prize_absorbed, out.fee_absorbed, out.deficit_added), (101, 0, 0));
-        assert_eq!((p.prize_owed, p.deficit, p.impaired), (399, 0, false));
+        assert_eq!((p.prize_owed, p.deficit, p.impaired), (399, 100, false));
     }
 
     #[test]
@@ -459,6 +484,20 @@ mod tests {
         assert_eq!((out.split.fee, out.split.depositor, out.split.prize), (150, 1_350, 0));
         assert_eq!((p.deficit, p.impaired, p.fee_owed, p.yield_owed), (0, false, 150, 1_350));
         assert_eq!(p.harvest_gain, 1_500);
+    }
+
+    #[test]
+    fn after_shutdown_the_haircut_shares_booked_dust_without_impairing() {
+        let mut p = pool(1_000, 0, 0);
+        p.venue_value = 0;
+        p.deficit = 10;
+        // 990 in the vault against 1,000 of claims, not impaired.
+        assert_eq!(haircut(&p, 990, 500), 500);
+        p.shutdown = true;
+        assert_eq!(haircut(&p, 990, 500), 495);
+        // No deficit: par.
+        p.deficit = 0;
+        assert_eq!(haircut(&p, 1_000, 500), 500);
     }
 
     #[test]
@@ -562,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn dust_under_the_tolerance_only_reduces_fee_owed() {
+    fn dust_under_the_tolerance_takes_the_fee_then_books_the_rest() {
         let mut p = pool(1_000_000, 1_000, 1_000);
         p.loss_tolerance_bps = 10;
         p.venue_value = 10_000;
@@ -571,13 +610,56 @@ mod tests {
         let out = apply_sync(&mut p, 9_980, 6).unwrap();
         assert_eq!((out.ran, out.gain, out.loss), (true, 0, 20));
         assert_eq!((p.fee_owed, p.venue_value), (10, 9_980));
-        // 10 bps of 9,980 is 9: a fall of 8 is dust, floored at a fee of zero.
+        // 10 bps of 9,980 is 9: a fall of 8 is dust, the fee bears 8 of it.
         apply_sync(&mut p, 9_972, 7).unwrap();
         assert_eq!(p.fee_owed, 2);
+        // The next 7 are dust too. The fee has 2, so 5 is booked.
         apply_sync(&mut p, 9_965, 8).unwrap();
-        assert_eq!(p.fee_owed, 0);
-        assert!(!p.impaired && p.deficit == 0);
+        assert_eq!((p.fee_owed, p.deficit, p.impaired), (0, 5, false));
         assert_eq!((p.yield_owed, p.prize_owed, p.yield_index), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_hundred_sub_tolerance_drops_sum_to_the_booked_deficit() {
+        let mut p = pool(1_000_000_000_000, 1_000, 1_000);
+        p.loss_tolerance_bps = 1;
+        p.venue_value = 1_000_000_000_000;
+        p.last_sync_at = 5;
+        // 0.9 bps of the value each sync, under the 1 bps tolerance.
+        let mut booked = 0u64;
+        for i in 0..100 {
+            let drop = p.venue_value / 10_000 * 9 / 10;
+            let value = p.venue_value - drop;
+            let out = apply_sync(&mut p, value, 6 + i).unwrap();
+            booked += drop;
+            assert!(!p.impaired);
+            assert_eq!(out.deficit_added, drop);
+        }
+        assert_eq!((p.deficit, p.impaired), (booked, false));
+        assert_eq!(p.venue_value + p.deficit, 1_000_000_000_000);
+    }
+
+    #[test]
+    fn a_drop_over_the_tolerance_impairs_and_books_the_same_way() {
+        let mut p = pool(1_000_000, 1_000, 1_000);
+        p.loss_tolerance_bps = 1;
+        p.venue_value = 1_000_000;
+        p.last_sync_at = 5;
+        // 101 is over 1 bps of 1,000,000, and nothing absorbs it first.
+        apply_sync(&mut p, 999_899, 6).unwrap();
+        assert_eq!((p.deficit, p.impaired), (101, true));
+    }
+
+    #[test]
+    fn repaying_a_sub_tolerance_deficit_clears_nothing() {
+        let mut p = pool(1_000_000, 0, 0);
+        p.loss_tolerance_bps = 1;
+        p.venue_value = 1_000_000;
+        p.last_sync_at = 5;
+        apply_sync(&mut p, 999_950, 6).unwrap();
+        assert_eq!(p.deficit, 50);
+        let out = apply_sync(&mut p, 1_000_000, 7).unwrap();
+        assert_eq!((out.deficit_repaid, out.cleared, p.deficit, p.impaired), (50, false, 0, false));
     }
 
     #[test]

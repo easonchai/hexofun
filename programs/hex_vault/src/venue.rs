@@ -155,7 +155,9 @@ pub fn sync<'info>(
             deficit_repaid: outcome.deficit_repaid,
         });
     }
-    if outcome.deficit_added > 0 {
+    // Dust under the tolerance books a deficit without impairing the pool,
+    // and is no ImpairedSet.
+    if outcome.deficit_added > 0 && pool.impaired {
         emit!(ImpairedSet {
             pool: pool.key(),
             loss: outcome.loss,

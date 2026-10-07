@@ -32,7 +32,7 @@ use crate::events::{
     DeficitCovered, DeployPauseSet, ImpairedCleared, VenueParamsSet,
 };
 use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
-use crate::sync::{haircut, realise_loss, settle, settle_before_growth};
+use crate::sync::{absorb_dust, haircut, realise_loss, settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
@@ -698,7 +698,7 @@ pub fn request_withdraw<'info>(
             // What the value fell by beyond what arrived is rounding dust,
             // charged to the fee owed and floored at zero, as in `recall`.
             a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
-            a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(received));
+            absorb_dust(&mut a.pool, fall.saturating_sub(received))?;
             redeemed = gap;
         }
 
@@ -1026,7 +1026,7 @@ pub fn deploy_to_venue<'info>(
         .venue_value
         .checked_add(rise)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    pool.fee_owed = pool.fee_owed.saturating_sub(dust);
+    absorb_dust(pool, dust)?;
 
     emit!(VenueDeployed {
         pool: pool.key(),
@@ -1118,7 +1118,7 @@ pub fn recall<'info>(ctx: Context<'info, Recall<'info>>, amount: u64) -> Result<
     // fee owed, floored at zero.
     let pool = &mut a.pool;
     pool.venue_value = pool.venue_value.saturating_sub(fall);
-    pool.fee_owed = pool.fee_owed.saturating_sub(fall.saturating_sub(received));
+    absorb_dust(pool, fall.saturating_sub(received))?;
 
     emit!(VenueRecalled {
         pool: pool.key(),
@@ -1185,8 +1185,10 @@ pub fn harvest<'info>(ctx: Context<'info, Harvest<'info>>) -> Result<()> {
 
     // The dust the redeem cost is the fee's to bear: pay that much less, and
     // the vault keeps exactly what the venue lost beyond the redeem.
-    let fee_paid = fee_owed.saturating_sub(dust);
+    // Dust past the fee owed is booked as deficit.
     let pool = &mut a.pool;
+    absorb_dust(pool, dust)?;
+    let fee_paid = pool.fee_owed;
     let pool_id_bytes = pool.pool_id.to_le_bytes();
     let pool_bump = [pool.bump];
     let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];

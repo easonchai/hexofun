@@ -60,7 +60,10 @@ Run these in this order, and only after every winner who can still be paid has b
 2. **`shutdown --confirm <pool-id>`.**
 3. **Recall the venue position.** After shutdown `recall` has no limit and is permissionless; the
    operator sends it, and anyone can. Anything still deployed is money `emergency-crank` and
-   `sweep-house` cannot reach, so recall it first.
+   `sweep-house` cannot reach, so recall it first. The venue keeps a little of every move
+   (a kVault keeps about 0.001 USDC per withdraw). The program books that as deficit and
+   `shutdown` makes exits pro rata, so the last depositor is paid a hair under par and no
+   principal-vault top-up is needed.
 4. **`emergency-crank [--batch N]`.** Permissionless: lists every Player (House excluded) with
    `principal > 0` (a queued withdrawal is inside Principal) read straight off the chain (not the indexer, so it works
    even if Postgres is behind), creates each owner's associated token account if missing, and

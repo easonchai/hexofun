@@ -88,6 +88,8 @@ _Avoid_: Sync (which moves no USDC), claim, sweep, funding the jackpot
 
 **Impaired**:
 A pool state set when the venue position's value falls between two Syncs by more than the loss tolerance, 1 bps by default. The prize share owed absorbs the loss first, then the Yield fee owed; what remains is a recorded deficit. While Impaired, Harvest, deploy and deposits are refused and every withdrawal pays a Haircut. A queued withdrawal and an Emergency withdraw then pay only with the owner's signature, so leaving at the Haircut is the depositor's choice (ADR 0021). `request_withdraw`, `recall` and `cover_deficit` still work. It clears when later gains or the permissionless `cover_deficit` bring the deficit to zero. The Yield index does not fall.
+
+`loss_tolerance_bps` (1 by default) only decides whether a single Sync flips Impaired. A fall under it leaves the pool unimpaired, but the yield fee owed takes it and the shortfall is still booked as deficit, so small falls add up on the books. The same goes for the rounding dust a venue move costs at deploy, recall, harvest, drain and refund. After `shutdown` every exit pays the Haircut even if the pool is not Impaired, so booked dust is shared pro rata and needs no owner signature.
 _Avoid_: Paused (a separate switch), insolvent, frozen, default
 
 **Haircut**:
