@@ -96,7 +96,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   private closingRounds = new Map<bigint, number>();
   /** Epoch id to the owner whose leaf held its target. A target never moves
    *  once drawn, so a retried payout does not re-read the whole tree. */
-  private winners = new Map<bigint, string>();
+  private winners = new Map<bigint, { owner: string; isHouse: boolean }>();
   /** Ticket 06: withdrawal-cranking state across ticks (see `WithdrawState`). */
   private lastWithdrawState: WithdrawState | null = null;
   /** Ticket 12: expected-error repeat counts across ticks, by `action:target`. */
@@ -590,7 +590,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    * in `winners`. Add a `getProgramAccounts` memcmp filter on `leaf_index` if
    * it ever grows.
    */
-  private async winner(pool: PoolState, epoch: EpochState): Promise<string | null> {
+  private async winner(
+    pool: PoolState,
+    epoch: EpochState,
+  ): Promise<{ owner: string; isHouse: boolean } | null> {
     const cached = this.winners.get(epoch.epochId);
     if (cached !== undefined) return cached;
 
@@ -602,6 +605,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     interface DecodedPlayer {
       owner: PublicKey;
       leafIndex: number;
+      isHouse: boolean;
     }
     // SAFETY: `program.account` is keyed by plain strings in `Program<Idl>`
     // (no generated per-account types), same reason `instructions.ts`'s
@@ -618,10 +622,12 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     );
     if (!hit) return null;
 
-    const owner = hit.account.owner.toBase58();
-    this.winners.set(epoch.epochId, owner);
+    // The House Player's `owner` is the operator key, not `pool.house` (its
+    // PDA), so the flag is the only reliable test (mainnet-readiness-fixes 09).
+    const winner = { owner: hit.account.owner.toBase58(), isHouse: hit.account.isHouse };
+    this.winners.set(epoch.epochId, winner);
     for (const id of [...this.winners.keys()].slice(0, -WINNER_MEMORY)) this.winners.delete(id);
-    return owner;
+    return winner;
   }
 
   /**

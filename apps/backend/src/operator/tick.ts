@@ -277,11 +277,11 @@ export interface TickContext {
    *  `roundsToClose` results until the indexer mirrors `RoundClosed`. */
   forgetRound(id: bigint): void;
   /**
-   * Owner of the Player whose leaf in the Weight tree holds the drawn epoch's
+   * The Player (owner and House flag) whose leaf in the Weight tree holds the drawn epoch's
    * target, read from the tree and the Player accounts on chain (ticket 13: no
    * Read model table holds Weight ranges any more). Null when none does yet.
    */
-  winner(epoch: EpochState): Promise<string | null>;
+  winner(epoch: EpochState): Promise<{ owner: string; isHouse: boolean } | null>;
   send(instructions: TransactionInstruction[]): Promise<string>;
   /** Something an operator should read but that is not a failed tick: so far
    *  only a payout that would not land, which step 6 retries. */
@@ -698,8 +698,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // drawn-unpaid condition has had `DRAWN_UNPAID_ALERT_SECONDS` to page
   // someone, regardless of how short `payout_timeout` is set.
   if (previousEpoch?.status === EPOCH_STATUS.DRAWN) {
-    const winner = await ctx.winner(previousEpoch);
-    const isHouse = winner !== null && winner === pool.house.toBase58();
+    const hit = await ctx.winner(previousEpoch);
+    const winner = hit?.owner ?? null;
+    const isHouse = hit?.isHouse ?? false;
     const alertHasFired = now > previousEpoch.drawnAt + DRAWN_UNPAID_ALERT_SECONDS;
     const timedOut =
       now > previousEpoch.drawnAt + pool.payoutTimeout && (isHouse || alertHasFired);

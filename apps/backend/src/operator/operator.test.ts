@@ -877,7 +877,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 10n,
       }),
-      winner: async (drawn) => (drawn.epochId === 1n && drawn.target === 42n ? winner : null),
+      winner: async (drawn) => (drawn.epochId === 1n && drawn.target === 42n ? { owner: winner, isHouse: false } : null),
     });
     // No winner token account any more (ticket 02): the prize goes into
     // principal_vault instead, so payout is the whole transaction.
@@ -894,7 +894,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 10n,
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
     });
     expect(result.labels).toEqual(["payout"]);
   });
@@ -908,7 +908,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 60n,
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) {
           throw new Error("AccountFrozen");
@@ -937,7 +937,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 60n,
       }),
-      winner: async () => Keypair.generate().publicKey.toBase58(),
+      winner: async () => ({ owner: Keypair.generate().publicKey.toBase58(), isHouse: false }),
       send: async () => {
         throw new Error("blockhash expired");
       },
@@ -972,7 +972,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n),
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) {
           throw new Error("AccountFrozen");
@@ -1000,7 +1000,7 @@ describe("runTick", () => {
         // Past payoutTimeout, but well inside DRAWN_UNPAID_ALERT_SECONDS.
         drawnAt: NOW - 31n,
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) throw new Error("AccountFrozen");
         throw new Error("must not roll over yet");
@@ -1021,7 +1021,8 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 31n,
       }),
-      winner: async () => housePool.house.toBase58(),
+      // The House Player's owner is the operator key, never `pool.house`.
+      winner: async () => ({ owner: Keypair.generate().publicKey.toBase58(), isHouse: true }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) throw new Error("AccountFrozen");
         sent.push(ixs);
