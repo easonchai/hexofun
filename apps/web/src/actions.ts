@@ -29,12 +29,12 @@ import {
   bn,
   jackpotVaultAddress,
   method,
-  PROGRAM_ID,
   playerAddress,
   positionAddress,
   principalVaultAddress,
   roundAddress,
   TOKEN_PROGRAM,
+  VENUE_KIND,
   type HexVaultProgram,
   type TxBuilder,
 } from "./chain.js";
@@ -333,16 +333,21 @@ const venueAccounts = (pool: PoolLike) => ({
 });
 
 /**
- * What a klend redeem needs beyond the pinned four, in the order klend.rs
- * reads them: the lending market authority, the reserve's liquidity supply
- * vault, the cToken mint and the instructions sysvar. klend derives the first
- * three from the market and the liquidity mint, so no RPC read is needed; the
- * program checks each against the reserve itself. The `test-venue` stub pins
- * this program as its own klend and ignores them (apps/backend operator/
- * instructions.ts `venueRemaining` does the same).
+ * What the venue backing needs beyond the pinned four, chosen by the pool's
+ * `venueKind` like the operator's `venueRemaining`, not by which program is
+ * pinned. For klend, in the order klend.rs reads them: the lending market
+ * authority, the reserve's liquidity supply vault, the cToken mint and the
+ * instructions sysvar. klend derives the first three from the market and the
+ * liquidity mint, so no RPC read is needed; the program checks each against
+ * the reserve itself. The `test-venue` stub takes none (apps/backend
+ * operator/instructions.ts `venueRemaining` does the same). A kind this
+ * build does not know throws rather than guess an account list.
  */
-export function klendRemaining(pool: PoolLike, programId: PublicKey = PROGRAM_ID) {
-  if (pool.klendProgram.equals(programId)) return [];
+export function klendRemaining(pool: PoolLike) {
+  if (pool.venueKind === VENUE_KIND.stub) return [];
+  if (pool.venueKind !== VENUE_KIND.klend) {
+    throw new Error(`unsupported venue kind ${pool.venueKind}`);
+  }
   const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
     PublicKey.findProgramAddressSync(
       seeds.map((seed) => (typeof seed === "string" ? Buffer.from(seed) : seed.toBuffer())),

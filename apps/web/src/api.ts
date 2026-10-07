@@ -379,6 +379,19 @@ export interface OpsSummaryDto extends StatusDto {
     minVenueMove: string;
     lossToleranceBps: number;
   } | null;
+  /** The venue kind the pool is on now (`VENUE_KIND`); null before it is indexed. */
+  venueKind: number | null;
+  /** The open venue proposal; null when none is open. `proposedAt` and
+   *  `unlocksAt` are chain unix seconds as strings. */
+  venueProposal: {
+    venueKind: number;
+    klendProgram: string;
+    klendMarket: string;
+    klendReserve: string;
+    klendCtoken: string;
+    proposedAt: string;
+    unlocksAt: string;
+  } | null;
   /** klend's supply rate in bps; null when the reserve cannot be read. */
   supplyRateBps: number | null;
   harvestedToTreasury: string;

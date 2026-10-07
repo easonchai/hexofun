@@ -55,13 +55,19 @@ export function Switch({ label, on }: { label: string; on: boolean | null }) {
   );
 }
 
-/** The line that sits under every on-chain figure: age of the pool's last Sync. */
-export function SyncLine({ lastSyncAt }: { lastSyncAt: string }) {
+/** The viewer's clock in unix seconds, refreshed every second. */
+export function useNow(): number {
   const [now, setNow] = useState(() => Date.now() / 1000);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now() / 1000), 1000);
     return () => clearInterval(timer);
   }, []);
+  return now;
+}
+
+/** The line that sits under every on-chain figure: age of the pool's last Sync. */
+export function SyncLine({ lastSyncAt }: { lastSyncAt: string }) {
+  const now = useNow();
   return (
     <p className="ops-sync" data-testid="sync-line">
       {syncLine(lastSyncAt, now)}

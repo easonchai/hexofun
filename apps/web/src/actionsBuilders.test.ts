@@ -24,7 +24,7 @@ import {
   settlePosition,
   shutdownWithdraw,
 } from "./actions.js";
-import { PROGRAM_ID } from "./chain.js";
+import { PROGRAM_ID, VENUE_KIND } from "./chain.js";
 import type { HexVaultProgram } from "./chain.js";
 import { idl } from "./idl.js";
 import { poolFromDto, type PoolLike } from "./read.js";
@@ -48,6 +48,7 @@ const pool: PoolLike = {
   klendMarket: key(),
   klendReserve: key(),
   klendCtoken: key(),
+  venueKind: VENUE_KIND.klend,
 };
 
 /** Runs `action` against a real Program and returns the program's instructions it sent. */
@@ -134,8 +135,13 @@ describe("player instructions against the IDL", () => {
 });
 
 describe("klendRemaining", () => {
-  it("is empty for the test-venue stub, which pins this program as its own klend", () => {
-    expect(klendRemaining({ ...pool, klendProgram: PROGRAM_ID })).toEqual([]);
+  it("is empty for the test-venue stub kind, whichever program is pinned", () => {
+    expect(klendRemaining({ ...pool, venueKind: VENUE_KIND.stub })).toEqual([]);
+  });
+
+  it("goes by the kind, not the pinned program, and refuses a kind it does not know", () => {
+    expect(klendRemaining({ ...pool, klendProgram: PROGRAM_ID })).toHaveLength(4);
+    expect(() => klendRemaining({ ...pool, venueKind: 2 })).toThrow(/unsupported venue kind 2/);
   });
 
   it("derives the market authority, liquidity vault and cToken mint, then the sysvar", () => {
@@ -172,6 +178,7 @@ describe("poolFromDto", () => {
     klendMarket: pool.klendMarket.toBase58(),
     klendReserve: pool.klendReserve.toBase58(),
     klendCtoken: pool.klendCtoken.toBase58(),
+    venueKind: 0,
   } as unknown as PoolDto & { closeBuffer: string; minDeposit: string };
 
   it("carries the tree and klend addresses through", () => {

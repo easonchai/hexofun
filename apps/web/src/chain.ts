@@ -215,6 +215,15 @@ export const positionAddress = (
 export const principalVaultAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("principal"), pool.toBuffer()]);
 
+/** `Pool::venue_kind` (programs/hex_vault/src/constants.rs `venue_kind`): which
+ *  backing the four pinned venue keys point at. 2 is reserved for kVault. */
+export const VENUE_KIND = { klend: 0, stub: 1 } as const;
+
+/** The pool's open venue proposal; the account exists only while one is open,
+ *  and `deploy_to_venue` refuses while it does. */
+export const venueProposalAddress = (pool: PublicKey): PublicKey =>
+  pda([Buffer.from("venue_proposal"), pool.toBuffer()]);
+
 export const jackpotVaultAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("jackpot"), pool.toBuffer()]);
 

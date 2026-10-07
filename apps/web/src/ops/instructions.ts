@@ -28,6 +28,8 @@ import {
   poolAddress,
   principalVaultAddress,
   roundAddress,
+  venueProposalAddress,
+  VENUE_KIND,
   type HexVaultProgram,
 } from "../chain.js";
 import { parseAtomic } from "../lib/money.js";
@@ -43,6 +45,8 @@ export interface VenuePool {
   klendMarket: PublicKey;
   klendReserve: PublicKey;
   klendCtoken: PublicKey;
+  /** Which backing the four pins point at (`VENUE_KIND`). */
+  venueKind: number;
 }
 
 /** A Round or epoch's randomness request seed, read off its account. */
@@ -107,11 +111,15 @@ const venue = (pool: VenuePool) => ({
 /**
  * Beyond the pinned four a venue deposit or redeem needs the market authority,
  * the reserve's liquidity supply, the cToken mint and the instructions
- * sysvar. The `test-venue` stub pins this program as its own klend and ignores
- * them (backend `venueRemaining`).
+ * sysvar. Chosen by the pool's `venueKind`, like backend `venueRemaining`: the
+ * `test-venue` stub takes none, and a kind this build does not know throws
+ * rather than guess an account list.
  */
-function venueRemaining(program: HexVaultProgram, pool: VenuePool): AccountMeta[] {
-  if (pool.klendProgram.equals(program.programId)) return [];
+function venueRemaining(pool: VenuePool): AccountMeta[] {
+  if (pool.venueKind === VENUE_KIND.stub) return [];
+  if (pool.venueKind !== VENUE_KIND.klend) {
+    throw new Error(`unsupported venue kind ${pool.venueKind}`);
+  }
   const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
     PublicKey.findProgramAddressSync(
       seeds.map((s) => (typeof s === "string" ? Buffer.from(s) : s.toBuffer())),
@@ -139,10 +147,17 @@ const principalAccounts = (pool: VenuePool) => ({
 });
 
 export const deployToVenue = (program: HexVaultProgram, pool: VenuePool, amount: bigint) =>
-  build(program, "deployToVenue", principalAccounts(pool), [bn(amount)], venueRemaining(program, pool));
+  build(
+    program,
+    "deployToVenue",
+    // Usually absent on chain; the program refuses a deploy while it exists.
+    { ...principalAccounts(pool), venueProposal: venueProposalAddress(pool.address) },
+    [bn(amount)],
+    venueRemaining(pool),
+  );
 
 export const recall = (program: HexVaultProgram, pool: VenuePool, amount: bigint) =>
-  build(program, "recall", principalAccounts(pool), [bn(amount)], venueRemaining(program, pool));
+  build(program, "recall", principalAccounts(pool), [bn(amount)], venueRemaining(pool));
 
 export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
   build(
@@ -154,7 +169,7 @@ export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
       treasury: pool.treasury,
     },
     [],
-    venueRemaining(program, pool),
+    venueRemaining(pool),
   );
 
 /** Pays `amount` from the payer's own USDC account; the program caps it at the deficit. */
@@ -173,7 +188,7 @@ export const coverDeficit = (
       ...principalAccounts(pool),
     },
     [bn(amount)],
-    venueRemaining(program, pool),
+    venueRemaining(pool),
   );
 
 /**
@@ -238,6 +253,7 @@ export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
     klendMarket: asKey(a.klendMarket),
     klendReserve: asKey(a.klendReserve),
     klendCtoken: asKey(a.klendCtoken),
+    venueKind: Number(a.venueKind),
   };
 }
 

@@ -9,6 +9,8 @@ import {
   PROGRAM_ID,
   roundAddress,
   epochAddress,
+  venueProposalAddress,
+  VENUE_KIND,
   type HexVaultProgram,
 } from "../chain.js";
 import { idl } from "../idl.js";
@@ -39,6 +41,7 @@ const pool: VenuePool = {
   klendMarket: key(),
   klendReserve: key(),
   klendCtoken: key(),
+  venueKind: VENUE_KIND.klend,
 };
 const caller = key();
 const idlAccounts = (name: string) => idl.instructions.find((ix) => ix.name === name)!.accounts.length;
@@ -92,9 +95,23 @@ describe("venue crank account lists", () => {
     );
   });
 
-  it("a pool pinned to this program as its own klend gets no extras", async () => {
-    const stub = { ...pool, klendProgram: PROGRAM_ID };
-    expect((await harvest(program, stub)).keys).toHaveLength(idlAccounts("harvest"));
+  it("the stub kind gets no extras, whichever program is pinned", async () => {
+    for (const klendProgram of [PROGRAM_ID, pool.klendProgram]) {
+      const stub = { ...pool, klendProgram, venueKind: VENUE_KIND.stub };
+      expect((await harvest(program, stub)).keys).toHaveLength(idlAccounts("harvest"));
+    }
+  });
+
+  it("the klend kind gets the extras even when this program is pinned, and an unknown kind throws", async () => {
+    const klend = { ...pool, klendProgram: PROGRAM_ID };
+    expect((await harvest(program, klend)).keys).toHaveLength(idlAccounts("harvest") + KLEND_EXTRAS);
+    expect(() => harvest(program, { ...pool, venueKind: 2 })).toThrow(/unsupported venue kind 2/);
+  });
+
+  it("deploy_to_venue names the venue proposal PDA the program refuses on", async () => {
+    expect(keysOf(await deployToVenue(program, pool, 5n))).toContain(
+      venueProposalAddress(pool.address).toBase58(),
+    );
   });
 
   it("cover_deficit pays from the wallet's USDC account", async () => {

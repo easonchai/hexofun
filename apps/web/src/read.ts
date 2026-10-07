@@ -43,6 +43,8 @@ export interface PoolLike {
   klendMarket: PublicKey;
   klendReserve: PublicKey;
   klendCtoken: PublicKey;
+  /** Which backing the four pins point at (`VENUE_KIND`). */
+  venueKind: number;
 }
 
 /**
@@ -129,6 +131,7 @@ export function poolFromDto(
       klendMarket: new PublicKey(dto.klendMarket),
       klendReserve: new PublicKey(dto.klendReserve),
       klendCtoken: new PublicKey(dto.klendCtoken),
+      venueKind: dto.venueKind,
     },
   };
 }
