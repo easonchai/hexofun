@@ -22,11 +22,11 @@ import {
   fetchPositionCounts,
   type CurrentEpochDto,
   type EpochDto,
-  type EventDto,
   type PlayerDto,
 } from "../api.js";
-import { CLUSTER, GAME_GATED, JACKPOT_GATED, eventKey } from "../chain.js";
+import { CLUSTER, GAME_GATED, JACKPOT_GATED } from "../chain.js";
 import { dhmsParts } from "../engine.js";
+import { dollars, toHistoryRows, type HistoryRow } from "../historyRows.js";
 import { launchCountdown, launchCountdownLabel, prizeCardState } from "../launch.js";
 import { formatAddress, formatMoney2 } from "../lib/money.js";
 import { useApiPoll } from "../useApiPoll.js";
@@ -40,10 +40,6 @@ const txExplorerUrl = (signature: string) =>
   `https://explorer.solana.com/tx/${signature}${
     CLUSTER === "devnet" ? "?cluster=devnet" : ""
   }`;
-
-/** Atomic (6dp) string → "$2,423.55". */
-const dollars = (atomic: string) =>
-  `$${formatMoney2(BigInt(atomic.replace(/[^0-9]/g, "") || "0"), DECIMALS)}`;
 
 /** The 13px "open in new tab" glyph after each tx hash in the Figma rows. */
 const NewTab = () => (
@@ -103,70 +99,6 @@ export function shortDate(unixSeconds: string | null): string {
   });
 }
 
-interface HistoryRow {
-  key: string;
-  label: string;
-  signature: string;
-  amount: string;
-  blockTime: string | null;
-  /** Prize rows read lime across the row; deposits and withdrawals do not. */
-  prize: boolean;
-}
-
-/**
- * The event kinds that move a Player's USDC. Everything else the
- * feed carries (positions, rounds, rollovers) belongs to the game, not the
- * money path, so it is dropped rather than shown with a blank amount.
- */
-function toHistoryRow(row: EventDto): HistoryRow | null {
-  const data = row.data ?? {};
-  const amount = dollars(String(data.amount ?? "0"));
-  const key = `${row.slot}-${row.signature}-${row.index}`;
-  switch (eventKey(row.name)) {
-    case "deposited":
-      return {
-        key,
-        label: "Deposit",
-        signature: row.signature,
-        amount: `+ ${amount}`,
-        blockTime: row.blockTime,
-        prize: false,
-      };
-    case "withdrawn":
-      return {
-        key,
-        label: "Withdraw",
-        signature: row.signature,
-        amount: `- ${amount}`,
-        blockTime: row.blockTime,
-        prize: false,
-      };
-    // A request pays its pending-deposit part at once (ADR 0020); the queued
-    // part shows as Withdraw when `process_withdraw` moves it.
-    case "withdrawRequested":
-      if (BigInt(String(data.paid ?? "0")) === 0n) return null;
-      return {
-        key,
-        label: "Refund",
-        signature: row.signature,
-        amount: `- ${dollars(String(data.paid))}`,
-        blockTime: row.blockTime,
-        prize: false,
-      };
-    case "jackpotPaid":
-      return {
-        key,
-        label: "Prize Win",
-        signature: row.signature,
-        amount,
-        blockTime: row.blockTime,
-        prize: true,
-      };
-    default:
-      return null;
-  }
-}
-
 export function Dashboard(props: DashboardScreenProps) {
   const {
     owner,
@@ -196,7 +128,7 @@ export function Dashboard(props: DashboardScreenProps) {
     (signal: AbortSignal) =>
       ownerBase58
         ? // Over-fetch: the feed carries game events too, and only the
-          // money ones survive toHistoryRow.
+          // money and queue ones survive toHistoryRows.
           fetchFeed(apiBaseUrl(), historyLimit * 4, signal, ownerBase58)
         : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
     [ownerBase58, historyLimit],
@@ -216,8 +148,7 @@ export function Dashboard(props: DashboardScreenProps) {
   const historyRows = useMemo(() => {
     const out: HistoryRow[] = [];
     for (const row of history.data ?? []) {
-      const mapped = toHistoryRow(row);
-      if (mapped) out.push(mapped);
+      out.push(...toHistoryRows(row));
     }
     return out.slice(0, historyLimit);
   }, [history.data, historyLimit]);

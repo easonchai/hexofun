@@ -58,6 +58,14 @@ const FEED_NAMES = [
   "EpochRolledOver",
 ] as const;
 
+/**
+ * What a wallet's own history adds to `FEED_NAMES`: its withdraw requests
+ * (the refunded and queued parts) and cancels. The public feed leaves them
+ * out, since `activityRows.ts` renders neither and they would take rows under
+ * the limit.
+ */
+const OWNER_FEED_NAMES = [...FEED_NAMES, "WithdrawRequested", "WithdrawCancelled"] as const;
+
 /** How long a `getSlot` probe answers for. `rpcOk` only needs to be roughly right. */
 const RPC_PROBE_TTL_MS = 300_000;
 
@@ -703,7 +711,7 @@ export class ApiService {
       SELECT slot, signature, "index", name, data, "blockTime"
       FROM "Event"
       WHERE "poolAddress" = ${this.poolAddress}
-        AND (name IN (${Prisma.join(FEED_NAMES)})
+        AND (name IN (${Prisma.join(owner === undefined ? FEED_NAMES : OWNER_FEED_NAMES)})
          OR (name = 'PositionSettled'
              AND (data->>'reward' ~ '^[1-9][0-9]*$' OR data->>'refund' ~ '^[1-9][0-9]*$')))
       ${ownerFilter}

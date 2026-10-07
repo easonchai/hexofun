@@ -977,6 +977,46 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(bob.body).toEqual([]);
   });
 
+  it("GET /feed?owner adds withdraw requests and cancels, which the public feed leaves out", async () => {
+    const signatures = ["sigWdReq", "sigWdCancel"];
+    await prisma.event.createMany({
+      data: [
+        {
+          slot: 40n,
+          signature: signatures[0] as string,
+          index: 0,
+          poolAddress: POOL_ADDRESS,
+          name: "WithdrawRequested",
+          data: { owner: ALICE, amount: "6000000", refunded: "5301000", paid: "5301000", pending: "699000" },
+          blockTime: NOW - 10n,
+        },
+        {
+          slot: 41n,
+          signature: signatures[1] as string,
+          index: 0,
+          poolAddress: POOL_ADDRESS,
+          name: "WithdrawCancelled",
+          data: { owner: ALICE, amount: "699000", pendingEpoch: "7" },
+          blockTime: NOW - 5n,
+        },
+      ],
+    });
+    try {
+      const mine = await http.get(`/feed?owner=${ALICE}`).expect(200);
+      expect(mine.body.slice(0, 2).map((event: { name: string }) => event.name)).toEqual([
+        "WithdrawCancelled",
+        "WithdrawRequested",
+      ]);
+      const names = (await http.get("/feed").expect(200)).body.map(
+        (event: { name: string }) => event.name,
+      );
+      expect(names).not.toContain("WithdrawRequested");
+      expect(names).not.toContain("WithdrawCancelled");
+    } finally {
+      await prisma.event.deleteMany({ where: { signature: { in: signatures } } });
+    }
+  });
+
   it("GET /positions/counts counts from the PositionBought event log, including rounds Position has already dropped", async () => {
     // Runs after the /feed tests above on purpose: PositionBought is a
     // FEED_NAMES event, so seeding it earlier would perturb their exact
