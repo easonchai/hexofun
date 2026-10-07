@@ -17,6 +17,30 @@ kVault backing, the Ops console and `cancel_withdraw`. Sources: `tests/run-local
 
 ## Run log
 
+### 2026-10-07 evening, `2cd5833` on `feature/mainnet-contracts`, Tier 3 by hand
+
+Fresh `surf.sh up`, re-running the fork blocks of fork-run-fixes 01 to 06.
+
+| Case | Result |
+| --- | --- |
+| A2 to A4 (01) | `/players` and `/leaderboard` 200 before `start-jackpot` |
+| B (03) | settled yield raises Principal only, Tickets from the next epoch |
+| B12 (04) | CLI reports what it sent |
+| C13 to C17 (05) | feed and Dashboard list the refunds, requests and cancels |
+| E28 (06) | open jackpot 0 between `request_draw` and `payout` |
+| 02 | passed on kVault DWSX: harvest lifted epoch 3's jackpot 1 to 7,954 micro |
+| I53 | passed: chain time, Principals and venue value unchanged across Ctrl-C and `up --resume`; indexer reconnected in 20 s, operator resumed rounds |
+
+- The klend reserve paid about 4.4%, under the 488 bps base rate, so `prizeOwed` stayed 0. The pool
+  moved to kVault `DWSXb18x…KaP` (propose, warp 48 h, drain, migrate, deploy) to test 02.
+- First klend deploy panicked at `lending_checks.rs:462`, an incoherent fork snapshot.
+  `surfnet_resetAccount` on the reserve and its two neighbours, one `getMultipleAccounts` over all
+  three, and a backend restart to clear the 600 s venue cool-down fixed it.
+- New tickets: 08 (Earnings shows a fresh deposit as yield), 09 (drop the withdraw sheet's Pending
+  row), 10 (web player actions fail on a kVault pool: deposit 3005 `AccountNotEnoughKeys`).
+- Epoch 3 rolled over (7,954 < `min_jackpot`), as designed.
+- Not run yet: I54 shutdown, the four fork suites in one `run-fork.sh` (07).
+
 ### 2026-10-07, `e5a34cc` on `feature/mainnet-contracts`
 
 After the fork-run-fixes (`docs/plan/fork-run-fixes`, tickets 01 to 07, commits `86fcdc5..477cebb`)
