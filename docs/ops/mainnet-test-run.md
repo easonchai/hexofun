@@ -39,7 +39,29 @@ Fresh `surf.sh up`, re-running the fork blocks of fork-run-fixes 01 to 06.
 - New tickets: 08 (Earnings shows a fresh deposit as yield), 09 (drop the withdraw sheet's Pending
   row), 10 (web player actions fail on a kVault pool: deposit 3005 `AccountNotEnoughKeys`).
 - Epoch 3 rolled over (7,954 < `min_jackpot`), as designed.
-- Not run yet: I54 shutdown, the four fork suites in one `run-fork.sh` (07).
+- I54 (2026-10-08) failed, two bugs. `shutdown --confirm 1` landed. The operator then sent no
+  recall, so the 1,282.95 USDC kVault position stayed out of reach (ticket 11: `decideVenue`
+  ignores shutdown, and `funds.md` says the operator recalls). `emergency-crank` failed with 3005
+  `AccountNotEnoughKeys`, because it sends no kVault remaining accounts (added to ticket 10).
+  `sweep-house` and the `cancel_withdraw` sub-check were not run.
+- I54 retest (2026-10-08), same shut-down pool, with 11 and 10's CLI part built. The operator
+  recalled 1,282.945366 and then the 0.003702 gain its sync had booked; venue value 0.
+  `emergency-crank` paid the admin 1,050.333175 and stopped on burner A with `InsufficientVault`,
+  337 micro-USDC short (ticket 12: venue rounding dust beyond `fee_owed` is charged to no one).
+  After a 0.001 USDC top-up to the principal vault, it paid burner A 375.149537. `sweep-house`
+  moved the jackpot vault to treasury. Wallets rose by principal plus yield: burner A
+  4,625 → 5,000.149537, admin 998,950 → 1,000,000.332175 (less the 0.001 top-up). The vault keeps
+  663 micro-USDC. The `cancel_withdraw` sub-check was not run.
+
+### 2026-10-08, Tier 3 scripted, all four suites in one `run-fork.sh`
+
+Through the relay (`HEXVAULT_FORK_DATASOURCE=http://127.0.0.1:9402`). 29 of 29 passed in 223 s.
+
+The first try failed 11 tests (timeouts, and `Cannot travel to past timestamp`). `klend.fork.ts`
+and `kvault.pool.fork.ts` read time with `getBlockTime`, which Surfpool leaves at the pre-warp
+time, so after `venue-switch.fork.ts` moved the clock about 4 days their waits never ended and
+their warps aimed at the past. `onChainNowSeconds` in `tests/helpers/hx.ts` now reads the Clock
+sysvar, and both suites use it.
 
 ### 2026-10-07, `e5a34cc` on `feature/mainnet-contracts`
 
