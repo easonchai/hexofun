@@ -10,6 +10,7 @@
 // attempt and never a wrong transfer.
 import { PublicKey } from "@solana/web3.js";
 
+import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import type { EpochState, PoolState } from "./chain-state";
 
 /** Harvest runs inside this many seconds before `epoch_end`, so the prize
@@ -22,11 +23,22 @@ export const VENUE_RETRY_SECONDS = 600n;
 
 const BPS = 10_000n;
 
-export type VenueKind = "deploy" | "recall" | "harvest";
+/** The open venue proposal, as far as the tick needs it. Null when none. */
+export interface VenueProposalState {
+  readonly proposedAt: bigint;
+}
+
+/** Chain time the lock ends. The tick starts draining only then, so a
+ *  proposal does not cost the old venue's yield for two days. */
+export const venueUnlocksAt = (proposal: VenueProposalState): bigint =>
+  proposal.proposedAt + VENUE_LOCK_SECONDS;
+
+export type VenueKind = "deploy" | "recall" | "harvest" | "drain";
 
 export type VenueCrank =
   | { readonly kind: "deploy"; readonly amount: bigint }
   | { readonly kind: "recall"; readonly amount: bigint }
+  | { readonly kind: "drain"; readonly amount: bigint }
   | { readonly kind: "harvest" };
 
 /** What the cranks remember between ticks. The service keeps it in memory; a
@@ -136,6 +148,27 @@ export function recallAmount(pool: PoolState, vaultBalance: bigint): bigint | nu
   return short > 0n && short <= pool.venueValue ? short : null;
 }
 
+/**
+ * The next drain step while a proposal stands and its lock has elapsed, or
+ * null. Dust (at most `min_venue_move`) stays: the migration accepts it.
+ * `available` is the venue's free liquidity, null when it cannot be read (the
+ * stub, a failed read), in which case the whole position is asked for and the
+ * program's own illiquid check decides. A klend redeem can pay one unit more
+ * than asked, so a step sized by liquidity stays one under it.
+ */
+export function drainAmount(
+  pool: PoolState,
+  proposal: VenueProposalState | null,
+  available: bigint | null,
+  now: bigint,
+): bigint | null {
+  if (proposal === null || now < venueUnlocksAt(proposal)) return null;
+  if (pool.venueValue <= pool.minVenueMove) return null;
+  const amount =
+    available !== null && available <= pool.venueValue ? available - 1n : pool.venueValue;
+  return amount > 0n ? amount : null;
+}
+
 /** Inside the last `HARVEST_LEAD_SECONDS` of the current epoch, once. */
 function harvestDue(
   pool: PoolState,
@@ -164,7 +197,8 @@ export function nextHarvestAt(
 /**
  * The one venue crank this tick should send, or null. Harvest first, because
  * its window closes; then recall, because an under-floor vault is what makes
- * a refund redeem from the venue; then deploy.
+ * a refund redeem from the venue; then, with a proposal open, drain, or else
+ * deploy.
  *
  * Deploy waits out a deploy pause and an impaired venue, and nothing deploys
  * after Shutdown. Recall and harvest stay available then (harvest is refused
@@ -176,8 +210,12 @@ export function decideVenue(input: {
   readonly now: bigint;
   readonly currentEpoch: EpochState | null;
   readonly state: VenueState;
+  /** The open venue proposal, null when none. */
+  readonly proposal: VenueProposalState | null;
+  /** The venue's free liquidity, null when unknown. Only drains read it. */
+  readonly venueAvailable: bigint | null;
 }): VenueCrank | null {
-  const { pool, vaultBalance, now, currentEpoch, state } = input;
+  const { pool, vaultBalance, now, currentEpoch, state, proposal, venueAvailable } = input;
   if (!hasVenue(pool)) return null;
 
   if (venueReady(state, "harvest", now) && harvestDue(pool, currentEpoch, now, state)) {
@@ -188,6 +226,14 @@ export function decideVenue(input: {
   if (venueReady(state, "recall", now) && free < idleFloor(pool, vaultBalance)) {
     const amount = recallAmount(pool, vaultBalance);
     if (amount !== null) return { kind: "recall", amount };
+  }
+
+  // A proposal refuses deploys outright (`VenueProposalOpen`), so none is
+  // tried. Once its lock has elapsed the position is drained step by step.
+  if (proposal !== null) {
+    const amount = drainAmount(pool, proposal, venueAvailable, now);
+    if (amount !== null && venueReady(state, "drain", now)) return { kind: "drain", amount };
+    return null;
   }
 
   if (

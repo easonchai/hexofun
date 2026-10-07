@@ -136,6 +136,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService end-of-tick timestamp", () => {
       keypair: Keypair.generate(),
       connection: new CountingConnection(accounts),
       poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       recordChainTime: () => {},
       send: async (
         _instructions: TransactionInstruction[],
@@ -203,6 +204,7 @@ describe("OperatorService catch-path state write", () => {
         },
       },
       poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       recordChainTime: () => {},
     };
     const failingPrisma = {
@@ -252,6 +254,7 @@ describe("OperatorService.onModuleDestroy", () => {
         removeAccountChangeListener: async () => {},
       },
       poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       recordChainTime: () => {},
     };
     const prisma = { operatorState: { upsert: async () => {} } };
@@ -345,6 +348,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
         keypair: Keypair.generate(),
         connection: new CountingConnection(new Map()),
         poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       } as unknown as ChainService,
       prisma,
       {
@@ -422,6 +426,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
       keypair: Keypair.generate(),
       connection,
       poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, POOL, id),
       roundAddress: (id: bigint) => roundAddress(PROGRAM_ID, POOL, id),
       recordChainTime: () => {},
@@ -506,6 +511,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService RPC failure recovery", () => {
       keypair: Keypair.generate(),
       connection,
       poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       recordChainTime: () => {},
       send: async () => "signature",
     };
@@ -604,6 +610,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService randomness subscription", () => 
       keypair: Keypair.generate(),
       connection,
       poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
       epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, POOL, id),
       roundAddress: (id: bigint) => roundAddress(PROGRAM_ID, POOL, id),
       recordChainTime: () => {},
@@ -760,6 +767,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       keypair: Keypair.generate(),
       connection: new CountingConnection(accounts),
       poolAddress: () => ACTIVE,
+      venueProposalAddress: () => PublicKey.default,
       epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, ACTIVE, id),
       roundAddress: (id: bigint) => roundAddress(PROGRAM_ID, ACTIVE, id),
       recordChainTime: () => {},
@@ -829,6 +837,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
         keypair: Keypair.generate(),
         connection: new CountingConnection(accounts),
         poolAddress: () => UNMIRRORED,
+        venueProposalAddress: () => PublicKey.default,
         recordChainTime: () => {},
         send: async () => "signature",
       } as unknown as ChainService,

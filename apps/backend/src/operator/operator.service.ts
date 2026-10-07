@@ -14,13 +14,16 @@ import { Prisma } from "@prisma/client";
 import { getAccount, TokenAccountNotFoundError } from "@solana/spl-token";
 import { PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
 
+import { decodeReserve } from "../api/live-yield";
 import { ChainService } from "../chain/chain.service";
+import { VENUE_KIND } from "../chain/venue-kind";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   clockUnixTimestamp,
   decodeEpoch,
   decodePool,
+  decodeVenueProposal,
   decodeRound,
   ROUND_STATUS,
   type EpochState,
@@ -308,10 +311,11 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
 
   private async context(): Promise<TickContext> {
     const poolAddress = this.chain.poolAddress();
-    const [poolInfo, clockInfo] =
+    const [poolInfo, clockInfo, proposalInfo] =
       await this.chain.connection.getMultipleAccountsInfo([
         poolAddress,
         SYSVAR_CLOCK_PUBKEY,
+        this.chain.venueProposalAddress(poolAddress),
       ]);
     if (!poolInfo) {
       throw new Error(
@@ -335,6 +339,12 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       ix: this.instructions,
       lastWithdrawState: this.lastWithdrawState,
       lastVenueState: this.lastVenueState,
+      // The account exists only while a proposal is open (venue-switch ticket 03).
+      venueProposal:
+        proposalInfo && proposalInfo.owner.equals(this.chain.programId)
+          ? decodeVenueProposal(this.chain.program, proposalInfo.data)
+          : null,
+      venueAvailable: () => this.venueAvailable(pool),
       lastExpectedErrors: this.lastExpectedErrors,
       lastRoundSkipEpochId: this.lastRoundSkipEpochId,
       launchAt: this.launchAt,
@@ -464,6 +474,22 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       "confirmed",
     );
     this.randomnessWatch = { address: wanted, subscriptionId };
+  }
+
+  /**
+   * The pinned klend reserve's free liquidity, which sizes a drain step. Null
+   * for any other kind and when the read fails: the drain then asks for the
+   * whole position and the program's `VenueIlliquid` is the judge.
+   */
+  private async venueAvailable(pool: PoolState): Promise<bigint | null> {
+    if (pool.venueKind !== VENUE_KIND.klend) return null;
+    try {
+      const info = await this.chain.connection.getAccountInfo(pool.klendReserve);
+      return info ? decodeReserve(info.data).available : null;
+    } catch (cause) {
+      this.logger.warn(`could not read the venue's liquidity: ${(cause as Error).message}`);
+      return null;
+    }
   }
 
   private async principalVaultBalance(): Promise<bigint> {

@@ -4,6 +4,8 @@
 import type { Idl, Program } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
 
+import type { VenueProposalState } from "./venue";
+
 export const EPOCH_STATUS = {
   OPEN: 0,
   ENDED: 1,
@@ -164,6 +166,12 @@ export function decodePool(
     deployPaused: raw.deployPaused === true,
     impaired: raw.impaired === true,
   };
+}
+
+/** The `VenueProposal` account: only the time the lock counts from. */
+export function decodeVenueProposal(program: Program<Idl>, data: Buffer): VenueProposalState {
+  const raw = program.coder.accounts.decode<Decoded>("venueProposal", data);
+  return { proposedAt: big(raw.proposedAt) };
 }
 
 export function decodeEpoch(program: Program<Idl>, data: Buffer): EpochState {

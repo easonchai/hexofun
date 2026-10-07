@@ -317,6 +317,8 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     ]);
     expect(summary.lastSyncAt).toBe(NOW - 60n);
     expect(summary.admin).toBe(ADMIN);
+    // `poolRow` gives the pool its own address as the operator.
+    expect(summary.operatorKey).toBe(POOL.toBase58());
     expect(summary.venueParams).toEqual({
       yieldFeeBps: 1_000,
       idleFloorBps: 500,
@@ -444,6 +446,7 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect(summary.harvestedToJackpot).toBe(0n);
     expect(summary.lastSyncAt).toBe(0n);
     expect(summary.admin).toBeNull();
+    expect(summary.operatorKey).toBeNull();
     expect(summary.venueParams).toBeNull();
     expect(summary.venueKind).toBeNull();
     expect(summary.venueProposal).toBeNull();

@@ -525,6 +525,52 @@ describe("admin run", () => {
     expect(rawSent).toHaveLength(2);
   });
 
+  // venue-switch ticket 04: the deploy pause and the drain are one transaction.
+  it("drain-venue signs locally and sends the deploy pause with the drain in one transaction", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "drain-venue", amount: 1_500_000n }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    const [pause, drain] = sent[0] ?? [];
+    expect(decodeInstruction(pause?.data)).toMatchObject({ name: "set_deploy_pause" });
+    const decoded = decodeInstruction(drain?.data) as { name: string; data: { amount: BN } };
+    expect(decoded.name).toBe("drain_venue");
+    expect(decoded.data.amount.toString()).toBe("1500000");
+    expect(drain?.keys.some((k) => k.isSigner && k.pubkey.equals(mode.signer))).toBe(true);
+    expect(drain?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
+  });
+
+  it("drain-venue in multisig mode prints one transaction carrying both instructions, signed by the vault", async () => {
+    const { chain, sent } = await harness();
+    const vault = Keypair.generate().publicKey;
+    const mode: AdminMode = { signer: vault, multisig: true };
+
+    const { stdout } = await capture(() => run({ kind: "drain-venue", amount: 7n }, chain, mode));
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(vault)).toBe(true);
+    expect(tx.instructions.map((ix) => decodeInstruction(ix.data)?.name)).toEqual([
+      "set_deploy_pause",
+      "drain_venue",
+    ]);
+    expect(tx.instructions[1]?.keys.some((k) => k.isSigner && k.pubkey.equals(vault))).toBe(true);
+  });
+
+  it("drain-venue with a Ledger sends both instructions through it", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const ledgerKeypair = Keypair.generate();
+    const mode: AdminMode = { signer: ledgerKeypair.publicKey, multisig: false };
+    await capture(() =>
+      run({ kind: "drain-venue", amount: 7n }, chain, mode, fakeLedger(ledgerKeypair)),
+    );
+    expect(sent).toEqual([]);
+    expect(rawSent).toHaveLength(1);
+  });
+
   // game-jackpot-pause ticket 02.
   it("pause-game signs locally with the loaded key", async () => {
     const { chain, sent } = await harness();

@@ -356,6 +356,20 @@ describe("parseAdminCommand", () => {
     ).toThrow(/base58 pubkey/);
   });
 
+  it("parses drain-venue's amount and refuses a missing, zero or fractional one", () => {
+    expect(parseAdminCommand(["drain-venue", "--amount", "1500000"])).toEqual({
+      kind: "drain-venue",
+      amount: 1_500_000n,
+    });
+    expect(() => parseAdminCommand(["drain-venue"])).toThrow(/needs --amount/);
+    expect(() => parseAdminCommand(["drain-venue", "--amount", "0"])).toThrow(
+      /positive whole number/,
+    );
+    expect(() => parseAdminCommand(["drain-venue", "--amount", "1.5"])).toThrow(
+      /positive whole number/,
+    );
+  });
+
   it("parses cover-deficit's amount", () => {
     expect(parseAdminCommand(["cover-deficit", "--amount", "2500000"])).toEqual({
       kind: "cover-deficit",

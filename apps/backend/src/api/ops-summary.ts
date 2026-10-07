@@ -67,6 +67,8 @@ export interface OpsSummaryExtras {
   lastSyncAt: bigint;
   /** Null before the pool is indexed. */
   admin: string | null;
+  /** The hot crank key; may call `drain_venue` at any time. Null before the pool is indexed. */
+  operatorKey: string | null;
   /** Null before the pool is indexed. */
   venueParams: VenueParams | null;
   /** The venue kind the pool is on now. Null before the pool is indexed. */
@@ -167,6 +169,7 @@ export class OpsSummaryService {
       deficit: pool?.deficit ?? 0n,
       lastSyncAt: pool?.lastSyncAt ?? 0n,
       admin: pool?.admin ?? null,
+      operatorKey: pool?.operator ?? null,
       venueParams:
         pool === null
           ? null

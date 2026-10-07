@@ -21,13 +21,16 @@ import {
 import type { OperatorInstructions } from "./instructions";
 import {
   decideVenue,
+  drainAmount,
   EMPTY_VENUE_STATE,
   hasVenue,
   nextHarvestAt,
   venueFailed,
   venueSucceeded,
   VENUE_EXPECTED_ERRORS,
+  venueUnlocksAt,
   type VenueCrank,
+  type VenueProposalState,
   type VenueState,
 } from "./venue";
 
@@ -206,6 +209,12 @@ export interface TickContext {
   readonly lastWithdrawState: WithdrawState | null;
   /** Ticket 13: what the venue cranks remember, null before the first one ran. */
   readonly lastVenueState: VenueState | null;
+  /** Venue-switch ticket 04: the pool's open venue proposal, null when none.
+   *  Read off the proposal account every tick. */
+  readonly venueProposal: VenueProposalState | null;
+  /** The venue's free liquidity in atomic USDC, null when it cannot be read
+   *  (the stub kind, a failed read). Asked only before a drain. */
+  venueAvailable(): Promise<bigint | null>;
   /** Ticket 12: how many times in a row each `action:target` key has hit an
    *  expected error. Empty before anything has repeated. */
   readonly lastExpectedErrors: ReadonlyMap<string, number>;
@@ -358,6 +367,8 @@ function nextWakeAt(ctx: TickContext, acted: boolean): bigint {
   if (hasVenue(pool)) {
     const harvestAt = nextHarvestAt(currentEpoch, ctx.lastVenueState ?? EMPTY_VENUE_STATE);
     if (harvestAt !== null) candidates.push(harvestAt);
+    // Venue-switch ticket 04: the drain starts the moment the lock ends.
+    if (ctx.venueProposal) candidates.push(venueUnlocksAt(ctx.venueProposal));
   }
   if (previousEpoch?.status === EPOCH_STATUS.DRAWING) {
     candidates.push(previousEpoch.requestedAt + pool.vrfTimeout);
@@ -713,7 +724,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
           ? await ctx.ix.deployToVenue(pool, crank.amount)
           : crank.kind === "recall"
             ? await ctx.ix.recall(pool, crank.amount)
-            : await ctx.ix.harvest(pool),
+            : crank.kind === "drain"
+              ? await ctx.ix.drainVenue(pool, crank.amount)
+              : await ctx.ix.harvest(pool),
       );
       venueState = venueSucceeded(venueState, crank.kind, currentEpoch?.epochId ?? null);
       venueChanged = true;
@@ -737,15 +750,26 @@ async function decide(ctx: TickContext): Promise<Decision> {
   }
 
   if (hasVenue(pool)) {
+    // The liquidity read is a round trip, so it waits until a drain is due.
+    const drainDue = drainAmount(pool, ctx.venueProposal, null, now) !== null;
     const crank = decideVenue({
       pool,
       vaultBalance: await ctx.principalVaultBalance(),
       now,
       currentEpoch,
       state: venueState,
+      proposal: ctx.venueProposal,
+      venueAvailable: drainDue ? await ctx.venueAvailable() : null,
     });
     if (crank && (await sendVenue(crank))) {
-      return finish({ action: crank.kind === "deploy" ? "deploy_to_venue" : crank.kind });
+      return finish({
+        action:
+          crank.kind === "deploy"
+            ? "deploy_to_venue"
+            : crank.kind === "drain"
+              ? "drain_venue"
+              : crank.kind,
+      });
     }
   }
 

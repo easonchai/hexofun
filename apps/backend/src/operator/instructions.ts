@@ -510,6 +510,33 @@ export class OperatorInstructions {
   }
 
   /**
+   * `drain_venue` (venue-switch ticket 04): brings `amount` home from the
+   * venue to the principal vault. `signer` is the Operator for the tick's
+   * crank and the Admin for the CLI; the program lets either in at any time
+   * and anyone while a proposal is open.
+   */
+  async drainVenue(
+    pool: PoolState,
+    amount: bigint,
+    signer: PublicKey = this.operator,
+  ): Promise<TransactionInstruction[]> {
+    return [
+      await this.method("drainVenue", bn(amount))
+        .accountsPartial({
+          signer,
+          pool: pool.address,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          venueProposal: venueProposalAddress(this.programId, pool.address),
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts(this.venueRemaining(pool))
+        .instruction(),
+    ];
+  }
+
+  /**
    * Fast pause (ops-console ticket 06). The Operator may only turn a switch
    * on, so these three hardcode `true`: no argument can pass `false`.
    */

@@ -2,7 +2,7 @@
 // start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
 // start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
 // fund-jackpot, grant-tickets, set-operator,
-// propose-admin, accept-admin, propose-venue, cancel-venue, create-invite, shutdown, emergency-crank,
+// propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, create-invite, shutdown, emergency-crank,
 // sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
@@ -49,6 +49,7 @@ import {
   decodeRound,
   type PoolState,
 } from "../operator/chain-state";
+import { OperatorInstructions } from "../operator/instructions";
 import { randomnessAddress } from "../operator/vrf";
 import {
   parseAdminCommand,
@@ -798,6 +799,29 @@ export async function run(
         mode,
         [ix],
         `propose venue kind ${command.venueKind} (reserve ${command.reserve.toBase58()}); deploys stop until cancel-venue or the migration, and the 48 hour lock restarts`,
+        ledger,
+      );
+    }
+    // venue-switch ticket 04. The deploy pause rides in the same transaction,
+    // before the drain, so the Operator's crank cannot put the USDC back.
+    // Whichever of Admin or Operator signs, both may do both.
+    case "drain-venue": {
+      const pool = await readPool(chain);
+      const instructions = new OperatorInstructions(
+        chain.program,
+        chain.programId,
+        mode.signer,
+        false,
+      );
+      const pause = await method(chain, "setDeployPause", true)
+        .accountsPartial({ signer: mode.signer, pool: pool.address })
+        .instruction();
+      const drain = await instructions.drainVenue(pool, command.amount, mode.signer);
+      return submit(
+        chain,
+        mode,
+        [pause, ...drain],
+        `pause deploys and drain ${command.amount} atomic units from the venue into the principal vault; start-deploy resumes deploys`,
         ledger,
       );
     }

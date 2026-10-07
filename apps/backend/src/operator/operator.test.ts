@@ -188,6 +188,9 @@ function context(over: Partial<TickContext> = {}): Recorder {
     ix: instructions,
     lastWithdrawState: null,
     lastVenueState: null,
+    // No venue change open by default (venue-switch ticket 04).
+    venueProposal: null,
+    venueAvailable: async () => null,
     lastExpectedErrors: new Map(),
     lastRoundSkipEpochId: null,
     // Unconfigured by default (ticket 05): begin_epoch is never withheld in
@@ -1553,6 +1556,92 @@ describe("venue cranks (ticket 13)", () => {
     expect(built[0]?.keys.map((key) => key.pubkey.toBase58())).toContain(
       venueProposalAddress(PROGRAM_ID, venuePool().address).toBase58(),
     );
+  });
+
+  // --- Venue-switch ticket 04: drain while a proposal stands.
+  const LOCK = 48n * 60n * 60n;
+  const elapsed = { proposedAt: NOW - LOCK - 10n };
+  const heldPool = (over: Partial<PoolState> = {}) => venuePool({ venueValue: 5_000n * U, ...over });
+  const drainTick = (over: Partial<TickContext> = {}) =>
+    venueTick(1_000n * U, { pool: heldPool(), venueProposal: elapsed, ...over });
+
+  it("drains the whole position once the lock has elapsed, signed by the Operator, and sends no deploy", async () => {
+    const { ctx, sent } = drainTick();
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("drain_venue");
+    expect((sent[0] ?? []).map(label)).toEqual(["drain_venue"]);
+    expect(amountSent(sent)).toBe((5_000n * U).toString());
+    const keys = keysOfIx(sent[0] ?? []);
+    expect(keys).toContain(venueProposalAddress(PROGRAM_ID, heldPool().address).toBase58());
+    // klend's extras ride along, so the redeem inside the drain can run.
+    expect(keys.slice(-4)).toEqual([LMA, LIQ_SUPPLY, CMINT].map((k) => k.toBase58()).concat(SYSVAR_IX));
+  });
+
+  it("waits out the lock, and wakes when it ends", async () => {
+    const { ctx, sent } = drainTick({ venueProposal: { proposedAt: NOW - LOCK + 30n } });
+    const outcome = await runTick(ctx);
+
+    expect(sent).toEqual([]);
+    expect(outcome.action).toBeNull();
+    expect(outcome.nextWakeAt).toBe(NOW + 30n);
+  });
+
+  it("sizes each step by the venue's free liquidity, one unit under it", async () => {
+    const { ctx, sent } = drainTick({ venueAvailable: async () => 1_200n * U });
+    await runTick(ctx);
+    expect(amountSent(sent)).toBe((1_200n * U - 1n).toString());
+
+    // More liquidity than position: the whole position.
+    const roomy = drainTick({ venueAvailable: async () => 9_000n * U });
+    await runTick(roomy.ctx);
+    expect(amountSent(roomy.sent)).toBe((5_000n * U).toString());
+  });
+
+  it("stops when the position is down to dust, the venue has no liquidity or the proposal is gone", async () => {
+    for (const over of [
+      { pool: heldPool({ venueValue: 100n * U }) },
+      { venueAvailable: async () => 0n },
+      { venueAvailable: async () => 1n },
+    ]) {
+      const { ctx, sent } = drainTick(over);
+      expect((await runTick(ctx)).action).toBeNull();
+      expect(sent).toEqual([]);
+    }
+
+    // No proposal: the same pool deploys again instead of draining.
+    const gone = drainTick({ venueProposal: null });
+    expect((await runTick(gone.ctx)).action).toBe("deploy_to_venue");
+  });
+
+  it("cools down after a refused drain, with a warning and no alert", async () => {
+    const { ctx, warned } = drainTick({
+      send: async () => {
+        throw new Error("VenueIlliquid");
+      },
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.stepError).toBeUndefined();
+    expect(outcome.venueState?.failedAt.drain).toBe(NOW);
+    expect(warned.some((message) => message.includes("drain refused"))).toBe(true);
+
+    const retry = drainTick({ lastVenueState: outcome.venueState ?? null, now: NOW + 30n });
+    await runTick(retry.ctx);
+    expect(retry.sent).toEqual([]);
+  });
+
+  it("takes the liquidity read only when a drain is due", async () => {
+    let reads = 0;
+    const venueAvailable = async () => {
+      reads += 1;
+      return null;
+    };
+    await runTick(venueTick(1_000n * U, { pool: heldPool(), venueAvailable }).ctx);
+    await runTick(drainTick({ venueProposal: { proposedAt: NOW }, venueAvailable }).ctx);
+    expect(reads).toBe(0);
+    await runTick(drainTick({ venueAvailable }).ctx);
+    expect(reads).toBe(1);
   });
 
   it("takes no extra accounts for the stub kind", async () => {
