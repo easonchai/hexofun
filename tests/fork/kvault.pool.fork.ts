@@ -694,15 +694,18 @@ describe("kVault backing, liquidity limits", () => {
       .signers([g.admin])
       .rpc();
 
-  const depositInstruction = async (amount: bigint) =>
-    (program.methods.deposit(bn(amount)) as unknown as Builder)
+  const walletInstruction = (builder: unknown, redeem: boolean) =>
+    (builder as Builder)
       .accountsPartial({
         owner: wallet.keypair.publicKey, pool: g.pool, player: playerPda(g.pool, wallet.keypair.publicKey), acceptedMint: USDC,
         ownerToken: wallet.tokenAccount, principalVault: g.principalVault, klendProgram: KVAULT_PROGRAM_ID, klendMarket: VAULT,
         klendReserve: SHARES_MINT, klendCtoken: g.shares, tokenProgram: TOKEN_PROGRAM_ID, systemProgram: SystemProgram.programId,
       })
-      .remainingAccounts(kvaultRemaining(view, { valueOnly: true }))
+      .remainingAccounts(kvaultRemaining(view, redeem ? { writableMint: USDC } : { valueOnly: true }))
       .instruction();
+  const depositInstruction = (amount: bigint) => walletInstruction(program.methods.deposit(bn(amount)), false);
+  const requestWithdrawInstruction = (amount: bigint) =>
+    walletInstruction(program.methods.requestWithdraw(bn(amount)), true);
 
   /** What the vault can pay now before the exit cost: idle plus each reserve's
    *  free liquidity up to what the vault holds there, worked out from raw accounts. */
@@ -769,6 +772,12 @@ describe("kVault backing, liquidity limits", () => {
     // Shutdown lifts the recall band, so the only limit left is the vault's.
     await program.methods.shutdown().accountsPartial({ admin: g.admin.publicKey, pool: g.pool }).signers([g.admin]).rpc();
     await pastLastSync(g);
+    // Cutting the vault's idle tokens lowered its value, by more than the loss
+    // tolerance when mainnet's idle is large. A 1 USDC refund from the pending
+    // deposit syncs that loss now (it is allowed shut down and impaired), so
+    // the drain's own sync below has nothing left to book.
+    await sendV0("request_withdraw 1 USDC (sync after the cut)", [await requestWithdrawInstruction(USDC_UNIT)], [wallet.keypair], view);
+    await pastLastSync(g);
     const before = await program.account.pool.fetch(g.pool);
     const sharesBefore = await tokenBalance(g.shares);
     const { text, logs } = await failure(await ix.recall(await poolState(g), 800n * USDC_UNIT), [g.operator], view);
@@ -785,7 +794,10 @@ describe("kVault backing, liquidity limits", () => {
     await sendV0("drain_venue 800 USDC (vault pays short)", await ix.drainVenue(await poolState(g), 800n * USDC_UNIT), [g.operator], view);
     const received = (await tokenBalance(g.principalVault)) - vaultBefore;
     expect(received > 0n && received < 800n * USDC_UNIT).toBe(true);
-    expect((await program.account.pool.fetch(g.pool)).venueValue.toString()).toBe((big(before.venueValue) - received).toString());
+    // The drain's own sync can still book a few seconds of interest on the
+    // borrow pushed in above (about 0.01 USDC), never anything near the 800.
+    const accrued = big((await program.account.pool.fetch(g.pool)).venueValue) - (big(before.venueValue) - received);
+    expect(accrued >= 0n && accrued < USDC_UNIT).toBe(true);
     await resetPosition();
   }, TIMEOUT);
 });
