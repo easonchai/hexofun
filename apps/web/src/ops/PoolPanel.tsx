@@ -27,13 +27,13 @@ export function PoolPanel() {
     <Panel id="pool" title="Pool">
       <SyncLine lastSyncAt={s.lastSyncAt} />
       <dl>
-        <Row label="Total Principal" value={usdc(s.totalPrincipal)} />
-        <Row label="Vault balance" value={usdc(s.vaultLiquidity)} />
-        <Row label="Free idle" value={idle} {...(idleNote ? { note: idleNote } : {})} />
-        <Row label="Idle band" value={band} />
-        <Row label="Pending withdrawals" value={usdc(s.pendingWithdrawals)} />
-        <Row label="Solvency margin" value={usdc(s.solvencyMargin)} />
-        <Row label="Deficit" value={usdc(s.deficit)} />
+        <Row label="Total Principal" value={usdc(s.totalPrincipal)} raw={s.totalPrincipal} />
+        <Row label="Vault balance" value={usdc(s.vaultLiquidity)} raw={s.vaultLiquidity} />
+        <Row label="Free idle" value={idle} {...(idleNote ? { note: idleNote } : {})} raw={s.freeIdle} />
+        <Row label="Idle band" value={band} raw={v ? `${v.idleFloorBps} to ${v.idleTargetBps} bps` : null} />
+        <Row label="Pending withdrawals" value={usdc(s.pendingWithdrawals)} raw={s.pendingWithdrawals} />
+        <Row label="Solvency margin" value={usdc(s.solvencyMargin)} raw={s.solvencyMargin} />
+        <Row label="Deficit" value={usdc(s.deficit)} raw={s.deficit} />
         <Row label="Impaired" value={s.impaired ? "Yes" : "No"} />
         <Switch label="Pool" on={p ? p.paused : null} />
         <Switch label="Game" on={p ? p.gamePaused : null} />

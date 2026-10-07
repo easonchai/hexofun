@@ -101,6 +101,61 @@ body.ops #root {
   color: var(--text-muted);
 }
 
+/* Raw values sit beside each derived figure, shown by the header's toggle. */
+.ops-raw {
+  display: none;
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.ops-page[data-raw] .ops-raw {
+  display: block;
+}
+
+.ops-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ops-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Headline strip: six figures, label above value. */
+.ops-headline {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 16px;
+}
+
+.ops-headline .ops-row {
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  background: var(--bg-surface);
+}
+
+.ops-headline .ops-row dt {
+  font-size: 11px;
+}
+
+.ops-headline .ops-row dd {
+  text-align: left;
+  font-size: 15px;
+  font-weight: 700;
+}
+
 .ops-alerts,
 .ops-error {
   list-style: none;
