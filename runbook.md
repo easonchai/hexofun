@@ -97,55 +97,81 @@
 
   Changing a pool's venue (ADR 0023)
 
-  Status: rehearsed on localnet (stub to stub); fork rehearsal pending. Treat every step below as unproven against
-  real klend and kVault accounts until the fork transcript is pasted here.
+  Status: rehearsed on localnet (stub to stub) and on a Surfpool mainnet fork on 2026-10-07 (klend to klend, klend to
+  kVault, emergency park; tests/fork/venue-switch.fork.ts). Not yet run on mainnet.
 
   A pool holds one venue, a klend reserve or a Kamino Earn vault. Moving it takes a proposal, a 48 hour lock the
   program enforces, a drain and a migration. Every command is the admin CLI, `pnpm --filter @hexvault/backend admin
   <command>`, run with the target environment's env exported as in "Admin actions through Squads" below. On mainnet,
   export `ADMIN_ADDRESS=<squads-vault>` and the admin-gated ones (propose-venue, cancel-venue, set-venue-params,
   start-deploy) print a base58 transaction for Squads to import. `migrate-venue` and the Operator's `drain-venue` need no
-  multisig. Read the pool's state from `GET /ops/summary`: `venueKind`, `venueValue`, `venueProposal` (with `unlocksAt`,
-  chain unix seconds) and `venueParams`.
+  multisig. A kVault pool's `drain-venue` and `migrate-venue` build v0 transactions, so the CLI refuses them with
+  `ADMIN_ADDRESS` set or a Ledger loaded; run those two from the Operator key with `ADMIN_ADDRESS` unset (the tick sends
+  both by itself, so this only matters for a hand drain). `pause-jackpot`, `pause-deploy` and the other Operator-or-Admin
+  commands ignore `ADMIN_ADDRESS` and send from the loaded key. Read the pool's state from `GET /ops/summary`: `venueKind`,
+  `venueValue`, `venueProposal` (with `unlocksAt`, chain unix seconds) and `venueParams`, or from the Pool account.
+
+  The operator needs no change and no restart: it reads the pool's venue kind and pins from chain every tick and builds the
+  deploy, drain and migrate accounts from them.
 
   Migration
 
-    1. Prepare the target. For a kVault, read its state account and shares mint from Kamino's API and from the vault
-       account, and create the pool's shares account before proposing, since nothing creates it later:
+    1. Prepare the target. Create the pool's token account for the target's position token before proposing, since
+       nothing creates it later. For a kVault that is the shares mint; for a klend reserve it is the reserve's cToken mint
+       (the PDA `["reserve_coll_mint", <market>, <USDC mint>]` under the klend program). Any funded keypair pays:
 
-         spl-token create-account <SHARES_MINT> --owner <POOL_PDA> --fee-payer <FUNDED_KEYPAIR>
+         spl-token create-account <SHARES_OR_CTOKEN_MINT> --owner <POOL_PDA> --fee-payer <FUNDED_KEYPAIR>
 
-       Check: `spl-token account-info --address <ATA>` (or `solana account <ATA>`) shows the shares mint and the pool PDA as
-       owner. The Squads vault also needs a little SOL, because the Admin pays the proposal account's rent. The rent
-       returns to the Admin when the proposal closes.
+       Check: `spl-token account-info --address <ATA>` shows `Balance: 0`, the mint above and the pool PDA as owner (the
+       command printed the ATA address). The Squads vault also needs a little SOL, because the Admin pays the proposal
+       account's rent. The rent returns to the Admin when the proposal closes.
 
     2. Propose. The four flags are positional pins: for a kVault, `--program` is the kVault program, `--market` the vault
        state, `--reserve` the shares mint and `--ctoken` the pool's shares account. For klend they are the klend
-       program, market, USDC reserve and the pool's cToken account.
+       program, market, USDC reserve and the pool's cToken account. Re-read the addresses from Kamino's API the same day
+       (`https://api.kamino.finance/kamino-market/<market>/reserves/metrics` for a reserve,
+       `https://api.kamino.finance/kvaults/vaults` for a vault).
 
          admin propose-venue --kind kvault \
            --program KvauGMspG5k6rtzrqqn7WNn3oZdyKqLKwK2XWQ8FLjd \
            --market <VAULT_STATE> --reserve <SHARES_MINT> --ctoken <POOL_SHARES_ATA>
 
-       Check: `/ops/summary` shows `venueProposal` with the right kind and pins and `unlocksAt` exactly 172800 seconds
-       after `proposedAt`. The operator's log shows deploys skipped with `VenueProposalOpen`, and `venueValue` keeps
-       growing, because the old venue earns until the lock ends. A second `propose-venue` replaces the proposal and
-       restarts the lock. Do not do that by accident.
+         admin propose-venue --kind klend \
+           --program KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD \
+           --market <MARKET> --reserve <USDC_RESERVE> --ctoken <POOL_CTOKEN_ATA>
 
-    3. Lower the dust line. The Operator migrates by itself as soon as the old position is at or under
-       `min_venue_move`, and the migration then leaves that much untracked at the old venue. The default is 100 USDC.
-       Lower it so the drain empties the position, and put it back in step 8:
+       With `ADMIN_ADDRESS` set the CLI prints one unsigned base58 transaction on stdout (555 characters for klend, 735 for
+       a kVault, fee payer the Admin) and says so on stderr; paste it into Squads' "Import base58 encoded tx" within about a
+       minute, since its blockhash expires. Check: the `VenueProposed` event shows the right kind and pins and `unlocksAt`
+       exactly 172800 seconds after `proposedAt`; `/ops/summary` shows `venueProposal`. From here the operator's tick takes
+       no action (deploys refused with `VenueProposalOpen`, no early drain), `venueValue` keeps growing because the old venue
+       earns until the lock ends, and deposits work as before (a deposit during the proposal was part of the fork run, and a
+       withdrawal queued before it was untouched). A second `propose-venue` replaces the
+       proposal and restarts the lock. Do not do that by accident.
+
+    3. Lower the dust line. Do not skip this. The tick sizes its first drain from `venue_value` as of the last sync, which
+       is up to the whole lock old. The drain's own sync books the interest accrued since, redeems the stale figure and
+       leaves that interest in the venue. On the fork that was 3.17 USDC on a 13.5k USDC position. The tick then migrates as
+       soon as the position is at or under `min_venue_move` (default 100 USDC), and the migration leaves it untracked at the
+       old venue. With the default line the fork run did exactly that: `left_behind` 3,167,018 and the pool's claims 3.17 USDC
+       above what it tracks. Lower the line so the tick drains the interest too, and put it back in step 8:
 
          admin set-venue-params --min-venue-move 10000
 
-       Check: `venueParams.minVenueMove` in `/ops/summary` reads 10000.
+       Check: `venueParams.minVenueMove` in `/ops/summary` reads 10000. With 10000 (0.01 USDC) both klend sources ended with
+       `left_behind` 0. 10000 is enough for a klend source; it has not been run from a kVault source, whose redeem keeps
+       a flat 1,000 base units and which the program values 1,010 under the formula, so read `left_behind` before trusting it
+       there (step 6).
 
     4. Wait out the lock. Deposits and withdrawals work throughout. Watch the target the whole time. If it turns bad
        (the vault's fee or penalty changes, an allocation reserve is deprecated), run `admin cancel-venue`. It closes the
        proposal and deploys resume. Check: `venueProposal` is null.
 
-    5. Drain. After `unlocksAt` the Operator's tick drains in steps sized by the old venue's free liquidity, and anyone
-       may drain by hand (`drain-venue` also sets the deploy pause, which the open proposal already enforces):
+    5. Drain. After `unlocksAt` the operator's tick drains by itself, with no manual step. It asks for the whole
+       `venueValue` the first time and for what accrued since each time after, in steps no larger than the old venue's free
+       liquidity. The fork run: `drain_venue` (13,500.395408 USDC asked, all received), `drain_venue` (3.165125 USDC), then
+       the migration, three ticks about a second apart. Anyone may also drain by hand
+       (`drain-venue` also sets the deploy pause, which step 7 then has to clear):
 
          admin drain-venue --amount <ATOMIC_USDC>
 
@@ -155,7 +181,7 @@
        falls only by what came back. Keep draining until `venueValue` is at or under the line from step 3. Do not
        migrate with a larger position and expect to come back for it: nothing redeems the old position afterwards.
 
-    6. Migrate. If the Operator has not already:
+    6. Migrate. The tick does it on the tick after the last drain. If it has not:
 
          admin migrate-venue
 
@@ -165,22 +191,38 @@
        rent. The migration is refused by name if the lock has not elapsed (`VenueLockNotElapsed`) or the position is
        too large (`VenuePositionNotEmpty`). Then drain again.
 
-    7. Resume deploys. A hand drain left the deploy pause on. Clear it, then let the Operator's deploy crank move the idle
-       USDC to the new venue under the idle band and the deploy caps:
+    7. Deploy at the new venue. The tick does it on the next tick (`deploy_to_venue`, under the idle band and the deploy
+       caps, which read the new venue from then on). If a hand drain set the deploy pause, the tick deploys nothing until the
+       Admin clears it:
 
          admin start-deploy
 
        Check: `DEPLOY_PAUSED` leaves `/alerts`, a `VenueDeployed` event follows within a tick or two, `venueValue` rises
        toward the whole non-idle share, and `freeIdleBps` settles near the idle target. The gap between the last drain
-       and this deploy earned nothing, so do not leave it open.
+       and this deploy earned nothing: one to two seconds on the fork, a tick period in production.
 
     8. Restore the dust line, and record the move here with the signatures and the fork's CU numbers:
 
          admin set-venue-params --min-venue-move 100000000
 
+  What the fork showed (2026-10-07, pool of 15.2k USDC, three Players, one queued withdrawal)
+
+    - Every Player's Principal was the same before the first drain, after the migration and after the deploy at the new
+      venue, for klend to klend and for klend to kVault. The queued 500 USDC withdrawal was paid by the tick once its epoch
+      ended, from the new venue's pool (`process_withdraw`), and only the payee's Principal moved (down by 500, plus her
+      accrued yield settled into it).
+    - The solvency check (vault plus the position at the venue it points at, against Principal and what is owed) held at every
+      step to within 1 base unit on klend (the vault run reads up to 0.27 USDC above, the program's conservative fee estimate);
+      the only shortfall is the `left_behind` of step 3.
+    - Compute units, whole transaction: `drain_venue` from klend 76k then 71k, `migrate_venue` 26k, `deploy_to_venue`
+      87k at the OnRe reserve and 323k at the kVault (two days of stale reserves, 13.2k USDC), `process_withdraw` 45k from klend
+      and 133k from the vault, `propose_venue` 13k to 16k. Messages are 395 to 602 bytes. The kVault deploy is v0 with the
+      vault's own lookup table.
+    - Rehearsed signatures and the full transcript: docs/plan/venue-switch/research/07-fork-rehearsals.md (not committed).
+
   Emergency park
 
-  Status: rehearsed on localnet; fork rehearsal pending.
+  Status: rehearsed on localnet and on the fork (2026-10-07).
 
   Use it when the venue is going bad: a reserve being deprecated, a curator raising fees, a market losing liquidity. It
   needs no proposal and no lock, because the USDC only goes into the pool's own principal vault. It also earns nothing
@@ -191,8 +233,10 @@
 
          admin drain-venue --amount <venueValue from /ops/summary>
 
-       The transaction sets the deploy pause first and drains second, so the crank cannot put the money back.
-       Check: `DEPLOY_PAUSED` appears in `/alerts`, `venueValue` falls and the principal vault balance rises.
+       The transaction sets the deploy pause first and drains second, so the crank cannot put the money back (85k CU on
+       klend). Check: `DEPLOY_PAUSED` appears in `/alerts`, `venueValue` falls and the principal vault balance rises. On
+       the fork, 13,500.395626 USDC asked and received, 18 base units of `venueValue` left (accrued since the
+       last sync), the tick deployed nothing, and a refund from the vault worked while parked.
 
     2. If the venue cannot pay that much, the call fails and nothing moves (`VenueIlliquid` on klend). Repeat with
        smaller amounts as liquidity allows. A kVault may return less than asked, and the book falls by what returned.
@@ -202,8 +246,10 @@
        Impaired, which has its own playbook (docs/ops/incidents.md, "Venue loss"). Withdrawals pay from the vault the
        whole time, and the idle USDC earns nothing.
 
-    4. Pick the new venue, then run the Migration above from step 1. Step 7 clears the pause. Only the Admin can. If
-       the old venue recovers and the team stays, `admin start-deploy` alone resumes deploying.
+    4. Pick the new venue, then run the Migration above from step 1. The position is already under the line, so after the
+       lock the tick migrates at once with no drain (`left_behind` 18 base units on the fork), and nothing deploys until
+       step 7's `admin start-deploy`, which only the Admin can send. If the old venue recovers and the team stays,
+       `admin start-deploy` alone resumes deploying.
 
   Daily referral bonus (docs/plan/hexo-referrals ticket 08)
 
