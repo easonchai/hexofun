@@ -571,6 +571,47 @@ describe("admin run", () => {
     expect(rawSent).toHaveLength(1);
   });
 
+  // venue-switch ticket 05: permissionless, so any signer only pays the fee.
+  it("migrate-venue signs locally and names the proposal, the Admin who gets the rent and the old pins", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "migrate-venue" }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    const ix = sent[0]?.[0];
+    expect(decodeInstruction(ix?.data)?.name).toBe("migrate_venue");
+    const keys = ix?.keys.map((k) => k.pubkey.toBase58()) ?? [];
+    expect(keys).toContain(proposalPda.toBase58());
+    expect(keys).toContain(poolFields.admin.toBase58());
+    // Permissionless: the signer is not among the instruction's signers.
+    expect(ix?.keys.some((k) => k.isSigner)).toBe(false);
+  });
+
+  it("migrate-venue in multisig mode prints one transaction paid by the vault, and with a Ledger sends through it", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const vault = Keypair.generate().publicKey;
+    const { stdout } = await capture(() =>
+      run({ kind: "migrate-venue" }, chain, { signer: vault, multisig: true }),
+    );
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(vault)).toBe(true);
+    expect(decodeInstruction(tx.instructions[0]?.data)?.name).toBe("migrate_venue");
+
+    const ledgerKeypair = Keypair.generate();
+    await capture(() =>
+      run(
+        { kind: "migrate-venue" },
+        chain,
+        { signer: ledgerKeypair.publicKey, multisig: false },
+        fakeLedger(ledgerKeypair),
+      ),
+    );
+    expect(sent).toEqual([]);
+    expect(rawSent).toHaveLength(1);
+  });
+
   // game-jackpot-pause ticket 02.
   it("pause-game signs locally with the loaded key", async () => {
     const { chain, sent } = await harness();

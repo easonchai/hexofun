@@ -33,12 +33,13 @@ export interface VenueProposalState {
 export const venueUnlocksAt = (proposal: VenueProposalState): bigint =>
   proposal.proposedAt + VENUE_LOCK_SECONDS;
 
-export type VenueKind = "deploy" | "recall" | "harvest" | "drain";
+export type VenueKind = "deploy" | "recall" | "harvest" | "drain" | "migrate";
 
 export type VenueCrank =
   | { readonly kind: "deploy"; readonly amount: bigint }
   | { readonly kind: "recall"; readonly amount: bigint }
   | { readonly kind: "drain"; readonly amount: bigint }
+  | { readonly kind: "migrate" }
   | { readonly kind: "harvest" };
 
 /** What the cranks remember between ticks. The service keeps it in memory; a
@@ -61,6 +62,9 @@ export function venueSucceeded(
 ): VenueState {
   const failedAt = { ...state.failedAt };
   delete failedAt[kind];
+  // The new venue starts with a clean slate: a deploy refused before the
+  // migration is no reason to wait out its cool-down after it.
+  if (kind === "migrate") delete failedAt.deploy;
   return {
     harvestedEpoch: kind === "harvest" && epochId !== null ? epochId : state.harvestedEpoch,
     failedAt,
@@ -93,7 +97,10 @@ export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   "ReserveLiquidityTooLow",
   "ReserveShareCapExceeded",
   "VenueIlliquid",
+  // A migration tried a moment early, or the position grew back above dust.
+  "VenueLockNotElapsed",
   "VenueMoveTooSmall",
+  "VenuePositionNotEmpty",
   // A venue change is proposed: deploys wait for the Admin to cancel or
   // execute it. Expected, so a warning and a cool-down, not an alert.
   "VenueProposalOpen",
@@ -197,8 +204,8 @@ export function nextHarvestAt(
 /**
  * The one venue crank this tick should send, or null. Harvest first, because
  * its window closes; then recall, because an under-floor vault is what makes
- * a refund redeem from the venue; then, with a proposal open, drain, or else
- * deploy.
+ * a refund redeem from the venue; then, with a proposal open, drain and finally migrate,
+ * or else deploy.
  *
  * Deploy waits out a deploy pause and an impaired venue, and nothing deploys
  * after Shutdown. Recall and harvest stay available then (harvest is refused
@@ -232,7 +239,13 @@ export function decideVenue(input: {
   // tried. Once its lock has elapsed the position is drained step by step.
   if (proposal !== null) {
     const amount = drainAmount(pool, proposal, venueAvailable, now);
-    if (amount !== null && venueReady(state, "drain", now)) return { kind: "drain", amount };
+    if (amount !== null) return venueReady(state, "drain", now) ? { kind: "drain", amount } : null;
+    // Nothing left to drain: either the position is down to dust, so the
+    // migration executes once the lock allows it, or the venue has no
+    // liquidity yet and the drain waits.
+    if (now >= venueUnlocksAt(proposal) && pool.venueValue <= pool.minVenueMove) {
+      return venueReady(state, "migrate", now) ? { kind: "migrate" } : null;
+    }
     return null;
   }
 

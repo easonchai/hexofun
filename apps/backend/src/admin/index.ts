@@ -2,7 +2,7 @@
 // start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
 // start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
 // fund-jackpot, grant-tickets, set-operator,
-// propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, create-invite, shutdown, emergency-crank,
+// propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, migrate-venue, create-invite, shutdown, emergency-crank,
 // sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
@@ -822,6 +822,24 @@ export async function run(
         mode,
         [pause, ...drain],
         `pause deploys and drain ${command.amount} atomic units from the venue into the principal vault; start-deploy resumes deploys`,
+        ledger,
+      );
+    }
+    // venue-switch ticket 05. Permissionless: the signer only pays the fee.
+    // The proposal's rent goes to the pool's Admin, not to the signer.
+    case "migrate-venue": {
+      const pool = await readPool(chain);
+      const instructions = new OperatorInstructions(
+        chain.program,
+        chain.programId,
+        mode.signer,
+        false,
+      );
+      return submit(
+        chain,
+        mode,
+        await instructions.migrateVenue(pool),
+        "migrate the pool to the proposed venue; the program checks the lock and the old position, and refuses by name if either is not ready",
         ledger,
       );
     }

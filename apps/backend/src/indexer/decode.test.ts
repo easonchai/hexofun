@@ -306,6 +306,27 @@ const CASES: Case[] = [
     data: { pool: POOL, asked: "5000000", received: "4999999", venueValue: "30000000" },
   },
   {
+    name: "VenueMigrated",
+    fields: [
+      key(POOL), Buffer.from([0]), key(OWNER), key(MINT), key(OWNER), key(MINT),
+      Buffer.from([2]), key(MINT), key(OWNER), key(MINT), key(OWNER), u64(30_000_000n),
+    ],
+    data: {
+      pool: POOL,
+      oldVenueKind: 0,
+      oldKlendProgram: OWNER,
+      oldKlendMarket: MINT,
+      oldKlendReserve: OWNER,
+      oldKlendCtoken: MINT,
+      newVenueKind: 2,
+      newKlendProgram: MINT,
+      newKlendMarket: OWNER,
+      newKlendReserve: MINT,
+      newKlendCtoken: OWNER,
+      leftBehind: "30000000",
+    },
+  },
+  {
     name: "VenueProposed",
     fields: [key(POOL), Buffer.from([2]), key(OWNER), key(MINT), key(OWNER), key(MINT), i64(1_800_000_000n), i64(1_800_172_800n)],
     data: {

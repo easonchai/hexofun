@@ -1598,9 +1598,12 @@ describe("venue cranks (ticket 13)", () => {
     expect(amountSent(roomy.sent)).toBe((5_000n * U).toString());
   });
 
-  it("stops when the position is down to dust, the venue has no liquidity or the proposal is gone", async () => {
+  it("stops draining when the position is down to dust (it migrates instead), the venue has no liquidity or the proposal is gone", async () => {
+    // Dust: nothing more to drain, so the migration is what goes out.
+    const dust = drainTick({ pool: heldPool({ venueValue: 100n * U }) });
+    expect((await runTick(dust.ctx)).action).toBe("migrate_venue");
+
     for (const over of [
-      { pool: heldPool({ venueValue: 100n * U }) },
       { venueAvailable: async () => 0n },
       { venueAvailable: async () => 1n },
     ]) {
@@ -1629,6 +1632,76 @@ describe("venue cranks (ticket 13)", () => {
     const retry = drainTick({ lastVenueState: outcome.venueState ?? null, now: NOW + 30n });
     await runTick(retry.ctx);
     expect(retry.sent).toEqual([]);
+  });
+
+  // --- Venue-switch ticket 05: migrate once the lock has elapsed and the
+  // position is down to dust.
+  const emptied = () => drainTick({ pool: heldPool({ venueValue: 40n * U }) });
+
+  it("migrates when the lock has elapsed and the position is at or under min_venue_move, then resumes deploys", async () => {
+    const { ctx, sent } = emptied();
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("migrate_venue");
+    expect((sent[0] ?? []).map(label)).toEqual(["migrate_venue"]);
+    const keys = keysOfIx(sent[0] ?? []);
+    const old = heldPool();
+    // The OLD pins and extras (the sync inside values the old venue), the
+    // proposal, and the Admin who gets the rent back.
+    for (const pinned of [old.klendProgram, old.klendMarket, old.klendReserve, old.klendCtoken, old.admin]) {
+      expect(keys).toContain(pinned.toBase58());
+    }
+    expect(keys).toContain(venueProposalAddress(PROGRAM_ID, old.address).toBase58());
+    expect(keys.slice(-4)).toEqual([LMA, LIQ_SUPPLY, CMINT].map((k) => k.toBase58()).concat(SYSVAR_IX));
+
+  });
+
+  it("a migration clears a deploy cool-down earned before it, and deploys run again once the proposal is gone", async () => {
+    const cooling = { harvestedEpoch: null, failedAt: { deploy: NOW } };
+    const { ctx } = drainTick({
+      pool: heldPool({ venueValue: 40n * U }),
+      lastVenueState: cooling,
+    });
+    const migrated = await runTick(ctx);
+    expect(migrated.action).toBe("migrate_venue");
+    expect(migrated.venueState?.failedAt.deploy).toBeUndefined();
+
+    // The next tick reads the closed proposal as none and deploys.
+    const next = venueTick(10_000n * U, { lastVenueState: migrated.venueState ?? null });
+    expect((await runTick(next.ctx)).action).toBe("deploy_to_venue");
+  });
+
+  it("does not migrate before the lock ends or while the position is above dust, and drains first", async () => {
+    const early = venueTick(1_000n * U, {
+      pool: heldPool({ venueValue: 40n * U }),
+      venueProposal: { proposedAt: NOW - LOCK + 30n },
+    });
+    expect((await runTick(early.ctx)).action).toBeNull();
+    expect(early.sent).toEqual([]);
+
+    const heavy = drainTick();
+    expect((await runTick(heavy.ctx)).action).toBe("drain_venue");
+
+    // At exactly min_venue_move the program accepts; one more and it does not.
+    const edge = drainTick({ pool: heldPool({ venueValue: 100n * U }) });
+    expect((await runTick(edge.ctx)).action).toBe("migrate_venue");
+    const over = drainTick({ pool: heldPool({ venueValue: 100n * U + 1n }) });
+    expect((await runTick(over.ctx)).action).toBe("drain_venue");
+  });
+
+  it("a migration the program refuses is a warning and a cool-down, not an alert", async () => {
+    for (const code of ["VenueLockNotElapsed", "VenuePositionNotEmpty"]) {
+      const { ctx, warned } = drainTick({
+        pool: heldPool({ venueValue: 40n * U }),
+        send: async () => {
+          throw new Error(code);
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.stepError).toBeUndefined();
+      expect(outcome.venueState?.failedAt.migrate).toBe(NOW);
+      expect(warned.some((message) => message.includes(code))).toBe(true);
+    }
   });
 
   it("takes the liquidity read only when a drain is due", async () => {

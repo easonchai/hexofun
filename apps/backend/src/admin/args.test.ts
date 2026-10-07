@@ -370,6 +370,11 @@ describe("parseAdminCommand", () => {
     );
   });
 
+  it("parses migrate-venue, which takes no flags", () => {
+    expect(parseAdminCommand(["migrate-venue"])).toEqual({ kind: "migrate-venue" });
+    expect(() => parseAdminCommand(["migrate-venue", "now"])).toThrow(/unexpected argument/);
+  });
+
   it("parses cover-deficit's amount", () => {
     expect(parseAdminCommand(["cover-deficit", "--amount", "2500000"])).toEqual({
       kind: "cover-deficit",

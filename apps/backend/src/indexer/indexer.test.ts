@@ -353,6 +353,42 @@ describe("account sync", () => {
     expect(await prisma.venueProposal.count()).toBe(0);
   });
 
+  // venue-switch ticket 05
+  it("a migration's log read moves the mirrored pins and kind and drops the proposal row", async () => {
+    indexer["lastSyncedSlot"] = undefined;
+    const old = Keypair.generate().publicKey;
+    const next = Keypair.generate().publicKey;
+    await put("pool", chain.poolAddress(), poolAccount({ venueKind: 0, klendReserve: old }));
+    await indexer.syncAccounts();
+    await prisma.venueProposal.create({
+      data: {
+        poolAddress: active(),
+        venueKind: 1,
+        klendProgram: next.toBase58(),
+        klendMarket: next.toBase58(),
+        klendReserve: next.toBase58(),
+        klendCtoken: next.toBase58(),
+        proposedAt: 1n,
+        updatedSlot: 1n,
+      },
+    });
+    expect(await prisma.pool.findUniqueOrThrow({ where: { address: active() } })).toMatchObject({
+      venueKind: 0,
+      klendReserve: old.toBase58(),
+    });
+
+    // The program repinned the Pool and closed the proposal account.
+    await put("pool", chain.poolAddress(), poolAccount({ venueKind: 1, klendReserve: next }));
+    connection.deleteAccount(chain.venueProposalAddress());
+    await indexer["refreshFromLogs"]([], 300n);
+
+    expect(await prisma.pool.findUniqueOrThrow({ where: { address: active() } })).toMatchObject({
+      venueKind: 1,
+      klendReserve: next.toBase58(),
+    });
+    expect(await prisma.venueProposal.count()).toBe(0);
+  });
+
   it("records the winning tile once the round is settled", async () => {
     await put("pool", chain.poolAddress(), poolAccount());
     await put("round", chain.roundAddress(1n), roundAccount({ status: 2, winningTile: 17 }));

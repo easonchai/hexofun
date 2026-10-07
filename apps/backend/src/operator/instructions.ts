@@ -537,6 +537,26 @@ export class OperatorInstructions {
   }
 
   /**
+   * `migrate_venue` (venue-switch ticket 05): permissionless, so the operator
+   * only pays the fee. `pool` is the pool as it reads BEFORE the migration:
+   * the sync inside it values the old venue, so the four pins and the extras
+   * are the old ones. The proposal closes into `pool.admin`, who paid its rent.
+   */
+  async migrateVenue(pool: PoolState): Promise<TransactionInstruction[]> {
+    return [
+      await this.method("migrateVenue")
+        .accountsPartial({
+          pool: pool.address,
+          admin: pool.admin,
+          proposal: venueProposalAddress(this.programId, pool.address),
+          ...this.venue(pool),
+        })
+        .remainingAccounts(this.venueRemaining(pool))
+        .instruction(),
+    ];
+  }
+
+  /**
    * Fast pause (ops-console ticket 06). The Operator may only turn a switch
    * on, so these three hardcode `true`: no argument can pass `false`.
    */

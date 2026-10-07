@@ -726,7 +726,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
             ? await ctx.ix.recall(pool, crank.amount)
             : crank.kind === "drain"
               ? await ctx.ix.drainVenue(pool, crank.amount)
-              : await ctx.ix.harvest(pool),
+              : crank.kind === "migrate"
+                ? await ctx.ix.migrateVenue(pool)
+                : await ctx.ix.harvest(pool),
       );
       venueState = venueSucceeded(venueState, crank.kind, currentEpoch?.epochId ?? null);
       venueChanged = true;
@@ -768,7 +770,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
             ? "deploy_to_venue"
             : crank.kind === "drain"
               ? "drain_venue"
-              : crank.kind,
+              : crank.kind === "migrate"
+                ? "migrate_venue"
+                : crank.kind,
       });
     }
   }

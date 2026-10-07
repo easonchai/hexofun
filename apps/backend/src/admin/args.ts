@@ -88,6 +88,9 @@ export type AdminCommand =
   /** venue-switch ticket 04: brings `amount` raw atomic USDC home from the
    *  venue, with the deploy pause set in the same transaction. */
   | { readonly kind: "drain-venue"; readonly amount: bigint }
+  /** venue-switch ticket 05: executes the proposal once the lock has elapsed
+   *  and the old position is down to dust. Permissionless; no flags. */
+  | { readonly kind: "migrate-venue" }
   /** Never touches the chain: `create-invite` writes straight to Postgres,
    *  so `main()` handles it before a ChainService is even built. */
   | {
@@ -129,6 +132,7 @@ export const USAGE = [
   "  accept-admin",
   "  propose-venue --kind klend|stub|kvault|N --program PUBKEY --market PUBKEY --reserve PUBKEY --ctoken PUBKEY   (admin only; replaces an open proposal and restarts the 48 hour lock; deploys stop until cancel-venue or the migration)",
   "  cancel-venue   (admin only; closes the open proposal, rent back to the admin)",
+  "  migrate-venue   (permissionless; repins the pool to the proposed venue once the 48 hour lock has elapsed and the old position is down to min-venue-move; no USDC moves; deploys then use the new venue)",
   "  drain-venue --amount N   (admin or operator; brings N raw atomic USDC home from the venue and pauses deploys in the same transaction, so the crank cannot redeploy; start-deploy resumes)",
   `  create-invite [--max-uses N] [--owner PUBKEY] [--count K]   (max-uses defaults to ${INVITE_CODE_MAX_USES})`,
   "  shutdown --confirm POOL_ID   (irreversible; POOL_ID must match the configured pool)",
@@ -348,6 +352,10 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         buybackReserve: pubkey("buyback-reserve", values["buyback-reserve"]),
       };
     }
+
+    case "migrate-venue":
+      rejectExtra(rest);
+      return { kind: "migrate-venue" };
 
     case "drain-venue":
       return {
