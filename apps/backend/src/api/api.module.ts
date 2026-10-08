@@ -7,6 +7,7 @@ import { AccessController } from "./access.controller";
 import { AlertsController } from "./alerts.controller";
 import { ApiController } from "./api.controller";
 import { ApiService } from "./api.service";
+import { BetsController } from "./bets.controller";
 import { ErrorReportController } from "./error-report.controller";
 import { FastPauseController } from "./fast-pause.controller";
 import { FaucetController } from "./faucet.controller";
@@ -15,6 +16,7 @@ import { GrantsController } from "./grants.controller";
 import { OpsController } from "./ops.controller";
 import { OpsSummaryService } from "./ops-summary";
 import { ReferralsController } from "./referrals.controller";
+import { RoundsService } from "./rounds.service";
 import { SerializationInterceptor } from "./serialization.interceptor";
 import { SessionsController } from "./sessions.controller";
 import { SessionsService } from "./sessions.service";
@@ -26,7 +28,8 @@ import { SessionsService } from "./sessions.service";
  * route: the frontend polls the read routes every 2 s and /healthz is a
  * container probe. Access is throttled too, same limit: a script trying
  * invite codes against POST /access/redeem is exactly what this guards
- * against (ticket 06). `POST /error-reports` is written to the shared
+ * against (ticket 06). `POST /game/bets` is throttled per session and
+ * address on its handler (off-chain-tickets 16). `POST /error-reports` is written to the shared
  * Postgres by anyone, so it is throttled too, tighter (5 a minute, set on the
  * handler; mainnet-readiness-fixes 10). `POST /referrals/apply` shares that limit for the
  * same reason (ticket 02); the rest of ReferralsController (the polled GET
@@ -46,7 +49,8 @@ import { SessionsService } from "./sessions.service";
             controller === AccessController ||
             controller === ErrorReportController ||
             controller === FastPauseController ||
-            controller === SessionsController
+            controller === SessionsController ||
+            controller === BetsController
           ) {
             return false;
           }
@@ -70,10 +74,12 @@ import { SessionsService } from "./sessions.service";
     GameConfigController,
     GrantsController,
     SessionsController,
+    BetsController,
   ],
   providers: [
     ApiService,
     SessionsService,
+    RoundsService,
     OpsSummaryService,
     { provide: APP_INTERCEPTOR, useClass: SerializationInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },

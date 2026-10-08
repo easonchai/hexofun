@@ -1397,15 +1397,55 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         tickets: ALICE_WEIGHT.toString(),
       });
       // Rounds and Positions left the program (off-chain-tickets ticket 10).
-      for (const gone of ["openRound", "round", "position"]) {
+      for (const gone of ["round", "position"]) {
         expect(body).not.toHaveProperty(gone);
       }
+      // The off-chain game's Rounds ride along (ticket 16); an idle board has none.
+      expect(body).toMatchObject({ nextRoundId: "1", openRound: null, lastRound: null });
       expect(body.status.operator).toMatchObject({ lastAction: "begin_epoch" });
       expect(body.status.cursor.lastSlot).toBe("15");
       expect(BigInt(body.chainTime)).toBeGreaterThanOrEqual(CHAIN_NOW);
       // Ticket 08: the cached estimate over the pool's hot writable accounts.
       expect(body.priorityFeeMicroLamports).toBe(FAKE_PRIORITY_FEE);
       assertNoLargeNumbers(body, "/state?owner");
+    });
+
+    it("shows the open Round, then the closed one beside the new nextRoundId, and never the seed", async () => {
+      const closeAt = new Date(Date.now() + 60_000);
+      const round = {
+        poolAddress: POOL_ADDRESS,
+        epochId: 7n,
+        openAt: new Date(),
+        closeAt,
+        seedCommitment: "c".repeat(64),
+        seedSecret: "5".repeat(64),
+        tileTotals: Array<string>(36).fill("0"),
+        configId: 1,
+      };
+      await prisma.round.create({ data: { ...round, id: 1n } });
+      try {
+        const open = (await http.get("/state").expect(200)).body;
+        expect(open.nextRoundId).toBe("2");
+        expect(open.openRound).toMatchObject({
+          id: "1",
+          status: "open",
+          closeAt: closeAt.toISOString(),
+          seedCommitment: "c".repeat(64),
+        });
+        expect(open.openRound.tileTotals).toHaveLength(36);
+        expect(open.lastRound).toBeNull();
+
+        await prisma.round.update({
+          where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: 1n } },
+          data: { status: "closed" },
+        });
+        const closed = (await http.get("/state").expect(200)).body;
+        expect(closed).toMatchObject({ nextRoundId: "2", openRound: null, lastRound: { id: "1", status: "closed", tile: null } });
+        expect(JSON.stringify(closed)).not.toContain("5".repeat(64));
+        assertNoLargeNumbers(closed, "/state (rounds)");
+      } finally {
+        await prisma.round.deleteMany();
+      }
     });
 
     it("omits the Player with no owner given, so a disconnected visitor gets a complete page", async () => {

@@ -38,6 +38,7 @@ import {
   type ReserveStats,
   type TrailingRate,
 } from "./live-yield";
+import { readRoundState } from "./round-state";
 
 /** Mirrors programs/hex_vault/src/constants.rs `epoch_status`. */
 export const EPOCH_OPEN = 0;
@@ -547,7 +548,7 @@ export class ApiService {
    * balance, rpc health, clock, pool config) run after the transaction closes.
    */
   async getState(owner?: string) {
-    const { pool, epoch, previousEpoch, operator, cursor, player } =
+    const { pool, epoch, previousEpoch, operator, cursor, player, rounds } =
       await this.prisma.$transaction(
         async (tx) => {
           const poolAddress = this.poolAddress;
@@ -557,7 +558,7 @@ export class ApiService {
               "The pool is not indexed yet. Try again in a few seconds.",
             );
           }
-          const [epoch, previousEpoch, operator, cursor, player] = await Promise.all([
+          const [epoch, previousEpoch, operator, cursor, player, rounds] = await Promise.all([
             tx.epoch.findUnique({
               where: { poolAddress_id: { poolAddress, id: pool.currentEpochId } },
             }),
@@ -571,8 +572,9 @@ export class ApiService {
             owner === undefined
               ? Promise.resolve(null)
               : tx.player.findUnique({ where: { poolAddress_owner: { poolAddress, owner } } }),
+            readRoundState(tx, poolAddress, new Date()),
           ]);
-          return { pool, epoch, previousEpoch, operator, cursor, player };
+          return { pool, epoch, previousEpoch, operator, cursor, player, rounds };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
       );
@@ -632,6 +634,11 @@ export class ApiService {
       /** Ticket 05: the deposit-only launch week's countdown target; null
        *  once an Epoch exists or `LAUNCH_AT` is unset. */
       launchAt: epoch === null ? this.launchAt : null,
+      /** Off-chain-tickets 16: the id a bet names to open a Round, the open
+       *  Round (null on an idle board) and the newest finished one. */
+      nextRoundId: rounds.nextRoundId,
+      openRound: rounds.openRound,
+      lastRound: rounds.lastRound,
     };
   }
 

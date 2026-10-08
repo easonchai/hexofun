@@ -506,3 +506,62 @@ model SessionNonce {
   nonce     String   @id
   expiresAt DateTime
 }
+
+// off-chain-tickets ticket 16: a Round of the off-chain game. No row exists
+// until a bet is accepted. `seedSecret` is the unrevealed seed and is never
+// served; `seed` stays null until reveal (ticket 17), when it takes the same
+// value. `tileTotals` is 36 decimal strings, the Tickets staked on each tile.
+// No relation to Pool, so a Pool cutover leaves the table alone.
+enum RoundStatus {
+  open
+  closed
+  revealed
+  settled
+  voided
+}
+
+model Round {
+  poolAddress    String
+  /// Per pool, from 1, in the order Rounds opened.
+  id             BigInt
+  epochId        BigInt
+  openAt         DateTime
+  closeAt        DateTime
+  status         RoundStatus @default(open)
+  seedCommitment String
+  seedSecret     String
+  seed           String?
+  drandRound     BigInt?
+  drandSignature String?
+  ctr            Int?
+  tile           Int?
+  pot            BigInt      @default(0)
+  houseCut       BigInt?
+  tileTotals     Json
+  /// sha256 of the accepted bets' raw signatures in order, hex; set at close.
+  betListHash    String?
+  configId       Int
+
+  @@id([poolAddress, id])
+  @@index([poolAddress, status])
+}
+
+// One accepted bet. `id` is the accepted order. `tiles` is a 36-bit mask, bit
+// n set for tile n. One Position per wallet per Round is a rule of the engine,
+// not of the table. `signature` is the session key's, base58.
+model Position {
+  id           BigInt   @id @default(autoincrement())
+  poolAddress  String
+  roundId      BigInt
+  owner        String
+  sessionId    String
+  seq          Int
+  tiles        BigInt
+  stakePerTile BigInt
+  message      String
+  signature    String
+  receivedAt   DateTime
+
+  @@index([poolAddress, roundId, id])
+  @@index([poolAddress, roundId, owner])
+}
