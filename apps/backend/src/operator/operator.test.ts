@@ -582,6 +582,26 @@ describe("runTick", () => {
     expect(next.snapshotMismatchEpoch).toBeNull();
   });
 
+  it("6. a winner with no Player account does not stop the tick, and the epoch rolls over past its timeouts", async () => {
+    const sends: string[] = [];
+    const { ctx, warned } = context({
+      pool: pool({ payoutTimeout: 30n }),
+      previousEpoch: drawn({ drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n) }),
+      payoutProof: async () => proofAt(42n),
+      send: async (ixs) => {
+        const name = label(ixs[0]!);
+        sends.push(name);
+        if (name === "payout") throw new Error("AccountNotInitialized");
+        return "sig";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(sends).toEqual(["payout", "rollover_epoch"]);
+    expect(outcome.action).toBe("rollover_epoch");
+    expect(outcome.snapshotMismatchEpoch).toBeNull();
+    expect(warned[0]).toContain("cannot be paid");
+  });
+
   it("no tick, in any epoch state, sends a Round instruction", async () => {
     const proof = proofAt(42n);
     const labels = new Set<string>();

@@ -65,6 +65,20 @@ export const PROOF_REFUSED: ReadonlySet<string> = new Set([
   "ZeroTicketLeaf",
 ]);
 
+/**
+ * `payout` failures that name the winner's accounts, not the proof: a leaf
+ * owner with no Player account (a granted wallet that never deposited), or a
+ * frozen or closed token account. Retrying cannot pay them, and throwing would
+ * stop every later step, so the epoch waits out `payout_timeout` instead.
+ */
+const UNPAYABLE_WINNER = [
+  "AccountNotInitialized",
+  "ConstraintTokenMint",
+  "ConstraintTokenOwner",
+  "AccountFrozen",
+  "custom program error: 0x11",
+];
+
 /** Every catch below narrows `unknown` the same way. */
 const errorMessage = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
@@ -438,9 +452,14 @@ async function decide(ctx: TickContext): Promise<Decision> {
           return finish({ action: "payout" });
         } catch (cause) {
           const message = errorMessage(cause);
-          if (!PROOF_REFUSED.has(message)) throw cause;
-          proofRefusedFor = epochId;
-          ctx.warn(`epoch ${epochId}: payout proof refused (${message}); not retrying`);
+          if (PROOF_REFUSED.has(message)) {
+            proofRefusedFor = epochId;
+            ctx.warn(`epoch ${epochId}: payout proof refused (${message}); not retrying`);
+          } else if (UNPAYABLE_WINNER.some((marker) => message.includes(marker))) {
+            ctx.warn(`epoch ${epochId}: the winner cannot be paid (${message}); rolling over after payout_timeout`);
+          } else {
+            throw cause;
+          }
         }
       }
     }
