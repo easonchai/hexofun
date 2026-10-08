@@ -1,6 +1,6 @@
 // Ops-and-envs program tickets: shutdown (ReduceOnly), the permissionless
-// emergency_withdraw and close_round cranks, and the admin's sweep_house
-// (docs/plan/ops-and-envs/issues/02-05).
+// emergency_withdraw crank, and the admin's sweep_house
+// (docs/plan/ops-and-envs/issues/02-04).
 //
 // Every test runs against a real localnet validator, so give it room.
 
@@ -9,36 +9,21 @@ import { BN } from "@anchor-lang/core";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID, getOrCreateAssociatedTokenAccount } from "@solana/spl-token";
 import {
-  DEVNET_VRF_NETWORK_STATE,
-  DEVNET_VRF_TREASURY,
   epochPda,
   findEvent,
   fulfillRandomness,
-  grantTicketsAsAdmin,
-  onChainNowSeconds,
+  payoutMethod,
   playerPda,
   refundAccounts,
-  positionPda,
   program,
-  provider,
-  randomnessFor,
-  randomnessPda,
   requestDrawMethod,
   retryUntilOk,
-  roundPda,
   setupPool,
-  sleepUntilOnChain,
   testNonce,
-  vrfSeed,
   type PoolCtx,
 } from "./helpers/hx.js";
 
 const TIMEOUT = 60_000;
-
-// ORAO's VRF program id, pinned on the pool at create_pool. test-vrf never
-// actually invokes it, so it needs no deployment on localnet; request_draw
-// still checks the account's address against this constant.
-const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 
 type Wallet = { keypair: Keypair; tokenAccount: PublicKey };
 
@@ -121,6 +106,7 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
       currentEpoch: epochPda(pool.pool, currentEpochId),
       epochTwoBehind: epochPda(pool.pool, twoBehindId),
       newEpoch: epochPda(pool.pool, currentEpochId + 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
@@ -158,18 +144,6 @@ async function buyTickets(pool: PoolCtx, owner: Wallet, amount: bigint) {
     .rpc();
 }
 
-async function grantTickets(pool: PoolCtx, signer: Keypair, owner: PublicKey, amount: bigint) {
-  return program.methods
-    .grantTickets(new BN(amount.toString()))
-    .accountsPartial({
-      signer: signer.publicKey,
-      pool: pool.pool,
-      player: playerPda(pool.pool, owner),
-    })
-    .signers([signer])
-    .rpc();
-}
-
 /**
  * `nonce` is mixed into the seed (beta-launch-fixes ticket 02); the program
  * now checks the randomness account against it itself (production-hardening
@@ -178,9 +152,10 @@ async function grantTickets(pool: PoolCtx, signer: Keypair, owner: PublicKey, am
 async function requestDraw(
   pool: PoolCtx,
   epochId: bigint,
+  totalTickets = 1n,
   nonce: Uint8Array = testNonce(),
 ) {
-  return requestDrawMethod(pool, epochId, nonce).rpc();
+  return requestDrawMethod(pool, epochId, totalTickets, nonce).rpc();
 }
 
 /** Permissionless (production-hardening ticket 01): first account is
@@ -204,137 +179,7 @@ async function draw(
 }
 
 async function payout(pool: PoolCtx, epochId: bigint, winner: PublicKey) {
-  return program.methods
-    .payout()
-    .accountsPartial({
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      epoch: epochPda(pool.pool, epochId),
-      winner: playerPda(pool.pool, winner),
-      jackpotVault: pool.jackpotVault,
-      principalVault: pool.principalVault,
-      treasury: pool.treasury,
-      buybackReserve: pool.buybackReserve,
-      ...pool.venue,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .rpc();
-}
-
-async function createRound(
-  pool: PoolCtx,
-  currentEpochId: bigint,
-  roundId: bigint,
-  startsAt: number,
-  endsAt: number,
-) {
-  return program.methods
-    .createRound(new BN(startsAt), new BN(endsAt))
-    .accountsPartial({
-      operator: pool.operator.publicKey,
-      pool: pool.pool,
-      currentEpoch: epochPda(pool.pool, currentEpochId),
-      round: roundPda(pool.pool, roundId),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
-}
-
-async function buyPosition(
-  pool: PoolCtx,
-  owner: Wallet,
-  roundId: bigint,
-  tiles: bigint,
-  stakePerTile: bigint,
-) {
-  return program.methods
-    .buyPosition(new BN(tiles.toString()), new BN(stakePerTile.toString()))
-    .accountsPartial({
-      owner: owner.keypair.publicKey,
-      pool: pool.pool,
-      player: playerPda(pool.pool, owner.keypair.publicKey),
-      round: roundPda(pool.pool, roundId),
-      position: positionPda(roundPda(pool.pool, roundId), owner.keypair.publicKey),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([owner.keypair])
-    .rpc();
-}
-
-/** `nonce` is mixed into the seed (beta-launch-fixes ticket 02); returns the
- *  seed actually used, since the Round's `vrfSeed` is `[0; 32]` until this
- *  succeeds. */
-async function requestRoundRandomness(
-  pool: PoolCtx,
-  roundId: bigint,
-  nonce: Uint8Array = testNonce(),
-): Promise<Uint8Array> {
-  const seed = vrfSeed("round", pool.pool, roundId, nonce);
-  await program.methods
-    .requestRoundRandomness(Array.from(nonce))
-    .accountsPartial({
-      payer: pool.operator.publicKey,
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      randomness: randomnessPda(seed),
-      vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-      vrfTreasury: DEVNET_VRF_TREASURY,
-      vrfProgram: ORAO_VRF_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
-  return seed;
-}
-
-/** Permissionless (production-hardening ticket 01): first account is
- *  `caller`, not `operator`; `house` still pins to `pool.house`. */
-async function settleRound(
-  pool: PoolCtx,
-  roundId: bigint,
-  randomness: PublicKey,
-  caller: Keypair = pool.operator,
-) {
-  return program.methods
-    .settleRound()
-    .accountsPartial({
-      caller: caller.publicKey,
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      randomness,
-      house: pool.house,
-    })
-    .signers([caller])
-    .rpc();
-}
-
-async function settlePosition(pool: PoolCtx, roundId: bigint, owner: PublicKey) {
-  return program.methods
-    .settlePosition()
-    .accountsPartial({
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      player: playerPda(pool.pool, owner),
-      owner,
-      position: positionPda(roundPda(pool.pool, roundId), owner),
-    })
-    .rpc();
-}
-
-async function closeRound(pool: PoolCtx, roundId: bigint) {
-  return program.methods
-    .closeRound()
-    .accountsPartial({
-      pool: pool.pool,
-      operator: pool.operator.publicKey,
-      round: roundPda(pool.pool, roundId),
-    })
-    .rpc();
-}
-
-async function fetchRound(pool: PoolCtx, roundId: bigint) {
-  return program.account.round.fetch(roundPda(pool.pool, roundId));
+  return payoutMethod(pool, epochId, winner).rpc();
 }
 
 async function fetchPlayer(pool: PoolCtx, owner: PublicKey) {
@@ -512,26 +357,16 @@ describe("shutdown", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 5_000_000n);
 
-      // A round and an epoch that both legitimately exist before shutdown,
-      // so the accounts passed below satisfy Anchor's own seed/bump checks
-      // and the program's `require!(!pool.shutdown, ...)` -- the very first
-      // check in every one of these handlers -- is what actually fires.
-      const roundId = 1n;
-      await createRound(pool, 0n, roundId, 0, 60);
+      // An epoch that legitimately exists before shutdown, so the accounts
+      // passed below satisfy Anchor's own seed/bump checks and the program's
+      // `require!(!pool.shutdown, ...)` -- the very first check in every one of
+      // these handlers -- is what actually fires.
       await beginEpoch(pool, 0n);
 
       await shutdown(pool);
 
       await expect(deposit(pool, owner, 1_000_000n)).rejects.toThrow(/PoolShutDown/);
       await expect(buyTickets(pool, owner, 1_000_000n)).rejects.toThrow(/PoolShutDown/);
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/PoolShutDown/);
-      await expect(
-        grantTickets(pool, pool.admin, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/PoolShutDown/);
-      await expect(createRound(pool, 1n, 2n, 0, 60)).rejects.toThrow(/PoolShutDown/);
-      await expect(buyPosition(pool, owner, roundId, 1n, 1n)).rejects.toThrow(/PoolShutDown/);
       await expect(beginEpoch(pool, 1n)).rejects.toThrow(/PoolShutDown/);
       // `draw` deliberately does NOT check shutdown any more
       // (beta-launch-fixes ticket 03): an Epoch still Drawing when shutdown
@@ -559,7 +394,7 @@ describe("emergency_withdraw", () => {
   );
 
   it(
-    "pays principal only, entries and principal zero out, total_principal drops",
+    "pays principal only, principal zeroes out, total_principal drops",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
@@ -572,16 +407,21 @@ describe("emergency_withdraw", () => {
       expect(await vaultBalance(owner.tokenAccount)).toBe(walletBefore + 4_000_000n);
       const player = await fetchPlayer(pool, owner.keypair.publicKey);
       expect(player.principal.toString()).toBe("0");
-      expect(player.entries.toString()).toBe("0");
       expect((await program.account.pool.fetch(pool.pool)).totalPrincipal.toString()).toBe("0");
 
-      const event = await findEvent<{ principal: BN; pending: BN; total: BN }>(
-        sig,
-        "emergencyWithdrawn",
-      );
-      expect(event?.principal.toString()).toBe("4000000");
+      const event = await findEvent<{
+        claim: BN;
+        pending: BN;
+        total: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(sig, "emergencyWithdrawn");
+      expect(event?.claim.toString()).toBe("4000000");
       expect(event?.pending.toString()).toBe("0");
       expect(event?.total.toString()).toBe("4000000");
+      // The Player's post-state, as the account reads after the transaction.
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
     },
     TIMEOUT,
   );
@@ -742,80 +582,6 @@ describe("sweep_house", () => {
         2_000_000n,
       );
       expect(await vaultBalance(pool.jackpotVault)).toBe(0n);
-    },
-    TIMEOUT,
-  );
-});
-
-describe("close_round", () => {
-  it(
-    "refuses on an Open round, then a Requested one, then an unsettled Settled one, and finally closes and pays rent to the operator",
-    async () => {
-      const pool = await setupPool({ roundSeconds: 4, closeBuffer: 1 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 5_000_000n);
-      // The deposit holds no Ticket until the next epoch (ADR 0020).
-      await grantTicketsAsAdmin(pool, owner.keypair.publicKey, 5_000_000n);
-
-      const roundId = 1n;
-      const startsAt = await onChainNowSeconds();
-      const endsAt = startsAt + 4;
-      await createRound(pool, 0n, roundId, startsAt, endsAt);
-
-      await expect(closeRound(pool, roundId)).rejects.toThrow(/RoundNotSettled/);
-
-      await buyPosition(pool, owner, roundId, 1n << 0n, 1_000_000n); // tile 0
-
-      await sleepUntilOnChain(endsAt - 1); // past the close buffer
-      const seed = await requestRoundRandomness(pool, roundId);
-
-      await expect(closeRound(pool, roundId)).rejects.toThrow(/RoundNotSettled/);
-
-      const randomness = await fulfillRandomness(seed, randomnessFor(0)); // tile 0 wins
-      await settleRound(pool, roundId, randomness);
-      expect((await fetchRound(pool, roundId)).status).toBe(2); // Settled
-
-      await expect(closeRound(pool, roundId)).rejects.toThrow(/RoundHasOpenPositions/);
-
-      const ownerBalBefore = await provider.connection.getBalance(owner.keypair.publicKey);
-      await settlePosition(pool, roundId, owner.keypair.publicKey);
-      expect(await provider.connection.getBalance(owner.keypair.publicKey)).toBeGreaterThan(
-        ownerBalBefore,
-      ); // Position rent came back to its owner
-      expect((await fetchRound(pool, roundId)).openPositions).toBe(0);
-
-      const roundLamports = (await provider.connection.getAccountInfo(roundPda(pool.pool, roundId)))!
-        .lamports;
-      const operatorBalBefore = await provider.connection.getBalance(pool.operator.publicKey);
-      const sig = await closeRound(pool, roundId);
-
-      expect(await provider.connection.getBalance(pool.operator.publicKey)).toBe(
-        operatorBalBefore + roundLamports,
-      );
-      await expect(fetchRound(pool, roundId)).rejects.toThrow();
-
-      const event = await findEvent<{ round: PublicKey; roundId: BN }>(sig, "roundClosed");
-      expect(event?.roundId.toString()).toBe(roundId.toString());
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "closes a forfeited round with nothing staked, and a voided round",
-    async () => {
-      const pool = await setupPool({ roundSeconds: 4, closeBuffer: 1 });
-
-      const forfeitedId = 1n;
-      const startsAt = await onChainNowSeconds();
-      await createRound(pool, 0n, forfeitedId, startsAt, startsAt + 4);
-      await sleepUntilOnChain(startsAt + 3);
-      const forfeitedSeed = await requestRoundRandomness(pool, forfeitedId);
-      const forfeitedRandomness = await fulfillRandomness(forfeitedSeed, randomnessFor(0));
-      await settleRound(pool, forfeitedId, forfeitedRandomness);
-      expect((await fetchRound(pool, forfeitedId)).status).toBe(3); // Forfeited
-
-      await closeRound(pool, forfeitedId); // no positions were ever bought
-      await expect(fetchRound(pool, forfeitedId)).rejects.toThrow();
     },
     TIMEOUT,
   );

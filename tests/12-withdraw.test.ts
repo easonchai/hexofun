@@ -13,8 +13,8 @@
 //
 // In epoch 0 every deposit is a pending deposit, which is how the refund
 // suites below get a pending part without waiting for an epoch to turn. A
-// queued amount needs Principal that held a Ticket, so those suites begin
-// epochs; `begin_epoch` is gated on the wall clock, hence the retries.
+// queued amount needs Principal that is no longer pending, so those suites
+// begin epochs; `begin_epoch` is gated on the wall clock, hence the retries.
 
 import { describe, expect, it } from "vitest";
 import { BN } from "@anchor-lang/core";
@@ -22,35 +22,22 @@ import { PublicKey, SystemProgram } from "@solana/web3.js";
 import { mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   assertSolvent,
-  DEVNET_VRF_NETWORK_STATE,
-  DEVNET_VRF_TREASURY,
   deployMethod,
   deployToVenue,
   epochPda,
-  fetchTree,
   findEvent,
-  fulfillRandomness,
-  leafTickets,
-  onChainNowSeconds,
   playerPda,
-  positionPda,
   program,
   provider,
-  randomnessFor,
-  randomnessPda,
   recallMethod,
   refundAccounts,
   retryUntilOk,
-  roundPda,
   setupPool,
   setVenueRate,
   stubVenueValue,
-  testNonce,
   testSyncMethod,
   txInfo,
-  vrfSeed,
   waitPastLastSync,
-  ticketsOf,
   type PoolCtx,
 } from "./helpers/hx.js";
 import idl from "../target/idl/hex_vault.json";
@@ -58,7 +45,6 @@ import idl from "../target/idl/hex_vault.json";
 const TIMEOUT = 300_000;
 const USDC = 1_000_000n;
 const SCALE = 10n ** 18n;
-const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 
 type Wallet = Awaited<ReturnType<PoolCtx["fundedWallet"]>>;
 
@@ -76,6 +62,8 @@ interface WithdrawRequestedEvent {
   refunded: BN;
   paid: BN;
   redeemed: BN;
+  principal: BN;
+  yieldIndex: BN;
 }
 
 async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
@@ -176,6 +164,7 @@ async function beginEpoch(ctx: PoolCtx, currentEpochId: bigint) {
         currentEpoch: epochPda(ctx.pool, currentEpochId),
         epochTwoBehind: epochPda(ctx.pool, currentEpochId > 0n ? currentEpochId - 1n : 0n),
         newEpoch: epochPda(ctx.pool, currentEpochId + 1n),
+        ...ctx.venue,
         systemProgram: SystemProgram.programId,
       })
       .signers([ctx.operator])
@@ -209,17 +198,6 @@ async function reprice(ctx: PoolCtx, rate: bigint) {
 /** Puts the USDC a rate rise is worth into the stub vault. */
 async function fundStub(ctx: PoolCtx, amount: bigint) {
   await mintTo(provider.connection, ctx.operator, ctx.mint, ctx.venue.klendCtoken, ctx.operator, amount);
-}
-
-/** The root of epoch `e`: every Player's Tickets. */
-async function root(ctx: PoolCtx, e: bigint): Promise<bigint> {
-  return leafTickets(await fetchTree(ctx), e).reduce((a, b) => a + b, 0n);
-}
-
-/** What the tree holds as `principal_sum` for `owner`'s leaf. */
-async function treePrincipal(ctx: PoolCtx, owner: Wallet): Promise<bigint> {
-  const player = await fetchPlayer(ctx, owner);
-  return (await fetchTree(ctx)).nodes[player.leafIndex - 1]!.principalSum;
 }
 
 /** One Player with `amount` deposited in epoch 0 (all of it a pending deposit),
@@ -260,13 +238,12 @@ function unsettled(
 
 describe("the refund of a pending deposit", () => {
   it(
-    "pays from free idle in one transaction, lowers Principal, the pending deposit, the pool total and the tree, and leaves Tickets alone",
+    "pays from free idle in one transaction, lowers Principal, the pending deposit and the pool total, and the event carries the Player's post-state",
     async () => {
       const { ctx, owner } = await deployedPool(1_000n * USDC);
       expect(await balance(ctx.principalVault)).toBe(100n * USDC);
       const walletBefore = await balance(owner.tokenAccount);
       const sharesBefore = (await program.account.testReserve.fetch(ctx.venue.klendReserve)).shares;
-      expect(await treePrincipal(ctx, owner)).toBe(1_000n * USDC);
 
       const signature = await request(ctx, owner, 60n * USDC);
 
@@ -279,15 +256,15 @@ describe("the refund of a pending deposit", () => {
       const player = await fetchPlayer(ctx, owner);
       expect(big(player.principal)).toBe(940n * USDC);
       expect(big(player.pendingDeposit)).toBe(940n * USDC);
-      expect(big(player.entries)).toBe(0n);
       expect(big(player.pendingWithdraw)).toBe(0n);
       const pool = await fetchPool(ctx);
       expect(big(pool.totalPrincipal)).toBe(940n * USDC);
       expect(big(pool.pendingWithdrawals)).toBe(0n);
       expect(big(pool.venueValue)).toBe(900n * USDC);
-      expect(await treePrincipal(ctx, owner)).toBe(940n * USDC);
 
       const event = await findEvent<WithdrawRequestedEvent>(signature, "withdrawRequested");
+      expect(big(event!.principal)).toBe(big(player.principal));
+      expect(big(event!.yieldIndex)).toBe(big(player.yieldIndex));
       expect(big(event!.amount)).toBe(60n * USDC);
       expect(big(event!.refunded)).toBe(60n * USDC);
       expect(big(event!.paid)).toBe(60n * USDC);
@@ -328,7 +305,7 @@ describe("the refund of a pending deposit", () => {
       }
 
       const units = (await txInfo(signature)).units;
-      console.log(`COMPUTE request_withdraw(refund with a redeem, small tree)=${units}`);
+      console.log(`COMPUTE request_withdraw(refund with a redeem)=${units}`);
       expect(units).toBeLessThan(200_000);
     },
     TIMEOUT,
@@ -398,22 +375,18 @@ describe("the refund of a pending deposit", () => {
 
 describe("the split and the queue", () => {
   it(
-    "refunds the pending part, queues the rest, leaves the root and the Tickets unchanged, merges requests, and pays after the next epoch begins",
+    "refunds the pending part, queues the rest, merges requests, and pays after the next epoch begins",
     async () => {
       const ctx = await setupPool({ epochSeconds: 8 });
       const a = await ctx.fundedWallet(200n * USDC);
       await beginEpoch(ctx, 0n); // epoch 1
       await deposit(ctx, a, 100n * USDC);
       await beginEpoch(ctx, 1n); // epoch 2
-      // 100 is active, and this 50 is pending: Principal 150, Tickets 100.
+      // 100 is active, and this 50 is pending: Principal 150.
       await deposit(ctx, a, 50n * USDC);
       let player = await fetchPlayer(ctx, a);
       expect(big(player.principal)).toBe(150n * USDC);
-      expect(big(player.entries)).toBe(100n * USDC);
       expect(big(player.pendingDeposit)).toBe(50n * USDC);
-      const rootBefore = await root(ctx, 2n);
-      expect(rootBefore).toBe(100n * USDC);
-      expect(await treePrincipal(ctx, a)).toBe(150n * USDC);
       const walletBefore = await balance(a.tokenAccount);
 
       // 120 asked: 50 refunds now, 70 queues.
@@ -424,10 +397,6 @@ describe("the split and the queue", () => {
       expect(big(player.pendingDeposit)).toBe(0n);
       expect(big(player.pendingWithdraw)).toBe(70n * USDC);
       expect(big(player.pendingEpoch)).toBe(2n);
-      // The request moved no Ticket and no tree weight but the refund's.
-      expect(big(player.entries)).toBe(100n * USDC);
-      expect(await root(ctx, 2n)).toBe(rootBefore);
-      expect(await treePrincipal(ctx, a)).toBe(100n * USDC);
       let pool = await fetchPool(ctx);
       // The queued 70 is still inside the pool's Principal.
       expect(big(pool.totalPrincipal)).toBe(100n * USDC);
@@ -448,7 +417,6 @@ describe("the split and the queue", () => {
       expect(big(player.pendingWithdraw)).toBe(90n * USDC);
       expect(big(player.requestedAt) > stampedAt).toBe(true);
       expect(big((await findEvent<WithdrawRequestedEvent>(merged, "withdrawRequested"))!.paid)).toBe(0n);
-      expect(await root(ctx, 2n)).toBe(rootBefore);
 
       // What one request can take is Principal less what is queued: 10 is left.
       await refused(ctx, requestMethod(ctx, a, 10n * USDC + 1n).rpc(), /InsufficientPrincipal/);
@@ -469,13 +437,12 @@ describe("the split and the queue", () => {
       expect(big(covered.requestedAt)).toBe(big(before.requestedAt));
       expect(big(covered.pendingEpoch)).toBe(big(before.pendingEpoch));
       expect(big(covered.principal)).toBe(100n * USDC);
-      expect(await root(ctx, 2n)).toBe(rootBefore);
 
       // Not due while the epoch it was requested in is current.
       await refused(ctx, processMethod(ctx, a).rpc(), /WithdrawalNotDue/);
 
-      // After the next epoch begins, it pays the whole 100 and lowers Principal,
-      // Tickets, the pool total and the tree together.
+      // After the next epoch begins, it pays the whole 100 and lowers Principal
+      // and the pool total together.
       await beginEpoch(ctx, 2n); // epoch 3
       const vaultBefore = await balance(ctx.principalVault);
       const walletBeforePay = await balance(a.tokenAccount);
@@ -484,20 +451,21 @@ describe("the split and the queue", () => {
       expect(vaultBefore - (await balance(ctx.principalVault))).toBe(100n * USDC);
       player = await fetchPlayer(ctx, a);
       expect(big(player.principal)).toBe(0n);
-      expect(big(player.entries)).toBe(0n);
       expect(big(player.pendingWithdraw)).toBe(0n);
       pool = await fetchPool(ctx);
       expect(big(pool.totalPrincipal)).toBe(0n);
       expect(big(pool.pendingWithdrawals)).toBe(0n);
-      expect(await treePrincipal(ctx, a)).toBe(0n);
-      expect(await root(ctx, 3n)).toBe(0n);
-      const withdrawn = await findEvent<{ amount: BN; principal: BN }>(paid, "withdrawn");
+      const withdrawn = await findEvent<{ amount: BN; principal: BN; yieldIndex: BN }>(
+        paid,
+        "withdrawn",
+      );
       expect(big(withdrawn!.amount)).toBe(100n * USDC);
-      expect(big(withdrawn!.principal)).toBe(0n);
+      expect(big(withdrawn!.principal)).toBe(big(player.principal));
+      expect(big(withdrawn!.yieldIndex)).toBe(big(player.yieldIndex));
       await refused(ctx, processMethod(ctx, a).rpc(), /NothingPending/);
 
       const units = (await txInfo(paid)).units;
-      console.log(`COMPUTE process_withdraw(sync, settle, touch, tree, small tree)=${units}`);
+      console.log(`COMPUTE process_withdraw(sync, settle, touch)=${units}`);
       expect(units).toBeLessThan(200_000);
     },
     TIMEOUT,
@@ -510,7 +478,6 @@ describe("the split and the queue", () => {
       await request(ctx, owner, 400n * USDC);
       const queuedAt = await fetchPlayer(ctx, owner);
       expect(big(queuedAt.principal)).toBe(1_000n * USDC);
-      expect(big(queuedAt.entries)).toBe(1_000n * USDC);
 
       // The venue gains 100 after the request, and nothing has synced it.
       await setVenueRate(ctx, (12n * SCALE) / 10n).rpc();
@@ -524,52 +491,19 @@ describe("the split and the queue", () => {
 
       // It paid the queued 400 and not a unit of the yield. The sync inside
       // process_withdraw booked the gain, and the Player's Principal took its
-      // share of it, less the 400. The yield adds no Tickets (ADR 0020): the
-      // touch reset them to the 1,000 Principal before the settle, and the
-      // withdrawal took 400 off.
+      // share of it, less the 400.
       expect((await balance(owner.tokenAccount)) - walletBefore).toBe(400n * USDC);
       const pool = await fetchPool(ctx);
       expect(big(pool.yieldIndex) > 0n).toBe(true);
       const player = await fetchPlayer(ctx, owner);
       const settled = big(player.principal) - 600n * USDC;
       expect(settled > 0n).toBe(true);
-      expect(big(player.entries)).toBe(600n * USDC);
       expect(big(player.pendingWithdraw)).toBe(0n);
-      expect(await root(ctx, 3n)).toBe(600n * USDC);
-      expect(await treePrincipal(ctx, owner)).toBe(big(player.principal));
       expect(big(pool.totalPrincipal)).toBe(big(player.principal));
     },
     TIMEOUT,
   );
 
-  it(
-    "withdrawing in the epoch the yield settled floors Tickets below Principal: no error, the tree agrees",
-    async () => {
-      // Principal 1,000 + yield, Tickets 1,000, a queued 10: process_withdraw
-      // settles the yield, then takes 10 off Principal and off Tickets. The 10
-      // may as well have been yield, which never held a Ticket, so Tickets end
-      // at 990 and the Player gives up 10 Tickets they could have kept. The
-      // accepted cost of not tracking unticketed Principal (ADR 0020).
-      const { ctx, owner } = await activePool(1_000n * USDC, 500n * USDC, { baseRateBps: 10_000 });
-      await request(ctx, owner, 10n * USDC);
-      expect(big((await fetchPlayer(ctx, owner)).entries)).toBe(1_000n * USDC);
-
-      await setVenueRate(ctx, (12n * SCALE) / 10n).rpc();
-      await fundStub(ctx, 100n * USDC);
-      await beginEpoch(ctx, 2n); // epoch 3
-      await waitPastLastSync(ctx);
-      await processWithdraw(ctx, owner);
-
-      const player = await fetchPlayer(ctx, owner);
-      const settled = big(player.principal) - 990n * USDC;
-      expect(settled > 0n).toBe(true);
-      expect(big(player.entries)).toBe(990n * USDC);
-      expect(await root(ctx, 3n)).toBe(990n * USDC);
-      expect(await treePrincipal(ctx, owner)).toBe(big(player.principal));
-      expect(big((await fetchPool(ctx)).totalPrincipal)).toBe(big(player.principal));
-    },
-    TIMEOUT,
-  );
 });
 
 describe("the Haircut while the pool is impaired", () => {
@@ -632,8 +566,13 @@ describe("the Haircut while the pool is impaired", () => {
       expect(pool.impaired).toBe(true);
       const player = await fetchPlayer(ctx, owner);
       expect(big(player.principal)).toBe(500n * USDC);
-      const event = await findEvent<{ amount: BN }>(signature, "withdrawn");
+      const event = await findEvent<{ amount: BN; principal: BN; yieldIndex: BN }>(
+        signature,
+        "withdrawn",
+      );
       expect(big(event!.amount)).toBe(410n * USDC);
+      expect(big(event!.principal)).toBe(big(player.principal));
+      expect(big(event!.yieldIndex)).toBe(big(player.yieldIndex));
     },
     TIMEOUT,
   );
@@ -658,7 +597,7 @@ describe("emergency withdraw", () => {
       // Principal is 1,000 and holds the queued 100. At 0.82 that is 820.
       expect((await balance(owner.tokenAccount)) - walletBefore).toBe(820n * USDC);
       const player = await fetchPlayer(ctx, owner);
-      for (const field of ["principal", "entries", "pendingDeposit", "pendingWithdraw"] as const) {
+      for (const field of ["principal", "pendingDeposit", "pendingWithdraw"] as const) {
         expect(player[field].toString(), field).toBe("0");
       }
       const pool = await fetchPool(ctx);
@@ -666,13 +605,18 @@ describe("emergency withdraw", () => {
       expect(pool.pendingWithdrawals.toString()).toBe("0");
       expect(pool.deficit.toString()).toBe("0");
       expect(pool.impaired).toBe(false);
-      const event = await findEvent<{ total: BN; principal: BN; pending: BN }>(
-        signature,
-        "emergencyWithdrawn",
-      );
+      const event = await findEvent<{
+        total: BN;
+        claim: BN;
+        pending: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(signature, "emergencyWithdrawn");
       expect(big(event!.total)).toBe(820n * USDC);
-      expect(big(event!.principal)).toBe(1_000n * USDC);
+      expect(big(event!.claim)).toBe(1_000n * USDC);
       expect(big(event!.pending)).toBe(100n * USDC);
+      expect(big(event!.principal)).toBe(big(player.principal));
+      expect(big(event!.yieldIndex)).toBe(big(player.yieldIndex));
     },
     TIMEOUT,
   );
@@ -697,310 +641,12 @@ describe("emergency withdraw", () => {
       expect((await balance(owner.tokenAccount)) - walletBefore).toBe(150n * USDC);
       expect(await balance(ctx.principalVault)).toBe(0n);
       const after = await fetchPlayer(ctx, owner);
-      for (const field of ["principal", "entries", "pendingDeposit", "pendingWithdraw"] as const) {
+      for (const field of ["principal", "pendingDeposit", "pendingWithdraw"] as const) {
         expect(after[field].toString(), field).toBe("0");
       }
       const pool = await fetchPool(ctx);
       expect(pool.totalPrincipal.toString()).toBe("0");
       expect(pool.pendingWithdrawals.toString()).toBe("0");
-    },
-    TIMEOUT,
-  );
-});
-
-describe("Tickets lost in the game", () => {
-  it(
-    "pays a Player who queued everything and then lost Tickets in a round their full Principal, and a re-deposit never lifts the pool's Tickets past the next reset",
-    async () => {
-      const ctx = await setupPool({ epochSeconds: 30, roundSeconds: 5, closeBuffer: 1 });
-      const a = await ctx.fundedWallet(10n * USDC);
-      const owner = a.keypair.publicKey;
-      await beginEpoch(ctx, 0n); // epoch 1
-      await deposit(ctx, a, 5n * USDC);
-      await beginEpoch(ctx, 1n); // epoch 2: the 5 is active Tickets
-
-      // A stakes 1 USDC of Tickets on tile 0 and loses it.
-      const startsAt = await onChainNowSeconds();
-      await program.methods
-        .createRound(new BN(startsAt), new BN(startsAt + 5))
-        .accountsPartial({
-          operator: ctx.operator.publicKey,
-          pool: ctx.pool,
-          currentEpoch: epochPda(ctx.pool, 2n),
-          round: roundPda(ctx.pool, 1n),
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([ctx.operator])
-        .rpc();
-      await program.methods
-        .buyPosition(new BN(1), new BN((1n * USDC).toString()))
-        .accountsPartial({
-          owner,
-          pool: ctx.pool,
-          player: playerPda(ctx.pool, owner),
-          round: roundPda(ctx.pool, 1n),
-          position: positionPda(roundPda(ctx.pool, 1n), owner),
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([a.keypair])
-        .rpc();
-      expect(big((await fetchPlayer(ctx, a)).entries)).toBe(4n * USDC);
-
-      // The Player queues all 5 while 4 of it is in Tickets. No Tickets rule.
-      await request(ctx, a, 5n * USDC);
-
-      const nonce = testNonce();
-      const seed = vrfSeed("round", ctx.pool, 1n, nonce);
-      await retryUntilOk(() =>
-        program.methods
-          .requestRoundRandomness(Array.from(nonce))
-          .accountsPartial({
-            payer: ctx.operator.publicKey,
-            pool: ctx.pool,
-            round: roundPda(ctx.pool, 1n),
-            randomness: randomnessPda(seed),
-            vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-            vrfTreasury: DEVNET_VRF_TREASURY,
-            vrfProgram: ORAO_VRF_PROGRAM_ID,
-            systemProgram: SystemProgram.programId,
-          })
-          .signers([ctx.operator])
-          .rpc(),
-      );
-      // Tile 7 wins, tile 0 does not.
-      await program.methods
-        .settleRound()
-        .accountsPartial({
-          caller: ctx.operator.publicKey,
-          pool: ctx.pool,
-          round: roundPda(ctx.pool, 1n),
-          randomness: await fulfillRandomness(seed, randomnessFor(7)),
-          house: ctx.house,
-        })
-        .signers([ctx.operator])
-        .rpc();
-      await program.methods
-        .settlePosition()
-        .accountsPartial({
-          pool: ctx.pool,
-          round: roundPda(ctx.pool, 1n),
-          player: playerPda(ctx.pool, owner),
-          owner,
-          position: positionPda(roundPda(ctx.pool, 1n), owner),
-        })
-        .rpc();
-      await assertSolvent(ctx);
-      let player = await fetchPlayer(ctx, a);
-      expect(big(player.principal)).toBe(5n * USDC);
-      expect(big(player.entries)).toBe(4n * USDC);
-      expect(big(player.pendingWithdraw)).toBe(5n * USDC);
-
-      // A deposits 5 more, a pending deposit that earns no Ticket today.
-      // Tickets in the epoch stay at 4, under the 10 of Principal that the next
-      // epoch's reset would give, so the loss was not refilled.
-      await deposit(ctx, a, 5n * USDC);
-      player = await fetchPlayer(ctx, a);
-      expect(big(player.principal)).toBe(10n * USDC);
-      expect(big(player.entries)).toBe(4n * USDC);
-      expect(await ticketsOf(ctx, owner, 2n)).toBe(4n * USDC);
-
-      // Shutdown lets the request pay in this epoch. The queued 5 pays in full
-      // although the Player holds 4 Tickets, and Tickets floor at zero.
-      await shutdown(ctx);
-      const walletBefore = await balance(a.tokenAccount);
-      await processWithdraw(ctx, a);
-      expect((await balance(a.tokenAccount)) - walletBefore).toBe(5n * USDC);
-      player = await fetchPlayer(ctx, a);
-      expect(big(player.principal)).toBe(5n * USDC);
-      expect(big(player.entries)).toBe(0n);
-      expect(big(player.pendingWithdraw)).toBe(0n);
-      expect(big(player.pendingDeposit)).toBe(5n * USDC);
-      // A's Tickets never passed what the next reset gives: Principal.
-      expect(await ticketsOf(ctx, owner, 2n)).toBe(0n);
-      expect(await treePrincipal(ctx, a)).toBe(5n * USDC);
-
-      // And the pending deposit leaves through emergency withdraw.
-      const walletMid = await balance(a.tokenAccount);
-      await emergencyMethod(ctx, a).rpc();
-      await assertSolvent(ctx);
-      expect((await balance(a.tokenAccount)) - walletMid).toBe(5n * USDC);
-    },
-    TIMEOUT,
-  );
-});
-
-const ALL_TILES = (1n << 36n) - 1n;
-
-/** A round that starts now and ends in 5 seconds, in epoch `epochId`. */
-async function openRound(ctx: PoolCtx, roundId: bigint, epochId: bigint) {
-  const startsAt = await onChainNowSeconds();
-  await program.methods
-    .createRound(new BN(startsAt), new BN(startsAt + 5))
-    .accountsPartial({
-      operator: ctx.operator.publicKey,
-      pool: ctx.pool,
-      currentEpoch: epochPda(ctx.pool, epochId),
-      round: roundPda(ctx.pool, roundId),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([ctx.operator])
-    .rpc();
-}
-
-/** Stakes `stakePerTile` on every tile. */
-async function stakeAll(ctx: PoolCtx, owner: Wallet, roundId: bigint, stakePerTile: bigint) {
-  const key = owner.keypair.publicKey;
-  await program.methods
-    .buyPosition(new BN(ALL_TILES.toString()), new BN(stakePerTile.toString()))
-    .accountsPartial({
-      owner: key,
-      pool: ctx.pool,
-      player: playerPda(ctx.pool, key),
-      round: roundPda(ctx.pool, roundId),
-      position: positionPda(roundPda(ctx.pool, roundId), key),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([owner.keypair])
-    .rpc();
-  await assertSolvent(ctx);
-}
-
-/** Requests randomness once the round closes and settles it on `tile`. */
-async function settleRoundOn(ctx: PoolCtx, roundId: bigint, tile: number) {
-  const nonce = testNonce();
-  const seed = vrfSeed("round", ctx.pool, roundId, nonce);
-  await retryUntilOk(() =>
-    program.methods
-      .requestRoundRandomness(Array.from(nonce))
-      .accountsPartial({
-        payer: ctx.operator.publicKey,
-        pool: ctx.pool,
-        round: roundPda(ctx.pool, roundId),
-        randomness: randomnessPda(seed),
-        vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-        vrfTreasury: DEVNET_VRF_TREASURY,
-        vrfProgram: ORAO_VRF_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([ctx.operator])
-      .rpc(),
-  );
-  await program.methods
-    .settleRound()
-    .accountsPartial({
-      caller: ctx.operator.publicKey,
-      pool: ctx.pool,
-      round: roundPda(ctx.pool, roundId),
-      randomness: await fulfillRandomness(seed, randomnessFor(tile)),
-      house: ctx.house,
-    })
-    .signers([ctx.operator])
-    .rpc();
-  await assertSolvent(ctx);
-}
-
-/** Anyone can settle a finished Position: the provider wallet pays, not the owner. */
-async function settlePositionOf(ctx: PoolCtx, owner: Wallet, roundId: bigint) {
-  const key = owner.keypair.publicKey;
-  await program.methods
-    .settlePosition()
-    .accountsPartial({
-      pool: ctx.pool,
-      round: roundPda(ctx.pool, roundId),
-      player: playerPda(ctx.pool, key),
-      owner: key,
-      position: positionPda(roundPda(ctx.pool, roundId), key),
-    })
-    .rpc();
-  await assertSolvent(ctx);
-}
-
-describe("open Positions block the queued payout", () => {
-  it(
-    "refuses process_withdraw while a stake is on the board, pays after the settle, and leaves no Tickets behind",
-    async () => {
-      const ctx = await setupPool({ epochSeconds: 20, roundSeconds: 5, closeBuffer: 1 });
-      const a = await ctx.fundedWallet(36n * USDC);
-      const owner = a.keypair.publicKey;
-      await beginEpoch(ctx, 0n); // epoch 1
-      await deposit(ctx, a, 36n * USDC);
-      await beginEpoch(ctx, 1n); // epoch 2: the 36 is active Tickets
-      await request(ctx, a, 36n * USDC); // queue all
-      await beginEpoch(ctx, 2n); // epoch 3: the request is due
-
-      // Stake every Tile in epoch 3: the Tickets leave the Player and the tree.
-      await openRound(ctx, 1n, 3n);
-      await stakeAll(ctx, a, 1n, 1n * USDC);
-      let player = await fetchPlayer(ctx, a);
-      expect(big(player.entries)).toBe(0n);
-      expect(player.openPositions).toBe(1);
-
-      // Due, but refused with nothing changed, before and after the round settles.
-      const poolBefore = await fetchPool(ctx);
-      await refused(ctx, processMethod(ctx, a).rpc(), /OpenPositions/);
-      await settleRoundOn(ctx, 1n, 7);
-      await refused(ctx, processMethod(ctx, a).rpc(), /OpenPositions/);
-      const poolAfter = await fetchPool(ctx);
-      expect(big(poolAfter.totalPrincipal)).toBe(big(poolBefore.totalPrincipal));
-      expect(big(poolAfter.pendingWithdrawals)).toBe(36n * USDC);
-      expect(big((await fetchPlayer(ctx, a)).pendingWithdraw)).toBe(36n * USDC);
-
-      // Anyone can settle it, and the stake comes home.
-      await settlePositionOf(ctx, a, 1n);
-      player = await fetchPlayer(ctx, a);
-      expect(player.openPositions).toBe(0);
-      // The stake and the winners' share of the pot, less the House cut.
-      expect(big(player.entries) > 0n).toBe(true);
-
-      const walletBefore = await balance(a.tokenAccount);
-      await processWithdraw(ctx, a);
-      expect((await balance(a.tokenAccount)) - walletBefore).toBe(36n * USDC);
-      player =await fetchPlayer(ctx, a);
-      expect(big(player.principal)).toBe(0n);
-      expect(big(player.entries)).toBe(0n);
-      // No Tickets without Principal, in the Player or in the epoch's root.
-      expect(await ticketsOf(ctx, owner, 3n)).toBe(0n);
-      // What is left in the root is the House's cut of the round, not the Player's.
-      const cut = big((await program.account.round.fetch(roundPda(ctx.pool, 1n))).houseCut);
-      expect(await root(ctx, 3n)).toBe(cut);
-      expect(await treePrincipal(ctx, a)).toBe(0n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "keeps a Position left open from an earlier epoch blocking the payout until anyone settles it",
-    async () => {
-      const ctx = await setupPool({ epochSeconds: 20, roundSeconds: 5, closeBuffer: 1 });
-      const a = await ctx.fundedWallet(36n * USDC);
-      await beginEpoch(ctx, 0n); // epoch 1
-      await deposit(ctx, a, 36n * USDC);
-      await beginEpoch(ctx, 1n); // epoch 2
-      await request(ctx, a, 36n * USDC);
-      await beginEpoch(ctx, 2n); // epoch 3
-      await openRound(ctx, 1n, 3n);
-      await stakeAll(ctx, a, 1n, 1n * USDC);
-      await settleRoundOn(ctx, 1n, 7);
-
-      // Nobody settles it, and the epoch rolls on. The request is long due.
-      await beginEpoch(ctx, 3n); // epoch 4
-      expect((await fetchPlayer(ctx, a)).openPositions).toBe(1);
-      await refused(ctx, processMethod(ctx, a).rpc(), /OpenPositions/);
-
-      // A stranger's settle clears it. The stake is already back from the epoch
-      // reset, so the settle credits only the winners' share of the pot.
-      await settlePositionOf(ctx, a, 1n);
-      const player = await fetchPlayer(ctx, a);
-      expect(player.openPositions).toBe(0);
-      expect(big(player.entries) > 36n * USDC).toBe(true);
-
-      const walletBefore = await balance(a.tokenAccount);
-      await processWithdraw(ctx, a);
-      expect((await balance(a.tokenAccount)) - walletBefore).toBe(36n * USDC);
-      const paid = await fetchPlayer(ctx, a);
-      expect(big(paid.principal)).toBe(0n);
-      expect(big(paid.pendingWithdraw)).toBe(0n);
-      expect(paid.openPositions).toBe(0);
     },
     TIMEOUT,
   );
@@ -1028,6 +674,8 @@ interface WithdrawCancelledEvent {
   owner: PublicKey;
   amount: BN;
   pendingEpoch: BN;
+  principal: BN;
+  yieldIndex: BN;
 }
 
 /** Everything a cancel must leave alone. */
@@ -1037,11 +685,8 @@ async function untouched(ctx: PoolCtx, owner: Wallet) {
   const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
   return {
     principal: big(player.principal),
-    entries: big(player.entries),
     pendingDeposit: big(player.pendingDeposit),
     pendingEpoch: big(player.pendingEpoch),
-    leaf: await treePrincipal(ctx, owner),
-    root: await root(ctx, big(pool.currentEpochId)),
     totalPrincipal: big(pool.totalPrincipal),
     venueValue: big(pool.venueValue),
     deficit: big(pool.deficit),
@@ -1065,6 +710,10 @@ async function cancelAndCheck(ctx: PoolCtx, owner: Wallet, queued: bigint, epoch
   expect(event!.owner.toBase58()).toBe(owner.keypair.publicKey.toBase58());
   expect(big(event!.amount)).toBe(queued);
   expect(big(event!.pendingEpoch)).toBe(epoch);
+  // The Player as it stands after the cancel.
+  const player = await fetchPlayer(ctx, owner);
+  expect(big(event!.principal)).toBe(big(player.principal));
+  expect(big(event!.yieldIndex)).toBe(big(player.yieldIndex));
   return event!;
 }
 
@@ -1201,26 +850,6 @@ describe("cancel_withdraw", () => {
     TIMEOUT,
   );
 
-  it(
-    "works with a Position open",
-    async () => {
-      const ctx = await setupPool({ epochSeconds: 30, roundSeconds: 5, closeBuffer: 1 });
-      const a = await ctx.fundedWallet(36n * USDC);
-      await beginEpoch(ctx, 0n); // epoch 1
-      await deposit(ctx, a, 36n * USDC);
-      await beginEpoch(ctx, 1n); // epoch 2: the 36 is active Tickets
-      await request(ctx, a, 36n * USDC);
-      await openRound(ctx, 1n, 2n);
-      await stakeAll(ctx, a, 1n, 1n * USDC);
-      expect((await fetchPlayer(ctx, a)).openPositions).toBe(1);
-
-      await cancelAndCheck(ctx, a, 36n * USDC, 2n);
-      const player = await fetchPlayer(ctx, a);
-      expect(player.openPositions).toBe(1);
-      expect(big(player.principal)).toBe(36n * USDC);
-    },
-    TIMEOUT,
-  );
 });
 
 describe("the instruction set", () => {
@@ -1231,5 +860,27 @@ describe("the instruction set", () => {
     expect(names).toContain("process_withdraw");
     expect(names).toContain("cancel_withdraw");
     expect(names).not.toContain("instant_withdraw");
+  });
+
+  it("has no game, tree or grant instruction (ADR 0025)", () => {
+    const names = idl.instructions.map((ix) => ix.name);
+    for (const gone of [
+      "create_round",
+      "buy_position",
+      "request_round_randomness",
+      "settle_round",
+      "settle_position",
+      "void_round",
+      "close_round",
+      "grant_tickets",
+      "release_leaf",
+      "test_tree_fill",
+    ]) {
+      expect(names, gone).not.toContain(gone);
+    }
+    // Custody and the epoch draw stay.
+    for (const kept of ["deposit", "buy_tickets", "begin_epoch", "request_draw", "draw", "payout"]) {
+      expect(names, kept).toContain(kept);
+    }
   });
 });

@@ -1,13 +1,9 @@
-// Deposits earn Tickets from the next epoch (yield-claimer ticket 20, ADR
-// 0020). A deposit raises Principal and a Pending deposit and leaves Tickets
-// alone. The first touch in a later epoch folds it into Tickets, and a
-// depositor who never touches again is still in that epoch's root, because the
-// tree resets a stale slot from `principal_sum`. Yield, Bought tickets, Granted
-// tickets and the Prize credit Tickets at once.
-//
-// First deposits at the first and last second of an epoch, in the gap before
-// `begin_epoch` and the first stub epoch are in 08-weight-tree. The yield on a
-// pending deposit is in 06-yield.
+// The pending deposit (ADR 0020). A deposit raises Principal and a Pending
+// deposit, which holds no Ticket and refunds on request. The first touch in a
+// later epoch folds it. The Tickets themselves are the backend's (ADR 0025),
+// so this suite checks the program's half of the rule: the Pending deposit, the
+// fold, what a Prize does to it, and the Bought ticket cap that reads locked
+// Principal. The yield on a pending deposit is in 06-yield.
 
 import { describe, expect, it } from "vitest";
 import { BN } from "@anchor-lang/core";
@@ -16,16 +12,13 @@ import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
   assertSolvent,
   epochPda,
-  fetchTree,
   fulfillRandomness,
-  leafTickets,
+  payoutMethod,
   playerPda,
   program,
-  randomnessForTarget,
   requestDrawMethod,
   retryUntilOk,
   setupPool,
-  ticketsOf,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -67,6 +60,7 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
       currentEpoch: epochPda(pool.pool, currentEpochId),
       epochTwoBehind: epochPda(pool.pool, currentEpochId > 0n ? currentEpochId - 1n : 0n),
       newEpoch: epochPda(pool.pool, currentEpochId + 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
@@ -86,18 +80,6 @@ async function buyTickets(pool: PoolCtx, owner: Wallet, amount: bigint) {
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([owner.keypair])
-    .rpc();
-}
-
-async function grantTickets(pool: PoolCtx, owner: PublicKey, amount: bigint) {
-  return program.methods
-    .grantTickets(new BN(amount.toString()))
-    .accountsPartial({
-      signer: pool.operator.publicKey,
-      pool: pool.pool,
-      player: playerPda(pool.pool, owner),
-    })
-    .signers([pool.operator])
     .rpc();
 }
 
@@ -125,9 +107,9 @@ async function assertPrincipalSums(pool: PoolCtx, owners: PublicKey[]) {
   await assertSolvent(pool);
 }
 
-describe("deposits earn Tickets from the next epoch", () => {
+describe("the pending deposit", () => {
   it(
-    "shows zero Tickets and the full amount pending in the epoch, and the full amount active after a touch in the next",
+    "stays pending through its own epoch, and the first touch in the next epoch folds it",
     async () => {
       const pool = await setupPool({ epochSeconds: 8 });
       const a = await pool.fundedWallet(10_000_000n);
@@ -137,38 +119,33 @@ describe("deposits earn Tickets from the next epoch", () => {
       await deposit(pool, a, 4_000_000n);
       let player = await fetchPlayer(pool, owner);
       expect(big(player.principal)).toBe(4_000_000n);
-      expect(big(player.entries)).toBe(0n);
       expect(big(player.pendingDeposit)).toBe(4_000_000n);
       expect(big(player.pendingDepositEpoch)).toBe(1n);
-      expect(await ticketsOf(pool, owner, 1n)).toBe(0n);
       await assertPrincipalSums(pool, [owner, pool.operator.publicKey]);
 
       // A second deposit in the same epoch adds to the same pending amount.
       await deposit(pool, a, 1_000_000n);
       player = await fetchPlayer(pool, owner);
       expect(big(player.pendingDeposit)).toBe(5_000_000n);
-      expect(big(player.entries)).toBe(0n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
-      // The tree already counts it, and the account has not been touched.
-      expect(await ticketsOf(pool, owner, 2n)).toBe(5_000_000n);
-      expect(big((await fetchPlayer(pool, owner)).entries)).toBe(0n);
+      // Not touched yet: the account still says pending.
+      expect(big((await fetchPlayer(pool, owner)).pendingDeposit)).toBe(5_000_000n);
 
       // Any touch folds it: this deposit does, and is itself pending.
       await deposit(pool, a, 1_000_000n);
       player = await fetchPlayer(pool, owner);
-      expect(big(player.entries)).toBe(5_000_000n);
       expect(big(player.pendingDeposit)).toBe(1_000_000n);
       expect(big(player.pendingDepositEpoch)).toBe(2n);
+      expect(big(player.epochId)).toBe(2n);
       expect(big(player.principal)).toBe(6_000_000n);
-      expect(await ticketsOf(pool, owner, 2n)).toBe(5_000_000n);
       await assertPrincipalSums(pool, [owner, pool.operator.publicKey]);
     },
     TIMEOUT,
   );
 
   it(
-    "keeps a depositor who never touches again in the root, draws them, and the Prize raises Principal and Tickets at once without touching the pending deposit",
+    "a Prize raises Principal at once and leaves the pending deposit alone",
     async () => {
       const pool = await setupPool({ epochSeconds: 8 });
       const a = await pool.fundedWallet(10_000_000n);
@@ -180,23 +157,18 @@ describe("deposits earn Tickets from the next epoch", () => {
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
       await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3: epoch 2 can be drawn
-      await requestDrawMethod(pool, 2n).rpc();
-
-      // `a` never acted after depositing in epoch 1, and is all of epoch 2.
+      // `a` never acted after depositing in epoch 1, and holds all of epoch 2.
+      await requestDrawMethod(pool, 2n, 3_000_000n).rpc();
       const drawing = await fetchEpoch(pool, 2n);
       expect(big(drawing.registeredWeight)).toBe(3_000_000n);
-      expect(big((await fetchPlayer(pool, owner)).entries)).toBe(0n);
-      const held = leafTickets(await fetchTree(pool), 2n);
-      expect(held).toEqual([0n, 3_000_000n]);
 
-      const randomness = randomnessForTarget(3_000_000n, 0n, 3_000_000n);
       await program.methods
         .draw()
         .accountsPartial({
           caller: pool.operator.publicKey,
           pool: pool.pool,
           epoch: epochPda(pool.pool, 2n),
-          randomness: await fulfillRandomness(Uint8Array.from(drawing.vrfSeed), randomness),
+          randomness: await fulfillRandomness(Uint8Array.from(drawing.vrfSeed)),
         })
         .signers([pool.operator])
         .rpc();
@@ -204,63 +176,37 @@ describe("deposits earn Tickets from the next epoch", () => {
       // A new deposit in epoch 3 folds the first one and is itself pending.
       await deposit(pool, a, 1_000_000n);
       const before = await fetchPlayer(pool, owner);
-      expect(big(before.entries)).toBe(3_000_000n);
       expect(big(before.pendingDeposit)).toBe(1_000_000n);
       const prize = big(drawing.jackpotAmount);
       expect(prize).toBe(2_000_000n);
 
-      await program.methods
-        .payout()
-        .accountsPartial({
-          pool: pool.pool,
-          acceptedMint: pool.mint,
-          epoch: epochPda(pool.pool, 2n),
-          winner: playerPda(pool.pool, owner),
-          jackpotVault: pool.jackpotVault,
-          principalVault: pool.principalVault,
-          treasury: pool.treasury,
-          buybackReserve: pool.buybackReserve,
-          ...pool.venue,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .rpc();
+      await payoutMethod(pool, 2n, owner).rpc();
 
       const after = await fetchPlayer(pool, owner);
       expect(big(after.principal)).toBe(big(before.principal) + prize);
-      expect(big(after.entries)).toBe(3_000_000n + prize);
       expect(big(after.pendingDeposit)).toBe(1_000_000n);
-      // The tree agrees: this epoch holds the Tickets and not the pending deposit.
-      expect(await ticketsOf(pool, owner, 3n)).toBe(3_000_000n + prize);
       await assertPrincipalSums(pool, [owner, pool.operator.publicKey]);
     },
     TIMEOUT,
   );
 
   it(
-    "counts Bought and Granted tickets in the epoch they land, with both caps reading locked Principal and the pending deposit refused",
+    "the Bought ticket cap reads locked Principal, and refuses a pending deposit",
     async () => {
-      const pool = await setupPool({ epochSeconds: 8, bonusCapBps: 10_000 });
+      const pool = await setupPool({ epochSeconds: 8 });
       const a = await pool.fundedWallet(10_000_000n);
       const owner = a.keypair.publicKey;
       await beginEpoch(pool, 0n); // epoch 1
       await deposit(pool, a, 3_000_000n);
-      expect(await ticketsOf(pool, owner, 1n)).toBe(0n);
 
-      // All of it is pending, so nothing is locked to buy or be granted against.
-      await expect(grantTickets(pool, owner, 1n)).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
+      // All of it is pending, so nothing is locked to buy against.
       await expect(buyTickets(pool, a, 1n)).rejects.toThrow(/DailyBuyCapExceeded/);
 
-      // From epoch 2 the deposit is locked, and the pool cap is the total at its start.
+      // From epoch 2 the deposit is locked.
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await expect(grantTickets(pool, owner, 3_000_001n)).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
-      await grantTickets(pool, owner, 3_000_000n);
-      expect(await ticketsOf(pool, owner, 2n)).toBe(6_000_000n);
-
-      // The buy cap is locked Principal too, and these Tickets count at once.
+      await expect(buyTickets(pool, a, 3_000_001n)).rejects.toThrow(/DailyBuyCapExceeded/);
       await buyTickets(pool, a, 1_000_000n);
-      const bought = 1_000_000n * BigInt(pool.ticketsPerUsdc);
-      expect(await ticketsOf(pool, owner, 2n)).toBe(6_000_000n + bought);
-      expect(big((await fetchPlayer(pool, owner)).entries)).toBe(6_000_000n + bought);
+      expect(big((await fetchPlayer(pool, owner)).boughtAmount)).toBe(1_000_000n);
       await assertPrincipalSums(pool, [owner, pool.operator.publicKey]);
     },
     TIMEOUT,

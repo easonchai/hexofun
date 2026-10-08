@@ -1,7 +1,7 @@
-// Bought and Granted ticket caps count locked Principal (audit-fixes ticket
-// 01): Principal less the Pending deposit. A Pending deposit refunds on
-// request, so it cannot back Tickets. The pool-wide Operator grant cap reads
-// `epoch_start_principal`, fixed when the epoch begins.
+// The Bought ticket cap counts locked Principal (audit-fixes ticket 01):
+// Principal less the Pending deposit. A Pending deposit refunds on request, so
+// it cannot back Tickets. `epoch_start_principal`, which the backend's referral
+// bonus cap reads, is fixed when the epoch begins.
 
 import { describe, expect, it } from "vitest";
 import { BN } from "@anchor-lang/core";
@@ -75,17 +75,6 @@ function requestMethod(ctx: PoolCtx, owner: Wallet, amount: bigint) {
     .signers([owner.keypair]);
 }
 
-function grantMethod(ctx: PoolCtx, owner: Wallet, amount: bigint) {
-  return program.methods
-    .grantTickets(bn(amount))
-    .accountsPartial({
-      signer: ctx.operator.publicKey,
-      pool: ctx.pool,
-      player: playerPda(ctx.pool, owner.keypair.publicKey),
-    })
-    .signers([ctx.operator]);
-}
-
 async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
   await depositMethod(ctx, owner, amount).rpc();
   await assertSolvent(ctx);
@@ -93,11 +82,6 @@ async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
 
 async function buy(ctx: PoolCtx, owner: Wallet, amount: bigint) {
   await buyMethod(ctx, owner, amount).rpc();
-  await assertSolvent(ctx);
-}
-
-async function grant(ctx: PoolCtx, owner: Wallet, amount: bigint) {
-  await grantMethod(ctx, owner, amount).rpc();
   await assertSolvent(ctx);
 }
 
@@ -110,6 +94,7 @@ async function beginEpoch(ctx: PoolCtx, currentEpochId: bigint) {
       currentEpoch: epochPda(ctx.pool, currentEpochId),
       epochTwoBehind: epochPda(ctx.pool, currentEpochId > 0n ? currentEpochId - 1n : 0n),
       newEpoch: epochPda(ctx.pool, currentEpochId + 1n),
+      ...ctx.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([ctx.operator])
@@ -123,7 +108,7 @@ async function refused(ctx: PoolCtx, call: Promise<unknown>, error: RegExp) {
   await assertSolvent(ctx);
 }
 
-describe("buy and grant caps count locked Principal", () => {
+describe("the buy cap counts locked Principal", () => {
   it(
     "refuses deposit, buy, request in one transaction at the buy, and lets Principal from an earlier epoch buy after a deposit today",
     async () => {
@@ -156,9 +141,9 @@ describe("buy and grant caps count locked Principal", () => {
   );
 
   it(
-    "refuses an Operator grant for a Player whose only Principal is pending, and the pool-wide cap does not move when another wallet deposits mid-epoch",
+    "epoch_start_principal does not move when another wallet deposits mid-epoch",
     async () => {
-      const ctx = await setupPool({ epochSeconds: 8, bonusCapBps: 5_000 });
+      const ctx = await setupPool({ epochSeconds: 8 });
       const a = await ctx.fundedWallet(20n * M);
       const b = await ctx.fundedWallet(20n * M);
       const c = await ctx.fundedWallet(20n * M);
@@ -167,7 +152,6 @@ describe("buy and grant caps count locked Principal", () => {
 
       await deposit(ctx, a, 4n * M);
       await deposit(ctx, c, 4n * M);
-      await refused(ctx, grantMethod(ctx, a, 1n).rpc(), /DailyPlayerGrantCapExceeded/);
 
       await retryUntilOk(() => beginEpoch(ctx, 1n)); // epoch 2
       const start = big((await fetchPool(ctx)).totalPrincipal);
@@ -178,13 +162,7 @@ describe("buy and grant caps count locked Principal", () => {
       const pool = await fetchPool(ctx);
       expect(big(pool.totalPrincipal)).toBe(start + 8n * M);
       expect(big(pool.epochStartPrincipal)).toBe(start);
-      await refused(ctx, grantMethod(ctx, b, 1n).rpc(), /DailyPlayerGrantCapExceeded/);
-
-      // The pool cap is half the epoch-start total. `a` takes 4M of it, so one
-      // past the rest is refused, though half the live total would allow it.
-      const cap = start / 2n;
-      await grant(ctx, a, 4n * M);
-      await refused(ctx, grantMethod(ctx, c, cap - 4n * M + 1n).rpc(), /DailyPoolGrantCapExceeded/);    },
+    },
     TIMEOUT,
   );
 });

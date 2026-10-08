@@ -23,25 +23,20 @@ import {
   DEVNET_VRF_TREASURY,
   epochPda,
   findEvent,
-  fulfillRandomness,
   jackpotVaultPda,
   nextPoolId,
-  onChainNowSeconds,
   playerPda,
   refundAccounts,
   poolPda,
   principalVaultPda,
   program,
-  randomnessFor,
   randomnessPda,
   retryUntilOk,
-  roundPda,
   setupPool,
   sleepUntilOnChain,
   testNonce,
   venueAccountsFor,
   vrfSeed,
-  WEIGHT_TREE_SPACE,
   type PoolCtx,
   PROGRAM_DATA,
 } from "./helpers/hx.js";
@@ -135,6 +130,7 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
       currentEpoch: epochPda(pool.pool, currentEpochId),
       epochTwoBehind: epochPda(pool.pool, twoBehindId),
       newEpoch: epochPda(pool.pool, currentEpochId + 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
@@ -182,19 +178,25 @@ async function shutdown(pool: PoolCtx) {
 
 describe("custody", () => {
   it(
-    "deposit raises principal and the pending deposit, and no Tickets",
+    "deposit raises principal and the pending deposit, and emits the Player's post-state",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
 
       await deposit(pool, owner, 4_000_000n);
-      await deposit(pool, owner, 1_000_000n);
+      const signature = await deposit(pool, owner, 1_000_000n);
 
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
       // Principal includes the pending amount, which earns Tickets from the
       // next epoch (ADR 0020). Epoch 0 has not ended, so it is still pending.
       expect(player.principal.toString()).toBe("5000000");
-      expect(player.entries.toString()).toBe("0");
+      const event = await findEvent<{ amount: BN; principal: BN; yieldIndex: BN }>(
+        signature,
+        "deposited",
+      );
+      expect(event?.amount.toString()).toBe("1000000");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
       expect(player.pendingDeposit.toString()).toBe("5000000");
       expect(player.pendingDepositEpoch.toString()).toBe("0");
     },
@@ -219,15 +221,20 @@ describe("custody", () => {
 
       const signature = await requestWithdraw(pool, owner, 3_000_000n);
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      // The queued amount stays in Principal and in Tickets until it pays.
+      // The queued amount stays in Principal until it pays.
       expect(player.principal.toString()).toBe("3000000");
-      expect(player.entries.toString()).toBe("3000000");
       expect(player.pendingWithdraw.toString()).toBe("3000000");
 
-      const event = await findEvent<{ amount: BN; pending: BN; pendingEpoch: BN; refunded: BN }>(
-        signature,
-        "withdrawRequested",
-      );
+      const event = await findEvent<{
+        amount: BN;
+        pending: BN;
+        pendingEpoch: BN;
+        refunded: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(signature, "withdrawRequested");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
       expect(event?.amount.toString()).toBe("3000000");
       expect(event?.pending.toString()).toBe("3000000");
       expect(event?.pendingEpoch.toString()).toBe("1");
@@ -368,8 +375,13 @@ describe("custody", () => {
       expect(poolAccount.pendingWithdrawals.toString()).toBe("0");
       expect(poolAccount.totalPrincipal.toString()).toBe("2500000");
 
-      const event = await findEvent<{ amount: BN }>(signature, "withdrawn");
+      const event = await findEvent<{ amount: BN; principal: BN; yieldIndex: BN }>(
+        signature,
+        "withdrawn",
+      );
       expect(event?.amount.toString()).toBe("1500000");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
 
       // Nothing left to push.
       await expect(processWithdraw(pool, owner)).rejects.toThrow(/NothingPending/);
@@ -446,25 +458,18 @@ describe("custody", () => {
 // --- Roles (ticket 01) ---------------------------------------------------
 //
 // Anchor deserializes every account before it runs a single constraint, so
-// the matrix needs Epoch 1 and Round 1 to exist or the wrong signer is
-// masked by AccountNotInitialized. `rolePool` opens both; the accounts after
-// them in each struct are never read, so any address fills those slots.
-
-const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
+// the matrix needs Epoch 1 to exist or the wrong signer is masked by
+// AccountNotInitialized. `rolePool` opens it; the accounts after it in each
+// struct are never read, so any address fills those slots.
 
 const NO_PARAMS = {
   epochSeconds: null,
   epochAnchor: null,
-  roundSeconds: null,
-  closeBuffer: null,
   vrfTimeout: null,
   minDeposit: null,
-  houseCutBps: null,
   minJackpot: null,
   payoutTimeout: null,
   baseRateBps: null,
-  ticketsPerUsdc: null,
-  bonusCapBps: null,
 };
 
 /** A funded throwaway key. The `init` accounts on the operator-gated
@@ -480,9 +485,9 @@ async function fundedKey(): Promise<Keypair> {
   return keypair;
 }
 
-/** A pool with Epoch 1 open and Round 1 created, both by the real operator. */
+/** A pool with Epoch 1 open, begun by the real operator. */
 async function rolePool(): Promise<PoolCtx> {
-  const pool = await setupPool({ roundSeconds: 60 });
+  const pool = await setupPool();
   await program.methods
     .beginEpoch()
     .accountsPartial({
@@ -491,19 +496,7 @@ async function rolePool(): Promise<PoolCtx> {
       currentEpoch: epochPda(pool.pool, 0n),
       epochTwoBehind: epochPda(pool.pool, 0n),
       newEpoch: epochPda(pool.pool, 1n),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
-
-  const startsAt = await onChainNowSeconds();
-  await program.methods
-    .createRound(new BN(startsAt), new BN(startsAt + 60))
-    .accountsPartial({
-      operator: pool.operator.publicKey,
-      pool: pool.pool,
-      currentEpoch: epochPda(pool.pool, 1n),
-      round: roundPda(pool.pool, 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
@@ -514,49 +507,53 @@ async function rolePool(): Promise<PoolCtx> {
 /**
  * Every operator-gated instruction, built with `signer` in the operator slot.
  *
- * `settle_round`, `void_round`, `draw` and `rollover_epoch` are deliberately
- * absent (production-hardening ticket 01): they take any `caller`, so an
- * operator that stops cranking cannot withhold a fulfilled result or leave a
- * timed-out request stuck. Their permissionless behavior is covered by the
- * "settle_round, void_round, draw and rollover_epoch accept any caller" test
- * below and by tests/03-epochs.test.ts's `payout` coverage.
+ * `draw` and `rollover_epoch` are deliberately absent (production-hardening
+ * ticket 01): they take any `caller`, so an operator that stops cranking
+ * cannot withhold a fulfilled result or leave a timed-out request stuck.
+ * Their permissionless behavior is covered by tests/03-epochs.test.ts.
  */
 function operatorGated(pool: PoolCtx, signer: PublicKey) {
   const epoch = epochPda(pool.pool, 1n);
   const m = program.methods;
   return {
-    // Round 1 is already open, so this one is aimed at the next id.
-    createRound: m.createRound(new BN(0), new BN(60)).accountsPartial({
-      operator: signer,
-      pool: pool.pool,
-      currentEpoch: epoch,
-      round: roundPda(pool.pool, 2n),
-      systemProgram: SystemProgram.programId,
-    }),
     beginEpoch: m.beginEpoch().accountsPartial({
       operator: signer,
       pool: pool.pool,
       currentEpoch: epoch,
       epochTwoBehind: epochPda(pool.pool, 0n),
       newEpoch: epochPda(pool.pool, 2n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     }),
     // `request_draw` replaced `close_registration` (ticket 08): operator-only,
     // since the signer also pays ORAO's fee.
-    requestDraw: m.requestDraw(Array.from(testNonce())).accountsPartial({
+    requestDraw: m.requestDraw(Array.from(testNonce()), new BN(1)).accountsPartial({
       operator: signer,
       pool: pool.pool,
       epoch,
       jackpotVault: pool.jackpotVault,
-      randomness: randomnessPda(vrfSeed("epoch", pool.pool, 1n, testNonce())),
+      randomness: randomnessPda(vrfSeed(pool.pool, 1n, testNonce())),
       vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
       vrfTreasury: DEVNET_VRF_TREASURY,
       vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
       systemProgram: SystemProgram.programId,
     }),
-    // `payout` is deliberately absent: it takes no signer at all, so the
-    // operator cannot veto a winner by sitting out `payout_timeout`. A
-    // stranger paying one successfully is in tests/03-epochs.test.ts.
+    // Operator-signed until ticket 09 verifies the winner's proof: nothing on
+    // chain says who holds the drawn target, so a stranger cannot be trusted
+    // with the winner.
+    payout: m.payout().accountsPartial({
+      operator: signer,
+      pool: pool.pool,
+      acceptedMint: pool.mint,
+      epoch,
+      winner: pool.house,
+      jackpotVault: pool.jackpotVault,
+      principalVault: pool.principalVault,
+      treasury: pool.treasury,
+      buybackReserve: pool.buybackReserve,
+      ...pool.venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    }),
   };
 }
 
@@ -592,24 +589,12 @@ describe("roles", () => {
   );
 
   it(
-    "create_pool writes the Weight tree header, the House's leaf and the venue defaults",
+    "create_pool writes the layout version and the venue defaults",
     async () => {
       const pool = await setupPool();
 
-      const tree = await program.account.weightTree.fetch(pool.weightTree);
-      expect(tree.version).toBe(1);
-      expect(tree.nodeSize).toBe(56);
-      // The House never deposits but can win, so create_pool gives it leaf 1.
-      expect(tree.nodeCount.toString()).toBe("1");
-      expect(tree.pool.toBase58()).toBe(pool.pool.toBase58());
-      const info = await program.provider.connection.getAccountInfo(pool.weightTree);
-      expect(info?.data.length).toBe(WEIGHT_TREE_SPACE + 56);
-      expect(info?.owner.toBase58()).toBe(program.programId.toBase58());
-      expect((await program.account.player.fetch(pool.house)).leafIndex).toBe(1);
-
       const account = await program.account.pool.fetch(pool.pool);
-      expect(account.version).toBe(2);
-      expect(account.weightTree.toBase58()).toBe(pool.weightTree.toBase58());
+      expect(account.version).toBe(3);
       expect(account.yieldFeeBps).toBe(1_000);
       expect(account.idleFloorBps).toBe(500);
       expect(account.idleTargetBps).toBe(1_000);
@@ -624,8 +609,8 @@ describe("roles", () => {
         false,
       ]);
       const house = await program.account.player.fetch(pool.house);
-      expect(house.version).toBe(2);
-      expect(house.leafIndex).toBe(1);
+      expect(house.version).toBe(3);
+      expect(house.principal.toString()).toBe("0");
     },
     TIMEOUT,
   );
@@ -641,102 +626,6 @@ describe("roles", () => {
           await expect(builder.signers([wrong]).rpc(), name).rejects.toThrow(/ConstraintHasOne/);
         }
       }
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "settle_round and void_round accept any caller, and refuse the wrong precondition regardless of who calls",
-    async () => {
-      // Production-hardening ticket 01: `caller` may be any signer. A
-      // stranger succeeds exactly when the operator would have, and is
-      // refused by the same preconditions (unfulfilled/fulfilled/timeout),
-      // never by who they are.
-      const pool = await setupPool({ roundSeconds: 4, closeBuffer: 1, vrfTimeout: 2 });
-      const stranger = await fundedKey();
-
-      const startsAt = await onChainNowSeconds();
-      const endsAt = startsAt + 4;
-      await program.methods
-        .createRound(new BN(startsAt), new BN(endsAt))
-        .accountsPartial({
-          operator: pool.operator.publicKey,
-          pool: pool.pool,
-          currentEpoch: pool.pool,
-          round: roundPda(pool.pool, 1n),
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([pool.operator])
-        .rpc();
-
-      await sleepUntilOnChain(endsAt);
-
-      const nonce = testNonce();
-      const seed = vrfSeed("round", pool.pool, 1n, nonce);
-      // `request_round_randomness` is permissionless (any `payer`); the
-      // Operator is just the usual caller. A stranger who front-runs it pays
-      // the ORAO fee and still cannot pick the result: one request per
-      // Round, and pre-learning a seed's output makes that request fail.
-      await program.methods
-        .requestRoundRandomness(Array.from(nonce))
-        .accountsPartial({
-          payer: pool.operator.publicKey,
-          pool: pool.pool,
-          round: roundPda(pool.pool, 1n),
-          randomness: randomnessPda(seed),
-          vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-          vrfTreasury: DEVNET_VRF_TREASURY,
-          vrfProgram: ORAO_VRF_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([pool.operator])
-        .rpc();
-
-      const settleRoundAsStranger = () =>
-        program.methods
-          .settleRound()
-          .accountsPartial({
-            caller: stranger.publicKey,
-            pool: pool.pool,
-            round: roundPda(pool.pool, 1n),
-            randomness: randomnessPda(seed),
-            house: pool.house,
-          })
-          .signers([stranger])
-          .rpc();
-
-      // Unfulfilled: under test-vrf the randomness account doesn't even
-      // exist until test_fulfill creates it (real ORAO would have created a
-      // Pending one at request time), so this reads as InvalidRandomnessAccount
-      // rather than RandomnessNotFulfilled -- refused by the precondition
-      // either way, never by who is calling.
-      await expect(settleRoundAsStranger()).rejects.toThrow(/InvalidRandomnessAccount/);
-
-      const voidRoundAsStranger = () =>
-        program.methods
-          .voidRound()
-          .accountsPartial({
-            caller: stranger.publicKey,
-            pool: pool.pool,
-            round: roundPda(pool.pool, 1n),
-            randomness: randomnessPda(seed),
-          })
-          .signers([stranger])
-          .rpc();
-
-      // Before the vrf_timeout has elapsed: refused by VrfTimeoutNotElapsed.
-      await expect(voidRoundAsStranger()).rejects.toThrow(/VrfTimeoutNotElapsed/);
-
-      await fulfillRandomness(seed, randomnessFor(0));
-
-      // Fulfilled: void is refused even past the timeout.
-      const requested = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      await sleepUntilOnChain(Number(requested.requestedAt.toString()) + 2 + 1);
-      await expect(voidRoundAsStranger()).rejects.toThrow(/RandomnessAlreadyFulfilled/);
-
-      // A stranger succeeds once the precondition holds.
-      await settleRoundAsStranger();
-      expect((await program.account.round.fetch(roundPda(pool.pool, 1n))).status).toBe(3); // Forfeited (no positions)
     },
     TIMEOUT,
   );
@@ -979,33 +868,19 @@ describe("create_pool guards", () => {
     };
   }
 
-  /** `create_pool` with the Weight tree's `create_account` in front of it,
-   *  `space` bytes big (the right size unless a test says otherwise). */
+  /** `create_pool` paid for by the deploy wallet, which is the upgrade
+   *  authority, so it pays and signs. */
   async function createPoolWith(
-    payer: Keypair,
     p: ReturnType<typeof params>,
     accounts: ReturnType<typeof createPoolAccounts>,
-    space = WEIGHT_TREE_SPACE,
   ) {
-    const tree = Keypair.generate();
-    const createTree = SystemProgram.createAccount({
-      fromPubkey: payer.publicKey,
-      newAccountPubkey: tree.publicKey,
-      space,
-      lamports: await program.provider.connection.getMinimumBalanceForRentExemption(space),
-      programId: program.programId,
-    });
     return program.methods
       .createPool(p)
-      // The deploy wallet is the upgrade authority, so it pays and signs.
       .accountsPartial({
         ...accounts,
         payer: program.provider.publicKey,
         programData: PROGRAM_DATA,
-        weightTree: tree.publicKey,
       })
-      .preInstructions([createTree])
-      .signers([payer, tree])
       .rpc();
   }
 
@@ -1018,16 +893,11 @@ describe("create_pool guards", () => {
     vrfNetworkState: PublicKey.default,
     epochSeconds: new BN(86_400),
     epochAnchor: new BN(1_789_315_200),
-    roundSeconds: new BN(60),
-    closeBuffer: new BN(5),
     vrfTimeout: new BN(120),
     minDeposit: new BN(1_000_000),
-    houseCutBps: 600,
     minJackpot: new BN(0),
     payoutTimeout: new BN(82_800),
     baseRateBps: 488,
-    ticketsPerUsdc: 10,
-    bonusCapBps: 500,
     venueKind: 1, // the stub, since this file pins venueAccountsFor
     ...over,
   });
@@ -1064,7 +934,6 @@ describe("create_pool guards", () => {
 
       await expect(
         createPoolWith(
-          payer,
           params({ poolId: new BN(poolId.toString()), operator: payer.publicKey }),
           createPoolAccounts(
             payer,
@@ -1095,7 +964,6 @@ describe("create_pool guards", () => {
         const pool = poolPda(poolId);
         const operator = role === "operator" ? PublicKey.default : payer.publicKey;
         return createPoolWith(
-          payer,
           params({
             poolId: new BN(poolId.toString()),
             operator,
@@ -1117,7 +985,7 @@ describe("create_pool guards", () => {
   );
 
   it(
-    "rejects a zero payout_timeout, and a Weight tree account that is not header-sized",
+    "rejects a zero payout_timeout",
     async () => {
       const payer = await fundedKey();
       const connection = program.provider.connection;
@@ -1126,27 +994,22 @@ describe("create_pool guards", () => {
         createAccount(connection, payer, mint, payer.publicKey, Keypair.generate());
       const treasury = await token();
       const buybackReserve = await token();
-      const attempt = (payoutTimeout: number, treeSpace = WEIGHT_TREE_SPACE) => {
+      const attempt = (payoutTimeout: number) => {
         const poolId = nextPoolId();
         const pool = poolPda(poolId);
         return createPoolWith(
-          payer,
           params({
             poolId: new BN(poolId.toString()),
             operator: payer.publicKey,
             payoutTimeout: new BN(payoutTimeout),
           }),
           createPoolAccounts(payer, pool, mint, treasury, buybackReserve, TOKEN_PROGRAM_ID),
-          treeSpace,
         );
       };
 
       // Zero would let a Drawn epoch be rolled over in the block it was
       // drawn in, which is what the timeout exists to stop.
       await expect(attempt(0)).rejects.toThrow(/InvalidParameter/);
-      // The account arrives header-sized and create_pool grows it by the
-      // House's leaf, so one that already holds a node is refused.
-      await expect(attempt(82_800, WEIGHT_TREE_SPACE + 56)).rejects.toThrow(/InvalidParameter/);
       await attempt(82_800);
     },
     TIMEOUT,
@@ -1166,7 +1029,6 @@ describe("create_pool guards", () => {
       const pool = poolPda(poolId);
 
       await createPoolWith(
-        payer,
         params({ poolId: new BN(poolId.toString()), operator: payer.publicKey }),
         createPoolAccounts(payer, pool, mint, treasury, buybackReserve, TOKEN_PROGRAM_ID),
       );

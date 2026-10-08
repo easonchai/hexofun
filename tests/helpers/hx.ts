@@ -12,7 +12,6 @@ import {
   PublicKey,
   SystemProgram,
   SYSVAR_CLOCK_PUBKEY,
-  type TransactionInstruction,
 } from "@solana/web3.js";
 import {
   createAccount,
@@ -75,20 +74,6 @@ export function playerPda(pool: PublicKey, owner: PublicKey): PublicKey {
 export function epochPda(pool: PublicKey, epochId: bigint | number): PublicKey {
   return PublicKey.findProgramAddressSync(
     [Buffer.from("epoch"), pool.toBuffer(), u64le(epochId)],
-    PROGRAM_ID,
-  )[0];
-}
-
-export function roundPda(pool: PublicKey, roundId: bigint | number): PublicKey {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("round"), pool.toBuffer(), u64le(roundId)],
-    PROGRAM_ID,
-  )[0];
-}
-
-export function positionPda(round: PublicKey, owner: PublicKey): PublicKey {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("position"), round.toBuffer(), owner.toBuffer()],
     PROGRAM_ID,
   )[0];
 }
@@ -165,29 +150,6 @@ export function venueAccountsFor(pool: PublicKey): VenueAccounts {
   };
 }
 
-/** Discriminator plus the zero-copy header; `create_pool` wants exactly
- *  this, a tree with zero nodes (yield-claimer ticket 04). */
-export const WEIGHT_TREE_SPACE = 8 + 48;
-
-/**
- * The top-level `create_account` that has to precede `create_pool` in the
- * same transaction: a fresh program-owned account sized for the Weight tree
- * header. Sign the transaction with `keypair` as well as `payer`.
- */
-export async function weightTreeAccount(
-  payer: PublicKey,
-): Promise<{ keypair: Keypair; ix: TransactionInstruction }> {
-  const keypair = Keypair.generate();
-  const ix = SystemProgram.createAccount({
-    fromPubkey: payer,
-    newAccountPubkey: keypair.publicKey,
-    space: WEIGHT_TREE_SPACE,
-    lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
-    programId: PROGRAM_ID,
-  });
-  return { keypair, ix };
-}
-
 /** The test-vrf stand-in PDA for a request seed (see vrf::randomness_address). */
 export function randomnessPda(seed: Uint8Array): PublicKey {
   return PublicKey.findProgramAddressSync(
@@ -198,11 +160,11 @@ export function randomnessPda(seed: Uint8Array): PublicKey {
 
 /**
  * Fabricates a fulfilled randomness account for `seed` and returns its
- * address, which the settle instruction expects to be handed.
+ * address, which `draw` expects to be handed.
  *
- * Read the seed off the account being settled (`round.vrfSeed`,
- * `epoch.vrfSeed`) rather than recomputing the keccak here: the program is
- * the authority on it, and tests then need no hash library.
+ * Read the seed off the Epoch (`epoch.vrfSeed`) rather than recomputing the
+ * keccak here: the program is the authority on it, and tests then need no
+ * hash library.
  */
 export async function fulfillRandomness(
   seed: Uint8Array | number[],
@@ -259,19 +221,6 @@ function randomnessCandidate(n: number): Uint8Array {
   return bytes;
 }
 
-/**
- * 64 randomness bytes that make a round land on tile `value`, so a test can
- * pick the winning tile instead of guessing what the oracle returns.
- */
-export function randomnessFor(value: bigint | number, tiles = 36n): Uint8Array {
-  const want = BigInt(value);
-  for (let n = 0; n < 100_000; n += 1) {
-    const candidate = randomnessCandidate(n);
-    if (unbiasedU64(candidate, tiles) === want) return candidate;
-  }
-  throw new Error(`no randomness found for tile ${value}`);
-}
-
 /** 64 randomness bytes whose draw target under `total` lies in `[lo, hi)`. */
 export function randomnessForTarget(total: bigint, lo: bigint, hi: bigint): Uint8Array {
   for (let n = 0; n < 100_000; n += 1) {
@@ -284,8 +233,8 @@ export function randomnessForTarget(total: bigint, lo: bigint, hi: bigint): Uint
 
 // --- vrf_seed(domain, pool, id, nonce) --------------------------------------
 //
-// `request_round_randomness` and `request_draw` (beta-launch-fixes
-// ticket 02) mix a 32-byte nonce into the seed, so a test has to derive the
+// `request_draw` (beta-launch-fixes ticket 02) mixes a 32-byte nonce into the
+// seed, so a test has to derive the
 // same seed client-side to know which randomness account to pass -- the
 // address is unknowable from public inputs alone any more. No dependency in
 // this workspace carries Solana's pre-standard Keccak (differs from SHA3-256
@@ -370,14 +319,9 @@ function keccak256(input: Uint8Array): Uint8Array {
 }
 
 /** `utils::vrf_seed`: keccak256(domain || pool || id_le || nonce). */
-export function vrfSeed(
-  domain: "round" | "epoch",
-  pool: PublicKey,
-  id: bigint,
-  nonce: Uint8Array,
-): Uint8Array {
+export function vrfSeed(pool: PublicKey, id: bigint, nonce: Uint8Array): Uint8Array {
   return keccak256(
-    Buffer.concat([Buffer.from(domain), pool.toBuffer(), u64le64(id), Buffer.from(nonce)]),
+    Buffer.concat([Buffer.from("epoch"), pool.toBuffer(), u64le64(id), Buffer.from(nonce)]),
   );
 }
 
@@ -475,13 +419,8 @@ export interface PoolParamsOverrides {
    * after bootstrap, so epoch 1 is as long as it was before the grid
    * existed bar the seconds the test spends setting wallets up. */
   epochAnchor?: number;
-  roundSeconds?: number;
-  closeBuffer?: number;
   vrfTimeout?: number;
   minDeposit?: number;
-  /** House cut in basis points, 0..=10_000. Defaults to the bootstrap rate,
-   * so every round test settles against the cut the product ships with. */
-  houseCutBps?: number;
   /** Jackpot floor below which the draw rolls the epoch over. Defaults to 0
    * (no floor) so a test that never funds the jackpot still reaches the
    * draw; the low-jackpot test sets it. */
@@ -492,13 +431,6 @@ export interface PoolParamsOverrides {
   /** Ceiling on the depositor share, as an APR in basis points. Defaults to
    * the bootstrap rate. */
   baseRateBps?: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. Defaults to the
-   * bootstrap rate. */
-  ticketsPerUsdc?: number;
-  /** Share of `total_principal`, in basis points, an operator `grant_tickets`
-   * call may credit pool-wide per epoch. Defaults to the bootstrap rate
-   * (5%). */
-  bonusCapBps?: number;
   /** Reuse an existing mint instead of creating a fresh one (e.g. to test
    * two pools sharing an accepted asset). The caller must not rely on this
    * pool's operator being the mint authority when a shared mint is passed. */
@@ -508,11 +440,8 @@ export interface PoolParamsOverrides {
 // Spec §7 defaults.
 export const DEFAULT_PARAMS = {
   epochSeconds: 86_400,
-  roundSeconds: 60,
-  closeBuffer: 5,
   vrfTimeout: 120,
   minDeposit: 1_000_000, // 1 hexUSDC at 6 decimals
-  houseCutBps: 600, // 6%, the bootstrap default
   minJackpot: 0,
   // Strictly less than epochSeconds: set_params requires payout_timeout <
   // epoch_seconds (beta-launch-fixes ticket 03), so a pool bootstrapped here
@@ -520,8 +449,6 @@ export const DEFAULT_PARAMS = {
   // (even a no-op one, just testing who may call it) would refuse.
   payoutTimeout: 82_800,
   baseRateBps: 488, // spec §7: ~5% APY with daily compounding
-  ticketsPerUsdc: 10,
-  bonusCapBps: 500, // spec: default 5%
 };
 
 export interface PoolCtx {
@@ -539,14 +466,10 @@ export interface PoolCtx {
   principalVault: PublicKey;
   jackpotVault: PublicKey;
   house: PublicKey;
-  weightTree: PublicKey;
   /** Spread into any instruction that syncs. */
   venue: VenueAccounts;
   minDeposit: bigint;
-  houseCutBps: number;
   baseRateBps: number;
-  ticketsPerUsdc: number;
-  bonusCapBps: number;
   /** A fresh funded keypair with `amount` hexUSDC already in its ATA. */
   fundedWallet(amount: bigint): Promise<{ keypair: Keypair; tokenAccount: PublicKey }>;
 }
@@ -594,7 +517,6 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
   const jackpotVault = jackpotVaultPda(pool);
   const house = playerPda(pool, operator.publicKey);
   const epochAnchor = overrides.epochAnchor ?? (await onChainNowSeconds());
-  const weightTree = await weightTreeAccount(operator.publicKey);
   const venue = venueAccountsFor(pool);
 
   await program.methods
@@ -605,16 +527,11 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
       epochSeconds: new BN(params.epochSeconds),
       epochAnchor: new BN(epochAnchor),
-      roundSeconds: new BN(params.roundSeconds),
-      closeBuffer: new BN(params.closeBuffer),
       vrfTimeout: new BN(params.vrfTimeout),
       minDeposit: new BN(params.minDeposit),
-      houseCutBps: params.houseCutBps,
       minJackpot: new BN(params.minJackpot),
       payoutTimeout: new BN(params.payoutTimeout),
       baseRateBps: params.baseRateBps,
-      ticketsPerUsdc: params.ticketsPerUsdc,
-      bonusCapBps: params.bonusCapBps,
       venueKind: VENUE_KIND.stub,
     })
     .accountsPartial({
@@ -626,15 +543,12 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
       principalVault,
       jackpotVault,
       house,
-      weightTree: weightTree.keypair.publicKey,
       treasury,
       buybackReserve,
       ...venue,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
-    .preInstructions([weightTree.ix])
-    .signers([operator, weightTree.keypair])
     .rpc();
 
   // The stub venue's reserve and USDC vault, once per pool (test-venue).
@@ -655,8 +569,9 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
   // A new pool starts with both the game and the jackpot paused (spec
   // "game-jackpot-pause"): the admin has to explicitly start each one. Every
   // suite's fixture starts both right here, right after create_pool, so the
-  // rest of the tests see the pool the way they did before either switch
-  // existed -- running from the moment `setupPool` returns.
+  // rest of the tests see the pool running from the moment `setupPool`
+  // returns. The program reads only the jackpot switch; the game switch is
+  // the backend's.
   await program.methods
     .setFeaturePause({ game: {} }, false)
     .accountsPartial({ signer: admin.publicKey, pool })
@@ -691,13 +606,9 @@ export async function setupPool(overrides: PoolParamsOverrides = {}): Promise<Po
     principalVault,
     jackpotVault,
     house,
-    weightTree: weightTree.keypair.publicKey,
     venue,
     minDeposit: BigInt(params.minDeposit),
-    houseCutBps: params.houseCutBps,
     baseRateBps: params.baseRateBps,
-    ticketsPerUsdc: params.ticketsPerUsdc,
-    bonusCapBps: params.bonusCapBps,
     fundedWallet,
   };
 }
@@ -757,6 +668,7 @@ export function beginFirstEpoch(ctx: PoolCtx) {
       currentEpoch: epochPda(ctx.pool, 0n),
       epochTwoBehind: epochPda(ctx.pool, 0n),
       newEpoch: epochPda(ctx.pool, 1n),
+      ...ctx.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([ctx.operator])
@@ -962,147 +874,47 @@ export function setTreasuryAccountsMethod(
     .signers([admin]);
 }
 
-// --- Weight tree (yield-claimer tickets 08 and 19) ------------------------------
+// --- The epoch draw (off-chain-tickets ticket 08) -------------------------------
 //
-// A TypeScript port of the reads in `weight_tree.rs`: the same slot and idle
-// rules, so a test can ask what the tree says about a Player's Tickets in the
-// current epoch or the one before it, and find the draw's winner.
+// Tickets live in the backend, so a test that draws keeps its own list of who
+// holds what and hands the program the total.
 
-const TREE_HEADER = 56;
-const TREE_NODE = 56;
-
-export interface TreeSlot {
-  stamp: bigint;
-  base: bigint;
+export interface Holding {
+  owner: PublicKey;
   tickets: bigint;
-}
-export interface TreeNode {
-  principalSum: bigint;
-  slots: [TreeSlot, TreeSlot];
-}
-export interface TreeClock {
-  current: bigint;
-}
-export interface TreeView {
-  nodes: TreeNode[];
-  clock: TreeClock;
-  /** Bytes of tree account data, header included. */
-  dataLen: number;
-}
-
-function parseSlot(data: Buffer, at: number): TreeSlot {
-  return {
-    stamp: data.readBigUInt64LE(at),
-    base: data.readBigUInt64LE(at + 8),
-    tickets: data.readBigUInt64LE(at + 16),
-  };
-}
-
-export function treeClockOf(pool: { currentEpochId: { toString(): string } }): TreeClock {
-  return { current: big(pool.currentEpochId) };
-}
-
-export async function fetchTree(ctx: PoolCtx): Promise<TreeView> {
-  const [info, pool] = await Promise.all([
-    provider.connection.getAccountInfo(ctx.weightTree, "confirmed"),
-    program.account.pool.fetch(ctx.pool),
-  ]);
-  if (!info) throw new Error("weight tree account is missing");
-  const data = info.data;
-  const count = Number(data.readBigUInt64LE(16));
-  const nodes: TreeNode[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const at = TREE_HEADER + i * TREE_NODE;
-    nodes.push({
-      principalSum: data.readBigUInt64LE(at),
-      slots: [parseSlot(data, at + 8), parseSlot(data, at + 32)],
-    });
-  }
-  return { nodes, clock: treeClockOf(pool), dataLen: data.length };
-}
-
-/** One entry's Tickets in epoch `e`, by the slot rule and then the idle rule. */
-function entryTickets(node: TreeNode, e: bigint, clock: TreeClock): bigint {
-  if (e !== clock.current && e + 1n !== clock.current) {
-    throw new Error(`epoch ${e} is not readable at epoch ${clock.current}`);
-  }
-  const slot = node.slots[Number(e % 2n)] as TreeSlot;
-  if (slot.stamp === e) return slot.tickets;
-  const next = node.slots[Number((e + 1n) % 2n)] as TreeSlot;
-  return next.stamp === e + 1n ? next.base : node.principalSum;
-}
-
-/** Every leaf's Tickets in epoch `e`, leaf 1 first. */
-export function leafTickets(tree: TreeView, e: bigint): bigint[] {
-  const prefix = [0n];
-  for (let i = 1; i <= tree.nodes.length; i += 1) {
-    const low = i & -i;
-    prefix.push((prefix[i - low] as bigint) + entryTickets(tree.nodes[i - 1] as TreeNode, e, tree.clock));
-  }
-  return prefix.slice(1).map((p, i) => p - (prefix[i] as bigint));
-}
-
-/** The 1-based leaf whose range in `tickets` holds `target`. */
-export function leafHolding(tickets: bigint[], target: bigint): number {
-  let start = 0n;
-  for (let i = 0; i < tickets.length; i += 1) {
-    const end = start + (tickets[i] as bigint);
-    if (target >= start && target < end) return i + 1;
-    start = end;
-  }
-  throw new Error(`no leaf holds ${target}`);
-}
-
-/** `owner`'s Tickets in epoch `e` (the current epoch or the one before). */
-export async function ticketsOf(ctx: PoolCtx, owner: PublicKey, e: bigint): Promise<bigint> {
-  const player = await program.account.player.fetch(playerPda(ctx.pool, owner));
-  const tree = await fetchTree(ctx);
-  return leafTickets(tree, e)[player.leafIndex - 1] as bigint;
 }
 
 /**
- * `grant_tickets` signed by the pool's Admin: playable Tickets with no cap and
- * no Principal behind them. A deposit earns no Ticket until the next epoch
- * (ADR 0020), so a suite that needs Tickets on day one grants them.
+ * The Ticket total of `held` and 64 randomness bytes whose draw target falls in
+ * `winner`'s range, with the holders laid out in the order given.
  */
-export function grantTicketsAsAdmin(ctx: PoolCtx, owner: PublicKey, amount: bigint) {
-  return program.methods
-    .grantTickets(new BN(amount.toString()))
-    .accountsPartial({
-      signer: ctx.admin.publicKey,
-      pool: ctx.pool,
-      player: playerPda(ctx.pool, owner),
-    })
-    .signers([ctx.admin])
-    .rpc();
-}
-
-/** The owner of the leaf that holds epoch `e`'s drawn target. */
-export async function drawnWinner(
-  ctx: PoolCtx,
-  e: bigint,
-  candidates: PublicKey[],
-): Promise<PublicKey> {
-  const epoch = await program.account.epoch.fetch(epochPda(ctx.pool, e));
-  const leaf = leafHolding(leafTickets(await fetchTree(ctx), e), big(epoch.target));
-  for (const owner of candidates) {
-    const player = await program.account.player.fetch(playerPda(ctx.pool, owner));
-    if (player.leafIndex === leaf) return owner;
+export function randomnessLanding(
+  held: Holding[],
+  winner: PublicKey,
+): { total: bigint; randomness: Uint8Array } {
+  let lo = 0n;
+  let range: [bigint, bigint] | undefined;
+  for (const { owner, tickets } of held) {
+    if (owner.equals(winner)) range = [lo, lo + tickets];
+    lo += tickets;
   }
-  throw new Error(`leaf ${leaf} belongs to none of the candidates`);
+  if (!range) throw new Error(`${winner.toBase58()} holds nothing in this draw`);
+  return { total: lo, randomness: randomnessForTarget(lo, range[0], range[1]) };
 }
 
-/** Builder for `request_draw`. `nonce` is mixed into the seed, which is read
- *  back off the Epoch account once this succeeds. */
+/** Builder for `request_draw`. `totalTickets` is the epoch's Ticket total, which
+ *  the Operator supplies; `nonce` is mixed into the seed, which is read back
+ *  off the Epoch account once this succeeds. */
 export function requestDrawMethod(
   ctx: PoolCtx,
   epochId: bigint,
+  totalTickets: bigint,
   nonce: Uint8Array = testNonce(),
   randomness?: PublicKey,
 ) {
-  const seed = vrfSeed("epoch", ctx.pool, epochId, nonce);
+  const seed = vrfSeed(ctx.pool, epochId, nonce);
   return program.methods
-    .requestDraw(Array.from(nonce))
+    .requestDraw(Array.from(nonce), new BN(totalTickets.toString()))
     .accountsPartial({
       operator: ctx.operator.publicKey,
       pool: ctx.pool,
@@ -1113,6 +925,27 @@ export function requestDrawMethod(
       vrfTreasury: DEVNET_VRF_TREASURY,
       vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
       systemProgram: SystemProgram.programId,
+    })
+    .signers([ctx.operator]);
+}
+
+/** Builder for `payout`, signed by the Operator until ticket 09 (the winner's
+ *  proof) makes it permissionless again. */
+export function payoutMethod(ctx: PoolCtx, epochId: bigint, winner: PublicKey) {
+  return program.methods
+    .payout()
+    .accountsPartial({
+      operator: ctx.operator.publicKey,
+      pool: ctx.pool,
+      acceptedMint: ctx.mint,
+      epoch: epochPda(ctx.pool, epochId),
+      winner: playerPda(ctx.pool, winner),
+      jackpotVault: ctx.jackpotVault,
+      principalVault: ctx.principalVault,
+      treasury: ctx.treasury,
+      buybackReserve: ctx.buybackReserve,
+      ...ctx.venue,
+      tokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([ctx.operator]);
 }

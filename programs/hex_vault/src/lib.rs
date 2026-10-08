@@ -1,26 +1,19 @@
-//! HexVault: a no-loss lottery with zero-sum hex rounds (see `GLOSSARY.md`
-//! and `docs/plan/rebuild/spec.md`).
+//! HexVault: a no-loss lottery (see `GLOSSARY.md` and ADR 0025).
 //!
 //! This module only declares instructions and delegates to their owning
-//! module: custody in `custody.rs`, rounds in `rounds.rs`, epochs in
-//! `epochs.rs`. `register`, `close_registration`, `admin_withdraw` and
-//! `fund_yield` were removed by the live-yield layout rewrite (yield-claimer
-//! ticket 04; ADRs 0017, 0018). The draw reads the Weight tree in
-//! `weight_tree.rs` and `weight.rs`.
+//! module: custody in `custody.rs`, epochs in `epochs.rs`. The program is
+//! custody and the epoch draw only. Tickets, the game and grants live in the
+//! backend (ADR 0025).
 
 pub mod constants;
 pub mod custody;
 pub mod epochs;
 pub mod errors;
 pub mod events;
-pub mod free_leaves;
-pub mod rounds;
 pub mod state;
 pub mod sync;
 #[cfg(feature = "test-venue")]
 pub mod test_venue;
-#[cfg(feature = "test-vrf")]
-pub mod test_tree;
 #[cfg(feature = "test-vrf")]
 pub mod test_vrf;
 pub mod touch;
@@ -28,20 +21,14 @@ pub mod utils;
 pub mod venue;
 pub mod venue_change;
 pub mod vrf;
-pub mod weight;
-pub mod weight_tree;
 
 use anchor_lang::prelude::*;
 
 use custody::*;
 use epochs::*;
-use free_leaves::*;
-use rounds::*;
 use venue_change::*;
 #[cfg(feature = "test-venue")]
 use test_venue::*;
-#[cfg(feature = "test-vrf")]
-use test_tree::*;
 #[cfg(feature = "test-vrf")]
 use test_vrf::*;
 
@@ -125,7 +112,7 @@ pub mod hex_vault {
 
     /// Admin-only. Stops `buy_tickets` while set (yield-claimer ticket 11).
     pub fn set_buy_tickets_pause(ctx: Context<SetBuyTicketsPause>, paused: bool) -> Result<()> {
-        rounds::set_buy_tickets_pause(ctx, paused)
+        custody::set_buy_tickets_pause(ctx, paused)
     }
 
     /// Admin-only and irreversible (ops-and-envs ticket 02, spec
@@ -186,55 +173,10 @@ pub mod hex_vault {
         custody::buy_tickets(ctx, amount)
     }
 
-    pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
-        custody::grant_tickets(ctx, amount)
-    }
-
-    /// Permissionless (mainnet-readiness-fixes ticket 08): an empty Player
-    /// gives its Weight tree leaf back, and the next first deposit reuses it.
-    pub fn release_leaf(ctx: Context<ReleaseLeaf>) -> Result<()> {
-        free_leaves::release_leaf(ctx)
-    }
-
-    // Rounds (spec §2.3 "Rounds").
-
-    pub fn create_round(ctx: Context<CreateRound>, starts_at: i64, ends_at: i64) -> Result<()> {
-        rounds::create_round(ctx, starts_at, ends_at)
-    }
-
-    pub fn buy_position(ctx: Context<BuyPosition>, tiles: u64, stake_per_tile: u64) -> Result<()> {
-        rounds::buy_position(ctx, tiles, stake_per_tile)
-    }
-
-    pub fn request_round_randomness(
-        ctx: Context<RequestRoundRandomness>,
-        nonce: [u8; 32],
-    ) -> Result<()> {
-        rounds::request_round_randomness(ctx, nonce)
-    }
-
-    pub fn settle_round(ctx: Context<SettleRound>) -> Result<()> {
-        rounds::settle_round(ctx)
-    }
-
-    pub fn settle_position(ctx: Context<SettlePosition>) -> Result<()> {
-        rounds::settle_position(ctx)
-    }
-
-    pub fn void_round(ctx: Context<VoidRound>) -> Result<()> {
-        rounds::void_round(ctx)
-    }
-
-    /// Permissionless (ops-and-envs ticket 05): reclaims a finished Round's
-    /// rent for the operator once every Position on it has settled.
-    pub fn close_round(ctx: Context<CloseRound>) -> Result<()> {
-        rounds::close_round(ctx)
-    }
-
     // Epochs (spec §2.3 "Epochs"). The flow is `begin_epoch`, play,
     // `request_draw`, `draw`, `payout` (yield-claimer ticket 08, ADR 0018).
 
-    pub fn begin_epoch(ctx: Context<BeginEpoch>) -> Result<()> {
+    pub fn begin_epoch<'info>(ctx: Context<'info, BeginEpoch<'info>>) -> Result<()> {
         epochs::begin_epoch(ctx)
     }
 
@@ -242,16 +184,24 @@ pub mod hex_vault {
         epochs::fund_jackpot(ctx, amount)
     }
 
-    /// Operator-only (ticket 08): snapshots the ended epoch's Ticket total and
-    /// its prize, then asks the VRF for the draw, or rolls the epoch over.
-    pub fn request_draw(ctx: Context<RequestDraw>, nonce: [u8; 32]) -> Result<()> {
-        epochs::request_draw(ctx, nonce)
+    /// Operator-only: snapshots the ended epoch's prize, takes its Ticket
+    /// total from the Operator, then asks the VRF for the draw, or rolls the
+    /// epoch over. The total is unchecked until ticket 09 commits a Merkle
+    /// root beside it.
+    pub fn request_draw(
+        ctx: Context<RequestDraw>,
+        nonce: [u8; 32],
+        total_tickets: u64,
+    ) -> Result<()> {
+        epochs::request_draw(ctx, nonce, total_tickets)
     }
 
     pub fn draw(ctx: Context<Draw>) -> Result<()> {
         epochs::draw(ctx)
     }
 
+    /// Operator-signed until ticket 09 verifies the winner's proof, since
+    /// nothing on chain says who holds the target any more.
     pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         epochs::payout(ctx)
     }
@@ -378,13 +328,6 @@ pub mod hex_vault {
     #[cfg(feature = "test-venue")]
     pub fn test_sync<'info>(ctx: Context<'info, TestSync<'info>>) -> Result<()> {
         test_venue::test_sync(ctx)
-    }
-
-    // Localnet only (ticket 08): grows the Weight tree by many leaves at once,
-    // so the compute of a deposit and a position can be measured at 16,384.
-    #[cfg(feature = "test-vrf")]
-    pub fn test_tree_fill(ctx: Context<TestTreeFill>, count: u32) -> Result<()> {
-        test_tree::test_tree_fill(ctx, count)
     }
 
     // Localnet only (spec §2.5): fabricates a fulfilled ORAO randomness

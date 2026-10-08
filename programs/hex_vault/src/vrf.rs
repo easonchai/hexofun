@@ -133,9 +133,7 @@ pub fn request_v2_instruction(
     }
 }
 
-/// Requests randomness for one subject (a round's board or an epoch's draw).
-/// Both request paths (rounds.rs, epochs.rs) call this so the CPI is written
-/// once.
+/// Requests randomness for an epoch's draw.
 ///
 /// `test-vrf` builds no-op: nothing needs to exist here, because
 /// [`crate::test_vrf::test_fulfill`] fabricates the fulfilled account
@@ -187,9 +185,8 @@ pub fn request_randomness<'info>(
     .map_err(Into::into)
 }
 
-/// SHA-256 of all 64 randomness bytes (ADR 0019). Every outcome, the round's
-/// tile and the draw's target, reads from this digest, so no byte of the
-/// oracle's output goes unused.
+/// SHA-256 of all 64 randomness bytes (ADR 0019). The draw's target reads from
+/// this digest, so no byte of the oracle's output goes unused.
 pub fn digest(randomness: &[u8; 64]) -> [u8; 32] {
     sha256(randomness)
 }

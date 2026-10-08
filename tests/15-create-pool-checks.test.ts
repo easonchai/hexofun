@@ -29,7 +29,6 @@ import {
   program,
   PROGRAM_DATA,
   provider,
-  weightTreeAccount,
   VENUE_KIND,
 } from "./helpers/hx.js";
 
@@ -69,7 +68,6 @@ async function createPoolWith(opts: {
     );
   }
 
-  const weightTree = await weightTreeAccount(operator.publicKey);
   const p = { ...DEFAULT_PARAMS, payoutTimeout: opts.payoutTimeout ?? DEFAULT_PARAMS.payoutTimeout };
   return program.methods
     .createPool({
@@ -79,16 +77,11 @@ async function createPoolWith(opts: {
       vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
       epochSeconds: new BN(opts.epochSeconds ?? p.epochSeconds),
       epochAnchor: new BN(await onChainNowSeconds()),
-      roundSeconds: new BN(p.roundSeconds),
-      closeBuffer: new BN(p.closeBuffer),
       vrfTimeout: new BN(p.vrfTimeout),
       minDeposit: new BN(p.minDeposit),
-      houseCutBps: p.houseCutBps,
       minJackpot: new BN(p.minJackpot),
       payoutTimeout: new BN(p.payoutTimeout),
       baseRateBps: p.baseRateBps,
-      ticketsPerUsdc: p.ticketsPerUsdc,
-      bonusCapBps: p.bonusCapBps,
       venueKind: opts.venueKind ?? VENUE_KIND.klend,
     })
     .accountsPartial({
@@ -99,7 +92,6 @@ async function createPoolWith(opts: {
       principalVault: principalVaultPda(pool),
       jackpotVault: jackpotVaultPda(pool),
       house: playerPda(pool, operator.publicKey),
-      weightTree: weightTree.keypair.publicKey,
       treasury,
       buybackReserve,
       klendProgram:
@@ -113,8 +105,7 @@ async function createPoolWith(opts: {
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
-    .preInstructions([weightTree.ix])
-    .signers([operator, weightTree.keypair, ...(opts.payer ? [opts.payer] : [])])
+    .signers(opts.payer ? [opts.payer] : [])
     .rpc();
 }
 

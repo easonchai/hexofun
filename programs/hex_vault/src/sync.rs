@@ -190,19 +190,12 @@ pub fn absorb_dust(pool: &mut Pool, dust: u64) -> Result<u64> {
 /// Pays `player` its share of the Yield index rise since its last settle and
 /// returns the amount. Call after sync, and after `touch` (ADR 0017).
 ///
-/// Settled yield is fresh Principal, like a deposit: it raises Principal and
-/// leaves Tickets alone, and counts as Tickets from the next epoch (ADR 0020).
-/// So it makes no difference whether a Player's yield settled this epoch or
-/// still sits in `yield_owed`, and yield earned on a pending deposit does not
-/// become live Tickets in the deposit's own epoch.
+/// Settled yield is fresh Principal, like a deposit. The backend prices the
+/// unsettled part into a Player's Tickets at the epoch reset, so it makes no
+/// difference whether a Player's yield settled this epoch or still sits in
+/// `yield_owed` (ADR 0025).
 ///
-/// `touch` runs first so a stale Player is reset into the current epoch. The
-/// reset sets Tickets to the Principal it sees, which leaves out the `owed`
-/// settle adds after it.
-///
-/// The caller owns the Weight tree side: `owed` is new Principal only, so it
-/// goes into the instruction's [`crate::weight::Change`] with
-/// [`crate::weight::Change::settled`].
+/// `touch` runs first so a stale Player is stamped into the current epoch.
 ///
 /// owed = floor(principal x (pool index - player index) / 1e18).
 /// - The House never earns. It holds no Principal, and the early return keeps
@@ -674,20 +667,18 @@ mod tests {
     fn player(principal: u64, index: u128) -> Player {
         let mut p: Player = zeroed(Player::INIT_SPACE);
         p.principal = principal;
-        p.entries = principal;
         p.yield_index = index;
         p
     }
 
     #[test]
-    fn a_stale_index_pays_the_rise_into_principal_and_total_but_not_tickets() {
+    fn a_stale_index_pays_the_rise_into_principal_and_total() {
         let mut pool = pool(1_000, 0, 0);
         pool.yield_index = INDEX_SCALE / 2;
         pool.yield_owed = 500;
         let mut p = player(1_000, 0);
         assert_eq!(settle(&mut pool, &mut p).unwrap(), 500);
-        // Tickets wait for the next epoch's reset (ADR 0020).
-        assert_eq!((p.principal, p.entries), (1_500, 1_000));
+        assert_eq!(p.principal, 1_500);
         assert_eq!((pool.total_principal, pool.yield_owed), (1_500, 0));
         assert_eq!(p.yield_index, pool.yield_index);
         // Settling again at the same index owes nothing.
@@ -731,7 +722,7 @@ mod tests {
         let mut house = player(500, 0);
         house.is_house = true;
         assert_eq!(settle(&mut pool, &mut house).unwrap(), 0);
-        assert_eq!((house.principal, house.entries, house.yield_index), (500, 500, 0));
+        assert_eq!((house.principal, house.yield_index), (500, 0));
         assert_eq!((pool.total_principal, pool.yield_owed), (1_000, 1_000));
     }
 
@@ -771,18 +762,14 @@ mod tests {
                 if i == players.len() {
                     players.push(player(0, pool.yield_index));
                 }
-                let entries_before = players[i].entries;
                 settled += settle(&mut pool, &mut players[i]).unwrap() as u128;
-                assert_eq!(players[i].entries, entries_before, "seed {seed}");
                 if rng.below(3) == 0 {
                     let d = rng.below(1 << 30);
                     players[i].principal += d;
-                    players[i].entries += d;
                     pool.total_principal += d;
                 } else if rng.below(3) == 0 {
                     let d = rng.below(players[i].principal + 1);
                     players[i].principal -= d;
-                    players[i].entries = players[i].entries.saturating_sub(d);
                     pool.total_principal -= d;
                 }
                 let owed = pool.fee_owed as u128 + pool.yield_owed as u128 + pool.prize_owed as u128;

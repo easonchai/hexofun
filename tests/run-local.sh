@@ -10,7 +10,7 @@ set -eu
 # validator binds is derived from it, so two runs never collide.
 #
 # Usage:  tests/run-local.sh [vitest args...]
-#         HEXVAULT_RPC_PORT=8999 tests/run-local.sh tests/02-rounds.test.ts
+#         HEXVAULT_RPC_PORT=8999 tests/run-local.sh tests/03-epochs.test.ts
 
 port="${HEXVAULT_RPC_PORT:-8899}"
 ledger="${TMPDIR:-/tmp}/hexvault-validator-$port-$$"

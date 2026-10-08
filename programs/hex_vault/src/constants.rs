@@ -1,29 +1,18 @@
 use anchor_lang::prelude::*;
 
-/// Hex tiles on a round's board, indexed 0..35.
-pub const TILE_COUNT: u8 = 36;
-pub const TILE_MASK: u64 = (1u64 << TILE_COUNT) - 1;
-
-/// 100% in basis points. `Pool::house_cut_bps` and `Pool::base_rate_bps` are
-/// capped at this.
+/// 100% in basis points. `Pool::base_rate_bps` is capped at this.
 pub const BPS_DENOMINATOR: u16 = 10_000;
 
 /// Written to `version` on a freshly created `Epoch`. Epoch kept its layout
 /// through the live-yield rewrite. See ADR 0013.
 pub const EPOCH_VERSION: u8 = 1;
 
-/// Written to `version` on `Pool`, `Player`, `Round` and `Position` since the
-/// live-yield layout rewrite (yield-claimer ticket 04, ADR 0013 amendment).
-/// Version 1 of each had a different layout and a different discriminator
-/// (see `state.rs`), so Anchor refuses a version-1 account with
-/// `AccountDiscriminatorMismatch` before reading a byte of it.
-pub const LAYOUT_VERSION: u8 = 2;
-
-/// Written to the Weight tree header by `create_pool`.
-pub const WEIGHT_TREE_VERSION: u8 = 1;
-
-/// Written to the FreeLeaves header by `create_pool`.
-pub const FREE_LEAVES_VERSION: u32 = 1;
+/// Written to `version` on `Pool` and `Player`. Version 3 is the custody-only
+/// layout (off-chain-tickets ticket 08, ADR 0025). Earlier versions had a
+/// different layout and a different discriminator (see `state.rs`), so Anchor
+/// refuses their accounts with `AccountDiscriminatorMismatch` before reading a
+/// byte of them.
+pub const LAYOUT_VERSION: u8 = 3;
 
 /// Denominator for `base_rate_bps`, an annual rate: seconds in a 365-day year.
 pub const SECONDS_PER_YEAR: u128 = 31_536_000;
@@ -67,15 +56,14 @@ pub const MAX_MIN_VENUE_MOVE: u64 = 10_000_000_000;
 /// A fall under this share of venue value is dust, never a loss. 1%.
 pub const MAX_LOSS_TOLERANCE_BPS: u16 = 100;
 
-/// Floors for the two timeouts that gate the permissionless `void_round` and
+/// Floors for the two timeouts that gate the permissionless
 /// `rollover_epoch` (production-hardening 14, Finding 5). Below these, a
-/// merely slow ORAO fulfilment or an honest late Payout could be voided or
+/// merely slow ORAO fulfilment or an honest late Payout could be
 /// rolled over by any stranger the second the timeout passes. Localnet tests
 /// run epochs of a few seconds, so `test-vrf` builds keep the floor at 1;
 /// `lib.rs` refuses that feature together with `staging` or `mainnet`.
 ///
-/// 180 s since ADR 0019: ORAO's measured tail reached 62 to 77 s, and a 60 s
-/// floor would void about one round in six.
+/// 180 s since ADR 0019: ORAO's measured tail reached 62 to 77 s.
 #[cfg(not(feature = "test-vrf"))]
 pub const MIN_VRF_TIMEOUT: i64 = 180;
 #[cfg(feature = "test-vrf")]
@@ -89,13 +77,9 @@ pub const SEED_POOL: &[u8] = b"pool";
 pub const SEED_PRINCIPAL: &[u8] = b"principal";
 pub const SEED_JACKPOT: &[u8] = b"jackpot";
 pub const SEED_EPOCH: &[u8] = b"epoch";
-pub const SEED_ROUND: &[u8] = b"round";
 pub const SEED_PLAYER: &[u8] = b"player";
-pub const SEED_POSITION: &[u8] = b"position";
 /// The open venue proposal of a pool: `[SEED_VENUE_PROPOSAL, pool]`.
 pub const SEED_VENUE_PROPOSAL: &[u8] = b"venue_proposal";
-/// The pool's stack of released Weight tree leaves: `[SEED_FREE_LEAVES, pool]`.
-pub const SEED_FREE_LEAVES: &[u8] = b"free_leaves";
 
 /// How long a venue proposal must stand before `migrate_venue` may execute
 /// it (venue-switch ticket 05 reads this). A constant, not a parameter: the
@@ -154,16 +138,6 @@ pub mod epoch_status {
     pub const DRAWN: u8 = 3;
     pub const PAID: u8 = 4;
     pub const ROLLED_OVER: u8 = 5;
-}
-
-/// `Round::status`. Open → Requested → Settled or Forfeited, or Voided when
-/// the randomness never arrives.
-pub mod round_status {
-    pub const OPEN: u8 = 0;
-    pub const REQUESTED: u8 = 1;
-    pub const SETTLED: u8 = 2;
-    pub const FORFEITED: u8 = 3;
-    pub const VOIDED: u8 = 4;
 }
 
 #[cfg(test)]

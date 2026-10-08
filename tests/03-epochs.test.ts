@@ -1,10 +1,11 @@
-// Epoch lifecycle: contiguous epochs, the Weight tree's per-Player Tickets,
-// request_draw, draw, payout to a player and to the House, rollover, and the
-// closing invariant sweep (spec §2.3 "Epochs", §2.4 invariants 1-2 and 7-8).
+// Epoch lifecycle: contiguous epochs, request_draw, draw, payout to a player
+// and to the House, rollover, and the buy_tickets USDC sink (spec §2.3
+// "Epochs").
 //
-// Registration is gone (yield-claimer tickets 04 and 08): every Player is in
-// the draw through the Weight tree, which these tests read through
-// `ticketsOf` and `drawnWinner` in the helpers.
+// The program holds no Tickets (ADR 0025): the Operator hands request_draw the
+// epoch's Ticket total, and payout is Operator-signed until ticket 09 makes it
+// verify the winner's proof. So a test that draws keeps its own list of who
+// holds what and lands the target with `randomnessLanding`.
 //
 // Epochs here run a handful of seconds (via the `epochSeconds` override) so
 // tests sleep through them instead of a day. Each test airdrops, mints, and
@@ -15,44 +16,31 @@ import { BN } from "@anchor-lang/core";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { getOrCreateAssociatedTokenAccount, mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
-  DEVNET_VRF_NETWORK_STATE,
-  DEVNET_VRF_TREASURY,
   deployToVenue,
-  drawnWinner,
   epochPda,
-  fetchTree,
   findEvent,
   fulfillRandomness,
-  leafTickets,
   onChainNowSeconds,
+  payoutMethod,
   playerPda,
   refundAccounts,
-  positionPda,
   program,
-  grantTicketsAsAdmin,
-  randomnessFor,
-  randomnessForTarget,
+  randomnessLanding,
   randomnessPda,
   requestDrawMethod,
   retryUntilOk,
-  roundPda,
   setupPool,
   setVenueRate,
   sleep,
   sleepUntilOnChain,
   testNonce,
   vrfSeed,
-  ticketsOf,
   waitPastLastSync,
+  type Holding,
   type PoolCtx,
 } from "./helpers/hx.js";
 
 const TIMEOUT = 90_000;
-
-// ORAO's VRF program id, pinned on the pool at create_pool and re-checked by
-// `request_draw`/`request_round_randomness`. test-vrf's request path
-// never actually invokes it, so it needs no deployment on localnet.
-const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 
 const epoch_status = {
   OPEN: 0,
@@ -61,14 +49,6 @@ const epoch_status = {
   DRAWN: 3,
   PAID: 4,
   ROLLED_OVER: 5,
-};
-
-const round_status = {
-  OPEN: 0,
-  REQUESTED: 1,
-  SETTLED: 2,
-  FORFEITED: 3,
-  VOIDED: 4,
 };
 
 type Wallet = { keypair: Keypair; tokenAccount: PublicKey };
@@ -87,18 +67,7 @@ function depositAccounts(pool: PoolCtx, owner: Wallet) {
   };
 }
 
-// A deposit earns no Ticket until the next epoch (ADR 0020). Most tests here
-// are about the draw, the rounds and the withdrawal queue, and need the Tickets
-// a depositor holds from the day after, so `deposit` has the Admin grant them
-// at once. `depositOnly` is the bare instruction, and 11-next-epoch-tickets
-// holds the next-epoch rule itself.
 async function deposit(pool: PoolCtx, owner: Wallet, amount: bigint) {
-  const signature = await depositOnly(pool, owner, amount);
-  await grantTicketsAsAdmin(pool, owner.keypair.publicKey, amount);
-  return signature;
-}
-
-async function depositOnly(pool: PoolCtx, owner: Wallet, amount: bigint) {
   return program.methods
     .deposit(new BN(amount.toString()))
     .accountsPartial(depositAccounts(pool, owner))
@@ -163,6 +132,7 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
       currentEpoch: epochPda(pool.pool, currentEpochId),
       epochTwoBehind: epochPda(pool.pool, twoBehindId),
       newEpoch: epochPda(pool.pool, currentEpochId + 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
@@ -174,16 +144,11 @@ async function setParams(pool: PoolCtx, epochSeconds: number) {
     .setParams({
       epochSeconds: new BN(epochSeconds),
       epochAnchor: null,
-      roundSeconds: null,
-      closeBuffer: null,
       vrfTimeout: null,
       minDeposit: null,
-      houseCutBps: null,
       minJackpot: null,
       payoutTimeout: null,
       baseRateBps: null,
-      ticketsPerUsdc: null,
-      bonusCapBps: null,
     })
     .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool })
     .signers([pool.admin])
@@ -221,47 +186,32 @@ async function buyTickets(pool: PoolCtx, owner: Wallet, amount: bigint) {
     .rpc();
 }
 
-async function grantTickets(
-  pool: PoolCtx,
-  signer: Keypair,
-  owner: PublicKey,
-  amount: bigint,
-) {
-  return program.methods
-    .grantTickets(new BN(amount.toString()))
-    .accountsPartial({
-      signer: signer.publicKey,
-      pool: pool.pool,
-      player: playerPda(pool.pool, owner),
-    })
-    .signers([signer])
-    .rpc();
-}
-
 /**
- * `nonce` is mixed into the seed (beta-launch-fixes ticket 02); the program
- * now checks the randomness account against it itself (production-hardening
- * ticket 02), so a throwaway address no longer works.
+ * `totalTickets` is the epoch's Ticket total, which the Operator supplies
+ * (nothing checks it until ticket 09). `nonce` is mixed into the seed
+ * (beta-launch-fixes ticket 02); the program checks the randomness account
+ * against it itself (production-hardening ticket 02).
  */
 async function requestDraw(
   pool: PoolCtx,
   epochId: bigint,
+  totalTickets = 1n,
   nonce: Uint8Array = testNonce(),
 ) {
-  return requestDrawMethod(pool, epochId, nonce).rpc();
+  return requestDrawMethod(pool, epochId, totalTickets, nonce).rpc();
 }
 
-/** Draws `epochId` with randomness that lands the target in `owner`'s leaf, then
- *  returns the Epoch. Every Player holds Tickets, so a test that cares who wins
- *  has to pick the randomness. */
-async function drawFor(pool: PoolCtx, epochId: bigint, owner: PublicKey) {
+/** Requests the draw over `held` and draws it with randomness that lands the
+ *  target in `winner`'s range. Returns the Epoch. */
+async function requestAndDrawFor(
+  pool: PoolCtx,
+  epochId: bigint,
+  held: Holding[],
+  winner: PublicKey,
+) {
+  const { total, randomness } = randomnessLanding(held, winner);
+  await requestDraw(pool, epochId, total);
   const drawing = await fetchEpoch(pool, epochId);
-  const player = await fetchPlayer(pool, owner);
-  const held = leafTickets(await fetchTree(pool), epochId);
-  const leaf = player.leafIndex;
-  const lo = held.slice(0, leaf - 1).reduce((s, t) => s + t, 0n);
-  const hi = lo + (held[leaf - 1] as bigint);
-  const randomness = randomnessForTarget(BigInt(drawing.registeredWeight.toString()), lo, hi);
   await draw(pool, epochId, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed), randomness));
   return fetchEpoch(pool, epochId);
 }
@@ -286,26 +236,10 @@ async function draw(
     .rpc();
 }
 
-/** Permissionless: no signer at all, so the test wallet (neither the pool's
- *  admin nor its operator) just pays the fee. The operator cannot veto a
- *  winner by sitting out `payout_timeout`. A non-House winner needs no token
- *  account of their own: the prize compounds into `principal_vault`. */
+/** Operator-signed until ticket 09. A non-House winner needs no token account
+ *  of their own: the prize compounds into `principal_vault`. */
 async function payout(pool: PoolCtx, epochId: bigint, winner: PublicKey) {
-  return program.methods
-    .payout()
-    .accountsPartial({
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      epoch: epochPda(pool.pool, epochId),
-      winner: playerPda(pool.pool, winner),
-      jackpotVault: pool.jackpotVault,
-      principalVault: pool.principalVault,
-      treasury: pool.treasury,
-      buybackReserve: pool.buybackReserve,
-      ...pool.venue,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .rpc();
+  return payoutMethod(pool, epochId, winner).rpc();
 }
 
 /**
@@ -334,126 +268,6 @@ async function rolloverEpoch(
     .rpc();
 }
 
-// --- Round helpers (rounds.rs is ticket 03's file; these just drive its
-// already-landed instructions as a black box to forfeit a pot to the House.)
-
-async function createRound(pool: PoolCtx, currentEpochId: bigint, roundId: bigint, startsAt: number, endsAt: number) {
-  return program.methods
-    .createRound(new BN(startsAt), new BN(endsAt))
-    .accountsPartial({
-      operator: pool.operator.publicKey,
-      pool: pool.pool,
-      currentEpoch: epochPda(pool.pool, currentEpochId),
-      round: roundPda(pool.pool, roundId),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
-}
-
-async function buyPosition(pool: PoolCtx, owner: Wallet, roundId: bigint, tiles: bigint, stakePerTile: bigint) {
-  return program.methods
-    .buyPosition(new BN(tiles.toString()), new BN(stakePerTile.toString()))
-    .accountsPartial({
-      owner: owner.keypair.publicKey,
-      pool: pool.pool,
-      player: playerPda(pool.pool, owner.keypair.publicKey),
-      round: roundPda(pool.pool, roundId),
-      position: PublicKey.findProgramAddressSync(
-        [Buffer.from("position"), roundPda(pool.pool, roundId).toBuffer(), owner.keypair.publicKey.toBuffer()],
-        program.programId,
-      )[0],
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([owner.keypair])
-    .rpc();
-}
-
-/** `nonce` is mixed into the seed (beta-launch-fixes ticket 02); returns the
- *  seed actually used, since the Round's `vrfSeed` is `[0; 32]` until this
- *  succeeds. */
-async function requestRoundRandomness(
-  pool: PoolCtx,
-  roundId: bigint,
-  nonce: Uint8Array = testNonce(),
-): Promise<Uint8Array> {
-  const seed = vrfSeed("round", pool.pool, roundId, nonce);
-  await program.methods
-    .requestRoundRandomness(Array.from(nonce))
-    .accountsPartial({
-      payer: pool.operator.publicKey,
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      randomness: randomnessPda(seed),
-      vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-      vrfTreasury: DEVNET_VRF_TREASURY,
-      vrfProgram: ORAO_VRF_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
-  return seed;
-}
-
-/** Permissionless (production-hardening ticket 01): first account is
- *  `caller`, not `operator`; `house` still pins to `pool.house`. */
-async function settleRound(
-  pool: PoolCtx,
-  roundId: bigint,
-  randomness: PublicKey,
-  caller: Keypair = pool.operator,
-) {
-  return program.methods
-    .settleRound()
-    .accountsPartial({
-      caller: caller.publicKey,
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      randomness,
-      house: pool.house,
-    })
-    .signers([caller])
-    .rpc();
-}
-
-async function settlePosition(pool: PoolCtx, roundId: bigint, owner: PublicKey) {
-  return program.methods
-    .settlePosition()
-    .accountsPartial({
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      player: playerPda(pool.pool, owner),
-      owner,
-      position: positionPda(roundPda(pool.pool, roundId), owner),
-    })
-    .rpc();
-}
-
-/**
- * `seed` is the Round's own `vrfSeed` once requested (unused, any value
- * works, when voiding a still-OPEN round that was never requested at all).
- * The program checks the randomness account against it and refuses to void a
- * request that was fulfilled. Permissionless (production-hardening ticket
- * 01): first account is `caller`, not `operator`.
- */
-async function voidRound(
-  pool: PoolCtx,
-  roundId: bigint,
-  seed: Uint8Array | number[],
-  caller: Keypair = pool.operator,
-) {
-  return program.methods
-    .voidRound()
-    .accountsPartial({
-      caller: caller.publicKey,
-      pool: pool.pool,
-      round: roundPda(pool.pool, roundId),
-      randomness: randomnessPda(Uint8Array.from(seed)),
-    })
-    .signers([caller])
-    .rpc();
-}
-
 async function fetchPlayer(pool: PoolCtx, owner: PublicKey) {
   return program.account.player.fetch(playerPda(pool.pool, owner));
 }
@@ -463,107 +277,6 @@ async function fetchEpoch(pool: PoolCtx, epochId: bigint) {
 }
 
 describe("epochs", () => {
-  it(
-    "B depositing at half the epoch holds the same Tickets as A, from the next epoch",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 12 });
-      // Wallet setup (airdrop, mint, ATA) is real wall-clock work; done
-      // before `beginEpoch` fixes the epoch's `starts_at`, so it can't eat
-      // into the window the midpoint math below assumes.
-      const a = await pool.fundedWallet(10_000_000n);
-      const b = await pool.fundedWallet(10_000_000n);
-
-      await beginEpoch(pool, 0n);
-      const epoch1Open = await fetchEpoch(pool, 1n);
-      // Polls the validator's actual on-chain clock for the midpoint
-      // instead of comparing an on-chain deadline to `Date.now()`: the two
-      // clocks drift apart.
-      const startsAtSec = Number(epoch1Open.startsAt.toString());
-      const endsAtSec = Number(epoch1Open.endsAt.toString());
-      const midpointSec = Math.floor((startsAtSec + endsAtSec) / 2);
-
-      await depositOnly(pool, a, 5_000_000n);
-      await sleepUntilOnChain(midpointSec);
-      await depositOnly(pool, b, 5_000_000n);
-
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-
-      // Neither holds a Ticket in epoch 1, and both hold their whole deposit
-      // in epoch 2: the second a deposit lands in makes no difference.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(0n);
-      expect(await ticketsOf(pool, b.keypair.publicKey, 1n)).toBe(0n);
-      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(5_000_000n);
-      expect(await ticketsOf(pool, b.keypair.publicKey, 2n)).toBe(5_000_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a player idle through a whole epoch holds their principal",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5 });
-      await beginEpoch(pool, 0n); // epoch 1 open
-
-      const a = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, a, 4_000_000n);
-
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, epoch 2 open
-
-      // Player does nothing at all during epoch 2.
-      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch2 ended, epoch 3 open
-
-      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(4_000_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a player acting in N+1 leaves the Tickets epoch N ended with where they were, unaffected by a later deposit",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5 });
-      await beginEpoch(pool, 0n); // epoch 1 open
-
-      const a = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, a, 3_000_000n);
-
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, epoch 2 open
-      const before = await ticketsOf(pool, a.keypair.publicKey, 1n);
-      expect(before).toBe(3_000_000n);
-
-      // Acting inside epoch 2, before anything draws for epoch 1.
-      await deposit(pool, a, 1_000_000n);
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(before);
-
-      // A further deposit in epoch 2 does not move it either.
-      await deposit(pool, a, 1_000_000n);
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(before);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a queued request stays in the epoch's draw, and a refunded pending deposit never held a Ticket",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 20 });
-      const a = await pool.fundedWallet(10_000_000n);
-      const b = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, a, 5_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1: a's deposit is active
-
-      await depositOnly(pool, b, 3_000_000n); // pending in epoch 1, no stand-in Tickets
-      await requestWithdraw(pool, a, 5_000_000n); // queued
-      await requestWithdraw(pool, b, 3_000_000n); // refunded
-
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-
-      // The queued request changed no Ticket, so a is in epoch 1's draw in
-      // full. b's refund took back USDC that never held one.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(5_000_000n);
-      expect(await ticketsOf(pool, b.keypair.publicKey, 1n)).toBe(0n);
-    },
-    TIMEOUT,
-  );
-
   it(
     "request_draw refuses an epoch that is still Open, and one already requested",
     async () => {
@@ -599,7 +312,7 @@ describe("epochs", () => {
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch1 ended, nobody holds Tickets
 
-      await requestDraw(pool, 1n);
+      await requestDraw(pool, 1n, 0n);
 
       const epoch = await fetchEpoch(pool, 1n);
       expect(epoch.status).toBe(epoch_status.ROLLED_OVER);
@@ -629,8 +342,8 @@ describe("epochs", () => {
       expect(epoch1.jackpotAmount.toString()).toBe("1999999");
       const event = await findEvent<{ epochId: BN; jackpotAmount: BN }>(sig, "epochRolledOver");
       expect(event?.epochId.toString()).toBe("1");
-      // Tickets were not the reason: the epoch had a depositor.
-      expect(BigInt(epoch1.registeredWeight.toString()) > 0n).toBe(true);
+      // Tickets were not the reason: the Operator reported some.
+      expect(epoch1.registeredWeight.toString()).toBe("1");
 
       // The prize stayed put, so one more unit clears the floor next epoch.
       await fundJackpot(pool, funder, 1n);
@@ -640,74 +353,6 @@ describe("epochs", () => {
       const epoch2 = await fetchEpoch(pool, 2n);
       expect(epoch2.status).toBe(epoch_status.DRAWING);
       expect(epoch2.jackpotAmount.toString()).toBe("2000000");
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a player who lost every Entry can still request their whole Principal, and is paid after the boundary",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 30, roundSeconds: 5, closeBuffer: 1 });
-      const alice = await pool.fundedWallet(10_000_000n);
-
-      await deposit(pool, alice, 5_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1: the deposit is active Principal, so it queues
-
-      // Everything on tile 0, and tile 5 wins: the pot forfeits to the House
-      // and Alice is left holding Entries 0 against Principal 5M.
-      const startsAt = await onChainNowSeconds();
-      await createRound(pool, 1n, 1n, startsAt, startsAt + 5);
-      await buyPosition(pool, alice, 1n, 1n << 0n, 5_000_000n);
-      const seed1 = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
-      await settleRound(pool, 1n, await fulfillRandomness(seed1, randomnessFor(5)));
-      expect((await program.account.round.fetch(roundPda(pool.pool, 1n))).status).toBe(
-        round_status.FORFEITED,
-      );
-      expect((await fetchPlayer(pool, alice.keypair.publicKey)).entries.toString()).toBe("0");
-
-      // The old `entries >= amount` rule would have locked her out here.
-      await requestWithdraw(pool, alice, 5_000_000n);
-      const requested = await fetchPlayer(pool, alice.keypair.publicKey);
-      // The queued 5M stays in her Principal until it pays.
-      expect(requested.principal.toString()).toBe("5000000");
-      expect(requested.pendingWithdraw.toString()).toBe("5000000");
-      expect(requested.pendingEpoch.toString()).toBe("1");
-      expect(requested.entries.toString()).toBe("0");
-
-      // Mid-epoch the pool's Entries exceed what Alice holds: the House has
-      // her 5M, and her Principal is still counted in the pool's total.
-      const midPool = await program.account.pool.fetch(pool.pool);
-      const midHouse = await fetchPlayer(pool, pool.operator.publicKey);
-      expect(midPool.totalPrincipal.toString()).toBe("5000000");
-      expect(midPool.pendingWithdrawals.toString()).toBe("5000000");
-      expect(BigInt(midHouse.entries.toString())).toBe(5_000_000n);
-
-      const before = await program.provider.connection.getTokenAccountBalance(alice.tokenAccount);
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-      // An open Position holds the payout (mainnet-review-fixes ticket 02).
-      await expect(processWithdraw(pool, alice)).rejects.toThrow(/OpenPositions/);
-      await settlePosition(pool, 1n, alice.keypair.publicKey);
-      await processWithdraw(pool, alice);
-      const after = await program.provider.connection.getTokenAccountBalance(alice.tokenAccount);
-      expect(BigInt(after.value.amount) - BigInt(before.value.amount)).toBe(5_000_000n);
-
-      const paid = await fetchPlayer(pool, alice.keypair.publicKey);
-      expect(paid.pendingWithdraw.toString()).toBe("0");
-      expect((await program.account.pool.fetch(pool.pool)).pendingWithdrawals.toString()).toBe("0");
-
-      // Equality comes back at the epoch start, once each Player is touched.
-      // An empty round always touches the House on settlement, which is what
-      // resets the Entries it was holding for the epoch that ended.
-      const round2Start = await onChainNowSeconds();
-      await createRound(pool, 2n, 2n, round2Start, round2Start + 5);
-      const seed2 = await retryUntilOk(() => requestRoundRandomness(pool, 2n));
-      await settleRound(pool, 2n, await fulfillRandomness(seed2, randomnessFor(5)));
-
-      const endPool = await program.account.pool.fetch(pool.pool);
-      const endHouse = await fetchPlayer(pool, pool.operator.publicKey);
-      const endAlice = await fetchPlayer(pool, alice.keypair.publicKey);
-      const entriesSum = BigInt(endHouse.entries.toString()) + BigInt(endAlice.entries.toString());
-      expect(entriesSum).toBe(BigInt(endPool.totalPrincipal.toString()));
     },
     TIMEOUT,
   );
@@ -725,14 +370,12 @@ describe("epochs", () => {
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
-      await requestDraw(pool, 1n);
+      // `a` holds all of the epoch's 4M Tickets.
+      await requestDraw(pool, 1n, 4_000_000n);
 
       const epochAfterClose = await fetchEpoch(pool, 1n);
       expect(epochAfterClose.status).toBe(epoch_status.DRAWING);
-      // The snapshot is the tree's total for the epoch: `a` holds all of it.
-      expect(epochAfterClose.registeredWeight.toString()).toBe(
-        (await ticketsOf(pool, a.keypair.publicKey, 1n)).toString(),
-      );
+      expect(epochAfterClose.registeredWeight.toString()).toBe("4000000");
 
       const randomness = await fulfillRandomness(Uint8Array.from(epochAfterClose.vrfSeed));
       await draw(pool, 1n, randomness);
@@ -761,19 +404,22 @@ describe("epochs", () => {
         BigInt(playerAfter.principal.toString()) - BigInt(playerBefore.principal.toString()),
       ).toBe(2_000_000n);
       expect(
-        BigInt(playerAfter.entries.toString()) - BigInt(playerBefore.entries.toString()),
-      ).toBe(2_000_000n);
-      expect(
         BigInt(poolAfter.totalPrincipal.toString()) - BigInt(poolBefore.totalPrincipal.toString()),
       ).toBe(2_000_000n);
 
-      const event = await findEvent<{ isHouse: boolean; compounded: boolean; amount: BN }>(
-        sig,
-        "jackpotPaid",
-      );
+      const event = await findEvent<{
+        isHouse: boolean;
+        compounded: boolean;
+        amount: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(sig, "jackpotPaid");
       expect(event?.isHouse).toBe(false);
       expect(event?.compounded).toBe(true);
       expect(event?.amount.toString()).toBe("2000000");
+      // The winner's post-state, as the Player account reads after the payout.
+      expect(event?.principal.toString()).toBe(playerAfter.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(playerAfter.yieldIndex.toString());
 
       const paid = await fetchEpoch(pool, 1n);
       expect(paid.status).toBe(epoch_status.PAID);
@@ -792,7 +438,7 @@ describe("epochs", () => {
   );
 
   it(
-    "payout to a player: the yield settled just before the prize adds Principal only, and the prize adds its own Tickets",
+    "payout to a player: the yield settled just before the prize joins Principal, and the event carries both",
     async () => {
       // 1M USDC at 100% APR so the depositor ceiling does not bind on the gain.
       const big = 10n ** 12n;
@@ -806,7 +452,7 @@ describe("epochs", () => {
       await retryUntilOk(() => beginEpoch(pool, 1n));
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
-      await requestDraw(pool, 1n);
+      await requestDraw(pool, 1n, big);
       const drawing = await fetchEpoch(pool, 1n);
       await draw(pool, 1n, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed)));
 
@@ -817,15 +463,18 @@ describe("epochs", () => {
       await setVenueRate(pool, BigInt(reserve.rate.toString()) + 2n * 10n ** 10n).rpc();
       await waitPastLastSync(pool);
       const before = await fetchPlayer(pool, a.keypair.publicKey);
-      await payout(pool, 1n, a.keypair.publicKey);
+      const sig = await payout(pool, 1n, a.keypair.publicKey);
       const after = await fetchPlayer(pool, a.keypair.publicKey);
 
       const yieldSettled = 16_200n;
       expect(BigInt(after.principal.toString()) - BigInt(before.principal.toString())).toBe(
         2_000_000n + yieldSettled,
       );
-      expect(BigInt(after.entries.toString()) - BigInt(before.entries.toString())).toBe(2_000_000n);
-      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(BigInt(after.entries.toString()));
+      // The settle moved the Player's index to the pool's, and the event says so.
+      const event = await findEvent<{ principal: BN; yieldIndex: BN }>(sig, "jackpotPaid");
+      expect(event?.principal.toString()).toBe(after.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(after.yieldIndex.toString());
+      expect(after.yieldIndex.toString()).not.toBe(before.yieldIndex.toString());
     },
     TIMEOUT,
   );
@@ -833,60 +482,17 @@ describe("epochs", () => {
   it(
     "the House wins: buyback gets 50%, treasury 20%, the vault keeps 30%",
     async () => {
-      const pool = await setupPool({ epochSeconds: 14, roundSeconds: 5, closeBuffer: 0 });
-      const a = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, a, 6_000_000n);
-
+      const pool = await setupPool({ epochSeconds: 6 });
       await beginEpoch(pool, 0n);
-
-      const startsAt = Math.floor(Date.now() / 1000);
-      const endsAt = startsAt + 5;
-      await createRound(pool, 1n, 1n, startsAt, endsAt);
-
-      // A stakes everything on tile 0 only, leaving every other tile
-      // uncovered so the draw below is guaranteed to forfeit.
-      await buyPosition(pool, a, 1n, 1n, 6_000_000n);
-
-      const seed = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
-      // Tile 1 is not covered by A's position (only tile 0 is): forfeit.
-      const roundRandomness = await fulfillRandomness(seed, randomnessFor(1));
-      await settleRound(pool, 1n, roundRandomness);
-
-      const roundAfter = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      expect(roundAfter.status).toBe(round_status.FORFEITED);
-
-      // --- Closing invariant sweep (spec §2.4 #1-2), right after the
-      // forfeit: A's stake left `entries`, and reappeared whole in the
-      // House's, so both should still add up to total_principal exactly.
-      // Nothing is pending here; a `request_withdraw` would let Entries
-      // exceed Principal until the next boundary (ADR 0009).
-      const poolAfterForfeit = await program.account.pool.fetch(pool.pool);
-      const playerA = await fetchPlayer(pool, a.keypair.publicKey);
-      const house = await fetchPlayer(pool, pool.operator.publicKey);
-      const principalVaultBalance = await program.provider.connection.getTokenAccountBalance(pool.principalVault);
-
-      expect(playerA.principal.toString()).toBe(poolAfterForfeit.totalPrincipal.toString());
-      expect(principalVaultBalance.value.amount).toBe(poolAfterForfeit.totalPrincipal.toString());
-      expect(house.isHouse).toBe(true);
-      expect(house.entries.toString()).toBe("6000000");
-      expect(playerA.entries.toString()).toBe("0");
-      const entriesSum = BigInt(playerA.entries.toString()) + BigInt(house.entries.toString());
-      expect(entriesSum).toBe(BigInt(poolAfterForfeit.totalPrincipal.toString()));
-
-      // --- The House now holds forfeited Tickets, so it holds them in the
-      // tree too. Fund, request the draw, land the target in the House's leaf,
-      // pay out, and check the split.
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      expect(await ticketsOf(pool, pool.operator.publicKey, 1n)).toBe(6_000_000n);
 
+      // The House holds Tickets the backend booked from forfeited pots and the
+      // cut, so it can win: land the target in its range.
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
-      await requestDraw(pool, 1n);
-
-      const closed = await fetchEpoch(pool, 1n);
-      expect(closed.status).toBe(epoch_status.DRAWING);
-
-      await drawFor(pool, 1n, pool.operator.publicKey);
+      const house = pool.operator.publicKey;
+      const closed = await requestAndDrawFor(pool, 1n, [{ owner: house, tickets: 6_000_000n }], house);
+      expect(closed.status).toBe(epoch_status.DRAWN);
 
       const buybackBefore = await program.provider.connection.getTokenAccountBalance(pool.buybackReserve);
       const treasuryBefore = await program.provider.connection.getTokenAccountBalance(pool.treasury);
@@ -903,9 +509,17 @@ describe("epochs", () => {
       expect(BigInt(vaultBefore.value.amount) - BigInt(vaultAfter.value.amount)).toBe(700_000n); // 70% left
       expect(vaultAfter.value.amount).toBe("300000"); // 30% stays
 
-      const event = await findEvent<{ isHouse: boolean; compounded: boolean }>(sig, "jackpotPaid");
+      const event = await findEvent<{
+        isHouse: boolean;
+        compounded: boolean;
+        principal: BN;
+        yieldIndex: BN;
+      }>(sig, "jackpotPaid");
       expect(event?.isHouse).toBe(true);
       expect(event?.compounded).toBe(false);
+      // The House holds no Principal and never earns, so both stay 0.
+      expect(event?.principal.toString()).toBe("0");
+      expect(event?.yieldIndex.toString()).toBe("0");
 
       const paid = await fetchEpoch(pool, 1n);
       expect(paid.status).toBe(epoch_status.PAID);
@@ -972,19 +586,25 @@ describe("epochs", () => {
       await fundJackpot(pool, funder, 3_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
-      await requestDraw(pool, 1n);
-      const closed1 = await fetchEpoch(pool, 1n);
+      const [ha, hb] = [a.keypair.publicKey, b.keypair.publicKey];
+      const closed1 = await requestAndDrawFor(
+        pool,
+        1n,
+        [
+          { owner: ha, tickets: 3_000_000n },
+          { owner: hb, tickets: 3_000_000n },
+        ],
+        ha,
+      );
       expect(closed1.jackpotAmount.toString()).toBe("3000000");
       expect((await program.account.pool.fetch(pool.pool)).jackpotReserved.toString()).toBe(
         "3000000",
       );
-      await drawFor(pool, 1n, a.keypair.publicKey);
 
       // beta-launch-fixes ticket 03: begin_epoch refuses while the epoch two
       // behind the new one is still Drawing or Drawn, so epoch 1's winner
-      // (`a`) must be paid before epoch 3 can ever open -- otherwise the tree
-      // would stop holding epoch 1's leaf ranges that payout checks. Prize
-      // compounds into the principal vault, not a.'s own token account.
+      // (`a`) must be paid before epoch 3 can ever open. Prize compounds into
+      // the principal vault, not a.'s own token account.
       const principalBeforeFirst = await program.provider.connection.getTokenAccountBalance(
         pool.principalVault,
       );
@@ -1000,10 +620,17 @@ describe("epochs", () => {
       // Epoch 1 is now Paid. The next epoch must draw for its own 2M only.
       await fundJackpot(pool, funder, 2_000_000n);
       await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3
-      await requestDraw(pool, 2n);
-      const closed2 = await fetchEpoch(pool, 2n);
+      // Epoch 2: a holds 3M plus the 3M prize, b holds 3M.
+      const closed2 = await requestAndDrawFor(
+        pool,
+        2n,
+        [
+          { owner: ha, tickets: 6_000_000n },
+          { owner: hb, tickets: 3_000_000n },
+        ],
+        hb,
+      );
       expect(closed2.jackpotAmount.toString()).toBe("2000000");
-      await drawFor(pool, 2n, b.keypair.publicKey);
 
       await payout(pool, 2n, b.keypair.publicKey);
       expect((await fetchPlayer(pool, b.keypair.publicKey)).principal.toString()).toBe("5000000");
@@ -1150,19 +777,17 @@ describe("epochs", () => {
       await retryUntilOk(() => beginEpoch(pool, 1n));
 
       // production-hardening ticket 02: request_draw checks the
-      // randomness account against its own computed seed, the same way
-      // request_round_randomness does.
+      // randomness account against its own computed seed.
       const wrongNonce = testNonce(9);
-      const wrongSeed = vrfSeed("epoch", pool.pool, 2n, wrongNonce); // another epoch's seed
+      const wrongSeed = vrfSeed(pool.pool, 2n, wrongNonce); // another epoch's seed
       await expect(
-        requestDrawMethod(pool, 1n, testNonce(), randomnessPda(wrongSeed)).rpc(),
+        requestDrawMethod(pool, 1n, 1n, testNonce(), randomnessPda(wrongSeed)).rpc(),
       ).rejects.toThrow(/InvalidRandomnessAccount/);
 
       await requestDraw(pool, 1n);
 
       // Permissionless (production-hardening ticket 01): a stranger, not the
-      // operator, drives draw and rollover_epoch (and settle_round/void_round
-      // in tests/01-custody.test.ts).
+      // operator, drives draw and rollover_epoch.
       const stranger = Keypair.generate();
       await program.provider.connection.confirmTransaction(
         await program.provider.connection.requestAirdrop(stranger.publicKey, 2_000_000_000),
@@ -1236,6 +861,35 @@ describe("epochs", () => {
     TIMEOUT,
   );
 
+  it(
+    "EpochBegan carries the yield index after begin_epoch's own sync",
+    async () => {
+      // 1M USDC at 100% APR so the depositor ceiling does not bind on the gain.
+      const big = 10n ** 12n;
+      const pool = await setupPool({ epochSeconds: 6, baseRateBps: 10_000 });
+      const a = await pool.fundedWallet(big * 2n);
+      await deposit(pool, a, big);
+      await beginEpoch(pool, 0n);
+      await waitPastLastSync(pool);
+      await deployToVenue(pool, (big * 9n) / 10n);
+
+      // The venue gains with nobody syncing: only begin_epoch can book it.
+      const reserve = await program.account.testReserve.fetch(pool.venue.klendReserve);
+      await setVenueRate(pool, BigInt(reserve.rate.toString()) + 2n * 10n ** 10n).rpc();
+      await waitPastLastSync(pool);
+      expect((await program.account.pool.fetch(pool.pool)).yieldIndex.toString()).toBe("0");
+
+      const sig = await retryUntilOk(() => beginEpoch(pool, 1n));
+
+      const index = (await program.account.pool.fetch(pool.pool)).yieldIndex;
+      expect(index.toString()).not.toBe("0");
+      const event = await findEvent<{ epochId: BN; yieldIndex: BN }>(sig, "epochBegan");
+      expect(event?.epochId.toString()).toBe("2");
+      expect(event?.yieldIndex.toString()).toBe(index.toString());
+    },
+    TIMEOUT,
+  );
+
   // --- The anchored grid (epoch-anchor/02). Every boundary is a point of
   // `epochAnchor + k * epochSeconds`. These pools set the anchor a few
   // seconds ahead of `setupPool`, so epoch 1 is a short stub ending on the
@@ -1290,8 +944,6 @@ describe("epochs", () => {
       const pool = await setupPool({ epochSeconds: 8, epochAnchor: anchor });
       const a = await pool.fundedWallet(10_000_000n);
 
-      // Deposited before the first epoch opens, so this player holds its whole
-      // Principal as Tickets in epoch 1.
       await deposit(pool, a, 4_000_000n);
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
@@ -1309,10 +961,13 @@ describe("epochs", () => {
       expect((await fetchEpoch(pool, 1n)).status).toBe(epoch_status.ENDED);
 
       // Epoch 1, skipped past and not orphaned, still runs its own draw and
-      // pays out, and stays readable while epoch 2 is current.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(4_000_000n);
-      await requestDraw(pool, 1n);
-      await drawFor(pool, 1n, a.keypair.publicKey);
+      // pays out while epoch 2 is current.
+      await requestAndDrawFor(
+        pool,
+        1n,
+        [{ owner: a.keypair.publicKey, tickets: 4_000_000n }],
+        a.keypair.publicKey,
+      );
       await payout(pool, 1n, a.keypair.publicKey);
       expect((await fetchEpoch(pool, 1n)).status).toBe(epoch_status.PAID);
     },
@@ -1324,10 +979,7 @@ describe("epochs", () => {
     async () => {
       const anchor = (await onChainNowSeconds()) + GRID_LEAD;
       const pool = await setupPool({ epochSeconds: 30, epochAnchor: anchor });
-      const a = await pool.fundedWallet(10_000_000n);
-
       await beginEpoch(pool, 0n);
-      await deposit(pool, a, 5_000_000n);
 
       const epoch1 = await fetchEpoch(pool, 1n);
       const startsAt = BigInt(epoch1.startsAt.toString());
@@ -1335,9 +987,6 @@ describe("epochs", () => {
       expect(endsAt).toBe(BigInt(anchor)); // the first grid point after bootstrap
       expect(Number(endsAt - startsAt)).toBeGreaterThan(0);
       expect(Number(endsAt - startsAt)).toBeLessThan(30);
-      // The stub is a full epoch for the draw: the deposit holds all of its
-      // Principal as Tickets, however short the stub is.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 1n)).toBe(5_000_000n);
     },
     TIMEOUT,
   );
@@ -1352,14 +1001,11 @@ describe("epochs", () => {
       // refuse the setParams(pool, 24) call below, which never touches
       // payout_timeout at all.
       const pool = await setupPool({ epochSeconds: 8, epochAnchor: anchor, payoutTimeout: 4 });
-      const a = await pool.fundedWallet(10_000_000n);
 
       await beginEpoch(pool, 0n); // epoch 1: the stub
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: a full 8s period
       const epoch2 = await fetchEpoch(pool, 2n);
       expect(Number(epoch2.endsAt) - Number(epoch2.startsAt)).toBe(8);
-
-      await deposit(pool, a, 5_000_000n);
 
       await setParams(pool, 24); // the daily-to-weekly switch, scaled down
 
@@ -1368,9 +1014,6 @@ describe("epochs", () => {
       expect(epoch3.startsAt.toString()).toBe(epoch2.endsAt.toString());
       expect((Number(epoch3.endsAt) - anchor) % 24).toBe(0);
       expect(Number(epoch3.endsAt) - Number(epoch3.startsAt)).toBeLessThan(24);
-
-      // Epoch 2 stays readable behind the short transition epoch.
-      expect(await ticketsOf(pool, a.keypair.publicKey, 2n)).toBe(5_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 3n)); // epoch 4: the new cadence
       const epoch4 = await fetchEpoch(pool, 4n);
@@ -1384,100 +1027,19 @@ describe("epochs", () => {
   // restored every stake, and the credit is a plain delta in the epoch now
   // current (yield-claimer ticket 21; the winner's case is in 02-rounds).
 
-  it(
-    "a forfeited Round from an ended Epoch credits the House its pot in the new epoch",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 24, roundSeconds: 8, closeBuffer: 2 });
-      const alice = await pool.fundedWallet(10_000_000n);
-
-      await beginEpoch(pool, 0n);
-      await deposit(pool, alice, 5_000_000n);
-
-      const epoch1 = await fetchEpoch(pool, 1n);
-      const endsAt = Number(epoch1.endsAt.toString());
-      const startsAt = endsAt - 8;
-
-      await sleepUntilOnChain(startsAt);
-      await createRound(pool, 1n, 1n, startsAt, endsAt);
-      await buyPosition(pool, alice, 1n, 1n << 0n, 1_000_000n); // tile 0 only
-
-      await sleepUntilOnChain(endsAt);
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-
-      const seed = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
-      const randomness = await fulfillRandomness(seed, randomnessFor(5)); // nobody on tile 5
-      await settleRound(pool, 1n, randomness);
-
-      const settled = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      expect(settled.status).toBe(round_status.FORFEITED);
-
-      const house = await fetchPlayer(pool, pool.operator.publicKey);
-      expect(house.entries.toString()).toBe("1000000");
-      expect(await ticketsOf(pool, pool.operator.publicKey, 2n)).toBe(1_000_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a voided Round from an ended Epoch credits nothing, since the reset already restored the stake",
-    async () => {
-      // yield-claimer ticket 21: touch runs first and a refund would count
-      // the stake twice.
-      const pool = await setupPool({ epochSeconds: 20, roundSeconds: 6, closeBuffer: 1, vrfTimeout: 2 });
-      const alice = await pool.fundedWallet(10_000_000n);
-
-      await beginEpoch(pool, 0n);
-      await deposit(pool, alice, 5_000_000n);
-
-      const epoch1 = await fetchEpoch(pool, 1n);
-      const endsAt = Number(epoch1.endsAt.toString());
-      const startsAt = endsAt - 6;
-
-      await sleepUntilOnChain(startsAt);
-      await createRound(pool, 1n, 1n, startsAt, endsAt);
-      await buyPosition(pool, alice, 1n, 1n << 0n, 1_000_000n);
-
-      await sleepUntilOnChain(endsAt);
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-
-      const round = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      expect(round.pot.toString()).toBe("1000000");
-      const seed = await retryUntilOk(() => requestRoundRandomness(pool, 1n));
-
-      const requested = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      await sleepUntilOnChain(Number(requested.requestedAt.toString()) + 2 + 1); // past vrf_timeout
-      await retryUntilOk(() => voidRound(pool, 1n, seed));
-
-      const voided = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      expect(voided.status).toBe(round_status.VOIDED);
-      expect(voided.houseCut.toString()).toBe("0");
-
-      const sig = await settlePosition(pool, 1n, alice.keypair.publicKey);
-      const event = await findEvent<{ reward: BN; refund: BN }>(sig, "positionSettled");
-      expect(event?.refund.toString()).toBe("0");
-      expect(event?.reward.toString()).toBe("0");
-
-      // The reset already put her back at her 5M Principal, so nothing is credited.
-      const player = await fetchPlayer(pool, alice.keypair.publicKey);
-      expect(player.entries.toString()).toBe("5000000");
-      expect(await ticketsOf(pool, alice.keypair.publicKey, 2n)).toBe(5_000_000n);
-      expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("0");
-    },
-    TIMEOUT,
-  );
-
   // --- Base yield (hexo-referrals ticket 01, ADR 0011) went with `register`
   // and `fund_yield` (ADR 0017). Ticket 06's Yield index tests replace it.
 
   // --- Bought tickets (hexo-referrals ticket 03). `buy_tickets` spends real
-  // USDC into the jackpot vault and credits `amount * tickets_per_usdc`
-  // ordinary Entries, capped per Player per epoch at Principal.
+  // USDC into the jackpot vault, capped per Player per epoch at locked
+  // Principal. It credits nothing: the backend books the Tickets from the
+  // `TicketsBought` event (ADR 0025).
 
   it(
     "refuses before the first epoch exists",
     async () => {
       // beta-launch-fixes ticket 03: buy_tickets requires current_epoch_id >
-      // 0, so Entries bought before Epoch 1 begins (and are lost the moment
+      // 0, so Tickets bought before Epoch 1 begins (and are lost the moment
       // it does) can never be paid for in the first place.
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
@@ -1492,9 +1054,9 @@ describe("epochs", () => {
   );
 
   it(
-    "credits tickets at the pool rate, moves real USDC to the jackpot vault, and emits TicketsBought",
+    "moves real USDC to the jackpot vault, credits nothing, and emits TicketsBought with the Player's post-state",
     async () => {
-      const pool = await setupPool({ ticketsPerUsdc: 10 });
+      const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 4_000_000n);
       await beginEpoch(pool, 0n); // epoch 1 open: buy_tickets now requires one
@@ -1518,19 +1080,22 @@ describe("epochs", () => {
       expect(walletBefore - walletAfter).toBe(1_000_000n);
 
       const player = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(player.principal.toString()).toBe("4000000"); // unaffected: only entries move
-      expect(player.entries.toString()).toBe("14000000"); // 4_000_000 + 1_000_000 * 10
+      expect(player.principal.toString()).toBe("4000000"); // unaffected
       expect(player.boughtAmount.toString()).toBe("1000000");
       expect(player.boughtEpoch.toString()).toBe("1");
 
-      const event = await findEvent<{ owner: PublicKey; epochId: BN; usdc: BN; tickets: BN }>(
-        sig,
-        "ticketsBought",
-      );
+      const event = await findEvent<{
+        owner: PublicKey;
+        epochId: BN;
+        usdc: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(sig, "ticketsBought");
       expect(event?.owner.toString()).toBe(owner.keypair.publicKey.toString());
       expect(event?.epochId.toString()).toBe("1");
       expect(event?.usdc.toString()).toBe("1000000");
-      expect(event?.tickets.toString()).toBe("10000000");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
     },
     TIMEOUT,
   );
@@ -1550,7 +1115,14 @@ describe("epochs", () => {
         (await fetchPlayer(pool, owner.keypair.publicKey)).boughtAmount.toString(),
       ).toBe("3000000");
 
+      // Past the cap it fails by name and moves no USDC.
+      const balances = async () =>
+        [pool.jackpotVault, owner.tokenAccount].map(async (account) =>
+          (await program.provider.connection.getTokenAccountBalance(account)).value.amount,
+        );
+      const before = await Promise.all(await balances());
       await expect(buyTickets(pool, owner, 1n)).rejects.toThrow(/DailyBuyCapExceeded/);
+      expect(await Promise.all(await balances())).toEqual(before);
 
       await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3 open
       await buyTickets(pool, owner, 3_000_000n); // fresh cap, same Principal
@@ -1636,8 +1208,8 @@ describe("epochs", () => {
       await setPause(pool, false);
 
       await buyTickets(pool, owner, 1_000_000n);
-      expect((await fetchPlayer(pool, owner.keypair.publicKey)).entries.toString()).toBe(
-        (4_000_000n + 1_000_000n * BigInt(pool.ticketsPerUsdc)).toString(),
+      expect((await fetchPlayer(pool, owner.keypair.publicKey)).boughtAmount.toString()).toBe(
+        "1000000",
       );
     },
     TIMEOUT,
@@ -1688,341 +1260,16 @@ describe("epochs", () => {
     TIMEOUT,
   );
 
-  it(
-    "bought tickets stake with buy_position, and a refund of the pending deposit takes no Ticket",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 60, roundSeconds: 30, closeBuffer: 2 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, owner, 1_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
-      await buyTickets(pool, owner, 500_000n); // +5_000_000 entries at the default rate
-
-      const beforeStake = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(beforeStake.entries.toString()).toBe("6000000");
-
-      const startsAt = await onChainNowSeconds();
-      await createRound(pool, 2n, 1n, startsAt, startsAt + 30);
-      // Stakes more than bare Principal (1_000_000) would cover; only clears
-      // because the bought Tickets are ordinary Entries.
-      await buyPosition(pool, owner, 1n, 0b11n, 2_500_000n);
-
-      const afterStake = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(afterStake.entries.toString()).toBe("1000000"); // 6_000_000 - 5_000_000 staked
-
-      // A second deposit is pending, so asking for it back refunds it. It held
-      // no Ticket, so the 1M of Tickets that remain are untouched.
-      await deposit(pool, owner, 1_000_000n); // the helper also grants 1M Tickets
-      const beforeRefund = await fetchPlayer(pool, owner.keypair.publicKey);
-      await requestWithdraw(pool, owner, 1_000_000n);
-      const afterWithdraw = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(afterWithdraw.entries.toString()).toBe(beforeRefund.entries.toString());
-      expect(afterWithdraw.principal.toString()).toBe("1000000");
-    },
-    TIMEOUT,
-  );
-
   // --- Granted tickets (hexo-referrals ticket 04). `grant_tickets` credits
   // ordinary Entries by hand: capped per Player and pool-wide on the
   // operator path, uncapped on the admin path.
 
-  it(
-    "an operator grant credits entries up to the player's own cap, one more fails, and it emits TicketsGranted",
-    async () => {
-      // bonusCapBps: 10_000 (100%) so the pool-wide cap, which a
-      // single-depositor pool would otherwise hit first (it is a share of
-      // this same Principal), does not shadow the Player cap under test.
-      const pool = await setupPool({ epochSeconds: 5, bonusCapBps: 10_000 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, owner, 1_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
-
-      // One past the Player's own cap fails; the cap itself lands.
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_001n),
-      ).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
-      const sig = await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n);
-
-      const player = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(player.principal.toString()).toBe("1000000"); // unaffected: only entries move
-      expect(player.entries.toString()).toBe("2000000"); // deposit + grant
-      expect(player.bonusGranted.toString()).toBe("1000000");
-      expect(player.bonusEpoch.toString()).toBe("2");
-
-      const event = await findEvent<{
-        owner: PublicKey;
-        epochId: BN;
-        amount: BN;
-        byAdmin: boolean;
-      }>(sig, "ticketsGranted");
-      expect(event?.owner.toString()).toBe(owner.keypair.publicKey.toString());
-      expect(event?.epochId.toString()).toBe("2");
-      expect(event?.amount.toString()).toBe("1000000");
-      expect(event?.byAdmin).toBe(false);
-
-      // A second grant in the same epoch is refused, whatever its size
-      // (mainnet-readiness-fixes 07), so a resent transaction cannot double up.
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/AlreadyGranted/);
-      // The next epoch grants again, as "both counters reset" shows.
-    },
-    TIMEOUT,
-  );
+  // --- Jackpot pause (game-jackpot-pause ticket 01). `begin_epoch` and
+  // `buy_tickets` are refused; `draw` and `payout` are not. `request_draw` is
+  // refused too.
 
   it(
-    "the pool-wide cap binds even when a large player's own cap has plenty of headroom",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5 }); // default bonusCapBps: 500 (5%)
-      const owner = await pool.fundedWallet(20_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, owner, 10_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
-
-      // Player cap is 10_000_000; the pool cap (5% of the epoch-start total) is
-      // 500_000, far tighter, so hitting it here cannot be the player cap.
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_001n),
-      ).rejects.toThrow(/DailyPoolGrantCapExceeded/);
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a small player's own cap binds independently of a generous pool-wide cap",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5, minDeposit: 1 });
-      const small = await pool.fundedWallet(1_000_000n);
-      const big = await pool.fundedWallet(20_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, small, 100_000n);
-      await deposit(pool, big, 10_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: both are locked
-
-      // Pool cap is 5% of 10_100_000 = 505_000, well above small's own
-      // 100_000 cap.
-      await expect(
-        grantTickets(pool, pool.operator, small.keypair.publicKey, 100_001n),
-      ).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
-      await grantTickets(pool, pool.operator, small.keypair.publicKey, 100_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "a Player with zero Principal cannot receive an operator grant",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, pool.minDeposit);
-      await requestWithdraw(pool, owner, pool.minDeposit); // back to zero Principal
-
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/DailyPlayerGrantCapExceeded/);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "the House cannot receive an operator grant",
-    async () => {
-      const pool = await setupPool();
-      await expect(
-        grantTickets(pool, pool.operator, pool.operator.publicKey, 1_000_000n),
-      ).rejects.toThrow(/HouseCannotBeGranted/);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "grant_tickets refuses while paused, both the operator and the admin path",
-    async () => {
-      // production-hardening ticket 02: pause stops all Ticket movement.
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 1_000_000n);
-      await setPause(pool, true);
-
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/PoolPaused/);
-      await expect(
-        grantTickets(pool, pool.admin, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/PoolPaused/);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "pause leaves settle_round, settle_position and request_withdraw open",
-    async () => {
-      // production-hardening ticket 02: an open round can still finish, and
-      // a withdrawal is never blocked by pause.
-      const pool = await setupPool({ roundSeconds: 6, closeBuffer: 2 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 5_000_000n);
-
-      const startsAt = await onChainNowSeconds();
-      const endsAt = startsAt + 6;
-      await createRound(pool, 0n, 1n, startsAt, endsAt);
-      await buyPosition(pool, owner, 1n, 1n << 0n, 1_000_000n); // tile 0
-
-      await sleepUntilOnChain(endsAt - 1);
-      const seed = await requestRoundRandomness(pool, 1n);
-      const randomness = await fulfillRandomness(seed, randomnessFor(0)); // tile 0 wins
-
-      await setPause(pool, true);
-
-      await settleRound(pool, 1n, randomness);
-      expect((await program.account.round.fetch(roundPda(pool.pool, 1n))).status).toBe(
-        round_status.SETTLED,
-      );
-      await settlePosition(pool, 1n, owner.keypair.publicKey);
-      await requestWithdraw(pool, owner, 1_000_000n); // never blocked by pause
-      // The 5M is still a pending deposit, so 1M of it refunded.
-      expect((await fetchPlayer(pool, owner.keypair.publicKey)).principal.toString()).toBe(
-        "4000000",
-      );
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "an unrelated signer is refused",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 1_000_000n);
-      const stranger = await pool.fundedWallet(0n);
-
-      await expect(
-        grantTickets(pool, stranger.keypair, owner.keypair.publicKey, 1_000n),
-      ).rejects.toThrow(/Unauthorized/);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "the admin path is uncapped, leaves the operator counters untouched, and allows the House",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 1_000_000n); // a cap of only 1_000_000 on the operator path
-
-      // Well past both the player and the (still-tiny) pool-wide cap.
-      const sig = await grantTickets(pool, pool.admin, owner.keypair.publicKey, 5_000_000n);
-
-      const player = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(player.entries.toString()).toBe("6000000");
-      expect(player.bonusGranted.toString()).toBe("0");
-      expect(player.bonusEpoch.toString()).toBe("0");
-      expect((await program.account.pool.fetch(pool.pool)).bonusGranted.toString()).toBe("0");
-
-      const event = await findEvent<{ byAdmin: boolean }>(sig, "ticketsGranted");
-      expect(event?.byAdmin).toBe(true);
-
-      // The House is refused on the operator path but not here.
-      await grantTickets(pool, pool.admin, pool.operator.publicKey, 1_000n);
-      expect((await fetchPlayer(pool, pool.operator.publicKey)).entries.toString()).toBe("1000");
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "both counters reset at the epoch boundary",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5, bonusCapBps: 10_000 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, owner, 1_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
-
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n); // caps epoch 2
-      expect((await fetchPlayer(pool, owner.keypair.publicKey)).bonusGranted.toString()).toBe(
-        "1000000",
-      );
-      expect((await program.account.pool.fetch(pool.pool)).bonusGranted.toString()).toBe(
-        "1000000",
-      );
-
-      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3 open
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 1_000_000n); // fresh cap
-
-      const player = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(player.bonusGranted.toString()).toBe("1000000");
-      expect(player.bonusEpoch.toString()).toBe("3");
-      const poolAfter = await program.account.pool.fetch(pool.pool);
-      expect(poolAfter.bonusGranted.toString()).toBe("1000000");
-      expect(poolAfter.bonusEpoch.toString()).toBe("3");
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "granted tickets are ordinary entries, stakeable with buy_position",
-    async () => {
-      const pool = await setupPool({
-        epochSeconds: 60,
-        roundSeconds: 30,
-        closeBuffer: 2,
-        bonusCapBps: 10_000,
-      });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, owner, 1_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
-
-      const beforeStake = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(beforeStake.entries.toString()).toBe("1500000");
-
-      const startsAt = await onChainNowSeconds();
-      await createRound(pool, 2n, 1n, startsAt, startsAt + 30);
-      // One tile at the full 1_500_000 stake: more than bare Principal
-      // (1_000_000) would cover; only clears because the granted Tickets
-      // are ordinary Entries.
-      await buyPosition(pool, owner, 1n, 0b1n, 1_500_000n);
-
-      const afterStake = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(afterStake.entries.toString()).toBe("0");
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "granted tickets reset to Principal at the next epoch boundary, like any other entries",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5, bonusCapBps: 10_000 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n); // epoch 1 open
-      await deposit(pool, owner, 1_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is locked
-      await grantTickets(pool, pool.operator, owner.keypair.publicKey, 500_000n);
-      expect((await fetchPlayer(pool, owner.keypair.publicKey)).entries.toString()).toBe(
-        "1500000",
-      );
-
-      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3 open
-      // Any touch (here a further deposit) resets Entries to Principal
-      // first, discarding the grant like any other Entries at the
-      // boundary, then adds the new deposit on top of that reset base.
-      await deposit(pool, owner, 1_000_000n);
-      const after = await fetchPlayer(pool, owner.keypair.publicKey);
-      expect(after.entries.toString()).toBe(after.principal.toString());
-      expect(after.principal.toString()).toBe("2000000");
-    },
-    TIMEOUT,
-  );
-
-  // --- Jackpot pause (game-jackpot-pause ticket 01). `begin_epoch`,
-  // `buy_tickets` and `grant_tickets` are refused; `draw` and `payout` are
-  // not. `request_draw` is refused too.
-
-  it(
-    "jackpot pause refuses begin_epoch, buy_tickets and grant_tickets",
+    "jackpot pause refuses begin_epoch, buy_tickets and request_draw",
     async () => {
       const pool = await setupPool({ epochSeconds: 5 });
       const owner = await pool.fundedWallet(10_000_000n);
@@ -2034,9 +1281,6 @@ describe("epochs", () => {
       await setJackpotPaused(pool, true);
 
       await expect(buyTickets(pool, owner, 1_000_000n)).rejects.toThrow(/JackpotPaused/);
-      await expect(
-        grantTickets(pool, pool.operator, owner.keypair.publicKey, 1n),
-      ).rejects.toThrow(/JackpotPaused/);
       await expect(beginEpoch(pool, 2n)).rejects.toThrow(/JackpotPaused/);
       await expect(requestDraw(pool, 1n)).rejects.toThrow(/JackpotPaused/);
 

@@ -1,5 +1,9 @@
 //! Every event the indexer decodes (spec §2.6). Renaming one breaks the
 //! backend's event coder and the frontend feed.
+//!
+//! An event whose instruction runs `touch` or can settle yield carries the
+//! Player's `principal` and `yield_index` as they stand after the change, so
+//! the backend's ledger never races the account (off-chain-tickets ticket 08).
 
 use anchor_lang::prelude::*;
 
@@ -39,16 +43,11 @@ pub struct ParamsSet {
     pub pool: Pubkey,
     pub epoch_seconds: i64,
     pub epoch_anchor: i64,
-    pub round_seconds: i64,
-    pub close_buffer: i64,
     pub vrf_timeout: i64,
     pub min_deposit: u64,
-    pub house_cut_bps: u16,
     pub min_jackpot: u64,
     pub payout_timeout: i64,
     pub base_rate_bps: u16,
-    pub tickets_per_usdc: u16,
-    pub bonus_cap_bps: u16,
 }
 
 #[event]
@@ -82,7 +81,7 @@ pub struct Deposited {
     pub owner: Pubkey,
     pub amount: u64,
     pub principal: u64,
-    pub entries: u64,
+    pub yield_index: u128,
 }
 
 #[event]
@@ -100,6 +99,9 @@ pub struct WithdrawRequested {
     pub paid: u64,
     /// What the refund took from the venue to cover free idle.
     pub redeemed: u64,
+    /// The Player's Principal after the refund and any settle.
+    pub principal: u64,
+    pub yield_index: u128,
 }
 
 /// `cancel_withdraw` cleared the whole queued amount. No USDC moved.
@@ -108,6 +110,8 @@ pub struct WithdrawCancelled {
     pub owner: Pubkey,
     pub amount: u64,
     pub pending_epoch: u64,
+    pub principal: u64,
+    pub yield_index: u128,
 }
 
 /// A `Withdrawn` event follows once `process_withdraw` moves the USDC. Its
@@ -117,59 +121,7 @@ pub struct Withdrawn {
     pub owner: Pubkey,
     pub amount: u64,
     pub principal: u64,
-    pub entries: u64,
-}
-
-#[event]
-pub struct RoundOpened {
-    pub round_id: u64,
-    pub epoch_id: u64,
-    pub starts_at: i64,
-    pub ends_at: i64,
-}
-
-#[event]
-pub struct PositionBought {
-    pub round_id: u64,
-    pub owner: Pubkey,
-    pub tiles: u64,
-    pub stake_per_tile: u64,
-    pub total: u64,
-}
-
-#[event]
-pub struct RoundSettled {
-    pub round_id: u64,
-    pub winning_tile: u8,
-    /// Gross: the House cut has not been subtracted from it.
-    pub pot: u64,
-    /// True when nobody covered the winning tile and the pot went to the House.
-    pub forfeited: bool,
-    /// Entries taken out of `pot` for the House. 0 on a forfeited round.
-    pub house_cut: u64,
-}
-
-#[event]
-pub struct RoundVoided {
-    pub round_id: u64,
-}
-
-/// Permissionless: `close_round` reclaimed a finished Round's rent for
-/// `pool.operator` once every Position on it had settled.
-#[event]
-pub struct RoundClosed {
-    pub round: Pubkey,
-    pub round_id: u64,
-}
-
-#[event]
-pub struct PositionSettled {
-    pub round_id: u64,
-    pub owner: Pubkey,
-    /// Stake back plus the share of the losers' pot, for a winner.
-    pub reward: u64,
-    /// The whole stake returned as Tickets on a voided round (ADR 0019).
-    pub refund: u64,
+    pub yield_index: u128,
 }
 
 #[event]
@@ -177,6 +129,9 @@ pub struct EpochBegan {
     pub epoch_id: u64,
     pub starts_at: i64,
     pub ends_at: i64,
+    /// The pool's yield index after the sync `begin_epoch` runs first. The
+    /// backend's Ticket reset reads it for the unsettled yield at the cutoff.
+    pub yield_index: u128,
 }
 
 #[event]
@@ -202,6 +157,9 @@ pub struct JackpotPaid {
     /// vault and added to the winner's Principal instead of paid to a token
     /// account. Always false for a House win, which keeps its 50/30/20 split.
     pub compounded: bool,
+    /// The winner's Principal after the prize. The House's stays 0.
+    pub principal: u64,
+    pub yield_index: u128,
 }
 
 #[event]
@@ -210,21 +168,15 @@ pub struct EpochRolledOver {
     pub jackpot_amount: u64,
 }
 
+/// `buy_tickets` moved `usdc` from the owner into the jackpot vault. It
+/// credits nothing: the backend books the Tickets from this event.
 #[event]
 pub struct TicketsBought {
     pub owner: Pubkey,
     pub epoch_id: u64,
     pub usdc: u64,
-    pub tickets: u64,
-}
-
-#[event]
-pub struct TicketsGranted {
-    pub owner: Pubkey,
-    pub epoch_id: u64,
-    pub amount: u64,
-    /// True for the uncapped admin path; false for the capped operator path.
-    pub by_admin: bool,
+    pub principal: u64,
+    pub yield_index: u128,
 }
 
 /// Admin-only and irreversible (spec "Shutdown"). Stops every inflow, the
@@ -237,14 +189,17 @@ pub struct PoolShutdown {
 
 /// Permissionless: `emergency_withdraw` paid one Player's whole balance to
 /// its own USDC ATA once the pool was shut down. `total` is what was paid: all
-/// of `principal`, which holds `pending` already, or the haircut value of it
-/// while the pool is impaired (ticket 10).
+/// of `claim`, which holds `pending` already, or the haircut value of it
+/// while the pool is impaired (ticket 10). `principal` is what the Player
+/// holds after, which is 0.
 #[event]
 pub struct EmergencyWithdrawn {
     pub owner: Pubkey,
-    pub principal: u64,
+    pub claim: u64,
     pub pending: u64,
     pub total: u64,
+    pub principal: u64,
+    pub yield_index: u128,
 }
 
 /// A sync saw the venue's value rise and split the gain (yield-claimer
@@ -425,14 +380,4 @@ pub struct VenueMigrated {
     pub new_klend_reserve: Pubkey,
     pub new_klend_ctoken: Pubkey,
     pub left_behind: u64,
-}
-
-/// `release_leaf` gave an empty Player's Weight tree leaf back to the pool's
-/// free stack (mainnet-readiness-fixes ticket 08). The next first deposit
-/// takes it before the tree grows.
-#[event]
-pub struct LeafReleased {
-    pub pool: Pubkey,
-    pub owner: Pubkey,
-    pub leaf_index: u32,
 }

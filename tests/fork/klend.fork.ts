@@ -43,7 +43,6 @@ import {
   sleep,
   sleepUntilOnChain,
   venueProposalPda,
-  WEIGHT_TREE_SPACE,
   PROGRAM_DATA,
 } from "../helpers/hx.js";
 
@@ -182,7 +181,6 @@ async function createForkPool(pin?: Partial<Venue>): Promise<ForkPool> {
   const buybackReserve = await createAccount(connection, operator, USDC, operator.publicKey, Keypair.generate());
   const principalVault = principalVaultPda(pool);
   const jackpotVault = jackpotVaultPda(pool);
-  const weightTree = Keypair.generate();
 
   await program.methods
     .createPool({
@@ -192,17 +190,12 @@ async function createForkPool(pin?: Partial<Venue>): Promise<ForkPool> {
       vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
       epochSeconds: new BN(86_400),
       epochAnchor: new BN(await onChainNowSeconds()),
-      roundSeconds: new BN(60),
-      closeBuffer: new BN(5),
       // 180 is the floor outside a test-vrf build.
       vrfTimeout: new BN(180),
       minDeposit: new BN(1_000_000),
-      houseCutBps: 600,
       minJackpot: new BN(0),
       payoutTimeout: new BN(82_800),
       baseRateBps: 488,
-      ticketsPerUsdc: 10,
-      bonusCapBps: 500,
       venueKind: 0,
     })
     .accountsPartial({
@@ -213,23 +206,12 @@ async function createForkPool(pin?: Partial<Venue>): Promise<ForkPool> {
       principalVault,
       jackpotVault,
       house: playerPda(pool, operator.publicKey),
-      weightTree: weightTree.publicKey,
       treasury,
       buybackReserve,
       ...venue,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
-    .preInstructions([
-      SystemProgram.createAccount({
-        fromPubkey: operator.publicKey,
-        newAccountPubkey: weightTree.publicKey,
-        space: WEIGHT_TREE_SPACE,
-        lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
-        programId: program.programId,
-      }),
-    ])
-    .signers([operator, weightTree])
     .rpc();
 
   return { poolId, pool, admin, operator, treasury, jackpotVault, principalVault, venue };

@@ -177,16 +177,11 @@ describe("propose_venue and cancel_venue", () => {
           .setParams({
             epochSeconds: new BN(7 * 86_400 + 1),
             epochAnchor: null,
-            roundSeconds: null,
-            closeBuffer: null,
             vrfTimeout: null,
             minDeposit: null,
-            houseCutBps: null,
             minJackpot: null,
             payoutTimeout: null,
             baseRateBps: null,
-            ticketsPerUsdc: null,
-            bonusCapBps: null,
           })
           .accountsPartial({ admin: ctx.admin.publicKey, pool: ctx.pool })
           .signers([ctx.admin])

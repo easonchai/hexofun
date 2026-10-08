@@ -1,25 +1,19 @@
-//! The touch rule: the lazy reset of Tickets to Principal at an epoch
-//! boundary (spec §2.2).
+//! The touch rule: the lazy stamp of a Player's epoch and the fold of its
+//! pending deposit at an epoch boundary (spec §2.2).
 //!
-//! Every instruction that reads or changes a Player's Tickets calls
+//! Every instruction that reads or changes a Player's Principal calls
 //! [`touch`] first, before it applies its own change. Nothing sweeps players
-//! at an epoch boundary; each player pays for their own reset the next time
-//! they act.
-//!
-//! The per-Player Weight accrual and the freeze that fed `register` were
-//! removed by the layout rewrite (yield-claimer ticket 04). The Fenwick tree
-//! keeps a Ticket count per epoch instead (tickets 08 and 19). A deposit leaves
-//! Tickets alone and the next epoch's reset picks it up (ticket 20).
+//! at an epoch boundary; each player pays for their own stamp the next time
+//! they act. Tickets are not on chain: the backend resets them from the
+//! `EpochBegan` event (ADR 0025).
 
 use crate::state::{Player, Pool};
 
-/// Resets `entries` to `principal` the first time `player` is touched in an
-/// epoch later than the one its Tickets belong to. Principal includes the
-/// pending deposit, so the reset folds it into Tickets and zeroes it (ADR
-/// 0020). A no-op within an epoch, and before the first epoch begins.
+/// Stamps `player` with the current epoch and zeroes its pending deposit the
+/// first time it is touched in an epoch later than its stamp (ADR 0020). A
+/// no-op within an epoch, and before the first epoch begins.
 pub fn touch(player: &mut Player, pool: &Pool) {
     if player.epoch_id < pool.current_epoch_id {
-        player.entries = player.principal;
         player.pending_deposit = 0;
         player.epoch_id = pool.current_epoch_id;
     }
@@ -41,52 +35,45 @@ pub(crate) mod tests {
         pool
     }
 
-    fn player(principal: u64, entries: u64, epoch_id: u64) -> Player {
+    fn player(principal: u64, epoch_id: u64) -> Player {
         let mut p: Player = zeroed(Player::INIT_SPACE);
         p.principal = principal;
-        p.entries = entries;
         p.epoch_id = epoch_id;
         p
     }
 
     #[test]
-    fn within_an_epoch_tickets_are_left_alone() {
-        let mut p = player(100, 30, 3);
+    fn within_an_epoch_nothing_is_stamped() {
+        let mut p = player(100, 3);
+        p.pending_deposit = 40;
         touch(&mut p, &pool_in(3));
-        assert_eq!((p.entries, p.epoch_id), (30, 3));
+        assert_eq!((p.epoch_id, p.pending_deposit), (3, 40));
     }
 
     #[test]
-    fn a_later_epoch_resets_tickets_to_principal() {
-        let mut p = player(100, 300, 3);
+    fn a_later_epoch_stamps_the_player_and_leaves_principal_alone() {
+        let mut p = player(100, 3);
         touch(&mut p, &pool_in(5));
-        assert_eq!((p.entries, p.epoch_id), (100, 5));
+        assert_eq!((p.epoch_id, p.principal), (5, 100));
     }
 
     #[test]
     fn a_pending_deposit_folds_in_the_next_epoch_and_not_before() {
-        let mut p = player(300, 100, 3);
+        let mut p = player(300, 3);
         p.pending_deposit = 200;
         p.pending_deposit_epoch = 3;
         touch(&mut p, &pool_in(3));
-        assert_eq!((p.entries, p.pending_deposit), (100, 200));
+        assert_eq!(p.pending_deposit, 200);
         touch(&mut p, &pool_in(4));
-        assert_eq!((p.entries, p.pending_deposit, p.principal), (300, 0, 300));
+        assert_eq!((p.pending_deposit, p.principal), (0, 300));
     }
 
     #[test]
-    fn the_house_resets_to_zero_tickets() {
-        let mut house = player(0, 5_000, 3);
-        house.is_house = true;
-        touch(&mut house, &pool_in(4));
-        assert_eq!(house.entries, 0);
-    }
-
-    #[test]
-    fn before_the_first_epoch_nothing_resets() {
-        let mut p = player(100, 40, 0);
+    fn before_the_first_epoch_nothing_is_stamped() {
+        let mut p = player(100, 0);
+        p.pending_deposit = 100;
         touch(&mut p, &pool_in(0));
-        assert_eq!((p.entries, p.epoch_id), (40, 0));
+        assert_eq!((p.epoch_id, p.pending_deposit), (0, 100));
     }
 
     #[test]

@@ -26,14 +26,13 @@ import {
   epochPda,
   findEvent,
   fulfillRandomness,
-  grantTicketsAsAdmin,
   harvestMethod,
   playerPda,
   program,
   provider,
-  randomnessForTarget,
   recallMethod,
   refundAccounts,
+  payoutMethod,
   requestDrawMethod,
   retryUntilOk,
   setDeployPauseMethod,
@@ -80,7 +79,6 @@ async function deposit(ctx: PoolCtx, owner: Wallet, amount: bigint) {
     })
     .signers([owner.keypair])
     .rpc();
-  await grantTicketsAsAdmin(ctx, owner.keypair.publicKey, amount);
   await assertSolvent(ctx);
   return signature;
 }
@@ -378,8 +376,6 @@ describe("venue loss and the haircut", () => {
       const player = await fetchPlayer(ctx, alice);
       expect(big(player.principal)).toBe(500n * USDC);
       expect(big(player.pendingDeposit)).toBe(500n * USDC);
-      // The refunded units held no Ticket, so none left.
-      expect(big(player.entries)).toBe(1_000n * USDC);
       const pool = await fetchPool(ctx);
       expect(big(pool.totalPrincipal)).toBe(500n * USDC);
       expect(big(pool.venueValue)).toBe(410n * USDC);
@@ -388,10 +384,15 @@ describe("venue loss and the haircut", () => {
       expect(big(pool.deficit)).toBe(90n * USDC);
       expect(pool.impaired).toBe(true);
 
-      const event = await findEvent<{ refunded: BN; paid: BN; redeemed: BN }>(
-        signature,
-        "withdrawRequested",
-      );
+      const event = await findEvent<{
+        refunded: BN;
+        paid: BN;
+        redeemed: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(signature, "withdrawRequested");
+      expect(big(event!.principal)).toBe(big(player.principal));
+      expect(big(event!.yieldIndex)).toBe(big(player.yieldIndex));
       expect(big(event!.refunded)).toBe(500n * USDC);
       expect(big(event!.paid)).toBe(410n * USDC);
       expect(big(event!.redeemed)).toBe(310n * USDC);
@@ -659,6 +660,7 @@ describe("deposits while impaired", () => {
               currentEpoch: epochPda(ctx.pool, id),
               epochTwoBehind: epochPda(ctx.pool, id > 0n ? id - 1n : 0n),
               newEpoch: epochPda(ctx.pool, id + 1n),
+              ...ctx.venue,
               systemProgram: SystemProgram.programId,
             })
             .signers([ctx.operator])
@@ -681,7 +683,8 @@ describe("deposits while impaired", () => {
       await deploy(ctx, 900n * USDC);
       await beginEpoch(1n); // epoch 2: Alice's 1,000 are Tickets
       await beginEpoch(2n); // epoch 3: epoch 2 can be drawn
-      await requestDrawMethod(ctx, 2n).rpc();
+      // Alice holds all of epoch 2's Tickets, so any target is hers.
+      await requestDrawMethod(ctx, 2n, 1_000n * USDC).rpc();
       const drawing = await program.account.epoch.fetch(epochPda(ctx.pool, 2n));
       await program.methods
         .draw()
@@ -689,10 +692,7 @@ describe("deposits while impaired", () => {
           caller: ctx.operator.publicKey,
           pool: ctx.pool,
           epoch: epochPda(ctx.pool, 2n),
-          randomness: await fulfillRandomness(
-            Uint8Array.from(drawing.vrfSeed),
-            randomnessForTarget(big(drawing.registeredWeight), 0n, big(drawing.registeredWeight)),
-          ),
+          randomness: await fulfillRandomness(Uint8Array.from(drawing.vrfSeed)),
         })
         .signers([ctx.operator])
         .rpc();
@@ -701,21 +701,7 @@ describe("deposits while impaired", () => {
       expect((await fetchPool(ctx)).impaired).toBe(true);
       const before = await fetchPlayer(ctx, alice);
 
-      await program.methods
-        .payout()
-        .accountsPartial({
-          pool: ctx.pool,
-          acceptedMint: ctx.mint,
-          epoch: epochPda(ctx.pool, 2n),
-          winner: playerPda(ctx.pool, key),
-          jackpotVault: ctx.jackpotVault,
-          principalVault: ctx.principalVault,
-          treasury: ctx.treasury,
-          buybackReserve: ctx.buybackReserve,
-          ...ctx.venue,
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .rpc();
+      await payoutMethod(ctx, 2n, key).rpc();
       await assertSolvent(ctx);
       const after = await fetchPlayer(ctx, alice);
       expect(big(after.principal)).toBe(big(before.principal) + 2n * USDC);

@@ -18,26 +18,23 @@ use crate::constants::{
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
     DEFAULT_MIN_VENUE_MOVE, DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS, DEFAULT_RESERVE_SHARE_CAP_BPS,
     DEFAULT_YIELD_FEE_BPS, LAYOUT_VERSION, MIN_PAYOUT_TIMEOUT, MIN_VRF_TIMEOUT,
-    SEED_FREE_LEAVES, SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
-    WEIGHT_TREE_VERSION,
+    SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
 };
 use crate::errors::HexVaultError;
 use crate::events::{
-    AdminChanged, AdminProposed, Deposited, EmergencyWithdrawn, FeaturePaused, HouseSwept,
-    OperatorChanged, ParamsSet, Paused, PoolCreated, PoolShutdown, TicketsBought, TicketsGranted,
+    AdminChanged, AdminProposed, BuyTicketsPauseSet, Deposited, EmergencyWithdrawn, FeaturePaused,
+    HouseSwept, OperatorChanged, ParamsSet, Paused, PoolCreated, PoolShutdown, TicketsBought,
     VenueDeployed, WithdrawCancelled, WithdrawRequested, Withdrawn,
     // yield-claimer ticket 07
     Harvested, TreasuryAccountsSet, VenueRecalled,
     // yield-claimer ticket 10
     DeficitCovered, DeployPauseSet, ImpairedCleared, VenueParamsSet,
 };
-use crate::free_leaves;
-use crate::state::{FreeLeaves, Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
+use crate::state::{Player, Pool};
 use crate::sync::{absorb_dust, haircut, realise_loss, settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
-use crate::weight::{self, Change};
 
 /// Which switch `set_feature_pause` changes (game-jackpot-pause ticket 01).
 /// `set_pause`'s own `paused` field is untouched by either variant.
@@ -57,22 +54,13 @@ pub struct CreatePoolParams {
     pub vrf_network_state: Pubkey,
     pub epoch_seconds: i64,
     pub epoch_anchor: i64,
-    pub round_seconds: i64,
-    pub close_buffer: i64,
     pub vrf_timeout: i64,
     pub min_deposit: u64,
-    pub house_cut_bps: u16,
     pub min_jackpot: u64,
     pub payout_timeout: i64,
     /// Ceiling on the depositor share, as an annual rate in basis points,
     /// capped at `BPS_DENOMINATOR`. No floor.
     pub base_rate_bps: u16,
-    /// Tickets credited per USDC spent in `buy_tickets`. Must be > 0.
-    pub tickets_per_usdc: u16,
-    /// Share of `total_principal`, in basis points, an operator
-    /// `grant_tickets` call may credit pool-wide per epoch. Capped at
-    /// `BPS_DENOMINATOR`.
-    pub bonus_cap_bps: u16,
     /// A `constants::venue_kind` value: 0 klend, 1 stub (a `test-venue` build
     /// only), 2 kVault. Which backing the four venue accounts belong to, and so
     /// what each is: see `Pool::klend_program` to `klend_ctoken`. Refused unless
@@ -86,16 +74,11 @@ pub struct CreatePoolParams {
 pub struct SetParamsArgs {
     pub epoch_seconds: Option<i64>,
     pub epoch_anchor: Option<i64>,
-    pub round_seconds: Option<i64>,
-    pub close_buffer: Option<i64>,
     pub vrf_timeout: Option<i64>,
     pub min_deposit: Option<u64>,
-    pub house_cut_bps: Option<u16>,
     pub min_jackpot: Option<u64>,
     pub payout_timeout: Option<i64>,
     pub base_rate_bps: Option<u16>,
-    pub tickets_per_usdc: Option<u16>,
-    pub bonus_cap_bps: Option<u16>,
 }
 
 pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result<()> {
@@ -108,28 +91,11 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     require!(
         valid_epoch_seconds(params.epoch_seconds)
             && params.epoch_anchor > 0
-            && params.round_seconds > 0
             && params.vrf_timeout >= MIN_VRF_TIMEOUT,
         HexVaultError::InvalidParameter
     );
     require!(
-        params.close_buffer >= 0 && params.close_buffer < params.round_seconds,
-        HexVaultError::InvalidParameter
-    );
-    require!(
-        params.house_cut_bps <= BPS_DENOMINATOR,
-        HexVaultError::InvalidParameter
-    );
-    require!(
         params.base_rate_bps <= BPS_DENOMINATOR,
-        HexVaultError::InvalidParameter
-    );
-    require!(
-        params.tickets_per_usdc > 0,
-        HexVaultError::InvalidParameter
-    );
-    require!(
-        params.bonus_cap_bps <= BPS_DENOMINATOR,
         HexVaultError::InvalidParameter
     );
     // Zero would let the operator roll a Drawn epoch over in the same block
@@ -197,21 +163,6 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         HexVaultError::InvalidParameter
     );
 
-    let pool_key = ctx.accounts.pool.key();
-    // The tree starts with zero nodes and gains one per first deposit. The
-    // House takes leaf 1 below. `zero` on the account struct already checked
-    // that it is ours and uninitialised.
-    let tree_key = ctx.accounts.weight_tree.key();
-    {
-        let mut tree = ctx.accounts.weight_tree.load_init()?;
-        tree.version = WEIGHT_TREE_VERSION;
-        tree.node_size = WEIGHT_TREE_NODE_SIZE;
-        tree.node_count = 0;
-        tree.pool = pool_key;
-    }
-
-    free_leaves::init(&ctx.accounts.free_leaves, pool_key)?;
-
     let pool = &mut ctx.accounts.pool;
     pool.pool_id = params.pool_id;
     pool.admin = params.admin;
@@ -226,23 +177,15 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     pool.vrf_network_state = params.vrf_network_state;
     pool.epoch_seconds = params.epoch_seconds;
     pool.epoch_anchor = params.epoch_anchor;
-    pool.round_seconds = params.round_seconds;
-    pool.close_buffer = params.close_buffer;
     pool.vrf_timeout = params.vrf_timeout;
     pool.min_deposit = params.min_deposit;
-    pool.house_cut_bps = params.house_cut_bps;
     pool.min_jackpot = params.min_jackpot;
     pool.payout_timeout = params.payout_timeout;
     pool.pending_withdrawals = 0;
     pool.jackpot_reserved = 0;
     pool.base_rate_bps = params.base_rate_bps;
-    pool.tickets_per_usdc = params.tickets_per_usdc;
-    pool.bonus_cap_bps = params.bonus_cap_bps;
-    pool.bonus_epoch = 0;
-    pool.bonus_granted = 0;
     pool.version = LAYOUT_VERSION;
     pool.paused = false;
-    pool.weight_tree = tree_key;
     // The four venue addresses are pinned here: every venue
     // instruction checks its accounts against them (`venue::check`), and
     // `migrate_venue` is the only way to repin them (ADR 0023). The rest
@@ -270,8 +213,6 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     pool.current_epoch_ends_at = 0;
     pool.previous_epoch_start = 0;
     pool.previous_epoch_ends_at = 0;
-    pool.next_round_id = 1;
-    pool.open_round_id = 0;
     pool.total_principal = 0;
     pool.bump = ctx.bumps.pool;
     pool.principal_vault_bump = ctx.bumps.principal_vault;
@@ -284,7 +225,6 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     let house = &mut ctx.accounts.house;
     house.owner = params.operator;
     house.principal = 0;
-    house.entries = 0;
     house.epoch_id = 0;
     house.is_house = true;
     house.bump = ctx.bumps.house;
@@ -292,15 +232,6 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
     house.pending_epoch = 0;
     house.requested_at = 0;
     house.version = LAYOUT_VERSION;
-    // The House never deposits but it holds Tickets (forfeited pots, the cut),
-    // so it can win the draw and needs a leaf. The creator pays its rent.
-    house.leaf_index = weight::append_leaves(
-        &ctx.accounts.weight_tree,
-        pool,
-        &ctx.accounts.payer.to_account_info(),
-        &ctx.accounts.system_program.to_account_info(),
-        1,
-    )?;
 
     emit!(PoolCreated {
         pool: pool.key(),
@@ -323,27 +254,12 @@ pub fn set_params(ctx: Context<SetParams>, params: SetParamsArgs) -> Result<()> 
         require!(v > 0, HexVaultError::InvalidParameter);
         pool.epoch_anchor = v;
     }
-    if let Some(v) = params.round_seconds {
-        require!(v > 0, HexVaultError::InvalidParameter);
-        pool.round_seconds = v;
-    }
-    if let Some(v) = params.close_buffer {
-        require!(
-            v >= 0 && v < pool.round_seconds,
-            HexVaultError::InvalidParameter
-        );
-        pool.close_buffer = v;
-    }
     if let Some(v) = params.vrf_timeout {
         require!(v >= MIN_VRF_TIMEOUT, HexVaultError::InvalidParameter);
         pool.vrf_timeout = v;
     }
     if let Some(v) = params.min_deposit {
         pool.min_deposit = v;
-    }
-    if let Some(v) = params.house_cut_bps {
-        require!(v <= BPS_DENOMINATOR, HexVaultError::InvalidParameter);
-        pool.house_cut_bps = v;
     }
     if let Some(v) = params.min_jackpot {
         pool.min_jackpot = v;
@@ -356,27 +272,13 @@ pub fn set_params(ctx: Context<SetParams>, params: SetParamsArgs) -> Result<()> 
         require!(v <= BPS_DENOMINATOR, HexVaultError::InvalidParameter);
         pool.base_rate_bps = v;
     }
-    if let Some(v) = params.tickets_per_usdc {
-        require!(v > 0, HexVaultError::InvalidParameter);
-        pool.tickets_per_usdc = v;
-    }
-    if let Some(v) = params.bonus_cap_bps {
-        require!(v <= BPS_DENOMINATOR, HexVaultError::InvalidParameter);
-        pool.bonus_cap_bps = v;
-    }
     // Checked on the result rather than in the branches above, so changing
     // two of these in one call is judged on where they end up
     // (beta-launch-fixes ticket 03): a `payout_timeout` at or above
     // `epoch_seconds` would let an honest late Payout roll over into the
-    // very epoch that is supposed to follow it, and a `round_seconds` at or
-    // below `close_buffer` would reject every Position on the next Round
-    // created.
+    // very epoch that is supposed to follow it.
     require!(
         pool.payout_timeout < pool.epoch_seconds,
-        HexVaultError::InvalidParameter
-    );
-    require!(
-        pool.round_seconds > pool.close_buffer,
         HexVaultError::InvalidParameter
     );
 
@@ -384,16 +286,11 @@ pub fn set_params(ctx: Context<SetParams>, params: SetParamsArgs) -> Result<()> 
         pool: pool.key(),
         epoch_seconds: pool.epoch_seconds,
         epoch_anchor: pool.epoch_anchor,
-        round_seconds: pool.round_seconds,
-        close_buffer: pool.close_buffer,
         vrf_timeout: pool.vrf_timeout,
         min_deposit: pool.min_deposit,
-        house_cut_bps: pool.house_cut_bps,
         min_jackpot: pool.min_jackpot,
         payout_timeout: pool.payout_timeout,
         base_rate_bps: pool.base_rate_bps,
-        tickets_per_usdc: pool.tickets_per_usdc,
-        bonus_cap_bps: pool.bonus_cap_bps,
     });
     Ok(())
 }
@@ -540,9 +437,7 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
     // no-op on an existing one.
     player.init_if_fresh(a.owner.key(), pool, ctx.bumps.player);
     touch(player, pool);
-    let owed = settle_before_growth(pool, player)?;
-    let mut change = Change::default();
-    change.settled(owed)?;
+    settle_before_growth(pool, player)?;
 
     require!(!player.is_house, HexVaultError::HouseCannotDeposit);
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
@@ -554,22 +449,6 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         amount >= pool.min_deposit,
         HexVaultError::BelowMinimumDeposit
     );
-
-    // A first deposit takes a released leaf if one is waiting (ticket 08),
-    // else appends one and the depositor pays the rent for it. Refused with
-    // `WeightTreeFull` before anything moves if the account would pass 10 MiB.
-    if player.leaf_index == 0 {
-        player.leaf_index = match free_leaves::pop(&a.free_leaves)? {
-            Some(leaf) => leaf,
-            None => weight::append_leaves(
-                &a.weight_tree,
-                pool,
-                &a.owner.to_account_info(),
-                &a.system_program.to_account_info(),
-                1,
-            )?,
-        };
-    }
 
     token_interface::transfer_checked(
         CpiContext::new(
@@ -589,9 +468,8 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         .principal
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    // The deposit earns no Ticket in this epoch (ADR 0020): Tickets stay as
-    // they are and the tree gets a Principal delta only. The next epoch's reset
-    // folds it in, on a touch or lazily from the tree's `principal_sum`.
+    // The deposit earns no Ticket in this epoch (ADR 0020). The backend's
+    // reset at the next `EpochBegan` folds it in.
     player.pending_deposit = player
         .pending_deposit
         .checked_add(amount)
@@ -601,14 +479,12 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         .total_principal
         .checked_add(amount)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    change.principal(i128::from(amount))?;
-    weight::apply(&a.weight_tree, pool, player, change)?;
 
     emit!(Deposited {
         owner: a.owner.key(),
         amount,
         principal: player.principal,
-        entries: player.entries,
+        yield_index: player.yield_index,
     });
     Ok(())
 }
@@ -624,15 +500,14 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
 /// (`sync::haircut`), and Principal still falls by the whole refund.
 ///
 /// The rest queues (ADR 0009). It raises `pending_withdraw` and re-stamps
-/// `pending_epoch` and `requested_at`, and moves no USDC, Principal, Tickets,
-/// `total_principal` or tree weight: the amount stays in today's draw, the game
-/// and the yield until `process_withdraw` pays it. A second request that queues
+/// `pending_epoch` and `requested_at`, and moves no USDC, Principal,
+/// `total_principal`: the amount stays in today's draw and the yield until
+/// `process_withdraw` pays it. A second request that queues
 /// something merges into the first and re-stamps the maturity. A request the
 /// refund covers whole leaves the maturity alone.
 ///
 /// A queued amount is a sub-balance of Principal, so one request can take at
-/// most Principal minus what is already queued. There is no Tickets rule: a
-/// Player who lost Tickets in a round still gets every unit of Principal.
+/// most Principal minus what is already queued. Tickets play no part.
 ///
 /// Allowed while paused or shut down.
 pub fn request_withdraw<'info>(
@@ -651,9 +526,7 @@ pub fn request_withdraw<'info>(
     let (_, read) = venue::sync(&mut a.pool, &venue)?;
     touch(&mut a.player, &a.pool);
     // Yield earned so far joins Principal first, so it can be requested too.
-    let owed = settle(&mut a.pool, &mut a.player)?;
-    let mut change = Change::default();
-    change.settled(owed)?;
+    settle(&mut a.pool, &mut a.player)?;
 
     // Invariant 3: a withdrawal is never blocked by `paused`.
     require!(amount > 0, HexVaultError::ZeroAmount);
@@ -726,7 +599,6 @@ pub fn request_withdraw<'info>(
             .total_principal
             .checked_sub(refund)
             .ok_or(HexVaultError::ArithmeticOverflow)?;
-        change.principal(-i128::from(refund))?;
         // The loss this refund realised leaves the deficit, and takes no part
         // in a later recovery.
         clear_if_realised(a.pool.key(), &mut a.pool, refund - paid, impaired_cause::WITHDRAWAL);
@@ -746,7 +618,6 @@ pub fn request_withdraw<'info>(
         a.player.pending_epoch = a.pool.current_epoch_id;
         a.player.requested_at = now;
     }
-    weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
 
     if paid > 0 {
         let pool_id_bytes = a.pool.pool_id.to_le_bytes();
@@ -776,6 +647,8 @@ pub fn request_withdraw<'info>(
         refunded: refund,
         paid,
         redeemed,
+        principal: a.player.principal,
+        yield_index: a.player.yield_index,
     });
     Ok(())
 }
@@ -816,14 +689,9 @@ fn withdrawal_due(
 /// does not. Impaired, the payout is the haircut value, so the Player's owner
 /// must sign for it (`OwnerSignatureRequired`).
 ///
-/// Refused with `OpenPositions` while the Player has a Position on the board,
-/// because the stake would come back at settle to a Player whose Principal has
-/// left. Anyone can settle a finished Position, then this goes through.
-///
 /// Syncs, settles and touches first, so the yield earned up to this second
-/// stays with the Player and the Tickets reset has run. Then Principal falls by
-/// the pending amount, Tickets by the same with a floor at zero, and
-/// `total_principal` and the tree follow. While the pool is impaired the payout
+/// stays with the Player. Then Principal and `total_principal` fall by the
+/// pending amount. While the pool is impaired the payout
 /// is the haircut value of the pending amount as of this second, and what the
 /// Player gave up comes off the deficit.
 pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> Result<()> {
@@ -845,10 +713,6 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
             )?,
         HexVaultError::WithdrawalNotDue
     );
-    require!(
-        a.player.open_positions == 0,
-        HexVaultError::OpenPositions
-    );
 
     let venue = Venue {
         program: &a.klend_program,
@@ -864,9 +728,7 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         HexVaultError::OwnerSignatureRequired
     );
     touch(&mut a.player, &a.pool);
-    let owed = settle(&mut a.pool, &mut a.player)?;
-    let mut change = Change::default();
-    change.settled(owed)?;
+    settle(&mut a.pool, &mut a.player)?;
 
     // Impaired, the request pays the haircut value as of this sync. Not
     // impaired, that is `pending`.
@@ -883,17 +745,6 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         .principal
         .checked_sub(pending)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    // No Tickets rule: Tickets the Player lost in a round floor at zero, as the
-    // epoch reset would have done. The same floor covers yield settled above
-    // and withdrawn in this epoch: it raised Principal and never held Tickets
-    // (principal 110, entries 100, withdraw 10 leaves entries 90). That costs
-    // the Player 10 Tickets they never had, and is accepted over a per-epoch
-    // "unticketed Principal" counter (ADR 0020).
-    let entries_before = a.player.entries;
-    a.player.entries = entries_before.saturating_sub(pending);
-    change.principal(-i128::from(pending))?;
-    change.tickets(-i128::from(entries_before - a.player.entries))?;
-    weight::apply(&a.weight_tree, &a.pool, &a.player, change)?;
     a.pool.total_principal = a
         .pool
         .total_principal
@@ -930,18 +781,18 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
         owner: a.player.owner,
         amount: paid,
         principal: a.player.principal,
-        entries: a.player.entries,
+        yield_index: a.player.yield_index,
     });
     Ok(())
 }
 
 /// Takes back a queued request before it pays. A Pending withdrawal is only a
 /// flag on Principal that never left (ADR 0020), so this clears the flag and
-/// the pool's reservation and moves no USDC, Principal, Tickets or tree weight.
-/// A merged request cancels as one amount.
+/// the pool's reservation and moves no USDC or Principal. A merged request
+/// cancels as one amount.
 ///
-/// Allowed while paused, shut down or impaired and with a Position open, as
-/// the request is: nothing leaves the pool. Cancelling while impaired keeps the
+/// Allowed while paused, shut down or impaired, as the request is: nothing
+/// leaves the pool. Cancelling while impaired keeps the
 /// Player exposed like everyone who never asked to leave.
 pub fn cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
     let a = &mut *ctx.accounts;
@@ -957,6 +808,8 @@ pub fn cancel_withdraw(ctx: Context<CancelWithdraw>) -> Result<()> {
         owner: a.owner.key(),
         amount,
         pending_epoch: a.player.pending_epoch,
+        principal: a.player.principal,
+        yield_index: a.player.yield_index,
     });
     Ok(())
 }
@@ -1445,9 +1298,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
     let player = &mut a.player;
     touch(player, pool);
     // Yield earned so far is paid out with the Principal, in this call.
-    let owed = settle(pool, player)?;
-    let mut change = Change::default();
-    change.settled(owed)?;
+    settle(pool, player)?;
 
     require!(pool.shutdown, HexVaultError::PoolNotShutDown);
     require!(
@@ -1469,11 +1320,7 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
         HexVaultError::InsufficientVault
     );
 
-    change.principal(-i128::from(principal))?;
-    change.tickets(-i128::from(player.entries))?;
-    weight::apply(&a.weight_tree, pool, player, change)?;
     player.principal = 0;
-    player.entries = 0;
     player.pending_deposit = 0;
     player.pending_withdraw = 0;
     pool.total_principal = pool
@@ -1507,9 +1354,11 @@ pub fn emergency_withdraw<'info>(ctx: Context<'info, EmergencyWithdraw<'info>>) 
 
     emit!(EmergencyWithdrawn {
         owner: player.owner,
-        principal,
+        claim: principal,
         pending,
         total: paid,
+        principal: player.principal,
+        yield_index: player.yield_index,
     });
     Ok(())
 }
@@ -1584,9 +1433,10 @@ fn bought_amount_after(
     Ok(total)
 }
 
-/// Spends real USDC on extra Tickets at a fixed price (spec "Bought
-/// tickets"). The USDC goes to the jackpot vault and is never returned; the
-/// Tickets are ordinary Entries from the moment they land.
+/// Spends real USDC on extra Tickets (spec "Bought tickets"). The USDC goes to
+/// the jackpot vault and is never returned. The program credits nothing: the
+/// backend books the Tickets from `TicketsBought` at the rate in its Game
+/// config (ADR 0025).
 ///
 /// Capped per Player per epoch at locked Principal, checked against the live
 /// balance at call time rather than a start-of-day snapshot. `principal` only
@@ -1601,12 +1451,11 @@ fn bought_amount_after(
 pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
     let pool = &ctx.accounts.pool;
     let player = &mut ctx.accounts.player;
-    // Resets stale Tickets first, so the purchase lands on this epoch's.
     touch(player, pool);
 
     require!(!pool.shutdown, HexVaultError::PoolShutDown);
     require!(!pool.paused, HexVaultError::PoolPaused);
-    // Bought before Epoch 1 exists would be Entries with no epoch to count in
+    // Bought before Epoch 1 exists would be Tickets with no epoch to count in
     // and no epoch boundary to reset them, so they are just lost the moment
     // `begin_epoch` first runs (beta-launch-fixes ticket 03).
     require!(pool.current_epoch_id > 0, HexVaultError::NoEpochYet);
@@ -1638,142 +1487,28 @@ pub fn buy_tickets(ctx: Context<BuyTickets>, amount: u64) -> Result<()> {
         ctx.accounts.accepted_mint.decimals,
     )?;
 
-    let tickets = amount
-        .checked_mul(u64::from(pool.tickets_per_usdc))
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
     player.bought_amount = bought_amount;
-    player.entries = player
-        .entries
-        .checked_add(tickets)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let mut change = Change::default();
-    change.tickets(i128::from(tickets))?;
-    weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
 
     emit!(TicketsBought {
         owner: player.owner,
         epoch_id: pool.current_epoch_id,
         usdc: amount,
-        tickets,
+        principal: player.principal,
+        yield_index: player.yield_index,
     });
     Ok(())
 }
 
-/// Resets a bonus counter to 0 when its stored epoch is not
-/// `current_epoch_id`, adds `amount`, and checks the result against `cap`.
-/// Same reset-add-check shape as `bought_amount_after`, shared by
-/// `grant_tickets`' per-Player and pool-wide operator caps, which differ only
-/// in which counter and cap they check.
-fn bonus_after(
-    bonus_epoch: u64,
-    bonus_granted: u64,
-    current_epoch_id: u64,
-    cap: u64,
-    amount: u64,
-    err: HexVaultError,
-) -> Result<u64> {
-    let base = if bonus_epoch == current_epoch_id {
-        bonus_granted
-    } else {
-        0
-    };
-    let total = base
-        .checked_add(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    if total > cap {
-        return Err(err.into());
-    }
-    Ok(total)
-}
-
-/// `epoch_start_principal * bonus_cap_bps / 10_000`, the pool-wide operator grant
-/// cap for the current epoch. Widens to u128 first, like `yield_for`, since
-/// `total_principal * bonus_cap_bps` can overflow u64.
-fn pool_bonus_cap(total_principal: u64, bonus_cap_bps: u16) -> Result<u64> {
-    let scaled = u128::from(total_principal)
-        .checked_mul(u128::from(bonus_cap_bps))
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let capped = scaled
-        .checked_div(u128::from(BPS_DENOMINATOR))
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    u64::try_from(capped).map_err(|_| HexVaultError::ArithmeticOverflow.into())
-}
-
-/// Credits playable Tickets to a Player by hand (spec "Granted tickets"),
-/// signed by `pool.operator` or `pool.admin`.
-///
-/// The operator path is capped per Player per epoch at locked Principal and
-/// pool-wide per epoch at `epoch_start_principal * bonus_cap_bps / 10_000`, tracked
-/// by their own `bonus_epoch`/`bonus_granted` counters (separate from
-/// `bought_epoch`/`bought_amount` so a grant and a purchase don't share a
-/// cap), and refuses the House. The admin path is uncapped, allows the
-/// House, and leaves both counters untouched, for the rare manual fix.
-pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
-    let signer = ctx.accounts.signer.key();
+/// Admin-only. While set, `buy_tickets` refuses (yield-claimer ticket 11,
+/// ADR 0019). Unlike `set_feature_pause` the operator cannot move it either
+/// way: it is a compliance switch, not an emergency brake.
+pub fn set_buy_tickets_pause(ctx: Context<SetBuyTicketsPause>, paused: bool) -> Result<()> {
     let pool = &mut ctx.accounts.pool;
-    let player = &mut ctx.accounts.player;
-
-    let by_admin = signer == pool.admin;
-    require!(
-        by_admin || signer == pool.operator,
-        HexVaultError::Unauthorized
-    );
-
-    // Resets stale Tickets first, so the grant lands on this epoch's.
-    touch(player, pool);
-    // Refused for both the admin and the operator path (production-hardening
-    // ticket 02: pause stops all Ticket movement).
-    require!(!pool.shutdown, HexVaultError::PoolShutDown);
-    require!(!pool.paused, HexVaultError::PoolPaused);
-    require!(!pool.jackpot_paused, HexVaultError::JackpotPaused);
-    require!(amount > 0, HexVaultError::ZeroAmount);
-
-    if !by_admin {
-        require!(!player.is_house, HexVaultError::HouseCannotBeGranted);
-        // One grant per referrer per epoch: a resend after a lost
-        // confirmation must not grant twice.
-        require!(
-            player.bonus_epoch != pool.current_epoch_id || player.bonus_granted == 0,
-            HexVaultError::AlreadyGranted
-        );
-
-        let player_bonus = bonus_after(
-            player.bonus_epoch,
-            player.bonus_granted,
-            pool.current_epoch_id,
-            player.locked_principal(pool.current_epoch_id),
-            amount,
-            HexVaultError::DailyPlayerGrantCapExceeded,
-        )?;
-        let pool_cap = pool_bonus_cap(pool.epoch_start_principal, pool.bonus_cap_bps)?;
-        let pool_bonus = bonus_after(
-            pool.bonus_epoch,
-            pool.bonus_granted,
-            pool.current_epoch_id,
-            pool_cap,
-            amount,
-            HexVaultError::DailyPoolGrantCapExceeded,
-        )?;
-
-        player.bonus_epoch = pool.current_epoch_id;
-        player.bonus_granted = player_bonus;
-        pool.bonus_epoch = pool.current_epoch_id;
-        pool.bonus_granted = pool_bonus;
-    }
-
-    player.entries = player
-        .entries
-        .checked_add(amount)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
-    let mut change = Change::default();
-    change.tickets(i128::from(amount))?;
-    weight::apply(&ctx.accounts.weight_tree, pool, player, change)?;
-
-    emit!(TicketsGranted {
-        owner: player.owner,
-        epoch_id: pool.current_epoch_id,
-        amount,
-        by_admin,
+    pool.buy_tickets_paused = paused;
+    emit!(BuyTicketsPauseSet {
+        pool: pool.key(),
+        paused,
+        at: utils::now()?,
     });
     Ok(())
 }
@@ -1838,27 +1573,6 @@ pub struct CreatePool<'info> {
         space = 8 + Player::INIT_SPACE,
     )]
     pub house: Box<Account<'info, Player>>,
-
-    /// Created in the same transaction by a top-level
-    /// `system_program::create_account`, owned by this program and sized for
-    /// the header alone (zero nodes). `zero` refuses one already in use.
-    #[account(
-        zero,
-        constraint = weight_tree.to_account_info().data_len() == 8 + core::mem::size_of::<WeightTree>()
-            @ HexVaultError::InvalidParameter,
-    )]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
-
-    /// The stack of released leaves (ticket 08), a header-only PDA that
-    /// `release_leaf` grows.
-    #[account(
-        init,
-        payer = payer,
-        seeds = [SEED_FREE_LEAVES, pool.key().as_ref()],
-        bump,
-        space = 8 + core::mem::size_of::<FreeLeaves>(),
-    )]
-    pub free_leaves: AccountLoader<'info, FreeLeaves>,
 
     // Only the mint is checked. On mainnet these are the multisig's own
     // accounts, which nothing in this instruction signs for.
@@ -2229,7 +1943,6 @@ pub struct Deposit<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -2241,14 +1954,6 @@ pub struct Deposit<'info> {
         space = 8 + Player::INIT_SPACE,
     )]
     pub player: Box<Account<'info, Player>>,
-
-    /// Grows by one node at this Player's first deposit, `owner` paying,
-    /// unless a released leaf is waiting in `free_leaves`.
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
-
-    #[account(mut, seeds = [SEED_FREE_LEAVES, pool.key().as_ref()], bump)]
-    pub free_leaves: AccountLoader<'info, FreeLeaves>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2297,7 +2002,6 @@ pub struct RequestWithdraw<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -2307,9 +2011,6 @@ pub struct RequestWithdraw<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
-
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2372,7 +2073,6 @@ pub struct ProcessWithdraw<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -2389,9 +2089,6 @@ pub struct ProcessWithdraw<'info> {
     /// value. Leave it out otherwise.
     #[account(address = player.owner)]
     pub owner: Option<Signer<'info>>,
-
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2437,7 +2134,6 @@ pub struct EmergencyWithdraw<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -2447,9 +2143,6 @@ pub struct EmergencyWithdraw<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
-
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     /// Needed only while the pool is impaired. Leave it out otherwise.
     #[account(address = player.owner)]
@@ -2529,7 +2222,6 @@ pub struct BuyTickets<'info> {
     #[account(
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = weight_tree,
     )]
     pub pool: Box<Account<'info, Pool>>,
 
@@ -2541,9 +2233,6 @@ pub struct BuyTickets<'info> {
         bump = player.bump,
     )]
     pub player: Box<Account<'info, Player>>,
-
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2569,32 +2258,17 @@ pub struct BuyTickets<'info> {
     pub token_program: Interface<'info, TokenInterface>,
 }
 
-/// The signer names neither role directly: it may be either `pool.admin` or
-/// `pool.operator`, and the handler decides which, same reasoning as
-/// `SetPause`.
 #[derive(Accounts)]
-pub struct GrantTickets<'info> {
-    pub signer: Signer<'info>,
+pub struct SetBuyTicketsPause<'info> {
+    pub admin: Signer<'info>,
 
     #[account(
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = weight_tree,
+        has_one = admin,
     )]
-    pub pool: Box<Account<'info, Pool>>,
-
-    /// Must already exist, like `BuyTickets`': a Player only has a Principal
-    /// cap to grant against once it holds one.
-    #[account(
-        mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), player.owner.as_ref()],
-        bump = player.bump,
-    )]
-    pub player: Box<Account<'info, Player>>,
-
-    #[account(mut)]
-    pub weight_tree: AccountLoader<'info, WeightTree>,
+    pub pool: Account<'info, Pool>,
 }
 
 #[cfg(test)]
@@ -2688,16 +2362,12 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_deposit_gives_no_buy_or_grant_room() {
+    fn a_pending_deposit_gives_no_buy_room() {
         // Deposit 1_000 today with nothing locked: the flash sequence buys 1_000
         // against a cap of 0 and is refused.
         let p = player_with(1_000, 1_000);
         assert_eq!(p.locked_principal(1), 0);
         assert!(bought_amount_after(1, 0, 1, p.locked_principal(1), 1).is_err());
-        assert!(bonus_after(
-            1, 0, 1, p.locked_principal(1), 1, HexVaultError::DailyPlayerGrantCapExceeded
-        )
-        .is_err());
     }
 
     #[test]
@@ -2711,63 +2381,5 @@ mod tests {
         assert_eq!(p.locked_principal(1), 1_000);
         assert_eq!(bought_amount_after(1, 0, 1, p.locked_principal(1), 1_000).expect("at cap"), 1_000);
         assert!(bought_amount_after(1, 0, 1, p.locked_principal(1), 1_001).is_err());
-    }
-
-    // --- `bonus_after` / `pool_bonus_cap` (grant_tickets, hexo-referrals
-    // ticket 04): same reset-add-check shape as `bought_amount_after`, shared
-    // by the per-Player and pool-wide operator caps.
-
-    #[test]
-    fn a_grant_landing_exactly_on_the_cap_succeeds() {
-        let granted = bonus_after(1, 700, 1, 1_000, 300, HexVaultError::DailyPlayerGrantCapExceeded)
-            .expect("at cap");
-        assert_eq!(granted, 1_000);
-    }
-
-    #[test]
-    fn one_more_than_the_cap_fails_with_the_caller_supplied_error() {
-        assert!(
-            bonus_after(1, 700, 1, 1_000, 301, HexVaultError::DailyPlayerGrantCapExceeded)
-                .unwrap_err()
-                .to_string()
-                .contains("exceed the player's daily cap")
-        );
-        assert!(
-            bonus_after(1, 700, 1, 1_000, 301, HexVaultError::DailyPoolGrantCapExceeded)
-                .unwrap_err()
-                .to_string()
-                .contains("exceed the pool's daily bonus cap")
-        );
-    }
-
-    #[test]
-    fn a_new_epoch_resets_the_bonus_counter_instead_of_carrying_it_over() {
-        let granted = bonus_after(1, 1_000, 2, 1_000, 1_000, HexVaultError::DailyPlayerGrantCapExceeded)
-            .expect("fresh epoch");
-        assert_eq!(granted, 1_000);
-    }
-
-    #[test]
-    fn zero_principal_refuses_an_operator_grant_like_an_exhausted_cap() {
-        assert!(
-            bonus_after(0, 0, 1, 0, 1, HexVaultError::DailyPlayerGrantCapExceeded)
-                .unwrap_err()
-                .to_string()
-                .contains("exceed the player's daily cap")
-        );
-    }
-
-    #[test]
-    fn pool_bonus_cap_is_the_default_five_percent_of_total_principal() {
-        assert_eq!(pool_bonus_cap(1_000_000, 500).expect("cap"), 50_000);
-    }
-
-    #[test]
-    fn pool_bonus_cap_floors_and_never_overflows_u64() {
-        // 3 / 10_000 of u64::MAX floors rather than rounding up, and the
-        // u128 widening keeps `total_principal * bonus_cap_bps` from
-        // overflowing u64 the way a native multiply would at this scale.
-        let cap = pool_bonus_cap(u64::MAX, 3).expect("cap");
-        assert_eq!(cap, (u128::from(u64::MAX) * 3 / 10_000) as u64);
     }
 }

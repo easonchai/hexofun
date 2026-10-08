@@ -68,7 +68,6 @@ import {
   onChainNowSeconds,
   sleep,
   sleepUntilOnChain,
-  WEIGHT_TREE_SPACE,
   PROGRAM_DATA,
 } from "../helpers/hx.js";
 
@@ -425,7 +424,6 @@ describe("kVault backing on a mainnet fork", () => {
         ),
         [operator],
       );
-      const weightTree = Keypair.generate();
       const venue = over(
         { klendProgram: KVAULT_PROGRAM_ID, klendMarket: VAULT, klendReserve: SHARES_MINT, klendCtoken: sharesAta },
         usdcAta,
@@ -438,16 +436,11 @@ describe("kVault backing on a mainnet fork", () => {
           vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
           epochSeconds: new BN(86_400),
           epochAnchor: new BN(await onChainNowSeconds()),
-          roundSeconds: new BN(60),
-          closeBuffer: new BN(5),
           vrfTimeout: new BN(180),
           minDeposit: new BN(1_000_000),
-          houseCutBps: 600,
           minJackpot: new BN(0),
           payoutTimeout: new BN(82_800),
           baseRateBps: 488,
-          ticketsPerUsdc: 10,
-          bonusCapBps: 500,
           venueKind: 2,
         })
         .accountsPartial({
@@ -458,23 +451,12 @@ describe("kVault backing on a mainnet fork", () => {
           principalVault: principalVaultPda(pool),
           jackpotVault: jackpotVaultPda(pool),
           house: playerPda(pool, operator.publicKey),
-          weightTree: weightTree.publicKey,
           treasury,
           buybackReserve: buyback,
           ...venue,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .preInstructions([
-          SystemProgram.createAccount({
-            fromPubkey: operator.publicKey,
-            newAccountPubkey: weightTree.publicKey,
-            space: WEIGHT_TREE_SPACE,
-            lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
-            programId: program.programId,
-          }),
-        ])
-        .signers([operator, weightTree])
         .rpc()
         .then(
           () => "created",
