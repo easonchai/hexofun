@@ -89,6 +89,8 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
     app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter({ trustProxy: true }));
     prisma = app.get(PrismaService);
     rounds = app.get(RoundsService);
+    // These Rounds run on a 2026 test clock; the sweep must not reveal or void them against the real relays.
+    rounds.revealDue = async () => {};
     await ensurePoolRow(prisma, POOL, 1n);
     await app.init();
     await app.getHttpAdapter().getInstance().ready();
