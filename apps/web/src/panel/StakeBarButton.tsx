@@ -14,6 +14,8 @@ type Props = {
   phase: Phase;
   decimals: number;
   onOpen: () => void;
+  /** The wallet cannot start a betting session (Ledger): the bar stays shut. */
+  disabled?: boolean;
 };
 
 export function StakeBarButton({
@@ -23,6 +25,7 @@ export function StakeBarButton({
   phase,
   decimals,
   onOpen,
+  disabled = false,
 }: Props) {
   const model = stakeBarModel(stakeText, selected, position, phase, decimals);
   const ariaLabel = `Stake bar: ${model.ticketsPerTile} tickets per tile, ${model.tilesSelected} tiles selected, ${model.ticketsIn} tickets in. ${model.label}.`;
@@ -34,6 +37,7 @@ export function StakeBarButton({
       data-testid="stake-bar"
       data-state={model.state}
       aria-label={ariaLabel}
+      disabled={disabled}
       onClick={onOpen}
     >
       <span className="stake-bar-stats">

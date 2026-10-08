@@ -31,6 +31,8 @@ import { useChainClock } from "./useChainClock.js";
 import { useApiPoll } from "./useApiPoll.js";
 import { snapshot, useStatePoll } from "./useStatePoll.js";
 import { useRoundEngine } from "./useRoundEngine.js";
+import { LEDGER_COPY } from "./session.js";
+import { useSession } from "./useSession.js";
 import { useGameSigner } from "./wallets.js";
 import { summarizeStatus } from "./status.js";
 import { TABS, hashForTab, playLock, tabFromHash, type Tab } from "./tabs.js";
@@ -63,6 +65,14 @@ export function App() {
   // Phone bet drawer (spec.md "Drawer"): controlled here so the win takeover
   // path can close it.
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Ticket 15: one wallet prompt per 24 hours buys a browser-held session key.
+  const betSession = useSession(signer);
+  const { ensure: ensureSession } = betSession;
+  // Opening the drawer asks for a delegation when none is live (or under five
+  // minutes remain); a live one opens silently.
+  useEffect(() => {
+    if (drawerOpen && !betSession.cannotSign) void ensureSession();
+  }, [drawerOpen, betSession.cannotSign, ensureSession]);
 
   // Privy and wallet-adapter hand back a fresh signer object on every render,
   // so memoizing the provider on it rebuilt the Program every render — and the
@@ -422,6 +432,11 @@ export function App() {
                 );
               }}
             />
+            {betSession.cannotSign ? (
+              <div className="screen-note err ledger-copy" data-testid="ledger-copy">
+                {LEDGER_COPY}
+              </div>
+            ) : null}
             <ControlPanel {...panelProps} />
             <StakeBarButton
               stakeText={stakeText}
@@ -430,10 +445,17 @@ export function App() {
               phase={engine.phase}
               decimals={DECIMALS}
               onOpen={() => setDrawerOpen(true)}
+              disabled={betSession.cannotSign}
             />
             <BetDrawer
-              open={drawerOpen}
+              open={drawerOpen && !betSession.cannotSign}
               onOpenChange={setDrawerOpen}
+              session={{
+                active: betSession.session !== null,
+                busy: betSession.busy,
+                error: betSession.error,
+                onRevoke: () => void betSession.revoke(),
+              }}
               soundOn={soundOn}
               onToggleSound={() => {
                 const next = !soundOn;
