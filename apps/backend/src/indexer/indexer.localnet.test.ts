@@ -32,6 +32,7 @@ import {
   SystemProgram,
   type TransactionInstruction,
 } from "@solana/web3.js";
+import type { Prisma } from "@prisma/client";
 import bs58 from "bs58";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -39,6 +40,7 @@ import { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
 import { deployWallet } from "../chain/deploy-wallet.fixture";
 import { programDataAddress } from "../chain/pda";
+import { decodeEpoch } from "../operator/chain-state";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 import { IndexerService } from "./indexer.service";
@@ -90,6 +92,8 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
   let prisma: PrismaService;
   let indexer: IndexerService;
 
+  /** The four pinned venue accounts `begin_epoch` syncs against. */
+  let venue: Record<"klendProgram" | "klendMarket" | "klendReserve" | "klendCtoken", PublicKey>;
   const authority = Keypair.generate();
   const depositor = Keypair.generate();
   const poolId = BigInt(Date.now());
@@ -148,7 +152,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     const pool = chain.poolAddress();
     // `test-venue` pins this program as klend, the pool as the market and
     // two PDAs of its own as the reserve and the position's token account.
-    const venue = {
+    venue = {
       klendProgram: chain.programId,
       klendMarket: pool,
       klendReserve: PublicKey.findProgramAddressSync(
@@ -168,13 +172,14 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         admin: authority.publicKey,
         operator: authority.publicKey,
         vrfNetworkState: VRF_NETWORK_STATE,
-        epochSeconds: new BN(3_600),
+        // Short, so the Ticket ledger test below can cross two epoch boundaries.
+        epochSeconds: new BN(45),
         epochAnchor: new BN(Math.floor(Date.now() / 1000)),
         vrfTimeout: new BN(5),
         minDeposit: new BN(1_000_000),
         minJackpot: new BN(1),
-        // Far past this run, and under the epoch length as create_pool requires.
-        payoutTimeout: new BN(3_000),
+        // Under the epoch length, as create_pool requires; nothing here pays out.
+        payoutTimeout: new BN(40),
         // Base yield is off (0), same reasoning as the operator localnet
         // suite: it is not what this suite is about.
         baseRateBps: 0,
@@ -298,7 +303,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     expect(Date.now() - startedAt).toBeLessThan(4_000);
 
     expect(await prisma.player.findMany({ where: { isHouse: false } })).toMatchObject([
-      { owner: depositor.publicKey.toBase58(), principal: DEPOSIT, tickets: 0n },
+      { owner: depositor.publicKey.toBase58(), principal: DEPOSIT },
     ]);
     expect(await prisma.epoch.findMany()).toMatchObject([{ id: 1n, status: 0 }]);
     expect(await prisma.pool.findMany()).toMatchObject([
@@ -330,12 +335,85 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     expect(cursor.lastSignature).toBeTruthy();
     expect(cursor.lastSlot).not.toBeNull();
   }, 120_000);
+
+  // off-chain-tickets 11: a deposit in epoch 1 holds no Ticket in epoch 1. The
+  // reset at epoch 2 gives it Tickets, and the snapshot taken when epoch 3
+  // begins lists the wallet with that same count.
+  it("books the deposit as Tickets from the next epoch and snapshots the wallet after it", async () => {
+    const owner = depositor.publicKey.toBase58();
+    const pool = chain.poolAddress();
+    const epochEnds = async (id: bigint): Promise<number> => {
+      const info = await connection.getAccountInfo(chain.epochAddress(id));
+      if (!info) throw new Error(`epoch ${id} is not on chain`);
+      return Number(decodeEpoch(chain.program, info.data).endsAt);
+    };
+    // The validator's clock runs at or ahead of wall time, so wall time plus a margin is past the end.
+    const beginEpoch = async (ended: bigint): Promise<void> => {
+      const waitMs = (await epochEnds(ended)) * 1_000 + 3_000 - Date.now();
+      if (waitMs > 0) await sleep(waitMs);
+      await methods
+        .beginEpoch()
+        .accountsPartial({
+          operator: authority.publicKey,
+          pool,
+          currentEpoch: chain.epochAddress(ended),
+          epochTwoBehind: chain.epochAddress(ended > 1n ? ended - 1n : 0n),
+          newEpoch: chain.epochAddress(ended + 1n),
+          ...venue,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+    };
+    const balance = () =>
+      prisma.ticketBalance.findUnique({
+        where: { poolAddress_owner: { poolAddress: pool.toBase58(), owner } },
+      });
+    /** Event rows land through the finalized catch-up, which this drives instead of waiting a minute. */
+    const settled = (check: () => Promise<boolean>) => async () => {
+      await indexer.tick();
+      return check();
+    };
+
+    await beginEpoch(1n);
+    await waitFor(
+      "the ledger to book the epoch 2 reset",
+      settled(async () => ((await balance())?.epochId ?? 0n) === 2n),
+      150_000,
+    );
+    // Principal plus the yield index's rise between the deposit and the cutoff.
+    const yieldIndexOf = async (where: Prisma.EventWhereInput): Promise<bigint> => {
+      const { data } = await prisma.event.findFirstOrThrow({ where });
+      // SAFETY: an Anchor event always decodes to a struct, stored as a jsonb object.
+      return BigInt((data as Record<string, string>).yieldIndex as string);
+    };
+    const began = await yieldIndexOf({ name: "EpochBegan", data: { path: ["epochId"], equals: "2" } });
+    const deposited = await yieldIndexOf({ name: "Deposited" });
+    const expected = DEPOSIT + (DEPOSIT * (began - deposited)) / 10n ** 18n;
+    expect(await balance()).toMatchObject({ tickets: expected, principal: DEPOSIT, epochId: 2n });
+    expect(await prisma.epochSnapshot.count({ where: { epochId: 1n } })).toBe(0);
+
+    await beginEpoch(2n);
+    await waitFor(
+      "the ledger to snapshot epoch 2",
+      settled(async () => (await prisma.epochSnapshot.count({ where: { epochId: 2n } })) > 0),
+      150_000,
+    );
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 2n } })).toMatchObject([
+      { index: 0, owner, tickets: expected },
+    ]);
+    expect(await prisma.epoch.findUniqueOrThrow({ where: { poolAddress_id: { poolAddress: pool.toBase58(), id: 2n } } }))
+      .toMatchObject({ leafCount: 1, totalTickets: expected });
+  }, 400_000);
 });
 
 async function wipe(prisma: PrismaService): Promise<void> {
   // Pool goes last, after every table that references it (ADR 0016).
   await prisma.$transaction([
     prisma.event.deleteMany(),
+    prisma.ticketLedger.deleteMany(),
+    prisma.ticketBalance.deleteMany(),
+    prisma.epochSnapshot.deleteMany(),
+    prisma.ledgerCheck.deleteMany(),
     prisma.cursor.deleteMany(),
     prisma.player.deleteMany(),
     prisma.epoch.deleteMany(),
