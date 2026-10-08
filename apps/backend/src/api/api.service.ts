@@ -16,6 +16,7 @@ import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { clockUnixTimestamp } from "../operator/chain-state";
+import { snapshotReasons } from "../ledger/snapshot-reasons";
 import { referralGrantsForEpoch } from "../operator/referral-grants";
 import { epochSeed, randomnessAddress } from "../operator/vrf";
 import { PrismaService } from "../prisma/prisma.service";
@@ -391,6 +392,8 @@ export class ApiService {
    * root, depth, leaf count and total. `nextIndex` is where the next page starts,
    * null on the last. 404 until the next epoch has begun, which is when the
    * ledger takes the snapshot; an empty one reads as zero leaves and a null root.
+   * Each leaf also carries `reasons`, the ledger sums behind its Tickets (see
+   * `snapshotReasons`). The tree does not hash them.
    */
   async getEpochSnapshot(id: bigint, after: number, limit: number) {
     const epoch = await this.prisma.epoch.findUnique({
@@ -406,15 +409,28 @@ export class ApiService {
       select: { index: true, owner: true, tickets: true },
     });
     const next = after + leaves.length;
+    const why = await snapshotReasons(this.prisma, this.poolAddress, id, leaves.map((leaf) => leaf.owner));
     return {
       epochId: id,
       root: epoch.snapshotRoot,
       depth: epoch.snapshotDepth,
       leafCount: epoch.leafCount,
       totalTickets: epoch.totalTickets,
-      leaves,
+      leaves: leaves.map((leaf) => ({ ...leaf, ...why.get(leaf.owner) })),
       nextIndex: next < epoch.leafCount ? next : null,
     };
+  }
+
+  /** One wallet's Ticket ledger, newest first; `before` is the last page's `nextBefore`. */
+  async getLedger(owner: string, before: bigint | null, limit: number) {
+    const rows = await this.prisma.ticketLedger.findMany({
+      where: { poolAddress: this.poolAddress, owner, ...(before === null ? {} : { id: { lt: before } }) },
+      orderBy: { id: "desc" },
+      take: limit + 1,
+      select: { id: true, epochId: true, reason: true, delta: true, ref: true, signer: true, signature: true, createdAt: true },
+    });
+    const page = rows.slice(0, limit);
+    return { rows: page, nextBefore: rows.length > limit ? (page[page.length - 1]?.id ?? null) : null };
   }
 
   /** The epoch's Referral bonus grants and their inputs (ticket 22); the job lives in operator/referral-grants.ts. */

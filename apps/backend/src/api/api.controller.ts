@@ -94,6 +94,13 @@ export class ApiController {
     return this.api.getPlayer(parseOwner(owner));
   }
 
+  /** One wallet's Ticket ledger rows, newest first; pass `before` the last page's `nextBefore`. */
+  @Get("players/:owner/ledger")
+  getLedger(@Param("owner") owner: string, @Query("before") before?: string, @Query("limit") limit?: string) {
+    if (before !== undefined && !/^\d+$/.test(before)) throw new BadRequestException("`before` must be a whole number.");
+    return this.api.getLedger(parseOwner(owner), before === undefined ? null : BigInt(before), parseLimit(limit, 50));
+  }
+
   @Get("leaderboard")
   getLeaderboard(@Query("limit") limit?: string) {
     return this.api.getLeaderboard(parseLimit(limit, 20));

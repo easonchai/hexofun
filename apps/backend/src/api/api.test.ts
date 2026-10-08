@@ -9,7 +9,7 @@ import type { INestApplication } from "@nestjs/common";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import { FastifyAdapter } from "@nestjs/platform-fastify";
 import { Test } from "@nestjs/testing";
-import { Prisma, type Player } from "@prisma/client";
+import { Prisma, type Player, type TicketReason } from "@prisma/client";
 import {
   ACCOUNT_SIZE,
   AccountLayout,
@@ -863,11 +863,11 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
           nextIndex: 2,
         });
         expect(first.leaves).toEqual([
-          { index: 0, owner: ALICE, tickets: "10" },
-          { index: 1, owner: BOB, tickets: "20" },
+          { index: 0, owner: ALICE, tickets: "10", reasons: {} },
+          { index: 1, owner: BOB, tickets: "20", reasons: {} },
         ]);
         const last = (await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot?after=2&limit=2`).expect(200)).body;
-        expect(last.leaves).toEqual([{ index: 2, owner: HOUSE, tickets: "30" }]);
+        expect(last.leaves).toEqual([{ index: 2, owner: HOUSE, tickets: "30", reasons: {} }]);
         expect(last.nextIndex).toBeNull();
         assertNoLargeNumbers(first, "/epochs/:id/snapshot");
         await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot?limit=0`).expect(400);
@@ -878,6 +878,85 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
           where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: PREVIOUS_EPOCH } },
           data: { snapshotRoot: null, snapshotDepth: null, leafCount: null, totalTickets: null },
         });
+      }
+    });
+
+    it("shows each leaf's ledger sums by reason, adding up to its tickets, with the admin grant's signer", async () => {
+      const wallet = Keypair.generate().publicKey.toBase58();
+      const row = (epochId: bigint, reason: TicketReason, delta: bigint, extra: { signer?: string; signature?: string } = {}) =>
+        ({ poolAddress: POOL_ADDRESS, owner: wallet, epochId, reason, delta, ref: `${reason}-${epochId}`, ...extra });
+      await prisma.ticketLedger.createMany({
+        data: [
+          // Carried in from epoch 5, before the cutoff reset set the starting balance.
+          row(PREVIOUS_EPOCH - 1n, "prize", 40n),
+          row(PREVIOUS_EPOCH - 1n, "grant_admin", 7n, { signer: "OLD", signature: "old-sig" }),
+          row(PREVIOUS_EPOCH, "reset", 10n),
+          row(PREVIOUS_EPOCH, "stake", -30n),
+          row(PREVIOUS_EPOCH, "reward", 90n),
+          row(PREVIOUS_EPOCH, "refund", 5n),
+          row(PREVIOUS_EPOCH, "buy", 25n),
+          row(PREVIOUS_EPOCH, "grant_referral", 15n),
+          row(PREVIOUS_EPOCH, "grant_admin", 100n, { signer: "TEAM", signature: "team-sig" }),
+          row(PREVIOUS_EPOCH, "prize", 200n),
+          row(PREVIOUS_EPOCH, "withdraw", -10n),
+          // Booked after the snapshot was taken.
+          row(CURRENT_EPOCH, "stake", -5n),
+        ],
+      });
+      await prisma.epoch.update({
+        where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: PREVIOUS_EPOCH } },
+        data: { snapshotRoot: "ab".repeat(32), snapshotDepth: 1, leafCount: 1, totalTickets: 452n },
+      });
+      await prisma.epochSnapshot.create({ data: { poolAddress: POOL_ADDRESS, epochId: PREVIOUS_EPOCH, index: 0, owner: wallet, tickets: 452n } });
+      try {
+        const body = (await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot`).expect(200)).body;
+        expect(body).toMatchObject({ root: "ab".repeat(32), depth: 1, leafCount: 1, totalTickets: "452", nextIndex: null });
+        const [leaf] = body.leaves;
+        expect(leaf.reasons).toEqual({
+          reset: "57", // 40 + 7 carried in, plus the reset's 10
+          game: "65", // -30 + 90 + 5
+          buy: "25",
+          grant_referral: "15",
+          grant_admin: "100",
+          prize: "200",
+          withdraw: "-10",
+        });
+        expect((Object.values(leaf.reasons) as string[]).reduce((sum, v) => sum + BigInt(v), 0n)).toBe(BigInt(leaf.tickets));
+        expect(leaf.grants).toEqual([{ amount: "100", ref: `grant_admin-${PREVIOUS_EPOCH}`, signer: "TEAM", signature: "team-sig" }]);
+      } finally {
+        await prisma.ticketLedger.deleteMany({ where: { owner: wallet } });
+        await prisma.epochSnapshot.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+        await prisma.epoch.update({
+          where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: PREVIOUS_EPOCH } },
+          data: { snapshotRoot: null, snapshotDepth: null, leafCount: null, totalTickets: null },
+        });
+      }
+    });
+  });
+
+  describe("GET /players/:owner/ledger", () => {
+    it("pages a wallet's 1,000 rows newest first, 100 at a time", async () => {
+      const wallet = Keypair.generate().publicKey.toBase58();
+      await prisma.ticketLedger.createMany({
+        data: Array.from({ length: 1_000 }, (_, i) => ({
+          poolAddress: POOL_ADDRESS, owner: wallet, epochId: CURRENT_EPOCH, reason: "buy" as const, delta: BigInt(i + 1), ref: `r${i}`,
+        })),
+      });
+      try {
+        const seen: string[] = [];
+        let before = "";
+        for (let page = 0; page < 11; page += 1) {
+          const body = (await http.get(`/players/${wallet}/ledger?limit=100${before}`).expect(200)).body;
+          seen.push(...body.rows.map((r: { delta: string }) => r.delta));
+          if (body.nextBefore === null) break;
+          before = `&before=${body.nextBefore}`;
+        }
+        expect(seen).toEqual(Array.from({ length: 1_000 }, (_, i) => String(1_000 - i)));
+        const [row] = (await http.get(`/players/${wallet}/ledger?limit=1`).expect(200)).body.rows;
+        expect(row).toMatchObject({ epochId: CURRENT_EPOCH.toString(), reason: "buy", ref: "r999", signer: null, signature: null });
+        await http.get(`/players/${wallet}/ledger?before=x`).expect(400);
+      } finally {
+        await prisma.ticketLedger.deleteMany({ where: { owner: wallet } });
       }
     });
   });
