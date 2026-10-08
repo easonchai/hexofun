@@ -302,6 +302,38 @@ landed. A depth-18 proof does not fit a legacy transaction with kVault accounts 
 for every kVault instruction (1,067 bytes in the program test). The rows are the only way to build a proof: a lost database strands the
 proof until the snapshot is restored (`docs/ops/funds.md`).
 
+## Round lifecycle
+
+A Round is a game row in Postgres. The program never sees one and the operator's tick has no Round
+step. The engine (`apps/backend/src/api/rounds.service.ts`) runs on its own one-second sweep.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open: first accepted bet, seed committed
+    Open --> Closed: closeAt passes, bet list hashed
+    Closed --> Settled: drand beacon verified, tile derived, ledger rows booked
+    Closed --> Voided: no beacon 10 minutes after its release, stakes refunded
+    Settled --> [*]
+    Voided --> [*]
+```
+
+- **Open.** No Round exists until a bet is accepted. The first bet writes the Round with
+  `sha256(seed)` as `seedCommitment` and a `closeAt` on a whole-minute mark at least `roundSeconds`
+  away. Each bet is signed by a session key the wallet delegated, and writes a Position and a
+  `stake` ledger row in one transaction.
+- **Closed.** At `closeAt` the engine stops taking bets and stores `betListHash`, the sha256 of the
+  accepted signatures in order. The next Round may open while this one waits for its beacon.
+- **Settled or voided.** The beacon is drand quicknet round `roundAt(closeAt) + 2`, checked against
+  the pinned chain hash and public key. The tile comes from the seed, the beacon signature and the
+  Round id. Settling books `reward` and `house_credit` rows in the same transaction. A Round with
+  no valid beacon 10 minutes after its release books `refund` rows for every stake.
+
+`GET /rounds/:id/record` serves the whole Round for anyone to check: the Game config row in force,
+the seed commitment, every delegation of a wallet that bet, each Position with its message and
+signature, the close, the beacon, the settle rows and the revocations dated inside the Round. No
+backend access is needed to read it. `docs/game-verification.md` lists the checks and
+`scripts/verify-round.mjs <record url>` runs them.
+
 ## Backend jobs and the indexer read model
 
 The operator (`apps/backend/src/operator`) is deadline-driven: it sleeps until the next moment a
