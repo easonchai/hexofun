@@ -81,6 +81,11 @@ const state = {
   chainTime: "1800000000",
   priorityFeeMicroLamports: 0,
   launchAt: null,
+  nextRoundId: "1",
+  openRound: null,
+  lastRound: null,
+  positions: [],
+  serverTime: "1800000000",
 };
 
 interface Recorded {
@@ -228,7 +233,7 @@ test("a wallet that cannot sign messages sees the Ledger copy and no prompt", as
   const seen = await mockBackend(page);
   await openPlay(page);
 
-  await expect(page.getByTestId("ledger-copy")).toContainText("cannot sign messages");
+  await expect(page.getByTestId("ledger-copy")).toContainText("Ledger wallets can deposit and win the daily draw but cannot play the game");
   await expect(page.getByTestId("stake-bar")).toBeDisabled();
   await page.getByTestId("stake-bar").click({ force: true }).catch(() => undefined);
   await expect(page.getByTestId("bet-drawer")).toHaveCount(0);

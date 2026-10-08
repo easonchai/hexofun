@@ -1,8 +1,8 @@
 /**
  * React side of session delegation (off-chain-tickets ticket 15). Holds the
  * connected wallet's live session for the UI and runs `ensureSession` when the
- * bet drawer opens. Ticket 18's bet flow calls `ensure()` again before it signs
- * and `drop()` after a `SessionInvalid` refusal.
+ * bet drawer opens. The bet flow (ticket 18, App.tsx) calls `ensure()` again
+ * before it signs and `drop()` after a `SessionInvalid` refusal.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -44,7 +44,7 @@ const memoryStorage: SessionDeps["storage"] = {
   setItem: (key, value) => void memory.set(key, value),
   removeItem: (key) => void memory.delete(key),
 };
-const storage = (): SessionDeps["storage"] => {
+export const storage = (): SessionDeps["storage"] => {
   try {
     return window.localStorage;
   } catch {

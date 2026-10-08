@@ -1,36 +1,34 @@
 /**
- * Pure round-state derivation mirroring the program's enums. No React, no
- * chain I/O — everything here is unit-testable.
+ * Pure round-state derivation over the API's Rounds (off-chain-tickets
+ * ticket 18). No React, no I/O: everything here is unit-testable.
  */
-
-export const ROUND_OPEN = 0;
-export const ROUND_REQUESTED = 1;
-export const ROUND_SETTLED = 2;
-export const ROUND_FORFEITED = 3;
-export const ROUND_VOIDED = 4;
+import type { LastRoundDto, OpenRoundDto, PositionDto } from "./api.js";
 
 export type Phase =
-  | /** no round exists yet */ "idle"
-  /** positions open: countdown to the close */
+  | /** no Round is open: the next bet opens one */ "idle"
+  /** a Round is open: countdown to its close */
   | "mine"
-  /** positions closed, before ends_at: the draw is in flight, no countdown */
-  | "locked"
-  /** past ends_at, not yet revealed: still drawing */
-  | "settling"
-  /** settled, forfeited or voided; waiting for the next round to open */
-  | "awaiting";
+  /** past the close, before the server has closed the Round: bets are shut, no countdown */
+  | "locked";
 
-export interface RoundLike {
+/** The open Round, with its close as unix seconds on the server's clock. */
+export interface OpenRound {
   roundId: bigint;
-  epochId: bigint;
-  startsAt: bigint;
-  endsAt: bigint;
-  status: number;
-  winningTile: number;
-  pot: bigint;
-  /** Tickets the House took from the pot at settlement; 0 until then. */
-  houseCut: bigint;
+  closeAt: bigint;
+  seedCommitment: string;
+  /** Tickets staked on each tile, 36 of them. */
   tileTotals: bigint[];
+}
+
+export type ResultStatus = Exclude<LastRoundDto["status"], "open">;
+
+/** The newest Round that is no longer open. */
+export interface ResultRound {
+  roundId: bigint;
+  status: ResultStatus;
+  /** Protocol tile 0..35 once settled. */
+  tile: number | null;
+  seedCommitment: string;
 }
 
 export interface PositionLike {
@@ -38,42 +36,82 @@ export interface PositionLike {
   stakePerTile: bigint;
 }
 
+/** `/state`'s open Round → the engine's, or null on an idle board. */
+export function openRoundFrom(dto: OpenRoundDto | null): OpenRound | null {
+  if (dto === null || dto.status !== "open") return null;
+  return {
+    roundId: BigInt(dto.id),
+    closeAt: BigInt(Math.floor(Date.parse(dto.closeAt) / 1000)),
+    seedCommitment: dto.seedCommitment,
+    tileTotals: dto.tileTotals.map((total) => BigInt(total)),
+  };
+}
+
+/** `/state`'s newest finished Round → the engine's. */
+export function resultRoundFrom(dto: LastRoundDto | null): ResultRound | null {
+  if (dto === null || dto.status === "open") return null;
+  return { roundId: BigInt(dto.id), status: dto.status, tile: dto.tile, seedCommitment: dto.seedCommitment };
+}
+
+/** The wallet's Positions by Round id, from `/state`. */
+export function positionsFrom(dtos: readonly PositionDto[]): Map<string, PositionLike> {
+  return new Map(
+    dtos.map((dto) => [dto.roundId, { tiles: BigInt(dto.tiles), stakePerTile: BigInt(dto.stakePerTile) }]),
+  );
+}
+
 /** Identity for a round; round ids are unique per pool. */
 export const roundKey = (roundId: bigint): string => roundId.toString();
 
-/** Positions stop `buffer` seconds before the round's ends_at. */
-export function buyClosesAt(round: RoundLike, bufferSeconds: bigint): bigint {
-  const close = round.endsAt - bufferSeconds;
-  return close > round.startsAt ? close : round.startsAt;
+/** The betting phase follows the open Round, never a finished one. */
+export function phaseFor(open: OpenRound | null, now: bigint): Phase {
+  if (!open) return "idle";
+  return now < open.closeAt ? "mine" : "locked";
 }
 
-export function phaseFor(
-  round: RoundLike | null,
-  now: bigint,
-  bufferSeconds: bigint,
-): Phase {
-  if (!round) return "idle";
-  // The clock decides first. A round Settled before ends_at stays "locked"
-  // so the stage keeps its core while the reveal plays; "awaiting" only
-  // starts at ends_at, which is also when the operator opens the next round.
-  if (now < buyClosesAt(round, bufferSeconds)) return "mine";
-  if (now < round.endsAt) return "locked";
-  if (isRevealed(round) || round.status === ROUND_VOIDED) return "awaiting";
-  return "settling";
-}
+/** What the board says in the timer's spot while a Round awaits its beacon or was voided. */
+export type BoardResult = { kind: "revealing"; seedCommitment: string } | { kind: "voided" } | null;
 
 /**
- * What the empty board says while no round is open (game-jackpot-pause 03).
- * No epoch yet means the pool is new and nothing has started, whatever the
- * game switch says: the operator opens no round before epoch 1. Otherwise
- * the game switch decides. Null means "nothing to say", so the board shows
- * its ordinary waiting state.
- *
- * `epochEndsAt` and `roundSeconds` add the last case (yield-claimer ticket
- * 21): a round that would end after the epoch does is never opened, so the
- * last `roundSeconds` of an epoch have no round to show. The label counts
- * down to the epoch end and goes away when the next epoch begins, because
- * the new epoch's end is a whole round away again.
+ * "REVEALING" with the commitment from the moment betting shuts until the tile
+ * lands, "ROUND VOIDED" when no beacon came. An open Round's countdown wins
+ * over a result still pending behind it: the result animates when it lands,
+ * but the board keeps counting to the new close.
+ */
+export function boardResult(
+  phase: Phase,
+  open: OpenRound | null,
+  last: ResultRound | null,
+): BoardResult {
+  if (phase === "mine") return null;
+  if (open) return { kind: "revealing", seedCommitment: open.seedCommitment };
+  if (last?.status === "closed" || last?.status === "revealed") {
+    return { kind: "revealing", seedCommitment: last.seedCommitment };
+  }
+  return last?.status === "voided" ? { kind: "voided" } : null;
+}
+
+/** Seconds until the open Round closes, during "mine"; zero otherwise. */
+export function secondsLeft(open: OpenRound | null, now: bigint): bigint {
+  return open && phaseFor(open, now) === "mine" ? open.closeAt - now : 0n;
+}
+
+/** The pot of the open Round: every tile's stake, added up. */
+export const potOf = (open: OpenRound | null): bigint =>
+  open ? open.tileTotals.reduce((sum, total) => sum + total, 0n) : 0n;
+
+/** The longest a Round runs: opened one second past a minute, it closes at the minute after next. */
+export const longestRoundSeconds = (roundSeconds: bigint): bigint => 2n * roundSeconds - 1n;
+/** Reveal lag the epoch-tail rule leaves room for, on top of the longest Round. */
+export const REVEAL_ALLOWANCE_SECONDS = 60n;
+
+/**
+ * What the empty board says while no Round is open. No epoch yet means the
+ * pool is new and nothing has started, whatever the game switch says.
+ * Otherwise the game switch decides, then the epoch tail: a Round the epoch
+ * cannot hold, with its reveal, is refused, so the label counts down to the
+ * epoch end and goes away when the next epoch begins. Anything else is the
+ * invitation to open the next Round with a bet.
  */
 export function idleBoardLabel(
   roundOpen: boolean,
@@ -86,32 +124,28 @@ export function idleBoardLabel(
   if (roundOpen) return null;
   if (!epochStarted) return "STARTS SOON";
   if (gamePaused) return "GAME PAUSED";
-  if (epochEndsAt !== null && now + roundSeconds > epochEndsAt) {
+  const tail = longestRoundSeconds(roundSeconds) + REVEAL_ALLOWANCE_SECONDS;
+  if (epochEndsAt !== null && now + tail > epochEndsAt) {
     const left = epochEndsAt > now ? epochEndsAt - now : 0n;
     return `ROUND CLOSED, NEW DAY STARTS IN ${left}S`;
   }
-  return null;
+  return "PLACE A BET TO OPEN THE NEXT ROUND";
 }
 
-/** True once the round has a winning tile the program will pay against. */
-export const isRevealed = (round: RoundLike): boolean =>
-  round.status === ROUND_SETTLED || round.status === ROUND_FORFEITED;
-
-/** What the reveal choreography should do right now for the remembered round. */
+/** What the reveal choreography should do right now for the remembered result. */
 export type RevealDecision = "fire" | "wait" | "nothing";
 
 /**
  * Pure reveal-firing rule: no timers, no refs. `remembered` is the first
- * revealed (Settled or Forfeited) Round the engine ever saw for this id,
- * kept independent of whatever Round the chain read currently returns.
+ * settled result the engine ever saw for this id, kept independent of
+ * whatever Round `/state` currently calls the last one.
  *
  * - No remembered result yet → "wait" (nothing to fire).
  * - The Round is already in `played` → "nothing" (never re-animate it).
- * - Otherwise "fire" now: the result arriving is the cue. The countdown ends
- *   at the close, so there is no zero to hold the laser for.
+ * - Otherwise "fire" now: the result arriving is the cue.
  */
 export function decideReveal(
-  remembered: RoundLike | null,
+  remembered: ResultRound | null,
   played: ReadonlySet<string>,
 ): RevealDecision {
   if (!remembered) return "wait";
@@ -122,34 +156,12 @@ export function decideReveal(
 export const covers = (mask: bigint, tile: number): boolean =>
   ((mask >> BigInt(tile)) & 1n) === 1n;
 
-/**
- * Round reward in Tickets: (pot − House cut) × stake / staked-on-winning-tile,
- * floored. Only runs on settled rounds, so the stored cut is always present.
- */
-export function expectedReward(
-  round: RoundLike,
-  position: PositionLike,
-): bigint {
-  if (round.status !== ROUND_SETTLED) return 0n;
-  if (!covers(position.tiles, round.winningTile)) return 0n;
-  const winningTotal = round.tileTotals[round.winningTile] ?? 0n;
-  if (winningTotal === 0n) return 0n;
-  return ((round.pot - round.houseCut) * position.stakePerTile) / winningTotal;
-}
+/** Tiles in a Position's mask. */
+export const tileCountOf = (mask: bigint): number => mask.toString(2).replace(/[^1]/g, "").length;
 
-/**
- * Seconds until positions close, counting down through "mine" only. Zero in
- * every other phase: once locked, the draw is in flight and its length is
- * the oracle's, not the clock's, so there is nothing honest to count.
- */
-export function secondsLeft(
-  round: RoundLike,
-  bufferSeconds: bigint,
-  now: bigint,
-): bigint {
-  if (phaseFor(round, now, bufferSeconds) !== "mine") return 0n;
-  return buyClosesAt(round, bufferSeconds) - now;
-}
+/** Tile indices (0..35) of a mask, ascending: the order the bet text lists them. */
+export const tilesOfMask = (mask: bigint): number[] =>
+  Array.from({ length: 36 }, (_, tile) => tile).filter((tile) => covers(mask, tile));
 
 /** Display number 1..36 for a protocol tile index 0..35. */
 export const displayTile = (tile: number): number => tile + 1;
@@ -200,8 +212,9 @@ export type AutoRoundDecision =
   | { action: "skip"; reason: string };
 
 /**
- * Whether auto-rounds should re-place the remembered board in a freshly
- * opened Round. Pure: no chain I/O, no React state.
+ * Whether auto-rounds should re-place the remembered board. Pure: no I/O, no
+ * React state. With no Round open the bet opens the next one, so only the
+ * moment betting is shut skips.
  */
 export function decideAutoRound(
   board: RememberedBoard | null,
@@ -216,7 +229,7 @@ export function decideAutoRound(
     return { action: "skip", reason: "remembered stake is zero" };
   if (hasPosition)
     return { action: "skip", reason: "position already placed this round" };
-  if (phase !== "mine")
+  if (phase === "locked")
     return { action: "skip", reason: "round is not open for positions" };
   const spend = board.stake * BigInt(board.tiles.length);
   if (spend > tickets)

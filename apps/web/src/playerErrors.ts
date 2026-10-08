@@ -6,6 +6,7 @@
  * `failed(code)` result directly. Copy uses the screen's words (GLOSSARY.md):
  * "day" not epoch, "Tickets" not entries.
  */
+import type { BetRefusalCode } from "./bet.js";
 import { currentPage, reportError } from "./errorReport.js";
 import { idl } from "./idl.js";
 
@@ -113,6 +114,30 @@ export function decodeSendFailure(
     page: currentPage(),
   });
   return decodeErrorCode(result.code ?? -1);
+}
+
+/**
+ * Player copy for each refusal `POST /game/bets` names (off-chain-tickets
+ * ticket 18). The server's own `message` is for logs and curl; the screen's
+ * words are here. `Throttled` and `network` come from the web's own client.
+ */
+const BET_COPY: Record<BetRefusalCode | "Throttled" | "network", string> = {
+  SessionInvalid: "Your betting session ended. Approve a new one to keep playing.",
+  BadSignature: "That bet did not verify. Reload the page and try again.",
+  SeqMismatch: "Your bets got out of order. Try again.",
+  RoundClosed: "This round just closed. Bet again to open the next one.",
+  RoundAlreadyOpen: "A round is already open. Bet again to join it.",
+  RoundOutsideEpoch: "A new round would end after the day does. Wait for the new day's first round.",
+  GamePaused: "The game is paused right now. Try again once it restarts.",
+  BadTiles: "Pick at least one tile and stake at least 1 Ticket on each.",
+  InsufficientTickets: "You don't have enough Tickets for that.",
+  PositionExists: "You already have a bet in this round.",
+  Throttled: "Too many bets too fast. Wait a few seconds and try again.",
+  network: "Could not reach the server. Try again.",
+};
+
+export function decodeBetRefusal(code: string): string {
+  return (BET_COPY as Record<string, string | undefined>)[code] ?? GENERIC;
 }
 
 /**

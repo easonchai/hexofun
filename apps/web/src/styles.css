@@ -974,6 +974,20 @@ input::placeholder {
   font-size: 18px;
 }
 
+/* The seed commitment under "REVEALING": the proof the tile was fixed at the open. */
+.stage-commitment {
+  position: absolute;
+  left: 50%;
+  top: -4px;
+  transform: translateX(-50%);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 10;
+  white-space: nowrap;
+}
+
 /* Last two seconds of "mine"/"locked": same red the panel uses for problems. */
 .stage-timer.stage-timer-red {
   color: var(--danger-text);

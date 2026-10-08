@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { BET_REFUSALS } from "./bet.js";
 import {
+  decodeBetRefusal,
   decodeErrorCode,
   decodePlayerError,
   decodeSendFailure,
@@ -143,5 +145,24 @@ describe("decodePlayerError", () => {
   it("still logs the raw error for debugging", () => {
     decodePlayerError(new Error("boom"));
     expect(console.error).toHaveBeenCalledWith("boom");
+  });
+});
+
+describe("decodeBetRefusal", () => {
+  const GENERIC = "Something went wrong. Try again in a moment.";
+
+  it("has its own copy for every refusal the bet route names", () => {
+    const lines = BET_REFUSALS.map((code) => decodeBetRefusal(code));
+    expect(lines).not.toContain(GENERIC);
+    expect(new Set(lines).size).toBe(BET_REFUSALS.length);
+  });
+
+  it("covers the web client's own throttle and network codes", () => {
+    expect(decodeBetRefusal("Throttled")).toMatch(/too many bets/i);
+    expect(decodeBetRefusal("network")).toMatch(/reach the server/i);
+  });
+
+  it("says the generic line for a code it does not know", () => {
+    expect(decodeBetRefusal("http_500")).toBe(GENERIC);
   });
 });

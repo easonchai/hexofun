@@ -70,7 +70,7 @@ describe("stakeBarModel — placed state", () => {
     expect(model.tilesSelected).toBe("3");
     expect(model.ticketsPerTile).toBe(formatAtomic2(2_500_000n, DECIMALS));
     expect(model.ticketsIn).toBe(formatAtomic2(7_500_000n, DECIMALS));
-    expect(model.label).toBe("TOP UP");
+    expect(model.label).toBe("BET PLACED");
   });
 
   it("ignores the editing inputs once a Position is confirmed", () => {
@@ -81,30 +81,18 @@ describe("stakeBarModel — placed state", () => {
   });
 });
 
-describe("stakeBarModel — closed state (locked, settling, awaiting)", () => {
-  it("shows the locked phase copy and does not invite a bet", () => {
+describe("stakeBarModel — closed state (locked)", () => {
+  it("shows the revealing copy once the Round is past its close", () => {
     const model = stakeBarModel("1", [1, 2], null, "locked", DECIMALS);
     expect(model.state).toBe("closed");
-    expect(model.label).toBe("DRAWING…");
-  });
-
-  it("shows the settling phase copy", () => {
-    const model = stakeBarModel("1", [1, 2], null, "settling", DECIMALS);
-    expect(model.state).toBe("closed");
-    expect(model.label).toBe("DRAWING…");
-  });
-
-  it("shows the awaiting phase copy", () => {
-    const model = stakeBarModel("1", [1, 2], null, "awaiting", DECIMALS);
-    expect(model.state).toBe("closed");
-    expect(model.label).toBe("AWAITING…");
+    expect(model.label).toBe("REVEALING…");
   });
 
   it("still surfaces the placed Position's figures once locked", () => {
     const active = position({ tiles: (1n << 1n) | (1n << 2n), stakePerTile: 4n });
-    const model = stakeBarModel("1", [], active, "settling", DECIMALS);
+    const model = stakeBarModel("1", [], active, "locked", DECIMALS);
     expect(model.state).toBe("closed");
     expect(model.tilesSelected).toBe("2");
-    expect(model.label).toBe("DRAWING…");
+    expect(model.label).toBe("REVEALING…");
   });
 });

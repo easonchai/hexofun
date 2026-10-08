@@ -5,6 +5,7 @@ import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
 import {
+  cannotSignMessages,
   delegationMessage,
   dropSession,
   ensureSession,
@@ -194,6 +195,15 @@ describe("ensureSession", () => {
     await ensureSession(first.deps);
     const other = Keypair.generate().publicKey.toBase58();
     expect(loadSession(first.deps, other)).toBeNull();
+  });
+
+  it("detects a Ledger-style adapter: neither signMessage nor signIn", () => {
+    const noop = async () => new Uint8Array();
+    expect(cannotSignMessages({})).toBe(true);
+    expect(cannotSignMessages({ signMessage: undefined, signIn: undefined })).toBe(true);
+    expect(cannotSignMessages({ signMessage: noop })).toBe(false);
+    expect(cannotSignMessages({ signIn: noop })).toBe(false);
+    expect(LEDGER_COPY).toContain("cannot play the game");
   });
 
   it("shows the Ledger copy and never prompts or calls the server", async () => {

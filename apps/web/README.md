@@ -36,7 +36,10 @@ Copy `.env.example` to `.env.local` and adjust. The five variables are
   crash.
 - Amounts are bigint atomic units; formatting and parsing happen in
   `src/lib/money.ts` with no float in the path.
-- Rounds and Positions are not on chain any more (ADR 0025). The PLAY tab sits
-  behind `VITE_GATE_GAME=off` until wave 2 serves Rounds from the API.
+- Rounds and Positions are not on chain any more (ADR 0025). The PLAY tab reads
+  the open and last Round off `GET /state` and sends a bet as a message the
+  session key signs (`src/bet.ts`, `POST /game/bets`); no chain read or
+  transaction is in the game path. `VITE_GATE_GAME=off` still covers it with
+  the Coming soon card, as a launch switch.
 - Transactions are built directly from the IDL (`src/actions.ts`). The Anchor
   client camelCases the IDL, so `buy_tickets` is reached as `buyTickets`.

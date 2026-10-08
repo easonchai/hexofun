@@ -305,6 +305,45 @@ export interface StateDto {
    *  only while `currentEpoch` is null; null once an Epoch exists or none is
    *  configured. */
   launchAt: string | null;
+  /** Ticket 18: the id a bet names to open a Round (decimal). */
+  nextRoundId: string;
+  /** The open Round; null on an idle board. */
+  openRound: OpenRoundDto | null;
+  /** The newest Round that is not open, while its result still matters. */
+  lastRound: LastRoundDto | null;
+  /** The owner's Positions in `openRound` and `lastRound`. */
+  positions: PositionDto[];
+  /** Server wall-clock seconds, the clock `openRound.closeAt` is on (decimal). */
+  serverTime: string;
+}
+
+export type RoundStatusDto = "open" | "closed" | "revealed" | "settled" | "voided";
+
+export interface OpenRoundDto {
+  id: string;
+  openAt: string;
+  /** ISO time the engine stops taking bets. */
+  closeAt: string;
+  status: RoundStatusDto;
+  /** Per tile, Tickets staked on it (decimal strings, 36 of them). */
+  tileTotals: string[];
+  /** sha256 of the seed the reveal will publish. */
+  seedCommitment: string;
+}
+
+export interface LastRoundDto {
+  id: string;
+  status: RoundStatusDto;
+  /** Protocol tile 0..35 once settled. */
+  tile: number | null;
+  seedCommitment: string;
+}
+
+export interface PositionDto {
+  roundId: string;
+  /** 36-bit tile mask (decimal), bit n for tile n. */
+  tiles: string;
+  stakePerTile: string;
 }
 
 /** The epoch a permissionless crank would accept right now. */

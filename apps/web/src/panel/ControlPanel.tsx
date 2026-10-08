@@ -114,16 +114,6 @@ export function ControlPanel(props: ControlPanelProps) {
   const ready = canDeploy && tiles > 0 && stake > 0n && !locked && !deployBusy;
   const showScan = ready && !locked;
   const showLocked = locked && !deployBusy;
-  // "locked" (positions closed, countdown still running) reads the same as
-  // "settling" here: the deploy button can't be pressed either way.
-  const settling =
-    (engine.phase === "settling" || engine.phase === "locked") && !deployBusy;
-  // Once a round settles, forfeits or voids, App nulls `openRound`, so
-  // `locked` and `canDeploy` both go false and this button would otherwise
-  // fall through to "SELECT TILES"/"DEPLOY" — inviting a bet while Positions
-  // are closed (see stakeBar.ts's doc comment, which needed the same fix on
-  // the phone stake bar, and used this same string).
-  const awaiting = engine.phase === "awaiting" && !deployBusy;
 
   /** Prototype deploy burst: six symbols radiating out for 0.65s. */
   const [burst, setBurst] = useState(false);
@@ -299,7 +289,7 @@ export function ControlPanel(props: ControlPanelProps) {
 
         <button
           type="button"
-          className={`btn-deploy${locked ? " locked" : ""}${settling ? " settling" : ""}${!canDeploy || tiles === 0 || stake === 0n ? " dim" : ""}`}
+          className={`btn-deploy${locked ? " locked" : ""}${!canDeploy || tiles === 0 || stake === 0n ? " dim" : ""}`}
           data-testid="deploy"
           disabled={!ready}
           title={deployHint ?? undefined}
@@ -344,17 +334,7 @@ export function ControlPanel(props: ControlPanelProps) {
               </span>
             </span>
           ) : (
-            <span>
-              {awaiting
-                ? "AWAITING…"
-                : settling
-                  ? "DRAWING…"
-                  : tiles === 0
-                    ? "SELECT TILES"
-                    : locked
-                      ? "DEPLOYED"
-                      : "DEPLOY"}
-            </span>
+            <span>{tiles === 0 ? "SELECT TILES" : locked ? "DEPLOYED" : "DEPLOY"}</span>
           )}
         </button>
         {deployNote ? (

@@ -4,18 +4,12 @@
  * (`stake * tiles`, the same formula `ControlPanel` uses for "PER ROUND" /
  * "TICKETS IN").
  *
- * Phase copy for the closed state mirrors the deploy button in
- * `ControlPanel.tsx`, but those strings are inline JSX literals, not
- * exports. "DRAWING…" is reused verbatim (the button shows it for both the
- * locked and settling Round phases). Nothing in `ControlPanel` covers the
- * awaiting phase — its deploy button falls back to "DEPLOY"/"SELECT TILES"
- * because `openRound` is null once a round settles, forfeits or voids, so
- * "AWAITING…" below is new copy. Flag this for reconciliation: either give
- * the deploy button real awaiting copy too, or accept the two surfaces
- * differ here.
+ * The closed state is the second between the client clock reaching the open
+ * Round's `closeAt` and the server closing it. With no Round open the bar is
+ * "editing": the next bet opens one.
  */
 import { formatAtomic, formatAtomic2, parseAtomic } from "../lib/money.js";
-import type { Phase, PositionLike } from "../engine.js";
+import { tileCountOf, type Phase, type PositionLike } from "../engine.js";
 
 export type StakeBarState = "editing" | "placed" | "closed";
 
@@ -31,16 +25,7 @@ export interface StakeBarModel {
   label: string;
 }
 
-const CLOSED_LABEL: Record<"locked" | "settling" | "awaiting", string> = {
-  locked: "DRAWING…",
-  settling: "DRAWING…",
-  awaiting: "AWAITING…",
-};
-
-/** Popcount of a Position's tile bitmask — the same recipe App.tsx uses for deployedTotal. */
-function tileCountOf(tiles: bigint): number {
-  return tiles.toString(2).replace(/[^1]/g, "").length;
-}
+const CLOSED_LABEL = "REVEALING…";
 
 /** Derives the stake bar's model from the panel's own inputs and the Round phase. */
 export function stakeBarModel(
@@ -74,16 +59,17 @@ export function stakeBarModel(
     };
   };
 
-  if (phase === "locked" || phase === "settling" || phase === "awaiting") {
+  if (phase === "locked") {
     return {
       state: "closed",
       ...(position ? placedNumbers(position) : editingNumbers()),
-      label: CLOSED_LABEL[phase],
+      label: CLOSED_LABEL,
     };
   }
 
+  // One Position per wallet per Round: no top-up, so the bar says what happened.
   if (position) {
-    return { state: "placed", ...placedNumbers(position), label: "TOP UP" };
+    return { state: "placed", ...placedNumbers(position), label: "BET PLACED" };
   }
 
   return { state: "editing", ...editingNumbers(), label: "DEPLOY" };

@@ -144,6 +144,7 @@ export function Arena({
     coreEnter,
     takeover,
     dismissTakeover,
+    result,
   } = engine;
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
@@ -153,19 +154,21 @@ export function Arena({
   const revealDots = reveal?.fired ? reveal.laser.activeDotTimes : {};
   const flyMap = reveal?.flyMap ?? {};
   const seconds = Number(secondsLeft);
-  const showTimer =
-    phase === "mine" || phase === "locked" || phase === "settling";
-  // The countdown ends at the close; from there the draw is in flight and
-  // its length is the oracle's, so the timer says what is happening instead.
-  const timerLabel = phase === "mine" ? timerText(secondsLeft) : "DRAWING";
+  const revealing = result?.kind === "revealing";
+  // The countdown ends at the close; from there the draw waits on its beacon,
+  // whose length is drand's, so the timer says what is happening instead.
+  const timerLabel = phase === "mine" ? timerText(secondsLeft) : revealing ? "REVEALING" : null;
   const timerRed = phase === "mine" && seconds <= 2;
+  // No countdown and no reveal under way: a voided Round, else the idle label.
+  const boardLabel = result?.kind === "voided" ? "ROUND VOIDED, STAKES REFUNDED" : idleLabel;
 
   // Idle through the countdown and the draw; when the result lands the core
   // shakes hard for the build-up, then detonates as the laser fires.
+  const coreLive = phase !== "idle" || revealing;
   const shake =
     reveal && !reveal.fired
       ? "hexShake .08s infinite"
-      : phase === "mine" || phase === "locked" || phase === "settling"
+      : coreLive
         ? "hexShakeSubtle .25s infinite"
         : "none";
 
@@ -205,16 +208,21 @@ export function Arena({
     <div className="stage-arena-wrap" data-testid="arena" ref={arenaWrapRef}>
       <div className="hex-stage-container">
         {/* Timer / win banner above the hexagon */}
-        {showTimer && !banner ? (
+        {timerLabel !== null && !banner ? (
           <div
             className={`stage-timer${operatorStale ? " stage-timer-stale" : ""}${timerRed && !operatorStale ? " stage-timer-red" : ""}`}
             data-testid="round-timer"
           >
             {operatorStale ? "OPERATOR PAUSED" : timerLabel}
           </div>
-        ) : !banner && idleLabel ? (
+        ) : !banner && boardLabel ? (
           <div className="stage-timer stage-timer-stale" data-testid="board-idle-label">
-            {idleLabel}
+            {boardLabel}
+          </div>
+        ) : null}
+        {result?.kind === "revealing" && !banner ? (
+          <div className="stage-commitment" data-testid="seed-commitment" title="sha256 of the seed this Round reveals">
+            seed commitment {result.seedCommitment}
           </div>
         ) : null}
         {banner ? (
@@ -283,10 +291,7 @@ export function Arena({
             >
               <LogoCog size={72} />
             </div>
-          ) : reveal ||
-            phase === "mine" ||
-            phase === "locked" ||
-            phase === "settling" ? (
+          ) : reveal || coreLive ? (
             <div
               className="stage-core"
               style={{

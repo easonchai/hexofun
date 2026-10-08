@@ -74,6 +74,11 @@ const state = {
   chainTime: "1800000000",
   priorityFeeMicroLamports: 0,
   launchAt: null,
+  nextRoundId: "1",
+  openRound: null,
+  lastRound: null,
+  positions: [],
+  serverTime: "1800000000",
 };
 
 async function mockBackend(page: Page): Promise<void> {

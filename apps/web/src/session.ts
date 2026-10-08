@@ -91,9 +91,10 @@ export const cannotSignMessages = (signer: {
   signIn?: unknown;
 }): boolean => !signer.signMessage && !signer.signIn;
 
+/** The spec's "Ledger users" line, word for word. */
 export const LEDGER_COPY =
-  "This wallet cannot sign messages, so it cannot start a betting session. " +
-  "Connect a Phantom or Solflare wallet, or sign in with email, to play.";
+  "Ledger wallets can deposit and win the daily draw but cannot play the game. " +
+  "Connect a software wallet to play.";
 
 export type NonceResult =
   | { ok: true; nonce: string }
