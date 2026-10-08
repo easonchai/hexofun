@@ -15,6 +15,8 @@ import { OpsController } from "./ops.controller";
 import { OpsSummaryService } from "./ops-summary";
 import { ReferralsController } from "./referrals.controller";
 import { SerializationInterceptor } from "./serialization.interceptor";
+import { SessionsController } from "./sessions.controller";
+import { SessionsService } from "./sessions.service";
 
 /**
  * spec.md §3.5. The interceptor and the guard are registered here rather than
@@ -42,7 +44,8 @@ import { SerializationInterceptor } from "./serialization.interceptor";
             controller === FaucetController ||
             controller === AccessController ||
             controller === ErrorReportController ||
-            controller === FastPauseController
+            controller === FastPauseController ||
+            controller === SessionsController
           ) {
             return false;
           }
@@ -64,9 +67,11 @@ import { SerializationInterceptor } from "./serialization.interceptor";
     ReferralsController,
     ErrorReportController,
     GameConfigController,
+    SessionsController,
   ],
   providers: [
     ApiService,
+    SessionsService,
     OpsSummaryService,
     { provide: APP_INTERCEPTOR, useClass: SerializationInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },

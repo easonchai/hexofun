@@ -399,3 +399,30 @@ model GameConfig {
 
   @@index([poolAddress, id])
 }
+
+// off-chain-tickets ticket 15: a wallet's signed delegation of a
+// browser-held session key. One row per delegation; `sessionPubkey` is unique
+// because the web mints a fresh key for every delegation. `message` and
+// `signature` are the wallet's SIWS-shaped text and ed25519 signature, kept
+// verbatim for the published Round record. No relation to Pool, so a Pool
+// cutover leaves the table alone. `nextSeq` is the next bet's seq (ticket 16).
+model Session {
+  id            String    @id @default(uuid())
+  poolAddress   String
+  wallet        String
+  sessionPubkey String    @unique
+  message       String
+  signature     String
+  issuedAt      DateTime
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  nextSeq       Int       @default(0)
+
+  @@index([wallet])
+}
+
+// Single-use nonces for the delegation message. Consumed by deleting the row.
+model SessionNonce {
+  nonce     String   @id
+  expiresAt DateTime
+}
