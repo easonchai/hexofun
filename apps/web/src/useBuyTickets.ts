@@ -7,11 +7,16 @@ import { useCallback, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import { awaitSendResult, buyTickets, type TxSigner } from "./actions.js";
-import { buyDisabledReason, pendingDepositNote } from "./buyTickets.js";
+import { apiBaseUrl } from "./api.js";
+import { buyDisabledReason, pendingDepositNote, ticketsFromUsdc } from "./buyTickets.js";
 import type { HexVaultProgram } from "./chain.js";
 import { parseAtomic } from "./lib/money.js";
+import { fetchGameConfig } from "./ops/gameConfig.js";
 import { decodePlayerError, decodeSendFailure } from "./playerErrors.js";
 import type { PoolLike } from "./read.js";
+import { useApiPoll } from "./useApiPoll.js";
+
+const loadGameConfig = (signal: AbortSignal) => fetchGameConfig(apiBaseUrl(), signal);
 
 const DECIMALS = 6;
 
@@ -21,6 +26,7 @@ export interface UseBuyTicketsOptions {
   /** Sponsored send path of the Privy embedded wallet; unset for the rest. */
   sendTransaction?: TxSigner["sendTransaction"] | undefined;
   pool: PoolLike | null;
+  /** The pool's on-chain `buy_tickets_paused` (`/pool` `live.buyTicketsPaused`). */
   paused: boolean;
   /** ticket 11: `buy_tickets` refuses outright once the pool is shut down. */
   shutdown: boolean;
@@ -36,6 +42,8 @@ export interface BuyTicketsState {
   amountText: string;
   setAmountText: (text: string) => void;
   amount: bigint | null;
+  /** What `amount` buys at the Game config's rate, or null until `/game/config` has answered. */
+  tickets: bigint | null;
   allowanceLeft: bigint | null;
   /** One line to show beside the allowance, or null. */
   allowanceNote: string | null;
@@ -65,6 +73,8 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
   const [error, setError] = useState<string | null>(null);
 
   const amount = parseAtomic(amountText, DECIMALS);
+  const rate = useApiPoll(loadGameConfig, 30_000).data?.inForce?.ticketsPerUsdc;
+  const tickets = amount !== null && rate !== undefined ? ticketsFromUsdc(amount, rate) : null;
 
   // `allowanceLeft` lags behind `principal`/`paused`/`shutdown` (its own
   // slower poll), so "loading…" only shows for a depositor who is genuinely
@@ -115,6 +125,7 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
     amountText,
     setAmountText,
     amount,
+    tickets,
     allowanceLeft,
     allowanceNote: pendingDepositNote(pendingDeposit),
     disabledReason,
