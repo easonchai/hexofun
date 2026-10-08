@@ -1,0 +1,535 @@
+{
+  "format": "Merkle sum tree vectors for apps/backend/src/snapshot/sum-tree.ts and the program's snapshot.rs. Hashes and wallets are lowercase hex with no prefix. tickets, sums, total, target and prefix are u64 decimal strings; depth, leafCount, index and winnerIndex are JSON numbers. leaf = sha256(0x00 || wallet[32] || tickets u64le); node = sha256(0x01 || L.hash || L.sum u64le || R.hash || R.sum u64le); pad to 2^depth with leaf(wallet 0, tickets 0). proofs[].siblings run from the leaf up. Each target's winner is the leaf whose [winnerPrefix, winnerPrefix + winnerTickets) holds it. Regenerate with UPDATE_VECTORS=1 pnpm --filter @hexvault/backend test sum-tree.",
+  "cases": [
+    {
+      "name": "one-leaf",
+      "leaves": [
+        {
+          "wallet": "0909090909090909090909090909090909090909090909090909090909090909",
+          "tickets": "5"
+        }
+      ],
+      "depth": 1,
+      "leafCount": 1,
+      "total": "5",
+      "root": "a45242a8113e0a0655308df3a455fff663ca5f6e46200b5e42bb9adb06e642fb",
+      "proofs": [
+        {
+          "index": 0,
+          "wallet": "0909090909090909090909090909090909090909090909090909090909090909",
+          "tickets": "5",
+          "siblings": [
+            {
+              "hash": "9e1736c43d19118e6ce4302118af337109491ecc52757dfb949bad6a7940b0c2",
+              "sum": "0"
+            }
+          ]
+        }
+      ],
+      "targets": [
+        {
+          "target": "0",
+          "winnerIndex": 0,
+          "winnerWallet": "0909090909090909090909090909090909090909090909090909090909090909",
+          "winnerTickets": "5",
+          "winnerPrefix": "0"
+        },
+        {
+          "target": "0",
+          "winnerIndex": 0,
+          "winnerWallet": "0909090909090909090909090909090909090909090909090909090909090909",
+          "winnerTickets": "5",
+          "winnerPrefix": "0"
+        },
+        {
+          "target": "4",
+          "winnerIndex": 0,
+          "winnerWallet": "0909090909090909090909090909090909090909090909090909090909090909",
+          "winnerTickets": "5",
+          "winnerPrefix": "0"
+        }
+      ]
+    },
+    {
+      "name": "two-leaves-u64-max",
+      "leaves": [
+        {
+          "wallet": "0101010101010101010101010101010101010101010101010101010101010101",
+          "tickets": "9223372036854775808"
+        },
+        {
+          "wallet": "0202020202020202020202020202020202020202020202020202020202020202",
+          "tickets": "9223372036854775807"
+        }
+      ],
+      "depth": 1,
+      "leafCount": 2,
+      "total": "18446744073709551615",
+      "root": "dd88cac1c516b5303d65d924f7077ed52e03a3a70fd8b0a05a242d5a1c57d5d6",
+      "proofs": [
+        {
+          "index": 0,
+          "wallet": "0101010101010101010101010101010101010101010101010101010101010101",
+          "tickets": "9223372036854775808",
+          "siblings": [
+            {
+              "hash": "c0566543ab02a44abe37460734f1f8bf1cfc05484b967510c70a562b18964c2a",
+              "sum": "9223372036854775807"
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "wallet": "0202020202020202020202020202020202020202020202020202020202020202",
+          "tickets": "9223372036854775807",
+          "siblings": [
+            {
+              "hash": "0f82857605404b3cefd28149d9670c93015bf8f00f099722866f31f750d6b6c8",
+              "sum": "9223372036854775808"
+            }
+          ]
+        }
+      ],
+      "targets": [
+        {
+          "target": "0",
+          "winnerIndex": 0,
+          "winnerWallet": "0101010101010101010101010101010101010101010101010101010101010101",
+          "winnerTickets": "9223372036854775808",
+          "winnerPrefix": "0"
+        },
+        {
+          "target": "9223372036854775808",
+          "winnerIndex": 1,
+          "winnerWallet": "0202020202020202020202020202020202020202020202020202020202020202",
+          "winnerTickets": "9223372036854775807",
+          "winnerPrefix": "9223372036854775808"
+        },
+        {
+          "target": "18446744073709551614",
+          "winnerIndex": 1,
+          "winnerWallet": "0202020202020202020202020202020202020202020202020202020202020202",
+          "winnerTickets": "9223372036854775807",
+          "winnerPrefix": "9223372036854775808"
+        }
+      ]
+    },
+    {
+      "name": "eleven-leaves",
+      "leaves": [
+        {
+          "wallet": "0101010101010101010101010101010101010101010101010101010101010101",
+          "tickets": "3"
+        },
+        {
+          "wallet": "0202020202020202020202020202020202020202020202020202020202020202",
+          "tickets": "1"
+        },
+        {
+          "wallet": "0303030303030303030303030303030303030303030303030303030303030303",
+          "tickets": "4"
+        },
+        {
+          "wallet": "0404040404040404040404040404040404040404040404040404040404040404",
+          "tickets": "1"
+        },
+        {
+          "wallet": "0505050505050505050505050505050505050505050505050505050505050505",
+          "tickets": "5"
+        },
+        {
+          "wallet": "0606060606060606060606060606060606060606060606060606060606060606",
+          "tickets": "9"
+        },
+        {
+          "wallet": "0707070707070707070707070707070707070707070707070707070707070707",
+          "tickets": "2"
+        },
+        {
+          "wallet": "0808080808080808080808080808080808080808080808080808080808080808",
+          "tickets": "6"
+        },
+        {
+          "wallet": "0909090909090909090909090909090909090909090909090909090909090909",
+          "tickets": "5"
+        },
+        {
+          "wallet": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+          "tickets": "3"
+        },
+        {
+          "wallet": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "tickets": "5"
+        }
+      ],
+      "depth": 4,
+      "leafCount": 11,
+      "total": "44",
+      "root": "07325201f4adf186d8eacae4682dc43fb4e63e2356e67f3a212741d38a96a949",
+      "proofs": [
+        {
+          "index": 0,
+          "wallet": "0101010101010101010101010101010101010101010101010101010101010101",
+          "tickets": "3",
+          "siblings": [
+            {
+              "hash": "102919b5bb33d3ec1461104651791bfbb4c554145099b6464b8933c1401e3a90",
+              "sum": "1"
+            },
+            {
+              "hash": "ceec66c4b26ec230666edbdc3ea62a97efbe33a9b826ab7546d3738e9f53d3db",
+              "sum": "5"
+            },
+            {
+              "hash": "3af25e7833f182de501cc07a12852db3cf0ac4ca5615140b401bd875ef1a48bc",
+              "sum": "22"
+            },
+            {
+              "hash": "c7617b9b0eff4ebe8e363d0ce2aa6d892cdc695c26757f714e5e3a0e61cee836",
+              "sum": "13"
+            }
+          ]
+        },
+        {
+          "index": 5,
+          "wallet": "0606060606060606060606060606060606060606060606060606060606060606",
+          "tickets": "9",
+          "siblings": [
+            {
+              "hash": "43eeb538678b9b1e3d4adf1693e30a1615658fd78c5cdfa7cd67ea5c48c240d4",
+              "sum": "5"
+            },
+            {
+              "hash": "52996dfebf905e896e59d732108929bd10de0180981772d92ffcf4ec80a93a7b",
+              "sum": "8"
+            },
+            {
+              "hash": "b61a4591be8f27661af13ac35aaadc4709cefa79e9afdc328be44eb25c4ec65c",
+              "sum": "9"
+            },
+            {
+              "hash": "c7617b9b0eff4ebe8e363d0ce2aa6d892cdc695c26757f714e5e3a0e61cee836",
+              "sum": "13"
+            }
+          ]
+        },
+        {
+          "index": 10,
+          "wallet": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "tickets": "5",
+          "siblings": [
+            {
+              "hash": "9e1736c43d19118e6ce4302118af337109491ecc52757dfb949bad6a7940b0c2",
+              "sum": "0"
+            },
+            {
+              "hash": "64346c0c3f40971550ee2cba1862d032e2bc52b5c4ba8c87eae8315224e646a7",
+              "sum": "8"
+            },
+            {
+              "hash": "6bbf47cb8c6c9eafaa3ee9c42e534f94ca3972060b604eaffc8b3f8b224641ae",
+              "sum": "0"
+            },
+            {
+              "hash": "5ab6b8812ba476086ec1deba4a77947cf4bd669351cd55aa9783ccf9311a6dac",
+              "sum": "31"
+            }
+          ]
+        }
+      ],
+      "targets": [
+        {
+          "target": "0",
+          "winnerIndex": 0,
+          "winnerWallet": "0101010101010101010101010101010101010101010101010101010101010101",
+          "winnerTickets": "3",
+          "winnerPrefix": "0"
+        },
+        {
+          "target": "14",
+          "winnerIndex": 5,
+          "winnerWallet": "0606060606060606060606060606060606060606060606060606060606060606",
+          "winnerTickets": "9",
+          "winnerPrefix": "14"
+        },
+        {
+          "target": "43",
+          "winnerIndex": 10,
+          "winnerWallet": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "winnerTickets": "5",
+          "winnerPrefix": "39"
+        }
+      ]
+    },
+    {
+      "name": "two-hundred-thousand-leaves",
+      "generator": "leaf i (0-based, i < 200000): h = sha256(\"hexvault-sum-tree-vectors\" || u32be(i)); wallet = u32be(i) || h[0..28]; tickets = 1 + (u32le(h[28..32]) mod 1000)",
+      "depth": 18,
+      "leafCount": 200000,
+      "total": "100109995",
+      "root": "1e09ca7a909f2abd4792cb36390ec0fd3a253fa99200050845c12020ba93a735",
+      "proofs": [
+        {
+          "index": 0,
+          "wallet": "000000007b08c9e1f32095b84857a02032b4ddabc6d109cbc64792c8e0c3acd6",
+          "tickets": "664",
+          "siblings": [
+            {
+              "hash": "721c265fe43ec9ace255016c558e5035812baf4fb13389652a8879610302b24c",
+              "sum": "325"
+            },
+            {
+              "hash": "296a02fcb3342b600b75aed5f90ee9757359fa14e5f5d38603220e041c0236c5",
+              "sum": "799"
+            },
+            {
+              "hash": "4cfb09f110ad479aa45634273e38d1be781980c74de2df27b6a33363c6aa2ba0",
+              "sum": "1286"
+            },
+            {
+              "hash": "b31ed09b55cc87305ea1661e33fdd0d724e70f2079bd27760d67491e7a4311d4",
+              "sum": "4132"
+            },
+            {
+              "hash": "93d2130db233e3d9d0f40dc646724c01c4745234f48cc9480c2487d28f5a0736",
+              "sum": "10701"
+            },
+            {
+              "hash": "8eee53b07663970e7a10282854e36af5100e8fc830bb8cda5f996f95d0023ad4",
+              "sum": "14693"
+            },
+            {
+              "hash": "4899d71167ed22c743bb4267c0380492d35bdd3ce4fa8ffedbbfca708091f65f",
+              "sum": "37246"
+            },
+            {
+              "hash": "5c1220912d785a68c4543631ac95272489a7dd1aea836c68aabb88fbd86b950b",
+              "sum": "63529"
+            },
+            {
+              "hash": "3c827cd0b092ed85a9bb6d3a21073086c37ff71b90b2f01c37ba475881c9834d",
+              "sum": "128498"
+            },
+            {
+              "hash": "7e308a5617383c14d8e1d8ab090431845e99df53e5787fdd5d9fc9c5c00d86c7",
+              "sum": "258590"
+            },
+            {
+              "hash": "4d748066293160030fb95bbfe9d9a387a914570ed5fdefcdd46e398dca19c8e6",
+              "sum": "521660"
+            },
+            {
+              "hash": "b3c15a373767bceda6a8dd29f6fbc953f7467baa92f06e045454a4ca192f82d9",
+              "sum": "1011061"
+            },
+            {
+              "hash": "96237087ad9f2b6c4c243596ce3185e25d6e75cf46ce170c4c9e40e95944b1a6",
+              "sum": "2055274"
+            },
+            {
+              "hash": "1f15fcb27161868269e488323f4ff87c91dc278a9c4e9b78b8e14066930b14c8",
+              "sum": "4106717"
+            },
+            {
+              "hash": "3d703f09d5d34b60321c70878f0dddcbaace344663e7df1e53b742349ad6c7cc",
+              "sum": "8175194"
+            },
+            {
+              "hash": "fd4f75688469872ad61eb02990808bce7548a583dfc55daa82794ce82a915639",
+              "sum": "16456414"
+            },
+            {
+              "hash": "8577e3c7b31c5422442f7dccb17c7b88a8ec8dddadf17fe67ebb3269990bb1ee",
+              "sum": "32768706"
+            },
+            {
+              "hash": "8175570528b08d4377054e69b5a90843dc78607272dee6ae939d04cb73e766a3",
+              "sum": "34494506"
+            }
+          ]
+        },
+        {
+          "index": 100000,
+          "wallet": "000186a04086b3b5185379b0c19dad43cc203c1a3898dd64b23fa458a08762ee",
+          "tickets": "901",
+          "siblings": [
+            {
+              "hash": "dad944e0208af2476480d6ff1b6c3cfee3226ce9845e63f4114f8fb59b5898b0",
+              "sum": "729"
+            },
+            {
+              "hash": "8b65fc31a6ec7852aaec66e38d214bc1d7a44cb7c99e4ff67cdf94c6877a7c01",
+              "sum": "1133"
+            },
+            {
+              "hash": "cbe719811a8aaa8ab6701f9f824720ffaae4a0840b2b7e0bd41f0fb15f174636",
+              "sum": "2227"
+            },
+            {
+              "hash": "13dc5752e34f480f3cddcf13c0d604248c3e12512c735d0de790321f2a7417f5",
+              "sum": "4193"
+            },
+            {
+              "hash": "1c4f2884ccc8e1d1ec55cd6f1304c6ae56b897a621826dcbce0ebd168d5ea325",
+              "sum": "7721"
+            },
+            {
+              "hash": "e3b974d2529af5a50362ca4f66c0581847bb6c436186b107e357bead62d7c38c",
+              "sum": "14517"
+            },
+            {
+              "hash": "3808e7b2d4e9cea0daa76f9cf8cb0cc19e50e608546f9e8ebefa35e3f5aefa35",
+              "sum": "31740"
+            },
+            {
+              "hash": "e2e7ebbd6a9a435158b21c39d490958206f2b110c8bdc5a4b659ba91a7228924",
+              "sum": "67893"
+            },
+            {
+              "hash": "b5b41980b0bcdcb61a37f7275a85dc03f50d27be9fc3bd035e72b259e52cd62b",
+              "sum": "131122"
+            },
+            {
+              "hash": "fcad17bdc4d6aaed56b6fe1e3a1787cf6c7f26489d9ff8ed0d12e55793976723",
+              "sum": "256116"
+            },
+            {
+              "hash": "592bb7467940aebd425066c3ab430762ece3751d7e8fef150f6eadcfd2bb7698",
+              "sum": "508538"
+            },
+            {
+              "hash": "ea1164c21ed5ea6166a45aa82cd16e000d13c92e3e04bd5eb515fb0b5745bee4",
+              "sum": "1016679"
+            },
+            {
+              "hash": "dc06d85f5fb679106dc7c3789af512fde6390290e2f72c062bb98738adef9611",
+              "sum": "2017604"
+            },
+            {
+              "hash": "d18bf5e7f45deff42021fee34eab029e06dd8faa470b7df9508ba8a3fde82fe2",
+              "sum": "4086669"
+            },
+            {
+              "hash": "3d2d3e808945c99116bd9e13c53e3ba15a32341fdf3186fe4a1b6296504598dd",
+              "sum": "8197241"
+            },
+            {
+              "hash": "bb3237aca0c94ba6a4361ade4463edf44f5df3ff388fd4c14537a21c0555e6cf",
+              "sum": "16423683"
+            },
+            {
+              "hash": "9b174a396314789dffc5067213c1c1aa1b236d79f00998be3a7d3fcdd1bcec17",
+              "sum": "32846783"
+            },
+            {
+              "hash": "8175570528b08d4377054e69b5a90843dc78607272dee6ae939d04cb73e766a3",
+              "sum": "34494506"
+            }
+          ]
+        },
+        {
+          "index": 199999,
+          "wallet": "00030d3fa501e3c6cdfefd23f101d64d07e27c987bc77dcb6c47c3edb2fc3970",
+          "tickets": "768",
+          "siblings": [
+            {
+              "hash": "677befb17f0a3b09d3188a48606699e16b1872c77f1e68bf6f01a34774004b28",
+              "sum": "866"
+            },
+            {
+              "hash": "196301927eb6b23ab9b5e432d101b9cfcea488ba2e4d31193b81c8437a0f8582",
+              "sum": "1309"
+            },
+            {
+              "hash": "8df80a8c470634f7161c420d8c23687d10b865b36cacc3b8ffe791f561461d17",
+              "sum": "3047"
+            },
+            {
+              "hash": "ea67079e75eeb3da840bc2358bbaf3628c439c957707ee4c34b05db049678c1b",
+              "sum": "4488"
+            },
+            {
+              "hash": "2550db744760be682db6d9d71bd8ff428024f67f3c0c62fe276d78a10e72f6d3",
+              "sum": "8228"
+            },
+            {
+              "hash": "4bdb89cfc5e002d6e645315a026ac16fdbd94c9731e22d0b6c55674642a676c9",
+              "sum": "17062"
+            },
+            {
+              "hash": "a1bd7dddbc3065e320221346d2f8b0f310db41815d0d30a482f106c1c05fa974",
+              "sum": "0"
+            },
+            {
+              "hash": "088246d6c824f63cd121f907997b7c24dafe10c7faee181ccee8c3e79d50534d",
+              "sum": "0"
+            },
+            {
+              "hash": "65f86586c3cff4eff2df4d2a3a1908370f2bb73ff32364f383421ef10d30afeb",
+              "sum": "122611"
+            },
+            {
+              "hash": "54ee98c28f922d333d5a3d2261a7f7211f50fc06c404d13e3b11659d46f64218",
+              "sum": "0"
+            },
+            {
+              "hash": "54fe5fbcc76affab8d4701b9a0a88c90675c64565a9b492abd0f5387c61a8f6b",
+              "sum": "505274"
+            },
+            {
+              "hash": "ac82516daac137f8e5238c3d1452eab146a9e10b945be662e496ab168338bca3",
+              "sum": "1023493"
+            },
+            {
+              "hash": "db82bace78a1eb599158a211b55a4fc1c56c8750f89343e57c6d37407223e014",
+              "sum": "0"
+            },
+            {
+              "hash": "0961b06f503e488520c80a89ba6f4fb11a1bfa356cd76c5369974af1573f9b53",
+              "sum": "0"
+            },
+            {
+              "hash": "65c9c93c27b1e1255c83192e4ad69e02c25055a78aa8b0a222470dd23c47e027",
+              "sum": "0"
+            },
+            {
+              "hash": "fe254eeb612372f4a0c82a17317fe0debf7e7008c8a7de81bf63153432f7db97",
+              "sum": "0"
+            },
+            {
+              "hash": "f642e4268898fff8403c98028abc35c88d54e794812c7fed199cf79e13266d1c",
+              "sum": "32807360"
+            },
+            {
+              "hash": "b014b318893be10e58f82228a1f8e9422d88ef11edfea2602fd9b415b6032576",
+              "sum": "65615489"
+            }
+          ]
+        }
+      ],
+      "targets": [
+        {
+          "target": "0",
+          "winnerIndex": 0,
+          "winnerWallet": "000000007b08c9e1f32095b84857a02032b4ddabc6d109cbc64792c8e0c3acd6",
+          "winnerTickets": "664",
+          "winnerPrefix": "0"
+        },
+        {
+          "target": "50117530",
+          "winnerIndex": 100000,
+          "winnerWallet": "000186a04086b3b5185379b0c19dad43cc203c1a3898dd64b23fa458a08762ee",
+          "winnerTickets": "901",
+          "winnerPrefix": "50117530"
+        },
+        {
+          "target": "100109994",
+          "winnerIndex": 199999,
+          "winnerWallet": "00030d3fa501e3c6cdfefd23f101d64d07e27c987bc77dcb6c47c3edb2fc3970",
+          "winnerTickets": "768",
+          "winnerPrefix": "100109227"
+        }
+      ]
+    }
+  ]
+}
