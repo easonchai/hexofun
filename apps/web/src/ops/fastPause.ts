@@ -4,6 +4,8 @@
  *
  * `fastPauseMessage` mirrors apps/backend/src/api/invite-code.ts byte for byte.
  */
+import { POOL_ID, poolAddress } from "../chain.js";
+
 export const FAST_PAUSE_SWITCHES = ["pool", "game", "jackpot", "deploy"] as const;
 export type FastPauseSwitch = (typeof FAST_PAUSE_SWITCHES)[number];
 
@@ -11,6 +13,16 @@ const FETCH_TIMEOUT_MS = 15_000;
 
 export function fastPauseMessage(feature: FastPauseSwitch, pool: string, unixSeconds: number): string {
   return `HEXO fast pause: ${feature} ${pool} ${unixSeconds}`;
+}
+
+/** Signs the fast-pause message. The backend verifies it over the pool's base58 address, not the numeric id. */
+export async function signFastPause(
+  signMessage: (message: Uint8Array) => Promise<Uint8Array>,
+  feature: FastPauseSwitch,
+  unixSeconds: number,
+): Promise<Uint8Array> {
+  const message = fastPauseMessage(feature, poolAddress(POOL_ID).toBase58(), unixSeconds);
+  return signMessage(new TextEncoder().encode(message));
 }
 
 /** The admin CLI command that does what the failed request should have done. */

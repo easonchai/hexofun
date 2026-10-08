@@ -5,7 +5,7 @@ import { useState } from "react";
 
 import { API_URL, POOL_ID, poolAddress } from "../chain.js";
 import { encodeForSquads, pauseIx, type PauseSwitch } from "./admin.js";
-import { classifyFastPauseError, fastPauseMessage, postFastPause } from "./fastPause.js";
+import { classifyFastPauseError, postFastPause, signFastPause } from "./fastPause.js";
 import { PAUSE_LABEL, pauseConfirm } from "./opsCopy.js";
 import { isFastPauseSwitch, pausePath, type PausePathKind } from "./pausePath.js";
 import { PreparedTx } from "./PreparedTx.js";
@@ -71,7 +71,7 @@ export function PausePanel() {
       } else if (kind === "fast") {
         if (!publicKey || !signMessage || !isFastPauseSwitch(sw)) return;
         const time = Math.floor(Date.now() / 1000);
-        const bytes = await signMessage(new TextEncoder().encode(fastPauseMessage(sw, POOL_ID.toString(), time)));
+        const bytes = await signFastPause(signMessage, sw, time);
         const result = await postFastPause(API_URL, {
           switch: sw,
           wallet: publicKey.toBase58(),

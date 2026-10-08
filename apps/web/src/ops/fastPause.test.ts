@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyFastPauseError, fastPauseMessage, FAST_PAUSE_SWITCHES } from "./fastPause.js";
+import { POOL_ID, poolAddress } from "../chain.js";
+import { classifyFastPauseError, fastPauseMessage, FAST_PAUSE_SWITCHES, signFastPause } from "./fastPause.js";
 
 // Backend's apps/backend/src/api/invite-code.ts fastPauseMessage produces the same
 // strings; its test (fast-pause.test.ts) pins the same format. The web cannot
@@ -19,6 +20,23 @@ describe("fastPauseMessage", () => {
 
   it("lists the four switches the route accepts", () => {
     expect([...FAST_PAUSE_SWITCHES]).toEqual(["pool", "game", "jackpot", "deploy"]);
+  });
+});
+
+describe("signFastPause", () => {
+  it("signs over the base58 pool address, the string the backend verifies", async () => {
+    const signed: string[] = [];
+    await signFastPause(
+      async (m) => {
+        signed.push(new TextDecoder().decode(m));
+        return new Uint8Array(64);
+      },
+      "game",
+      1700000000,
+    );
+    // Same layout as the backend's fastPauseMessage("game", poolAddress.toBase58(), time).
+    expect(signed).toEqual([`HEXO fast pause: game ${poolAddress(POOL_ID).toBase58()} 1700000000`]);
+    expect(signed[0]).not.toContain(`game ${POOL_ID.toString()} `);
   });
 });
 
