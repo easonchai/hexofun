@@ -7,7 +7,7 @@ import { BN, EventParser } from "@anchor-lang/core";
 import type { Prisma } from "@prisma/client";
 import { PublicKey } from "@solana/web3.js";
 
-/** `Epoch::status` and `Round::status`, mirroring constants.rs. */
+/** `Epoch::status`, mirroring constants.rs. */
 export const EPOCH_STATUS = {
   OPEN: 0,
   ENDED: 1,
@@ -16,20 +16,6 @@ export const EPOCH_STATUS = {
   PAID: 4,
   ROLLED_OVER: 5,
 } as const;
-
-export const ROUND_STATUS = {
-  OPEN: 0,
-  REQUESTED: 1,
-  SETTLED: 2,
-  FORFEITED: 3,
-  VOIDED: 4,
-} as const;
-
-/** Round statuses in which `winning_tile` holds a drawn value. */
-const TILE_DECIDED: number[] = [ROUND_STATUS.SETTLED, ROUND_STATUS.FORFEITED];
-
-/** A round the operator may still act on: no other round can be created. */
-export const LIVE_ROUND_STATUSES: number[] = [ROUND_STATUS.OPEN, ROUND_STATUS.REQUESTED];
 
 export type JsonValue =
   | string
@@ -85,46 +71,12 @@ export function decodeEventLogs(parser: EventParser, logs: string[]): DecodedEve
 
 /**
  * Anchor's `Program` camelCases the IDL before building its coder, so the
- * coder calls the event `roundSettled`. Rows keep the name the program
- * declares and spec §2.6 lists, `RoundSettled`, because that is what the API
+ * coder calls the event `epochDrawn`. Rows keep the name the program
+ * declares and spec §2.6 lists, `EpochDrawn`, because that is what the API
  * and the frontend feed filter on. `decode.test.ts` checks every event name
  * against the IDL, so a casing rule that stops round-tripping fails there.
  */
 const declaredName = (name: string): string => name.charAt(0).toUpperCase() + name.slice(1);
-
-/**
- * `settle_position` closes the Position account and refunds its rent,
- * whether the Round it belongs to settled or was voided (`void_round` itself
- * closes nothing; it only ever unlocks the settle). The owner and round id
- * this event carries already identify the row Postgres keyed by address, so
- * the indexer deletes it here instead of waiting for a sweep to notice the
- * account is gone.
- */
-export function settledPosition(event: DecodedEvent): { owner: string; roundId: bigint } | null {
-  if (event.name !== "PositionSettled") return null;
-  const { data } = event;
-  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
-  const { owner, roundId } = data;
-  if (typeof owner !== "string" || typeof roundId !== "string") return null;
-  return { owner, roundId: BigInt(roundId) };
-}
-
-/**
- * `close_round` reclaimed this Round's rent and closed the account
- * (ops-and-envs ticket 08). The account read that follows this event in
- * `refreshFromLogs` comes back missing, and `applyAccount` already leaves a
- * missing Round row alone rather than deleting or blanking it, so this is
- * the only place the row learns it is gone: `persist()` flips `closed` on
- * the id this event names.
- */
-export function closedRound(event: DecodedEvent): { id: bigint } | null {
-  if (event.name !== "RoundClosed") return null;
-  const { data } = event;
-  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
-  const { roundId } = data;
-  if (typeof roundId !== "string") return null;
-  return { id: BigInt(roundId) };
-}
 
 const big = (value: BN): bigint => BigInt(value.toString());
 const isUnset = (key: PublicKey): boolean => key.equals(PublicKey.default);
@@ -143,10 +95,7 @@ export interface DecodedPool {
   minJackpot: BN;
   epochSeconds: BN;
   epochAnchor: BN;
-  roundSeconds: BN;
-  closeBuffer: BN;
   minDeposit: BN;
-  houseCutBps: number;
   paused: boolean;
   currentEpochId: BN;
   currentEpochStart: BN;
@@ -155,29 +104,18 @@ export interface DecodedPool {
   totalPrincipal: BN;
   /** The depositors' ceiling rate (APR, basis points). */
   baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. */
-  ticketsPerUsdc: number;
-  /** Share of `total_principal`, in basis points, an operator `grant_tickets`
-   *  call may credit pool-wide per epoch. */
-  bonusCapBps: number;
-  /** The epoch `bonusGranted` is counted against. */
-  bonusEpoch: BN;
-  /** Tickets an operator `grant_tickets` call has credited pool-wide so far
-   *  in `bonusEpoch`. */
-  bonusGranted: BN;
   /** Lets a future upgrade migrate an old account lazily (ADR 0013). */
   version: number;
   /** Admin-only and irreversible: stops every inflow, the game and the
    *  draw, and lets withdrawals skip the epoch lock. */
   shutdown: boolean;
-  /** Game pause (game-jackpot-pause ticket 02): no new Round or Position. */
+  /** Game pause (game-jackpot-pause ticket 02): the backend game opens no Round. */
   gamePaused: boolean;
   /** Jackpot pause (game-jackpot-pause ticket 02): no new epoch, ticket
-   *  purchase or grant, and an ended epoch does not request its draw. */
+   *  purchase, and an ended epoch does not request its draw. */
   jackpotPaused: boolean;
-  /** Live yield (yield-claimer): the Weight tree, the pinned klend accounts,
+  /** Live yield (yield-claimer): the pinned klend accounts,
    *  the Yield index and its owed amounts, and the venue settings. */
-  weightTree: PublicKey;
   klendProgram: PublicKey;
   klendMarket: PublicKey;
   klendReserve: PublicKey;
@@ -214,22 +152,9 @@ export interface DecodedEpoch {
   winner: PublicKey;
 }
 
-export interface DecodedRound {
-  roundId: BN;
-  epochId: BN;
-  startsAt: BN;
-  endsAt: BN;
-  status: number;
-  tileTotals: BN[];
-  pot: BN;
-  houseCut: BN;
-  winningTile: number;
-}
-
 export interface DecodedPlayer {
   owner: PublicKey;
   principal: BN;
-  entries: BN;
   epochId: BN;
   isHouse: boolean;
   pendingWithdraw: BN;
@@ -240,26 +165,12 @@ export interface DecodedPlayer {
   boughtEpoch: BN;
   /** USDC spent in `buy_tickets` so far in `boughtEpoch`, capped at `principal`. */
   boughtAmount: BN;
-  /** The epoch `bonusGranted` is counted against. */
-  bonusEpoch: BN;
-  /** Tickets an operator `grant_tickets` call has credited this Player so
-   *  far in `bonusEpoch`. */
-  bonusGranted: BN;
   /** The pool's Yield index at this Player's last settle, scaled by 1e18. */
   yieldIndex: BN;
-  /** This Player's leaf in the Weight tree, 1-based. */
-  leafIndex: number;
   /** The part of `principal` deposited in `pendingDepositEpoch`. Its Tickets
    *  count from the next epoch. */
   pendingDeposit: BN;
   pendingDepositEpoch: BN;
-}
-
-export interface DecodedPosition {
-  owner: PublicKey;
-  round: PublicKey;
-  tiles: BN;
-  stakePerTile: BN;
 }
 
 /** The `VenueProposal` account (venue-switch ticket 03). */
@@ -306,25 +217,17 @@ export function poolRow(
     minJackpot: big(pool.minJackpot),
     epochSeconds: big(pool.epochSeconds),
     epochAnchor: big(pool.epochAnchor),
-    roundSeconds: big(pool.roundSeconds),
-    closeBuffer: big(pool.closeBuffer),
     minDeposit: big(pool.minDeposit),
-    houseCutBps: pool.houseCutBps,
     paused: pool.paused,
     currentEpochId: big(pool.currentEpochId),
     currentEpochEndsAt: big(pool.currentEpochEndsAt),
     previousEpochEndsAt: big(pool.previousEpochEndsAt),
     totalPrincipal: big(pool.totalPrincipal),
     baseRateBps: pool.baseRateBps,
-    ticketsPerUsdc: pool.ticketsPerUsdc,
-    bonusCapBps: pool.bonusCapBps,
-    bonusEpoch: big(pool.bonusEpoch),
-    bonusGranted: big(pool.bonusGranted),
     version: pool.version,
     shutdown: pool.shutdown,
     gamePaused: pool.gamePaused,
     jackpotPaused: pool.jackpotPaused,
-    weightTree: pool.weightTree.toBase58(),
     klendProgram: pool.klendProgram.toBase58(),
     klendMarket: pool.klendMarket.toBase58(),
     klendReserve: pool.klendReserve.toBase58(),
@@ -368,22 +271,6 @@ export function epochRow(epoch: DecodedEpoch, poolAddress: string): Prisma.Epoch
   };
 }
 
-export function roundRow(round: DecodedRound, poolAddress: string): Prisma.RoundUncheckedCreateInput {
-  return {
-    poolAddress,
-    id: big(round.roundId),
-    epochId: big(round.epochId),
-    startsAt: big(round.startsAt),
-    endsAt: big(round.endsAt),
-    status: round.status,
-    pot: big(round.pot),
-    houseCut: big(round.houseCut),
-    // `winning_tile` is 0 on an unsettled round, which is also a real tile.
-    winningTile: TILE_DECIDED.includes(round.status) ? round.winningTile : null,
-    tileTotals: round.tileTotals.map((total) => total.toString()),
-  };
-}
-
 export function playerRow(
   player: DecodedPlayer,
   poolAddress: string,
@@ -393,7 +280,6 @@ export function playerRow(
     poolAddress,
     owner: player.owner.toBase58(),
     principal: big(player.principal),
-    entries: big(player.entries),
     epochId: big(player.epochId),
     isHouse: player.isHouse,
     pendingWithdraw: big(player.pendingWithdraw),
@@ -401,28 +287,9 @@ export function playerRow(
     requestedAt: big(player.requestedAt),
     boughtEpoch: big(player.boughtEpoch),
     boughtAmount: big(player.boughtAmount),
-    bonusEpoch: big(player.bonusEpoch),
-    bonusGranted: big(player.bonusGranted),
     yieldIndex: player.yieldIndex.toString(),
-    leafIndex: player.leafIndex,
     pendingDeposit: big(player.pendingDeposit),
     pendingDepositEpoch: big(player.pendingDepositEpoch),
     slot,
-  };
-}
-
-export function positionRow(
-  address: PublicKey,
-  position: DecodedPosition,
-  roundId: bigint,
-  poolAddress: string,
-): Prisma.PositionUncheckedCreateInput {
-  return {
-    address: address.toBase58(),
-    poolAddress,
-    owner: position.owner.toBase58(),
-    roundId,
-    tiles: big(position.tiles),
-    stakePerTile: big(position.stakePerTile),
   };
 }

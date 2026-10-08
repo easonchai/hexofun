@@ -8,12 +8,9 @@ import {
   clockUnixTimestamp,
   decodeEpoch,
   decodePool,
-  decodeRound,
   EPOCH_STATUS,
-  ROUND_STATUS,
   type EpochState,
   type PoolState,
-  type RoundState,
 } from "../operator/chain-state";
 import { isFulfilled, randomnessAddress } from "../operator/vrf";
 import { HARVEST_LEAD_SECONDS } from "../operator/venue";
@@ -24,15 +21,13 @@ import { ApiService } from "./api.service";
 import { supplyRateBps } from "./live-yield";
 import { TodoClock, todoDrafts, type TodoInput, type TodoItem } from "./ops-todo";
 
-/** The Round or epoch a permissionless crank would accept right now. */
+/** The epoch a permissionless crank would accept right now. */
 export interface StuckItem {
   id: bigint;
   status: number;
 }
 
 export interface Stuck {
-  /** The Round `void_round` would accept. */
-  round: StuckItem | null;
   /** The epoch `rollover_epoch` would accept. */
   epoch: StuckItem | null;
 }
@@ -96,7 +91,7 @@ export interface OpsSummaryExtras {
 
 export type OpsSummary = Awaited<ReturnType<ApiService["getStatus"]>> & OpsSummaryExtras;
 
-const NOT_STUCK: Stuck = { round: null, epoch: null };
+const NOT_STUCK: Stuck = { epoch: null };
 
 /** What one chain read gives the summary: the stuck check and the todo list share it. */
 interface ChainView {
@@ -105,29 +100,17 @@ interface ChainView {
 }
 
 /**
- * Mirrors the program's own gates in `void_round` and `rollover_epoch`, so the
- * console offers a crank only when the program would take it. A fulfilled
- * request is never stuck: `settle_round` and `draw` take it instead.
+ * Mirrors the program's own gates in `rollover_epoch`, so the console offers a
+ * crank only when the program would take it. A fulfilled request is never
+ * stuck: `draw` takes it instead.
  */
 export async function findStuck(input: {
   now: bigint;
   pool: Pick<PoolState, "vrfTimeout" | "payoutTimeout" | "jackpotPaused">;
-  openRound: RoundState | null;
   previousEpoch: EpochState | null;
   fulfilled: (seed: Uint8Array) => Promise<boolean>;
 }): Promise<Stuck> {
-  const { now, pool, openRound, previousEpoch, fulfilled } = input;
-
-  let round: StuckItem | null = null;
-  if (openRound?.status === ROUND_STATUS.OPEN && now > openRound.endsAt + pool.vrfTimeout) {
-    round = { id: openRound.roundId, status: openRound.status };
-  } else if (
-    openRound?.status === ROUND_STATUS.REQUESTED &&
-    now > openRound.requestedAt + pool.vrfTimeout &&
-    !(await fulfilled(openRound.vrfSeed))
-  ) {
-    round = { id: openRound.roundId, status: openRound.status };
-  }
+  const { now, pool, previousEpoch, fulfilled } = input;
 
   let stuckEpoch = false;
   switch (previousEpoch?.status) {
@@ -146,7 +129,6 @@ export async function findStuck(input: {
     default:
   }
   return {
-    round,
     epoch: previousEpoch && stuckEpoch ? { id: previousEpoch.epochId, status: previousEpoch.status } : null,
   };
 }
@@ -312,24 +294,20 @@ export class OpsSummaryService {
       if (!poolInfo) return { stuck: NOT_STUCK, chain: null };
       const pool = decodePool(program, poolKey, poolInfo.data);
       const wanted = [
-        ...(pool.openRoundId > 0n ? [this.chain.roundAddress(pool.openRoundId)] : []),
         ...(pool.currentEpochId > 1n ? [this.chain.epochAddress(pool.currentEpochId - 1n)] : []),
         ...(pool.currentEpochId > 0n ? [this.chain.epochAddress(pool.currentEpochId)] : []),
       ];
       const infos = wanted.length > 0 ? await connection.getMultipleAccountsInfo(wanted) : [];
-      const roundInfo = pool.openRoundId > 0n ? infos[0] : null;
-      const epochInfo = pool.currentEpochId > 1n ? infos[pool.openRoundId > 0n ? 1 : 0] : null;
+      const epochInfo = pool.currentEpochId > 1n ? infos[0] : null;
       const currentInfo = pool.currentEpochId > 0n ? infos[infos.length - 1] : null;
       const testVrf = program.idl.instructions.some((ix) => ix.name === "testFulfill");
       const now = clockUnixTimestamp(clockInfo?.data);
-      const openRound = roundInfo ? decodeRound(program, roundInfo.data) : null;
       const previousEpoch = epochInfo ? decodeEpoch(program, epochInfo.data) : null;
       return {
         chain: { pool, now, currentEpoch: currentInfo ? decodeEpoch(program, currentInfo.data) : null },
         stuck: await findStuck({
           now,
           pool,
-          openRound,
           previousEpoch,
           fulfilled: async (seed) =>
             isFulfilled((await connection.getAccountInfo(randomnessAddress(this.chain.programId, seed, testVrf)))?.data),

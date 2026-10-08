@@ -14,11 +14,8 @@ import {
   jsonify,
   playerRow,
   poolRow,
-  ROUND_STATUS,
-  roundRow,
   type DecodedPlayer,
   type DecodedPool,
-  type DecodedRound,
 } from "./decode";
 
 const idl = loadIdl();
@@ -32,6 +29,11 @@ const u8 = (value: number): Buffer => Buffer.from([value]);
 const u16 = (value: number): Buffer => {
   const buf = Buffer.alloc(2);
   buf.writeUInt16LE(value);
+  return buf;
+};
+const u32 = (value: number): Buffer => {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32LE(value);
   return buf;
 };
 const bool = (value: boolean): Buffer => Buffer.from([value ? 1 : 0]);
@@ -56,6 +58,9 @@ const key = (base58: string): Buffer => new PublicKey(base58).toBuffer();
 const OWNER = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
 const POOL = "So11111111111111111111111111111111111111112";
 const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+/** A Yield index past 2^64, so a narrow decode of the post-state field fails. */
+const INDEX = (1n << 70n) + 5n;
+const INDEX_STR = "1180591620717411303429";
 
 /** One transaction's logs, shaped the way the RPC delivers them. */
 function logs(discriminator: number[], fields: Buffer[]): string[] {
@@ -108,31 +113,21 @@ const CASES: Case[] = [
       key(POOL),
       i64(86_400n),
       i64(1_789_315_200n),
-      i64(60n),
-      i64(5n),
       i64(120n),
       u64(1_000_000n),
-      u16(600),
       u64(2_000_000n),
       i64(86_400n),
       u16(488),
-      u16(10),
-      u16(500),
     ],
     data: {
       pool: POOL,
       epochSeconds: "86400",
       epochAnchor: "1789315200",
-      roundSeconds: "60",
-      closeBuffer: "5",
       vrfTimeout: "120",
       minDeposit: "1000000",
-      houseCutBps: 600,
       minJackpot: "2000000",
       payoutTimeout: "86400",
       baseRateBps: 488,
-      ticketsPerUsdc: 10,
-      bonusCapBps: 500,
     },
   },
   {
@@ -147,12 +142,12 @@ const CASES: Case[] = [
   },
   {
     name: "Deposited",
-    fields: [key(OWNER), u64(1_000_000n), u64(3_000_000n), u64(3_000_000n)],
-    data: { owner: OWNER, amount: "1000000", principal: "3000000", entries: "3000000" },
+    fields: [key(OWNER), u64(1_000_000n), u64(3_000_000n), u128(INDEX)],
+    data: { owner: OWNER, amount: "1000000", principal: "3000000", yieldIndex: INDEX_STR },
   },
   {
     name: "WithdrawRequested",
-    fields: [key(OWNER), u64(500_000n), u64(750_000n), u64(4n), u64(200_000n), u64(190_000n), u64(50_000n)],
+    fields: [key(OWNER), u64(500_000n), u64(750_000n), u64(4n), u64(200_000n), u64(190_000n), u64(50_000n), u64(2_000_000n), u128(INDEX)],
     data: {
       owner: OWNER,
       amount: "500000",
@@ -161,63 +156,24 @@ const CASES: Case[] = [
       refunded: "200000",
       paid: "190000",
       redeemed: "50000",
+      principal: "2000000",
+      yieldIndex: INDEX_STR,
     },
   },
   {
     name: "WithdrawCancelled",
-    fields: [key(OWNER), u64(750_000n), u64(4n)],
-    data: { owner: OWNER, amount: "750000", pendingEpoch: "4" },
+    fields: [key(OWNER), u64(750_000n), u64(4n), u64(2_750_000n), u128(INDEX)],
+    data: { owner: OWNER, amount: "750000", pendingEpoch: "4", principal: "2750000", yieldIndex: INDEX_STR },
   },
   {
     name: "Withdrawn",
-    fields: [key(OWNER), u64(500_000n), u64(2_500_000n), u64(2_500_000n)],
-    data: { owner: OWNER, amount: "500000", principal: "2500000", entries: "2500000" },
-  },
-  {
-    name: "RoundOpened",
-    fields: [u64(4n), u64(2n), i64(1_700_000_000n), i64(1_700_000_060n)],
-    data: {
-      roundId: "4",
-      epochId: "2",
-      startsAt: "1700000000",
-      endsAt: "1700000060",
-    },
-  },
-  {
-    name: "PositionBought",
-    fields: [u64(4n), key(OWNER), u64(0b101n), u64(1_000n), u64(2_000n)],
-    data: { roundId: "4", owner: OWNER, tiles: "5", stakePerTile: "1000", total: "2000" },
-  },
-  {
-    name: "RoundSettled",
-    fields: [u64(4n), u8(35), u64(9_000n), bool(false), u64(540n)],
-    data: {
-      roundId: "4",
-      winningTile: 35,
-      pot: "9000",
-      forfeited: false,
-      houseCut: "540",
-    },
-  },
-  {
-    name: "RoundVoided",
-    fields: [u64(4n)],
-    data: { roundId: "4" },
-  },
-  {
-    name: "RoundClosed",
-    fields: [key(MINT), u64(4n)],
-    data: { round: MINT, roundId: "4" },
-  },
-  {
-    name: "PositionSettled",
-    fields: [u64(4n), key(OWNER), u64(4_500n), u64(1_000n)],
-    data: { roundId: "4", owner: OWNER, reward: "4500", refund: "1000" },
+    fields: [key(OWNER), u64(500_000n), u64(2_500_000n), u128(INDEX)],
+    data: { owner: OWNER, amount: "500000", principal: "2500000", yieldIndex: INDEX_STR },
   },
   {
     name: "EpochBegan",
-    fields: [u64(3n), i64(1_700_000_000n), i64(1_700_086_400n)],
-    data: { epochId: "3", startsAt: "1700000000", endsAt: "1700086400" },
+    fields: [u64(3n), i64(1_700_000_000n), i64(1_700_086_400n), u128(INDEX)],
+    data: { epochId: "3", startsAt: "1700000000", endsAt: "1700086400", yieldIndex: INDEX_STR },
   },
   {
     name: "JackpotFunded",
@@ -227,17 +183,21 @@ const CASES: Case[] = [
   {
     name: "EpochDrawn",
     fields: [u64(2n), u64(42n), u64(1n << 60n)],
-    data: { epochId: "2", target: "42", registeredWeight: "1152921504606846976" },
+    data: { epochId: "2", target: "42", totalTickets: "1152921504606846976" },
   },
   {
     name: "JackpotPaid",
-    fields: [u64(2n), key(OWNER), u64(10_000_000n), bool(true), bool(false)],
+    fields: [u64(2n), key(OWNER), u64(10_000_000n), bool(true), bool(false), u64(3_000_000n), u128(INDEX), u32(7), u64(4_000n)],
     data: {
       epochId: "2",
       winner: OWNER,
       amount: "10000000",
       isHouse: true,
       compounded: false,
+      principal: "3000000",
+      yieldIndex: INDEX_STR,
+      index: 7,
+      tickets: "4000",
     },
   },
   {
@@ -247,13 +207,8 @@ const CASES: Case[] = [
   },
   {
     name: "TicketsBought",
-    fields: [key(OWNER), u64(2n), u64(500_000n), u64(5_000_000n)],
-    data: { owner: OWNER, epochId: "2", usdc: "500000", tickets: "5000000" },
-  },
-  {
-    name: "TicketsGranted",
-    fields: [key(OWNER), u64(2n), u64(750_000n), bool(false)],
-    data: { owner: OWNER, epochId: "2", amount: "750000", byAdmin: false },
+    fields: [key(OWNER), u64(2n), u64(500_000n), u64(3_000_000n), u128(INDEX)],
+    data: { owner: OWNER, epochId: "2", usdc: "500000", principal: "3000000", yieldIndex: INDEX_STR },
   },
   {
     name: "PoolShutdown",
@@ -262,8 +217,8 @@ const CASES: Case[] = [
   },
   {
     name: "EmergencyWithdrawn",
-    fields: [key(OWNER), u64(3_000_000n), u64(500_000n), u64(3_500_000n)],
-    data: { owner: OWNER, principal: "3000000", pending: "500000", total: "3500000" },
+    fields: [key(OWNER), u64(3_000_000n), u64(500_000n), u64(3_500_000n), u64(0n), u128(INDEX)],
+    data: { owner: OWNER, claim: "3000000", pending: "500000", total: "3500000", principal: "0", yieldIndex: INDEX_STR },
   },
   {
     name: "HouseSwept",
@@ -330,11 +285,6 @@ const CASES: Case[] = [
       newKlendCtoken: OWNER,
       leftBehind: "30000000",
     },
-  },
-  {
-    name: "LeafReleased",
-    fields: [key(POOL), key(OWNER), (() => { const b = Buffer.alloc(4); b.writeUInt32LE(7); return b; })()],
-    data: { pool: POOL, owner: OWNER, leafIndex: 7 },
   },
   {
     name: "VenueProposed",
@@ -439,9 +389,9 @@ describe("decodeEventLogs", () => {
       key(OWNER),
       u64(1n),
       u64(1n),
-      u64(1n),
+      u128(1n),
     ]);
-    const second = logs(discriminatorOf("EpochBegan"), [u64(1n), i64(0n), i64(60n)]);
+    const second = logs(discriminatorOf("EpochBegan"), [u64(1n), i64(0n), i64(60n), u128(1n)]);
     // Splice the second event's data line into the first transaction's logs.
     const combined = [...first.slice(0, 3), second[2] as string, ...first.slice(3)];
     expect(decodeEventLogs(parser, combined).map((event) => event.name)).toEqual([
@@ -475,7 +425,7 @@ describe("jsonify", () => {
         key(OWNER),
         u64(18_446_744_073_709_551_615n),
         u64(0n),
-        u64(0n),
+        u128(0n),
       ]),
     );
     expect(decoded[0]?.data).toMatchObject({ amount: "18446744073709551615" });
@@ -499,10 +449,7 @@ function decodedPool(overrides: Partial<DecodedPool> = {}): DecodedPool {
     minJackpot: new BN(0),
     epochSeconds: new BN(86_400),
     epochAnchor: new BN(0),
-    roundSeconds: new BN(90),
-    closeBuffer: new BN(12),
     minDeposit: new BN(0),
-    houseCutBps: 0,
     paused: false,
     currentEpochId: new BN(3),
     currentEpochStart: new BN(0),
@@ -510,15 +457,10 @@ function decodedPool(overrides: Partial<DecodedPool> = {}): DecodedPool {
     previousEpochEndsAt: new BN(0),
     totalPrincipal: new BN(0),
     baseRateBps: 488,
-    ticketsPerUsdc: 10,
-    bonusCapBps: 500,
-    bonusEpoch: new BN(0),
-    bonusGranted: new BN(0),
     version: 1,
     shutdown: false,
     gamePaused: false,
     jackpotPaused: false,
-    weightTree: new PublicKey(OWNER),
     klendProgram: new PublicKey(MINT),
     klendMarket: new PublicKey(MINT),
     klendReserve: new PublicKey(POOL),
@@ -556,7 +498,6 @@ describe("poolRow", () => {
       epochAnchor: new BN(1_789_315_200),
       currentEpochEndsAt: new BN(1_789_488_000),
       previousEpochEndsAt: new BN(1_789_401_600),
-      houseCutBps: 600,
       totalPrincipal: new BN(3_000_000),
       minDeposit: new BN(1_000_000),
     });
@@ -565,24 +506,19 @@ describe("poolRow", () => {
       epochAnchor: 1_789_315_200n,
       currentEpochEndsAt: 1_789_488_000n,
       previousEpochEndsAt: 1_789_401_600n,
-      houseCutBps: 600,
-      // The browser reads these two off the API now, so they have to survive
-      // the decode rather than being dropped (ticket 07).
-      closeBuffer: 12n,
+      // The browser reads this off the API now, so it has to survive the
+      // decode rather than being dropped (ticket 07).
       minDeposit: 1_000_000n,
     });
   });
 
-  // Ticket 05: the ceiling rate, bought tickets and granted tickets.
-  it("carries the ceiling rate and ticket-economy fields", () => {
-    const pool = decodedPool({ bonusEpoch: new BN(3), bonusGranted: new BN(40_000) });
-    expect(poolRow(new PublicKey(POOL), pool, 9n)).toMatchObject({
-      baseRateBps: 488,
-      ticketsPerUsdc: 10,
-      bonusCapBps: 500,
-      bonusEpoch: 3n,
-      bonusGranted: 40_000n,
-    });
+  // Ticket 05: the ceiling rate.
+  it("carries the ceiling rate and drops what the program no longer holds", () => {
+    const row = poolRow(new PublicKey(POOL), decodedPool(), 9n);
+    expect(row).toMatchObject({ baseRateBps: 488 });
+    for (const gone of ["roundSeconds", "closeBuffer", "houseCutBps", "ticketsPerUsdc", "bonusCapBps", "weightTree"]) {
+      expect(row).not.toHaveProperty(gone);
+    }
   });
 
   // Ticket 14: the venue and yield state. A yield index past 2^64 proves the
@@ -602,7 +538,6 @@ describe("poolRow", () => {
       buyTicketsPaused: true,
     });
     expect(poolRow(new PublicKey(POOL), pool, 9n)).toMatchObject({
-      weightTree: OWNER,
       klendProgram: MINT,
       venueKind: 1,
       klendReserve: POOL,
@@ -653,7 +588,6 @@ describe("playerRow", () => {
   const decodedPlayer = (overrides: Partial<DecodedPlayer> = {}): DecodedPlayer => ({
     owner: new PublicKey(OWNER),
     principal: new BN(3_000_000),
-    entries: new BN(3_000_000),
     epochId: new BN(4),
     isHouse: false,
     pendingWithdraw: new BN(0),
@@ -661,10 +595,7 @@ describe("playerRow", () => {
     requestedAt: new BN(0),
     boughtEpoch: new BN(0),
     boughtAmount: new BN(0),
-    bonusEpoch: new BN(0),
-    bonusGranted: new BN(0),
     yieldIndex: new BN(0),
-    leafIndex: 0,
     pendingDeposit: new BN(0),
     pendingDepositEpoch: new BN(0),
     ...overrides,
@@ -687,30 +618,22 @@ describe("playerRow", () => {
     });
   });
 
-  // Ticket 05: the bought/granted ticket counters.
-  it("carries the ticket-economy fields", () => {
-    const player = decodedPlayer({
-      boughtEpoch: new BN(4),
-      boughtAmount: new BN(200_000),
-      bonusEpoch: new BN(4),
-      bonusGranted: new BN(50_000),
-    });
-    expect(playerRow(player, POOL, 0n)).toMatchObject({
-      boughtEpoch: 4n,
-      boughtAmount: 200_000n,
-      bonusEpoch: 4n,
-      bonusGranted: 50_000n,
-    });
+  // Ticket 05: the bought ticket counter. The Tickets column is not in the
+  // row: the program no longer holds them, so the mirror leaves it alone.
+  it("carries the bought ticket counter and leaves the Tickets column to the ledger", () => {
+    const player = decodedPlayer({ boughtEpoch: new BN(4), boughtAmount: new BN(200_000) });
+    const row = playerRow(player, POOL, 0n);
+    expect(row).toMatchObject({ boughtEpoch: 4n, boughtAmount: 200_000n });
+    for (const absent of ["tickets", "entries", "leafIndex", "bonusEpoch", "bonusGranted"]) {
+      expect(row).not.toHaveProperty(absent);
+    }
   });
 
-  // Ticket 14: the index at the last settle and the leaf. The index is a u128,
-  // so one past 2^64 proves the string path.
-  it("carries the yield index at the last settle and the tree leaf", () => {
-    const player = decodedPlayer({ yieldIndex: new BN("18446744073709551617"), leafIndex: 9 });
-    expect(playerRow(player, POOL, 0n)).toMatchObject({
-      yieldIndex: "18446744073709551617",
-      leafIndex: 9,
-    });
+  // Ticket 14: the index at the last settle. It is a u128, so one past 2^64
+  // proves the string path.
+  it("carries the yield index at the last settle", () => {
+    const player = decodedPlayer({ yieldIndex: new BN("18446744073709551617") });
+    expect(playerRow(player, POOL, 0n)).toMatchObject({ yieldIndex: "18446744073709551617" });
   });
 
   // Ticket 20: the Read model folds the pending deposit by its epoch.
@@ -720,22 +643,5 @@ describe("playerRow", () => {
       pendingDeposit: 2_000_000n,
       pendingDepositEpoch: 4n,
     });
-  });
-});
-
-describe("roundRow", () => {
-  it("carries the House cut", () => {
-    const round: DecodedRound = {
-      roundId: new BN(4),
-      epochId: new BN(2),
-      startsAt: new BN(1_700_000_000),
-      endsAt: new BN(1_700_000_060),
-      status: ROUND_STATUS.SETTLED,
-      tileTotals: Array(36).fill(new BN(0)),
-      pot: new BN(9_000),
-      houseCut: new BN(540),
-      winningTile: 35,
-    };
-    expect(roundRow(round, POOL)).toMatchObject({ poolAddress: POOL, pot: 9_000n, houseCut: 540n });
   });
 });

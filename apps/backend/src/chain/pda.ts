@@ -6,11 +6,8 @@ const SEED_POOL = Buffer.from("pool");
 const SEED_PRINCIPAL = Buffer.from("principal");
 const SEED_JACKPOT = Buffer.from("jackpot");
 const SEED_EPOCH = Buffer.from("epoch");
-const SEED_ROUND = Buffer.from("round");
 const SEED_PLAYER = Buffer.from("player");
-const SEED_POSITION = Buffer.from("position");
 const SEED_VENUE_PROPOSAL = Buffer.from("venue_proposal");
-const SEED_FREE_LEAVES = Buffer.from("free_leaves");
 
 const leU64 = (value: bigint): Buffer => {
   const buf = Buffer.alloc(8);
@@ -38,26 +35,11 @@ export const epochAddress = (
   epochId: bigint,
 ): PublicKey => pda(programId, [SEED_EPOCH, pool.toBuffer(), leU64(epochId)]);
 
-// Round IDs are a single pool-wide counter (Pool.next_round_id), not scoped
-// to an epoch, so the seed is just [round, pool, round_id].
-export const roundAddress = (
-  programId: PublicKey,
-  pool: PublicKey,
-  roundId: bigint,
-): PublicKey => pda(programId, [SEED_ROUND, pool.toBuffer(), leU64(roundId)]);
-
 export const playerAddress = (
   programId: PublicKey,
   pool: PublicKey,
   owner: PublicKey,
 ): PublicKey => pda(programId, [SEED_PLAYER, pool.toBuffer(), owner.toBuffer()]);
-
-export const positionAddress = (
-  programId: PublicKey,
-  round: PublicKey,
-  owner: PublicKey,
-): PublicKey =>
-  pda(programId, [SEED_POSITION, round.toBuffer(), owner.toBuffer()]);
 
 export const principalVaultAddress = (
   programId: PublicKey,
@@ -75,10 +57,3 @@ export const venueProposalAddress = (
   programId: PublicKey,
   pool: PublicKey,
 ): PublicKey => pda(programId, [SEED_VENUE_PROPOSAL, pool.toBuffer()]);
-
-/** The pool's stack of released Weight tree leaves (`release_leaf`); `deposit`
- *  pops from it before the tree grows. */
-export const freeLeavesAddress = (
-  programId: PublicKey,
-  pool: PublicKey,
-): PublicKey => pda(programId, [SEED_FREE_LEAVES, pool.toBuffer()]);

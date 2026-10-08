@@ -28,18 +28,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
-import { epochAddress, poolAddress, roundAddress } from "../chain/pda";
+import { epochAddress, poolAddress } from "../chain/pda";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountingConnection } from "../test-utils/counting-connection";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
-import { EPOCH_STATUS, ROUND_STATUS } from "./chain-state";
-import type { IndexerQueries } from "./indexer-queries";
+import { EPOCH_STATUS } from "./chain-state";
 import { OperatorService } from "./operator.service";
 import { ensurePoolRow } from "./pool-row.fixture";
-import type { SparringService } from "./sparring";
 import { msUntilWake, SAFETY_INTERVAL_SECONDS } from "./tick";
-import { RANDOMNESS_DISCRIMINATOR, randomnessAddress } from "./vrf";
 
 const DB_AVAILABLE = isDatabaseReachableSync(TEST_DATABASE_URL);
 
@@ -62,9 +59,6 @@ const program = new Program(
 
 const bn = (value: bigint | number): BN => new BN(value.toString());
 
-/** A `SparringService` this suite never exercises: only `wake()` is called,
- *  and only to notice a `create_round`, which none of these fixtures send. */
-const noopSparring = { wake: () => {} } as unknown as SparringService;
 /** Every test here fabricates its own chain and DB reads, so the config
  *  service only needs to answer the one key `OperatorService` asks it for. */
 const fakeConfig = {
@@ -84,20 +78,16 @@ const pool = (overrides: object = {}) => ({
   vrfNetworkState: Keypair.generate().publicKey,
   epochSeconds: bn(86_400),
   epochAnchor: bn(1_789_315_200),
-  roundSeconds: bn(60),
-  closeBuffer: bn(5),
   vrfTimeout: bn(120),
   minDeposit: bn(1_000_000),
   paused: false,
-  // No epoch and no round open: the tick's only possible move is step 3,
-  // `begin_epoch`, so `send` fires without any Epoch or Round fixture.
+  // No epoch yet: the tick's only possible move is step 3, `begin_epoch`, so
+  // `send` fires without any Epoch fixture.
   currentEpochId: bn(0),
   currentEpochStart: bn(0),
   currentEpochEndsAt: bn(0),
   previousEpochStart: bn(0),
   previousEpochEndsAt: bn(0),
-  nextRoundId: bn(1),
-  openRoundId: bn(0),
   totalPrincipal: bn(0),
   bump: 255,
   principalVaultBump: 254,
@@ -147,18 +137,9 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService end-of-tick timestamp", () => {
       },
     };
 
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
     const operator = new OperatorService(
       fakeChain as unknown as ChainService,
       prisma,
-      indexer,
-      noopSparring,
       fakeConfig,
     );
 
@@ -215,18 +196,9 @@ describe("OperatorService catch-path state write", () => {
         },
       },
     };
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
     const operator = new OperatorService(
       fakeChain as unknown as ChainService,
       failingPrisma as unknown as PrismaService,
-      indexer,
-      noopSparring,
       fakeConfig,
     );
 
@@ -260,18 +232,9 @@ describe("OperatorService.onModuleDestroy", () => {
       recordChainTime: () => {},
     };
     const prisma = { operatorState: { upsert: async () => {} } };
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
     const operator = new OperatorService(
       fakeChain as unknown as ChainService,
       prisma as unknown as PrismaService,
-      indexer,
-      noopSparring,
       fakeConfig,
     );
 
@@ -305,13 +268,11 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
   }) => ({
     poolAddress: POOL_ADDRESS,
     principal: 0n,
-    entries: 0n,
+    tickets: 0n,
     epochId: 0n,
     isHouse: false,
     boughtEpoch: 0n,
     boughtAmount: 0n,
-    bonusEpoch: 0n,
-    bonusGranted: 0n,
     ...over,
   });
 
@@ -326,14 +287,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
       venueProposalAddress: () => PublicKey.default,
       } as unknown as ChainService,
       prisma,
-      {
-        unsettledPositions: async () => [],
-        referralGrantsDue: async () => [],
-        markReferralGrantsSent: async () => {},
-        sentReferralGrants: async () => [],
-        roundsToClose: async () => [],
-      },
-      noopSparring,
       fakeConfig,
     );
 
@@ -427,9 +380,8 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
     await prisma.operatorState.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
 
     const CHAIN_NOW = 1_800_000_000n;
-    // An Epoch running well past the safety interval, no open Round, paused so
-    // step 7 does not open one: the crank has nothing to do for a long time,
-    // which is the state it spends most of a Round in.
+    // An Epoch running well past the safety interval: the crank has nothing to
+    // do for a long time, which is the state it spends most of an epoch in.
     const idlePool = pool({
       paused: true,
       currentEpochId: bn(1),
@@ -471,24 +423,14 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
       poolAddress: () => POOL,
       venueProposalAddress: () => PublicKey.default,
       epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, POOL, id),
-      roundAddress: (id: bigint) => roundAddress(PROGRAM_ID, POOL, id),
       recordChainTime: () => {},
       send: async () => {
         throw new Error("an idle tick must not send anything");
       },
     };
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
     const operator = new OperatorService(
       fakeChain as unknown as ChainService,
       prisma,
-      indexer,
-      noopSparring,
       fakeConfig,
     );
 
@@ -559,18 +501,9 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService RPC failure recovery", () => {
       recordChainTime: () => {},
       send: async () => "signature",
     };
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
     const operator = new OperatorService(
       fakeChain as unknown as ChainService,
       prisma,
-      indexer,
-      noopSparring,
       fakeConfig,
     );
 
@@ -599,149 +532,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService RPC failure recovery", () => {
   });
 });
 
-// Ticket 04: a Round awaiting VRF is watched via subscription rather than
-// polled. `roundAccount`/`requestedPool` below fix `currentEpochId` at 0 (no
-// Epoch fixture needed) so `decide()`'s only live branch is step 1's Round
-// check; every other step falls through to nothing, and the fake `send`
-// throws if that assumption ever breaks.
-describe.skipIf(!DB_AVAILABLE)("OperatorService randomness subscription", () => {
-  const CHAIN_NOW = 1_800_000_000n;
-  const SEED = new Uint8Array(32).fill(7);
-  // The checked-in IDL has no `testFulfill`, same derivation OperatorService
-  // itself uses, kept in step with it rather than hard-coded.
-  const TEST_VRF = program.idl.instructions.some((ix) => ix.name === "testFulfill");
-  const RANDOMNESS = randomnessAddress(PROGRAM_ID, SEED, TEST_VRF);
-  const ROUND = roundAddress(PROGRAM_ID, POOL, 1n);
-
-  const requestedRound = (overrides: object = {}) => ({
-    roundId: bn(1),
-    epochId: bn(0),
-    startsAt: bn(CHAIN_NOW - 60n),
-    endsAt: bn(CHAIN_NOW - 5n),
-    status: ROUND_STATUS.REQUESTED,
-    tileTotals: Array.from({ length: 36 }, () => bn(0)),
-    pot: bn(0),
-    houseCut: bn(0),
-    vrfSeed: Array.from(SEED),
-    requestedAt: bn(CHAIN_NOW - 5n),
-    winningTile: 0,
-    bump: 255,
-    ...overrides,
-  });
-
-  async function setUp() {
-    const prisma = new PrismaService();
-    await prisma.$connect();
-    await ensurePoolRow(prisma, POOL_ADDRESS, 1n);
-    await prisma.operatorState.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
-
-    const accounts = new Map<string, Buffer>();
-    accounts.set(
-      POOL.toBase58(),
-      await program.coder.accounts.encode(
-        "pool",
-        pool({ currentEpochId: bn(0), openRoundId: bn(1), nextRoundId: bn(2) }),
-      ),
-    );
-    accounts.set(ROUND.toBase58(), await program.coder.accounts.encode("round", requestedRound()));
-    const clock = Buffer.alloc(40);
-    clock.writeBigInt64LE(CHAIN_NOW, 32);
-    accounts.set(SYSVAR_CLOCK_PUBKEY.toBase58(), clock);
-
-    const connection = new CountingConnection(accounts);
-    const fakeChain = {
-      program,
-      programId: PROGRAM_ID,
-      keypair: Keypair.generate(),
-      connection,
-      poolAddress: () => POOL,
-      venueProposalAddress: () => PublicKey.default,
-      epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, POOL, id),
-      roundAddress: (id: bigint) => roundAddress(PROGRAM_ID, POOL, id),
-      recordChainTime: () => {},
-      send: async () => {
-        throw new Error("this fixture's tick should never need to send anything");
-      },
-    };
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
-    const operator = new OperatorService(
-      fakeChain as unknown as ChainService,
-      prisma,
-      indexer,
-      noopSparring,
-      fakeConfig,
-    );
-    return { prisma, connection, accounts, operator };
-  }
-
-  async function tearDown(prisma: PrismaService): Promise<void> {
-    await prisma.operatorState.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
-    await prisma.$disconnect();
-  }
-
-  it("opens one subscription while Requested and wakes once fulfilled, without polling", async () => {
-    const { prisma, connection, operator } = await setUp();
-    try {
-      // Mocked rather than spied-through: the real `wake()` schedules another
-      // tick fire-and-forget, which is a separate concern (ticket 03) this
-      // test does not want racing its own assertions and teardown.
-      const wakeSpy = vi.spyOn(operator, "wake").mockImplementation(() => {});
-
-      const first = await operator.tick();
-      expect(first?.action).toBeNull();
-      expect(connection.callsTo("onAccountChange")).toBe(1);
-      // decide()'s own check, once per tick; unrelated to the subscription.
-      expect(connection.callsTo("getAccountInfo")).toBe(1);
-
-      // A second tick while still unfulfilled must not add a second
-      // subscription: one persistent watch replaces the poll, it is not
-      // re-armed every tick.
-      await operator.tick();
-      expect(connection.callsTo("onAccountChange")).toBe(1);
-      expect(connection.callsTo("getAccountInfo")).toBe(2);
-
-      // ORAO fulfils: the push notification wakes the operator directly,
-      // rather than waiting for the vrf-timeout deadline or the safety tick.
-      const fulfilled = Buffer.concat([
-        RANDOMNESS_DISCRIMINATOR,
-        Buffer.from([1]),
-        Buffer.alloc(32 + 32 + 64),
-      ]);
-      connection.setAccount(RANDOMNESS, fulfilled);
-      connection.fireAccountChange(RANDOMNESS);
-      expect(wakeSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      await tearDown(prisma);
-    }
-  });
-
-  it("stops watching once the Round is no longer Requested", async () => {
-    const { prisma, connection, accounts, operator } = await setUp();
-    try {
-      await operator.tick();
-      expect(connection.callsTo("onAccountChange")).toBe(1);
-
-      // The next fresh read no longer finds the Round Requested (settled by
-      // whatever means); the watch must be torn down rather than left dangling.
-      accounts.set(
-        ROUND.toBase58(),
-        await program.coder.accounts.encode("round", requestedRound({ status: ROUND_STATUS.SETTLED })),
-      );
-      await operator.tick();
-      expect(connection.callsTo("removeAccountChangeListener")).toBe(1);
-      expect(connection.callsTo("onAccountChange")).toBe(1); // no new watch opened
-    } finally {
-      await tearDown(prisma);
-    }
-  });
-});
-
 // Pool cutover (ADR 0016, ticket 02): after POOL_ID moves to a new pool, the
 // database still holds the retired pool's OperatorState and Cursor. The
 // operator must read and write only the Active pool's rows, or it would
@@ -764,43 +554,12 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       data: { poolAddress: RETIRED_POOL_ADDRESS, lastTickAt: 1n, lastAction: "retired" },
     });
 
-    // Epoch 1 ended and waits for request_draw, so the first tick has a move.
+    // No Epoch yet, so the first tick has a move: begin_epoch.
     const CHAIN_NOW = nowSeconds;
-    const epoch = (epochId: bigint, status: number, endsAt: bigint) => ({
-      epochId: bn(epochId),
-      startsAt: bn(endsAt - 86_400n),
-      endsAt: bn(endsAt),
-      status,
-      jackpotAmount: bn(0),
-      vrfSeed: Array(32).fill(0),
-      requestedAt: bn(0),
-      target: bn(0),
-      winner: PublicKey.default,
-      drawnAt: bn(0),
-      registrationOpenedAt: bn(0),
-      bump: 255,
-    });
     const accounts = new Map<string, Buffer>();
     accounts.set(
       ACTIVE_ADDRESS,
-      await program.coder.accounts.encode(
-        "pool",
-        pool({ poolId: bn(42), currentEpochId: bn(2) }),
-      ),
-    );
-    accounts.set(
-      epochAddress(PROGRAM_ID, ACTIVE, 1n).toBase58(),
-      await program.coder.accounts.encode(
-        "epoch",
-        epoch(1n, EPOCH_STATUS.ENDED, CHAIN_NOW - 1_000n),
-      ),
-    );
-    accounts.set(
-      epochAddress(PROGRAM_ID, ACTIVE, 2n).toBase58(),
-      await program.coder.accounts.encode(
-        "epoch",
-        epoch(2n, EPOCH_STATUS.OPEN, CHAIN_NOW + 85_400n),
-      ),
+      await program.coder.accounts.encode("pool", pool({ poolId: bn(42) })),
     );
     const clock = Buffer.alloc(40);
     clock.writeBigInt64LE(CHAIN_NOW, 32);
@@ -815,25 +574,15 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       poolAddress: () => ACTIVE,
       venueProposalAddress: () => PublicKey.default,
       epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, ACTIVE, id),
-      roundAddress: (id: bigint) => roundAddress(PROGRAM_ID, ACTIVE, id),
       recordChainTime: () => {},
       send: async (instructions: TransactionInstruction[]) => {
         sent.push(instructions);
         return "signature";
       },
     };
-    const indexer: IndexerQueries = {
-      unsettledPositions: async () => [],
-      referralGrantsDue: async () => [],
-      markReferralGrantsSent: async () => {},
-      sentReferralGrants: async () => [],
-      roundsToClose: async () => [],
-    };
     const operator = new OperatorService(
       fakeChain as unknown as ChainService,
       prisma,
-      indexer,
-      noopSparring,
       fakeConfig,
     );
     const activeState = () =>
@@ -843,15 +592,15 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       // No row yet: /status reads null last tick for the new pool.
       expect(await activeState()).toBeNull();
 
-      // The first tick sends request_draw and creates the Active pool's row
+      // The first tick sends begin_epoch and creates the Active pool's row
       // beside the retired one instead of overwriting it.
       const first = await operator.runOnce();
-      expect(first.action).toBe("request_draw");
+      expect(first.action).toBe("begin_epoch");
       expect(sent).toHaveLength(1);
       const row = await activeState();
       expect(row?.lastTickAt).not.toBeNull();
       expect(row?.lastError).toBeNull();
-      expect(row?.lastAction).toBe("request_draw");
+      expect(row?.lastAction).toBe("begin_epoch");
       const retired = await prisma.operatorState.findUniqueOrThrow({
         where: { poolAddress: RETIRED_POOL_ADDRESS },
       });
@@ -889,14 +638,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
         send: async () => "signature",
       } as unknown as ChainService,
       prisma,
-      {
-        unsettledPositions: async () => [],
-        referralGrantsDue: async () => [],
-        markReferralGrantsSent: async () => {},
-        sentReferralGrants: async () => [],
-        roundsToClose: async () => [],
-      },
-      noopSparring,
       fakeConfig,
     );
 
@@ -911,5 +652,75 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
     } finally {
       await prisma.$disconnect();
     }
+  });
+});
+
+// Off-chain-tickets ticket 10: until the Epoch snapshot exists (ticket 12) the
+// draw steps send nothing and say why, once per step and epoch. No database:
+// the state write is a fake.
+describe("OperatorService snapshot_pending", () => {
+  it("reports request_draw as waiting on the snapshot without sending, and logs it once", async () => {
+    const CHAIN_NOW = 1_800_000_000n;
+    const epoch = (epochId: bigint, status: number, endsAt: bigint) => ({
+      epochId: bn(epochId),
+      startsAt: bn(endsAt - 86_400n),
+      endsAt: bn(endsAt),
+      status,
+      jackpotAmount: bn(0),
+      vrfSeed: Array(32).fill(0),
+      requestedAt: bn(0),
+      target: bn(0),
+      winner: PublicKey.default,
+      drawnAt: bn(0),
+      registrationOpenedAt: bn(0),
+      bump: 255,
+    });
+    const accounts = new Map<string, Buffer>();
+    accounts.set(POOL.toBase58(), await program.coder.accounts.encode("pool", pool({ currentEpochId: bn(2) })));
+    accounts.set(
+      epochAddress(PROGRAM_ID, POOL, 1n).toBase58(),
+      await program.coder.accounts.encode("epoch", epoch(1n, EPOCH_STATUS.ENDED, CHAIN_NOW - 1_000n)),
+    );
+    accounts.set(
+      epochAddress(PROGRAM_ID, POOL, 2n).toBase58(),
+      await program.coder.accounts.encode("epoch", epoch(2n, EPOCH_STATUS.OPEN, CHAIN_NOW + 85_400n)),
+    );
+    const clock = Buffer.alloc(40);
+    clock.writeBigInt64LE(CHAIN_NOW, 32);
+    accounts.set(SYSVAR_CLOCK_PUBKEY.toBase58(), clock);
+
+    const sent: TransactionInstruction[][] = [];
+    const fakeChain = {
+      program,
+      programId: PROGRAM_ID,
+      keypair: Keypair.generate(),
+      connection: new CountingConnection(accounts),
+      poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
+      epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, POOL, id),
+      recordChainTime: () => {},
+      send: async (instructions: TransactionInstruction[]) => {
+        sent.push(instructions);
+        return "signature";
+      },
+    };
+    const operator = new OperatorService(
+      fakeChain as unknown as ChainService,
+      {
+        operatorState: { upsert: async () => {} },
+        player: { findMany: async () => [] },
+      } as unknown as PrismaService,
+      fakeConfig,
+    );
+    const log = vi.spyOn(operator["logger"], "log").mockImplementation(() => {});
+
+    const first = await operator.runOnce();
+    const second = await operator.runOnce();
+
+    expect(first.action).toBeNull();
+    expect(first.snapshotPending).toEqual({ step: "request_draw", epochId: 1n });
+    expect(second.snapshotPending).toEqual({ step: "request_draw", epochId: 1n });
+    expect(sent).toEqual([]);
+    expect(log.mock.calls.filter(([line]) => String(line).includes("snapshot_pending"))).toHaveLength(1);
   });
 });

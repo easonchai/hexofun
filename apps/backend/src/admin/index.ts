@@ -1,9 +1,9 @@
 // One-off admin CLI: set-params, pause, unpause, pause-game, pause-jackpot,
 // start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
 // start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
-// fund-jackpot, grant-tickets, set-operator,
+// fund-jackpot, set-operator,
 // propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, migrate-venue, create-invite, shutdown, emergency-crank,
-// sweep-house, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
+// sweep-house, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
 // ChainService and the same full .env the backend itself runs on, instead of
@@ -50,7 +50,6 @@ import { validateEnv } from "../config/env";
 import {
   decodeEpoch,
   decodePool,
-  decodeRound,
   type PoolState,
 } from "../operator/chain-state";
 import { OperatorInstructions } from "../operator/instructions";
@@ -414,17 +413,12 @@ async function setParams(
   const ix = await method(chain, "setParams", {
     epochSeconds: bnOrNull(params.epochSeconds),
     epochAnchor: bnOrNull(params.epochAnchor),
-    roundSeconds: bnOrNull(params.roundSeconds),
-    closeBuffer: bnOrNull(params.closeBuffer),
     vrfTimeout: bnOrNull(params.vrfTimeout),
     minDeposit: params.minDeposit === undefined ? null : new BN(params.minDeposit.toString()),
-    houseCutBps: params.houseCutBps === undefined ? null : params.houseCutBps,
     minJackpot:
       params.minJackpot === undefined ? null : new BN(params.minJackpot.toString()),
     payoutTimeout: bnOrNull(params.payoutTimeout),
     baseRateBps: params.baseRateBps ?? null,
-    ticketsPerUsdc: params.ticketsPerUsdc ?? null,
-    bonusCapBps: params.bonusCapBps ?? null,
   })
     .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
     .instruction();
@@ -432,7 +426,7 @@ async function setParams(
     chain,
     mode,
     [ix],
-    "set params (epoch/round changes apply to the next epoch/round, not the open one)",
+    "set params (epoch changes apply to the next epoch, not the open one)",
     ledger,
   );
 }
@@ -457,37 +451,6 @@ async function fundJackpot(chain: ChainService, amount: bigint): Promise<void> {
     .instruction();
   log(`signature ${await chain.send([ix])}`);
   log(`jackpot funded with ${amount} atomic units from ${source.toBase58()}`);
-}
-
-/**
- * The admin path of `grant_tickets`: uncapped, for the rare manual fix. The
- * referral job (docs/plan/hexo-referrals ticket 08) is the only intended
- * caller of the operator path, which signs with the operator key directly
- * through `OperatorInstructions` rather than this CLI.
- */
-async function grantTickets(
-  chain: ChainService,
-  mode: AdminMode,
-  owner: PublicKey,
-  amount: bigint,
-  ledger?: AdminSigner,
-): Promise<void> {
-  const pool = await readPool(chain);
-  const ix = await method(chain, "grantTickets", new BN(amount.toString()))
-    .accountsPartial({
-      signer: mode.signer,
-      pool: pool.address,
-      player: chain.playerAddress(owner),
-      weightTree: pool.weightTree,
-    })
-    .instruction();
-  await submit(
-    chain,
-    mode,
-    [ix],
-    `grant ${amount} tickets to ${owner.toBase58()} (admin path, uncapped)`,
-    ledger,
-  );
 }
 
 /**
@@ -592,7 +555,6 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
           .accountsPartial({
             pool: pool.address,
             player: player.address,
-            weightTree: pool.weightTree,
             // Null, not omitted: the client would fill the fee payer in.
             owner: null,
             acceptedMint: pool.acceptedMint,
@@ -660,32 +622,13 @@ function isTestVrf(chain: ChainService): boolean {
 }
 
 /**
- * Permissionless stuck-state exits (mainnet readiness 2026-09-28, blocker 4).
- * Both sign locally with the loaded key like `emergency-crank`: the program
+ * Permissionless stuck-state exit (mainnet readiness 2026-09-28, blocker 4).
+ * Signs locally with the loaded key like `emergency-crank`: the program
  * takes any `caller` and enforces the deadline itself, so a too-early call
  * fails with `VrfTimeoutNotElapsed` / `PayoutTimeoutNotElapsed` rather than
  * doing anything. The randomness account is derived from the stored seed
  * and may not exist; the program allows that.
  */
-async function voidRound(chain: ChainService, roundId: bigint): Promise<void> {
-  const pool = await readPool(chain);
-  const address = chain.roundAddress(roundId, pool.address);
-  const info = await chain.connection.getAccountInfo(address);
-  if (!info) throw new Error(`round ${roundId} (${address.toBase58()}) not found`);
-  const round = decodeRound(chain.program, info.data);
-  const ix = await method(chain, "voidRound")
-    .accountsPartial({
-      caller: chain.keypair.publicKey,
-      pool: pool.address,
-      round: address,
-      randomness: randomnessAddress(chain.programId, round.vrfSeed, isTestVrf(chain)),
-    })
-    .instruction();
-  const signature = await chain.send([ix]);
-  log(`signature ${signature}`);
-  log(`voided round ${roundId} (status was ${round.status})`);
-}
-
 async function rolloverEpoch(chain: ChainService, epochId: bigint): Promise<void> {
   const pool = await readPool(chain);
   const address = chain.epochAddress(epochId, pool.address);
@@ -790,8 +733,6 @@ export async function run(
       return setParams(chain, mode, command.params, ledger);
     case "fund-jackpot":
       return fundJackpot(chain, command.amount);
-    case "grant-tickets":
-      return grantTickets(chain, mode, command.owner, command.amount, ledger);
     case "set-operator": {
       const ix = await method(chain, "setOperator", command.key)
         .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
@@ -926,8 +867,6 @@ export async function run(
       return emergencyCrank(chain, command.batch);
     case "sweep-house":
       return sweepHouse(chain, mode, ledger);
-    case "void-round":
-      return voidRound(chain, command.roundId);
     case "rollover-epoch":
       return rolloverEpoch(chain, command.epochId);
   }

@@ -22,12 +22,8 @@ export interface PoolParams {
   readonly epochSeconds: number;
   /** Unix seconds. Fixes the phase of the `anchor + k * epochSeconds` grid. */
   readonly epochAnchor: number;
-  readonly roundSeconds: number;
-  readonly closeBuffer: number;
   readonly vrfTimeout: number;
   readonly minDeposit: bigint;
-  /** Basis points of every settled round pot credited to the House, 0..=10_000. */
-  readonly houseCutBps: number;
   /** Atomic units. An epoch closing with less than this in the jackpot vault
    * rolls over instead of paying out dust. */
   readonly minJackpot: bigint;
@@ -37,13 +33,6 @@ export interface PoolParams {
   /** Ceiling on the depositors' share of venue yield, as an APR on
    *  `total_principal` in basis points. Env override BASE_RATE_BPS. */
   readonly baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. Env override
-   *  TICKETS_PER_USDC. */
-  readonly ticketsPerUsdc: number;
-  /** Share of `total_principal`, in basis points, an operator
-   * `grant_tickets` call may credit pool-wide per epoch. Env override
-   * BONUS_CAP_BPS. */
-  readonly bonusCapBps: number;
   /** game-jackpot-pause ticket 02: a new pool starts with the game and the
    *  jackpot paused. `--start` turns both off right after create_pool, for
    *  localnet and dev. Needs the signer to be the admin. */
@@ -68,9 +57,8 @@ export function nextSundayAnchor(now: Date): number {
 }
 
 /**
- * A numeric env override with a fallback, shared by BASE_RATE_BPS,
- * TICKETS_PER_USDC and BONUS_CAP_BPS (ADR 0011): a bad value fails bootstrap
- * immediately instead of silently keeping whatever was typed. Unset or empty
+ * A numeric env override with a fallback, used by BASE_RATE_BPS (ADR 0011):
+ * a bad value fails bootstrap immediately instead of silently keeping whatever was typed. Unset or empty
  * takes the fallback. Pure, like `env.ts`'s `solWarn`: the caller reads
  * `process.env` and hands the raw value in, so this is testable without
  * touching the environment.
@@ -88,12 +76,9 @@ export function envInt(label: string, raw: string | undefined, fallback: number)
 export const DEFAULT_POOL_PARAMS: PoolParams = {
   epochSeconds: 86_400,
   epochAnchor: nextSundayAnchor(new Date()),
-  roundSeconds: 90,
-  closeBuffer: 5,
   // Equal to the program's floor, MIN_VRF_TIMEOUT in constants.rs.
   vrfTimeout: 180,
   minDeposit: 1_000_000n, // 1 hexUSDC at 6 decimals
-  houseCutBps: 600, // 6%, the rate PRD-V2 §5.4 asks for
   minJackpot: 1_000_000n, // 1 hexUSDC at 6 decimals
   // A day less an hour before an unpayable winner rolls over. Strictly less
   // than epochSeconds: set_params requires payout_timeout < epoch_seconds
@@ -102,13 +87,10 @@ export const DEFAULT_POOL_PARAMS: PoolParams = {
   payoutTimeout: 82_800,
   // ~5% APY with daily compounding.
   baseRateBps: envInt("BASE_RATE_BPS", process.env.BASE_RATE_BPS, 488),
-  ticketsPerUsdc: envInt("TICKETS_PER_USDC", process.env.TICKETS_PER_USDC, 10),
-  // 5% of total_principal per epoch.
-  bonusCapBps: envInt("BONUS_CAP_BPS", process.env.BONUS_CAP_BPS, 500),
 };
 
 export const USAGE =
-  "usage: bootstrap [--epoch-seconds N] [--round-seconds N] [--epoch-anchor ISO8601] [--house-cut-bps N] [--min-jackpot USDC] [--payout-timeout N] [--admin PUBKEY] [--operator PUBKEY] [--treasury PUBKEY] [--buyback-reserve PUBKEY] [--start]";
+  "usage: bootstrap [--epoch-seconds N] [--epoch-anchor ISO8601] [--min-jackpot USDC] [--payout-timeout N] [--admin PUBKEY] [--operator PUBKEY] [--treasury PUBKEY] [--buyback-reserve PUBKEY] [--start]";
 
 /** mainnet-beta's genesis hash. Every other cluster (devnet, testnet,
  * localnet) keeps today's hot-key convenience defaults. */
@@ -371,7 +353,7 @@ function seconds(flag: string, raw: string): number {
   return value;
 }
 
-/** create_pool and set_params both cap the House cut at 10_000 bps (100%). */
+/** A basis-point rate, 0..=10_000 (100%). */
 export function houseCutBps(flag: string, raw: string): number {
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 0 || value > 10_000) {
@@ -400,9 +382,7 @@ export function isoSeconds(flag: string, raw: string): number {
 export function parsePoolParams(argv: readonly string[]): PoolParams {
   let values: {
     "epoch-seconds"?: string;
-    "round-seconds"?: string;
     "epoch-anchor"?: string;
-    "house-cut-bps"?: string;
     "min-jackpot"?: string;
     "payout-timeout"?: string;
     admin?: string;
@@ -416,9 +396,7 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
       args: [...argv],
       options: {
         "epoch-seconds": { type: "string" },
-        "round-seconds": { type: "string" },
         "epoch-anchor": { type: "string" },
-        "house-cut-bps": { type: "string" },
         "min-jackpot": { type: "string" },
         "payout-timeout": { type: "string" },
         admin: { type: "string" },
@@ -434,23 +412,15 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
   }
 
   const epochSeconds = values["epoch-seconds"];
-  const roundSeconds = values["round-seconds"];
   const epochAnchor = values["epoch-anchor"];
-  const houseCut = values["house-cut-bps"];
   const params: PoolParams = {
     ...DEFAULT_POOL_PARAMS,
     ...(epochSeconds === undefined
       ? {}
       : { epochSeconds: seconds("epoch-seconds", epochSeconds) }),
-    ...(roundSeconds === undefined
-      ? {}
-      : { roundSeconds: seconds("round-seconds", roundSeconds) }),
     ...(epochAnchor === undefined
       ? {}
       : { epochAnchor: isoSeconds("epoch-anchor", epochAnchor) }),
-    ...(houseCut === undefined
-      ? {}
-      : { houseCutBps: houseCutBps("house-cut-bps", houseCut) }),
     ...(values["min-jackpot"] === undefined
       ? {}
       : { minJackpot: wholeUsdc("min-jackpot", values["min-jackpot"]) }),
@@ -474,14 +444,6 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
     ...(values.start === true ? { start: true } : {}),
   };
 
-  // create_pool requires close_buffer < round_seconds, so a too-fast demo
-  // pool fails here with a readable message instead of InvalidParameter
-  // after the mint and both token accounts have already been created.
-  if (params.closeBuffer >= params.roundSeconds) {
-    throw new Error(
-      `--round-seconds must be greater than the ${params.closeBuffer}s close buffer`,
-    );
-  }
   // Treasury and buyback_reserve share (mint, owner) when both are the ATA,
   // so create_pool cannot tell them apart; catch the same-address case here
   // rather than after both accounts have been checked to exist.

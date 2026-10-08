@@ -1,25 +1,17 @@
 // Spec §3.4: the steps, in order, at most one transaction per tick. Step 6a
 // runs the venue cranks (deploy, recall, harvest) and 6b pays out the
-// withdrawals whose epoch has ended. Round steps (1-2) run before the Epoch
-// steps (3+) so a Round can never straddle an Epoch boundary; `begin_epoch`
-// (3) waits for both the sweep and the previous Epoch to be settled. The
-// epoch goes `begin_epoch`, `request_draw` (4), `draw` (5), `payout` (6)
-// (yield-claimer ticket 13: no registration step any more).
+// withdrawals whose epoch has ended. The epoch goes `begin_epoch` (3),
+// `request_draw` (4), `draw` (5), `payout` (6). Off-chain-tickets ticket 10:
+// the program is custody only, so there are no Round steps; steps 4 and 6 wait
+// on the Epoch snapshot (ticket 12) and report `snapshot_pending` until it
+// exists.
 //
 // Everything the steps touch arrives in the context, so a test drives them
 // with a fabricated chain state and a recording `send`, and the service is
 // left with nothing but plumbing.
-import { PublicKey, type TransactionInstruction } from "@solana/web3.js";
+import type { TransactionInstruction } from "@solana/web3.js";
 
-import {
-  EPOCH_STATUS,
-  ROUND_STATUS,
-  type EpochState,
-  type PoolState,
-  type RoundState,
-} from "./chain-state";
-import type { SendHooks } from "../chain/chain.service";
-import { ALREADY_GRANTED_MARKER } from "./grant-reclaim";
+import { EPOCH_STATUS, type EpochState, type PoolState } from "./chain-state";
 import type { OperatorInstructions } from "./instructions";
 import {
   decideVenue,
@@ -37,12 +29,6 @@ import {
   type VenueState,
 } from "./venue";
 
-/** Instructions per transaction for the two batched steps (spec §3.4). */
-export const BATCH_SIZE = 8;
-/** Step 7 waits this long past a settled/forfeited `lastRound.endsAt` before
- *  opening the next Round. The reveal now fires the moment the draw lands,
- *  usually before `endsAt`, so one second of slack is all it needs. */
-export const REVEAL_SECONDS = 1n;
 /**
  * How far apart the scheduler's slow safety tick runs (ticket 03, spec.md
  * "The Operator becomes deadline-driven"), and the ceiling `nextWakeAt` falls
@@ -51,8 +37,8 @@ export const REVEAL_SECONDS = 1n;
  */
 export const SAFETY_INTERVAL_SECONDS = 60n;
 /**
- * Pending withdrawals per transaction (step 6b). Smaller than BATCH_SIZE
- * because each one carries three accounts of its own (owner, Player, the
+ * Pending withdrawals per transaction (step 6b). Smaller than the eight
+ * instructions a transaction could otherwise take because each one carries three accounts of its own (owner, Player, the
  * owner's token account) plus an idempotent ATA creation, and eight of those
  * overflow a legacy transaction.
  */
@@ -61,76 +47,13 @@ export const WITHDRAW_BATCH_SIZE = 4;
  *  `ChainService.mapSendError` puts the IDL name in `Error.message`. */
 const SHORT_VAULT = "InsufficientVaultLiquidity";
 
-/**
- * Markers in a failed `payout`'s message that mean this winner cannot be
- * paid at all, so step 6 warns and leaves the epoch Drawn for the
- * `payout_timeout` rollover to take. Every other failure is a real one and
- * has to reach `runOnce()`, or an RPC blip would look like an unpayable
- * winner and retry silently with no `lastError` until the timeout.
- *
- * `payout`'s non-House branch no longer has a `winner_token` account at all
- * (docs/plan/hexo-referrals ticket 02): the prize compounds into
- * `principal_vault`, a pool-owned PDA, so a non-House winner has nothing left
- * here that can independently be uninitialized, wrong-mint, wrong-owner or
- * frozen the way an arbitrary external token account could. These markers
- * now only have a real "unpayable winner" case on a House win, whose prize
- * still lands in the externally-owned `treasury`/`buyback_reserve` accounts
- * pinned at `create_pool` (see ADR 0010 and ticket 02's Comments). The
- * strings themselves are unchanged: they are Anchor's and SPL Token's own
- * generic account-constraint names, so they still match whichever account in
- * the transaction actually failed, House-only or not. SPL Token's codes are
- * in neither error table, so a frozen destination arrives as the raw custom
- * error code instead; both spellings are listed because a test names the
- * error and a validator names the code. Only SPL Token and this program run
- * in a payout transaction, and this program's codes start at 0x1770, so 0x11
- * can only be SPL Token's.
- */
-const UNPAYABLE_WINNER = [
-  "AccountNotInitialized",
-  "ConstraintTokenMint",
-  "ConstraintTokenOwner",
-  "AccountFrozen",
-  "custom program error: 0x11",
-];
-
 /** Every catch below narrows `unknown` the same way. */
 const errorMessage = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
-const cannotPayWinner = (cause: unknown): boolean =>
-  UNPAYABLE_WINNER.some((marker) => errorMessage(cause).includes(marker));
-
-/**
- * `grant_tickets`' operator-path cap errors (ticket 04). `computeBonuses`'
- * pool-wide scale-down is a best effort, not a guarantee: other grant
- * activity already counted against the epoch (an admin grant, an earlier
- * batch this same tick loop sent) can leave less headroom than it assumed
- * when a referrer's row was written.
- */
-const GRANT_CAP_EXCEEDED = ["DailyPlayerGrantCapExceeded", "DailyPoolGrantCapExceeded"];
-
-/** Ticket 07: the Player already got this epoch's grant, so the batch's rows are done. */
-const alreadyGranted = (cause: unknown): boolean =>
-  errorMessage(cause).includes("AlreadyGranted");
-
-type Grant = { referrer: string; amount: bigint };
-
-const capExceeded = (cause: unknown): boolean =>
-  GRANT_CAP_EXCEEDED.some((marker) => errorMessage(cause).includes(marker));
-
 /** Ticket 06: consecutive failed tries before a single owner's withdrawal is
  *  given up on for the rest of the epoch. Fixed and small, per the ticket. */
 export const WITHDRAW_FAILURE_LIMIT = 3;
-
-/**
- * Ticket 12: how many times in a row an *expected* race (see
- * `EXPECTED_ERRORS`) has hit the same action and target. The first two are
- * noise — a read that lost a race with a transaction already in flight — but
- * the third means something is actually wedged (a stale mirror row, most
- * often), so it graduates into a real, recorded tick error instead of being
- * swallowed forever.
- */
-export const EXPECTED_ERROR_REPEAT_LIMIT = 3;
 
 /**
  * Ticket 12: a drawn epoch with a human winner never rolls over just because
@@ -208,11 +131,6 @@ export interface TickContext {
   readonly pool: PoolState;
   readonly currentEpoch: EpochState | null;
   readonly previousEpoch: EpochState | null;
-  /** The Round at `pool.openRoundId`, null when none is open. */
-  readonly openRound: RoundState | null;
-  /** The Round at `pool.nextRoundId - 1`, the most recently created one
-   *  (open or already terminal). Null when none has ever been created. */
-  readonly lastRound: RoundState | null;
   readonly ix: OperatorInstructions;
   /** Ticket 06: null before any withdrawal has ever failed. */
   readonly lastWithdrawState: WithdrawState | null;
@@ -224,12 +142,6 @@ export interface TickContext {
   /** The venue's free liquidity in atomic USDC, null when it cannot be read
    *  (the stub kind, a failed read). Asked only before a drain. */
   venueAvailable(): Promise<bigint | null>;
-  /** Ticket 12: how many times in a row each `action:target` key has hit an
-   *  expected error. Empty before anything has repeated. */
-  readonly lastExpectedErrors: ReadonlyMap<string, number>;
-  /** Ticket 21: the epoch whose skipped round was last reported, null before
-   *  the first one. */
-  readonly lastRoundSkipEpochId: bigint | null;
   /** Beta-launch-fixes ticket 05: holds step 3 back from the Pool's very
    *  first `begin_epoch` until this chain timestamp. Null runs step 3 as
    *  before (unconfigured, or the Pool already has an Epoch). */
@@ -250,60 +162,9 @@ export interface TickContext {
     currentEpochId: bigint,
     deadline: { now: bigint; epochSeconds: bigint; shutdown: boolean },
   ): Promise<{ owner: string; amount: bigint }[]>;
-  /**
-   * Every qualifying referrer's daily bonus for `epochId` not yet sent
-   * (docs/plan/hexo-referrals ticket 08), computed and recorded before it is
-   * ever handed back, so a crash or restart resumes instead of double
-   * granting. Empty once every grant for the epoch is sent or already
-   * granted on chain.
-   */
-  referralGrantsDue(epochId: bigint): Promise<Grant[]>;
-  /** Records the signature of a batch of grants just sent; null clears it. */
-  markReferralGrantsSent(
-    epochId: bigint,
-    referrers: readonly string[],
-    txSig: string | null,
-  ): Promise<void>;
-  /**
-   * Positions still on chain whose Round has reached a terminal status
-   * (Settled, Forfeited, Voided), across every such Round, not just the
-   * newest, with the Round id so step 2 can group a batch by Round.
-   */
-  unsettledPositions(): Promise<
-    { address: string; owner: string; roundId: bigint }[]
-  >;
-  /**
-   * Mainnet-readiness-fixes 08: the owner of one Player that holds a Weight
-   * tree leaf and has been empty for more than one epoch, checked against the
-   * Player account on chain, or null when none is. Never a live Player: the
-   * answer is only as stale as the account read inside it. Absent runs no
-   * release step.
-   */
-  leafToRelease?(): Promise<string | null>;
-  /** Keeps an owner out of later `leafToRelease` answers: its release was
-   *  just sent or just refused. */
-  skipLeaf?(owner: string): void;
-  /** Positions a confirmed `settle_position` just closed; keep them out of
-   *  later `unsettledPositions` results. */
-  forgetPositions(addresses: string[]): Promise<void>;
-  /**
-   * Terminal Rounds with no Position left on them and not yet marked
-   * closed (ops-and-envs ticket 08): what `close_round` may still reclaim
-   * rent from. Oldest id first.
-   */
-  roundsToClose(): Promise<bigint[]>;
-  /** A Round `close_round` was just sent for; keep it out of later
-   *  `roundsToClose` results until the indexer mirrors `RoundClosed`. */
-  forgetRound(id: bigint): void;
-  /**
-   * The Player (owner and House flag) whose leaf in the Weight tree holds the drawn epoch's
-   * target, read from the tree and the Player accounts on chain (ticket 13: no
-   * Read model table holds Weight ranges any more). Null when none does yet.
-   */
-  winner(epoch: EpochState): Promise<{ owner: string; isHouse: boolean } | null>;
-  send(instructions: TransactionInstruction[], hooks?: SendHooks): Promise<string>;
+  send(instructions: TransactionInstruction[]): Promise<string>;
   /** Something an operator should read but that is not a failed tick: so far
-   *  only a payout that would not land, which step 6 retries. */
+   *  only a venue crank the program refused, which is retried later. */
   warn(message: string): void;
 }
 
@@ -323,19 +184,18 @@ export interface TickOutcome {
    *  6b ran, for the service to remember as next tick's `lastWithdrawState`. */
   readonly withdrawState?: WithdrawState;
   /**
-   * Ticket 06: a failure in the withdrawal, settle-position or close-round
-   * step, recorded so the service writes it as the tick's `lastError` even
-   * though the tick went on to act (possibly reaching `create_round`) rather
-   * than aborting. Absent when none of those steps failed this tick.
+   * Ticket 06: a failure in the venue or withdrawal step, recorded so the
+   * service writes it as the tick's `lastError` even though the tick went on
+   * to act rather than aborting. Absent when none of those steps failed this
+   * tick.
    */
   readonly stepError?: string;
-  /** Ticket 12: the updated expected-error repeat counts, present only when
-   *  a step this tick recorded, cleared or escalated one. */
-  readonly expectedErrors?: ReadonlyMap<string, number>;
-  /** Ticket 21: set on the first tick of an epoch that holds back a round
-   *  because it would end after the epoch does. Absent on every later tick of
-   *  that epoch, so the service logs it once. */
-  readonly roundSkip?: { readonly epochId: bigint; readonly endsAt: bigint };
+  /**
+   * Off-chain-tickets ticket 10: the draw step this tick would have sent but
+   * for the missing Epoch snapshot (ticket 12). The service logs it once per
+   * step and epoch.
+   */
+  readonly snapshotPending?: { readonly step: "request_draw" | "payout"; readonly epochId: bigint };
   /** Ticket 09: whether the previous epoch has missed its expected deadline
    *  to reach a terminal status. Present on every tick. */
   readonly epochNoProgress?: boolean;
@@ -344,9 +204,9 @@ export interface TickOutcome {
    *  on every tick. */
   readonly drawnUnpaid?: boolean;
   /**
-   * The chain timestamp at which this decision could next differ: a Round
-   * closing, an Epoch ending, a VRF timeout, the reveal wait after the last
-   * Round, or the safety interval when none of those apply. Not a wall-clock
+   * The chain timestamp at which this decision could next differ: an Epoch
+   * ending, a VRF timeout, a venue deadline, or the safety interval when none
+   * of those apply. Not a wall-clock
    * value and not a duration; the scheduler converts it (see
    * `operator.service.ts`).
    */
@@ -366,24 +226,15 @@ const NOTHING: Decision = { action: null };
  * already lives on `ctx`, so it never touches the clock or the network.
  *
  * Acting this tick (`acted`) always makes that "now": a batched step
- * (the settle sweep, the withdrawal queue) may have more left to do, and the state that
+ * (the withdrawal queue) may have more left to do, and the state that
  * triggered the action is still the state on `ctx`, so recomputing off it
  * would otherwise just repeat the same boundary that already fired.
  */
 function nextWakeAt(ctx: TickContext, acted: boolean): bigint {
-  const { pool, currentEpoch, previousEpoch, openRound, lastRound, now } = ctx;
+  const { pool, currentEpoch, previousEpoch, now } = ctx;
   const candidates: bigint[] = [now + SAFETY_INTERVAL_SECONDS];
 
   if (acted) candidates.push(now);
-  if (openRound?.status === ROUND_STATUS.OPEN) {
-    candidates.push(openRound.endsAt - pool.closeBuffer);
-    // The void deadline for a round whose request never landed; the
-    // request retries every safety tick until then.
-    candidates.push(openRound.endsAt + pool.vrfTimeout);
-  }
-  if (openRound?.status === ROUND_STATUS.REQUESTED) {
-    candidates.push(openRound.requestedAt + pool.vrfTimeout);
-  }
   if (currentEpoch) candidates.push(currentEpoch.endsAt);
   // Ticket 13: the pre-end harvest window opens `HARVEST_LEAD_SECONDS` before
   // the epoch ends. Dropped by the `>= now` filter once it has opened.
@@ -404,13 +255,6 @@ function nextWakeAt(ctx: TickContext, acted: boolean): bigint {
   // fires. Dropped by the `>= now` filter below once launch has passed.
   if (pool.currentEpochId === 0n && ctx.launchAt !== null) {
     candidates.push(ctx.launchAt);
-  }
-  if (
-    pool.openRoundId === 0n &&
-    lastRound &&
-    lastRound.status !== ROUND_STATUS.VOIDED
-  ) {
-    candidates.push(lastRound.endsAt + REVEAL_SECONDS);
   }
 
   return candidates
@@ -434,24 +278,19 @@ export function msUntilWake(now: bigint, deadline: bigint): number {
 
 export async function runTick(ctx: TickContext): Promise<TickOutcome> {
   const decision = await decide(ctx);
-  // A release does not wake the next tick at once: it is housekeeping paced
-  // by the safety interval, so a long backlog never turns into a hot loop
-  // against the RPC budget.
-  const acted = decision.action !== null && decision.action !== "release_leaf";
-  return { ...decision, nextWakeAt: nextWakeAt(ctx, acted) };
+  return { ...decision, nextWakeAt: nextWakeAt(ctx, decision.action !== null) };
 }
 
 async function decide(ctx: TickContext): Promise<Decision> {
-  const { pool, currentEpoch, previousEpoch, openRound, now } = ctx;
+  const { pool, currentEpoch, previousEpoch, now } = ctx;
 
-  // Ticket 06/12: accumulated across steps 2, 2c and 6b below, so a failure
-  // in one of them never has to `return` (and so cut the tick short) to be
-  // remembered — every later `return` in this function is wrapped in
+  // Ticket 06: accumulated across the venue and withdrawal steps below, so a
+  // failure in one of them never has to `return` (and so cut the tick short)
+  // to be remembered. Every later `return` in this function is wrapped in
   // `finish()`, which folds these back in.
   let stepError: string | undefined;
-  let expectedErrors = ctx.lastExpectedErrors;
-  let expectedErrorsChanged = false;
   let withdrawStateOut: WithdrawState | undefined;
+  let snapshotPending: Decision["snapshotPending"];
   // Ticket 13: the venue cranks' memory, folded into every return the same way.
   let venueState = ctx.lastVenueState ?? EMPTY_VENUE_STATE;
   let venueChanged = false;
@@ -465,151 +304,18 @@ async function decide(ctx: TickContext): Promise<Decision> {
     epochNoProgress: noProgress,
     drawnUnpaid: drawnUnpaidNow,
     ...(stepError !== undefined ? { stepError } : {}),
-    ...(expectedErrorsChanged ? { expectedErrors } : {}),
     ...(withdrawStateOut !== undefined ? { withdrawState: withdrawStateOut } : {}),
+    ...(snapshotPending !== undefined ? { snapshotPending } : {}),
     ...(venueChanged ? { venueState } : {}),
   });
 
-  /**
-   * Ticket 12: runs one expected-error-prone send. On success, clears any
-   * repeat count for `key`. On an `AccountNotInitialized` race, `alreadyGone`
-   * runs (closing the local bookkeeping the same way a confirmed send would)
-   * and the attempt is treated as done. On any other member of
-   * `EXPECTED_ERRORS`, the repeat count for `key` goes up; the third time,
-   * it escalates into `stepError` instead of being swallowed again. Anything
-   * else is a real failure (ticket 06): recorded as `stepError` immediately.
-   * Either way, throwing is never how this reports a failure — the caller
-   * falls through to the next step.
-   */
-  async function attempt(
-    key: string,
-    send: () => Promise<void>,
-    alreadyGone: () => Promise<void>,
-  ): Promise<boolean> {
-    try {
-      await send();
-      if (expectedErrors.has(key)) {
-        const next = new Map(expectedErrors);
-        next.delete(key);
-        expectedErrors = next;
-        expectedErrorsChanged = true;
-      }
-      return true;
-    } catch (cause) {
-      const message = errorMessage(cause);
-      if (message === "AccountNotInitialized") {
-        await alreadyGone();
-        return true;
-      }
-      if (EXPECTED_ERRORS.has(message)) {
-        const count = (expectedErrors.get(key) ?? 0) + 1;
-        const next = new Map(expectedErrors);
-        next.set(key, count);
-        expectedErrors = next;
-        expectedErrorsChanged = true;
-        if (count >= EXPECTED_ERROR_REPEAT_LIMIT) {
-          stepError = stepError ?? `${key} failed ${count} times in a row: ${message}`;
-        }
-        return false;
-      }
-      stepError = stepError ?? `${key} failed: ${message}`;
-      return false;
-    }
-  }
-
-  // 1. Round: an Open round past its close asks for randomness, the same
-  // instant `buy_position` starts refusing (program §2.3); Requested and
-  // fulfilled settles; Requested past `vrf_timeout` voids. Runs first so a
-  // Round can never straddle the boundary step 3 might open next.
-  if (openRound) {
-    if (openRound.status === ROUND_STATUS.OPEN) {
-      // Still Open `vrf_timeout` past its end means every request so far
-      // failed to land (ORAO refusing, a dropped transaction): stop retrying
-      // and take the program's own exit (beta-launch-fixes ticket 02), or
-      // the round holds every Position and no new round opens.
-      if (now > openRound.endsAt + pool.vrfTimeout) {
-        await ctx.send(await ctx.ix.voidRound(pool, openRound));
-        return finish({ action: "void_round" });
-      }
-      if (now >= openRound.endsAt - pool.closeBuffer) {
-        await ctx.send(await ctx.ix.requestRoundRandomness(pool, openRound));
-        return finish({ action: "request_round_randomness" });
-      }
-    }
-    if (openRound.status === ROUND_STATUS.REQUESTED) {
-      if (await ctx.fulfilled(openRound.vrfSeed)) {
-        await ctx.send(await ctx.ix.settleRound(pool, openRound));
-        return finish({ action: "settle_round" });
-      }
-      if (now > openRound.requestedAt + pool.vrfTimeout) {
-        await ctx.send(await ctx.ix.voidRound(pool, openRound));
-        return finish({ action: "void_round" });
-      }
-    }
-  }
-
-  // 2. Sweep: unsettled Positions on any Round that is Settled, Forfeited or
-  // Voided, not just the newest one. Grouped by Round because a batch settles
-  // within one Round; one batch, and one Round, per tick, as before. Ticket
-  // 06: a failure here (of any kind) is recorded, not thrown, so it never
-  // blocks the epoch or round loops below it.
-  // The read is inside the same recorded-failure path (mainnet-readiness-fixes 01).
-  let sweep: Awaited<ReturnType<typeof ctx.unsettledPositions>> = [];
-  try {
-    sweep = await ctx.unsettledPositions();
-  } catch (cause) {
-    stepError = stepError ?? `unsettled_positions read failed: ${errorMessage(cause)}`;
-  }
-  const [firstUnsettled] = sweep;
-  if (firstUnsettled) {
-    const roundId = firstUnsettled.roundId;
-    const batch = sweep
-      .filter((position) => position.roundId === roundId)
-      .slice(0, BATCH_SIZE);
-    const addresses = batch.map((position) => position.address);
-    const sent = await attempt(
-      `settle_position:${roundId}`,
-      async () => {
-        await ctx.send(await ctx.ix.settlePositions(pool, roundId, batch));
-        // The accounts are closed now, but the indexer can keep (or briefly
-        // resurrect) their rows for a few sweeps; tell the context so no
-        // later tick resends settle_position and gets AccountNotInitialized.
-        await ctx.forgetPositions(addresses);
-      },
-      () => ctx.forgetPositions(addresses),
-    );
-    if (sent) return finish({ action: "settle_position" });
-  }
-
-  // 2c. Close a terminal Round once nothing settled on it is still owed
-  // (ops-and-envs ticket 08): reclaims its rent for the operator.
-  // Permissionless on the program side and never refused in shutdown, so
-  // this runs whether or not the pool is shut down. Ticket 06: a failure
-  // here is recorded, not thrown, same as step 2.
-  const [roundToClose] = await ctx.roundsToClose();
-  if (roundToClose !== undefined) {
-    const sent = await attempt(
-      `close_round:${roundToClose}`,
-      async () => {
-        await ctx.send(await ctx.ix.closeRound(pool, roundToClose));
-        // The account is closed now, but the indexer mirrors that off the
-        // RoundClosed event asynchronously; tell the context so an immediate
-        // next tick does not resend close_round and get AccountNotInitialized.
-        ctx.forgetRound(roundToClose);
-      },
-      async () => ctx.forgetRound(roundToClose),
-    );
-    if (sent) return finish({ action: "close_round" });
-  }
-
-  // 3. Begin Epoch: only once the Round and the sweep above are clear, and
-  // the previous Epoch (if any) has actually finished, so no Epoch is ever
-  // left two behind. Refused in shutdown, so the epoch loop stops here
-  // once the pool is shut down (spec.md "Shutdown").
+  // 3. Begin Epoch: only once the previous Epoch (if any) has actually
+  // finished, so no Epoch is ever left two behind. Refused in shutdown, so the
+  // epoch loop stops here once the pool is shut down (spec.md "Shutdown").
   // Ticket 05: the Pool's very first begin_epoch (no Epoch yet) waits for
   // LAUNCH_AT, if configured, so deposits can open days before the first
-  // Draw without an Epoch existing to reset a bought Ticket. Every later
-  // begin_epoch (currentEpoch already exists) is unaffected.
+  // Draw without an Epoch existing. Every later begin_epoch (currentEpoch
+  // already exists) is unaffected.
   // game-jackpot-pause ticket 02: `begin_epoch` is refused while the jackpot
   // is paused, and a new pool starts that way, so no epoch begins until the
   // admin starts the jackpot.
@@ -621,120 +327,23 @@ async function decide(ctx: TickContext): Promise<Decision> {
     previousEpoch === null ||
     previousEpoch.status === EPOCH_STATUS.PAID ||
     previousEpoch.status === EPOCH_STATUS.ROLLED_OVER;
-  if (
-    !pool.shutdown &&
-    !pool.jackpotPaused &&
-    epochEnded &&
-    pool.openRoundId === 0n &&
-    previousDone
-  ) {
+  if (!pool.shutdown && !pool.jackpotPaused && epochEnded && previousDone) {
     await ctx.send(await ctx.ix.beginEpoch(pool));
     return finish({ action: "begin_epoch" });
   }
 
-  // 3b. Referral bonuses (ticket 08): once per epoch, right after
-  // begin_epoch, credit each qualifying referrer's daily bonus for the
-  // epoch that just began, so it counts for the full day. referralGrantsDue
-  // computes and records the whole epoch's bonuses the first time it is
-  // asked (the ReferralGrant table's own uniqueness makes that idempotent
-  // across restarts), then hands back whatever is still unsent; batched the
-  // same way step 4 batches registrations. `grant_tickets` is refused in
-  // shutdown (ops-and-envs ticket 02), so this stops with the rest of the
-  // epoch loop. It is refused while the jackpot is paused too
-  // (game-jackpot-pause ticket 02); the grants stay due and go out once the
-  // jackpot restarts. The same goes for the global pause (mainnet-readiness-fixes
-  // 02), and any other refusal here is recorded, not thrown, so it never
-  // blocks steps 4 to 7.
-  if (!pool.shutdown && !pool.jackpotPaused && !pool.paused && currentEpoch) {
-    const epochId = currentEpoch.epochId;
-    // The signature is recorded the moment the transaction is on the wire
-    // (ticket 07): a send that times out while the blockhash is live may
-    // still land, and a row without it would be granted a second time.
-    const sendGrants = async (grants: Grant[]): Promise<void> => {
-      const referrers = grants.map((grant) => grant.referrer);
-      await ctx.send(await ctx.ix.grantTickets(pool, grants), {
-        onSent: (signature) => ctx.markReferralGrantsSent(epochId, referrers, signature),
-        onDropped: () => ctx.markReferralGrantsSent(epochId, referrers, null),
-      });
-    };
-    // Mainnet-readiness-fixes 16: the read runs the signature reclaim (RPC and
-    // DB), so its throw is recorded like a send's and steps 4 to 7 still run.
-    let grants: Grant[] = [];
-    try {
-      grants = await ctx.referralGrantsDue(epochId);
-    } catch (cause) {
-      stepError = stepError ?? `referral grants read failed: ${errorMessage(cause)}`;
-    }
-    if (grants.length > 0) {
-      const batch = grants.slice(0, BATCH_SIZE);
-      const referrers = batch.map((grant) => grant.referrer);
-      try {
-        await sendGrants(batch);
-        return finish({ action: "grant_tickets" });
-      } catch (cause) {
-        if (alreadyGranted(cause)) {
-          // The program refused a second grant to a referrer this epoch, so
-          // an earlier send landed. There is no signature of ours to record
-          // (the refusal is at simulation), so the rows get a marker.
-          // Mainnet-readiness-fixes 16: simulation names only the first
-          // refused instruction, so a batch of more than one cannot say which
-          // referrer that was. Each is resent alone, and only a referrer
-          // refused on its own gets the marker.
-          if (batch.length === 1) {
-            await ctx.markReferralGrantsSent(epochId, referrers, ALREADY_GRANTED_MARKER);
-          } else {
-            for (const grant of batch) {
-              try {
-                await sendGrants([grant]).catch(async (single: unknown) => {
-                  if (!alreadyGranted(single)) throw single;
-                  await ctx.markReferralGrantsSent(epochId, [grant.referrer], ALREADY_GRANTED_MARKER);
-                });
-              } catch (single) {
-                stepError = stepError ?? `grant_tickets to ${grant.referrer} failed: ${errorMessage(single)}`;
-              }
-            }
-          }
-          return finish({ action: "grant_tickets" });
-        }
-        if (!capExceeded(cause)) {
-          stepError = stepError ?? `grant_tickets failed: ${errorMessage(cause)}`;
-          // Fall through to step 4 and below.
-        } else {
-          // referralGrantsDue re-clamps every grant against the freshest
-          // Player data it has before handing it back, so this should now
-          // only fire on drift the indexer has not caught up with yet (a very
-          // recent withdrawal), not the stale-forever case it used to. The
-          // error itself does not say which referrer in the batch tripped it,
-          // so every one of them is logged with the amount that was tried;
-          // ponytail: still one atomic transaction, so all of them wait for
-          // the next tick's freshly re-clamped retry rather than just the
-          // culprit. Splitting the batch on a repeated failure is the upgrade
-          // path if that ever bites in practice.
-          ctx.warn(
-            `referral bonus grant for epoch ${currentEpoch.epochId} exceeded the on-chain cap ` +
-              `for one of [${batch.map((grant) => `${grant.referrer}:${grant.amount}`).join(", ")}]: ${
-                cause instanceof Error ? cause.message : String(cause)
-              }`,
-          );
-        }
-      }
-    }
-  }
-
-  // 4. The ended epoch goes to the draw. `request_draw` snapshots the Weight
-  // tree's total and the jackpot vault, so it sends the epoch straight to
-  // Drawing, or rolls it over when it holds no Weight or a prize under
-  // `min_jackpot`. Refused in shutdown and while the jackpot is paused, and
-  // the tick falls through in both so withdrawals and rounds are not held.
-  // `begin_epoch` and `rollover_epoch` are refused too, so an Ended epoch
-  // waits out the pause the same way it always did.
+  // 4. The ended epoch goes to the draw. `request_draw` commits the Epoch
+  // snapshot's root, which the backend builds in off-chain-tickets ticket 12;
+  // until then this step only reports that it is waiting. Refused in shutdown
+  // and while the jackpot is paused, and the tick falls through in both so
+  // withdrawals are not held. `begin_epoch` and `rollover_epoch` are refused
+  // too, so an Ended epoch waits out the pause the same way it always did.
   if (
     !pool.shutdown &&
     !pool.jackpotPaused &&
     previousEpoch?.status === EPOCH_STATUS.ENDED
   ) {
-    await ctx.send(await ctx.ix.requestDraw(pool, previousEpoch.epochId));
-    return finish({ action: "request_draw" });
+    snapshotPending = { step: "request_draw", epochId: previousEpoch.epochId };
   }
 
   // 5. Waiting on the draw's randomness. `draw` is refused in shutdown
@@ -751,48 +360,27 @@ async function decide(ctx: TickContext): Promise<Decision> {
     }
   }
 
-  // 6. Drawn: pay whoever owns the leaf the target landed in. A winner
-  // whose token account is frozen or closed cannot be paid at all, so past
-  // `payout_timeout` the epoch rolls over instead and the prize stays in the
-  // vault for the next draw rather than stranding this epoch forever. Ticket
-  // 12: a human (non-House) winner is never rolled over until the
-  // drawn-unpaid condition has had `DRAWN_UNPAID_ALERT_SECONDS` to page
-  // someone, regardless of how short `payout_timeout` is set.
+  // 6. Drawn: `payout` needs the winner's proof out of the Epoch snapshot
+  // (ticket 12), so for now this step only reports that it is waiting. A
+  // drawn epoch still rolls over past `payout_timeout`, so the prize stays in
+  // the vault for the next draw rather than stranding the epoch forever.
+  // Ticket 12: a winner is never rolled over until the drawn-unpaid condition
+  // has had `DRAWN_UNPAID_ALERT_SECONDS` to page someone, regardless of how
+  // short `payout_timeout` is set.
   if (previousEpoch?.status === EPOCH_STATUS.DRAWN) {
-    const hit = await ctx.winner(previousEpoch);
-    const winner = hit?.owner ?? null;
-    const isHouse = hit?.isHouse ?? false;
     const alertHasFired = now > previousEpoch.drawnAt + DRAWN_UNPAID_ALERT_SECONDS;
-    const timedOut =
-      now > previousEpoch.drawnAt + pool.payoutTimeout && (isHouse || alertHasFired);
-    if (winner) {
-      try {
-        await ctx.send(
-          await ctx.ix.payout(pool, previousEpoch.epochId, new PublicKey(winner)),
-        );
-        return finish({ action: "payout" });
-      } catch (cause) {
-        if (!cannotPayWinner(cause)) throw cause;
-        ctx.warn(
-          `payout of epoch ${previousEpoch.epochId} to ${winner} failed: ${
-            cause instanceof Error ? cause.message : String(cause)
-          }`,
-        );
-      }
-    }
-    if (timedOut) {
+    if (now > previousEpoch.drawnAt + pool.payoutTimeout && alertHasFired) {
       await ctx.send(await ctx.ix.rolloverEpoch(pool, previousEpoch));
       return finish({ action: "rollover_epoch" });
     }
-    // Retried next tick rather than treated as an error: either the payout
-    // will start landing, or no leaf holds the target yet.
+    snapshotPending = { step: "payout", epochId: previousEpoch.epochId };
   }
 
   // 6a. Venue cranks (ticket 13): harvest inside the last minutes of the
   // epoch, recall when free idle is under the floor, deploy what sits above
   // the target. All three are permissionless, so a failure is recorded and
   // cooled down but never throws: a failed harvest does not block the draw,
-  // and nothing here holds up the withdrawals or rounds below it. The program
+  // and nothing here holds up the withdrawals below it. The program
   // syncs and refreshes the klend reserve itself.
   /** Sends one crank. True when a transaction landed. */
   async function sendVenue(crank: VenueCrank): Promise<boolean> {
@@ -861,7 +449,7 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // 6b. Pay out the withdrawals whose epoch has ended. Permissionless on the
   // program side, so the operator only pays the fee; it runs behind every
   // step above, which is what keeps a late return from the yield venue from
-  // delaying a round, a draw or a payout. A vault too short to cover the
+  // delaying a draw or a payout. A vault too short to cover the
   // next batch has already tried a recall in 6a (a vault under what is queued
   // is under the idle floor); when that cannot cover it either, it reports the
   // gap and waits for USDC to come back, retrying on the following tick.
@@ -916,13 +504,6 @@ async function decide(ctx: TickContext): Promise<Decision> {
           `principal vault holds ${held} against ${owed} of due withdrawals; short by ${withdrawShortfall}`,
         );
         withdrawStateOut = withdrawStateIn;
-      } else if (message === "OpenPositions") {
-        // A Position is still on the board: step 5 settles it, and a later
-        // tick pays. No alert, no failure count and no skip, but one at a
-        // time so the owners behind this one are not held by the whole batch.
-        // ponytail: an owner whose Position stays open holds the single-mode
-        // queue behind them, bounded by how fast step 5 settles it.
-        withdrawStateOut = { ...withdrawStateIn, singleMode: true };
       } else if (!withdrawStateIn.singleMode) {
         // First failure of a batch: never blame a specific owner yet, just
         // switch strategy so the next tick isolates the bad one.
@@ -953,70 +534,7 @@ async function decide(ctx: TickContext): Promise<Decision> {
     withdrawStateOut = withdrawStateIn;
   }
 
-  /**
-   * 8. Release one empty Player's Weight tree leaf (mainnet-readiness-fixes
-   * 08). The lowest priority: it only runs on a tick that has nothing else to
-   * send, at most one per tick, so a refunded attacker's leaves come back a
-   * tick at a time without a human and without crowding out a crank. The
-   * program refuses a live Player, and `leafToRelease` has already checked
-   * the account, so a refusal here is a race and is recorded like any step's.
-   */
-  async function releaseOne(decision: Decision): Promise<Decision> {
-    if (pool.shutdown || ctx.leafToRelease === undefined) return finish(decision);
-    let owner: string | null;
-    try {
-      owner = await ctx.leafToRelease();
-    } catch (cause) {
-      // Mainnet-readiness-fixes 16: a read failure must not lose the tick's
-      // shortfall and step errors on the way out.
-      stepError = stepError ?? `leaf release read failed: ${errorMessage(cause)}`;
-      return finish(decision);
-    }
-    if (owner === null) return finish(decision);
-    const sent = await attempt(
-      `release_leaf:${owner}`,
-      async () => {
-        await ctx.send(await ctx.ix.releaseLeaf(pool, owner));
-      },
-      async () => {},
-    );
-    ctx.skipLeaf?.(owner);
-    return sent ? finish({ ...decision, action: "release_leaf" }) : finish(decision);
-  }
-
-  // 7. Open the next round, if a whole one still fits in this epoch, and the
-  // previous Round's reveal has had time to play: no viewer should see a new
-  // countdown while the last Round's laser is still landing.
-  // game-jackpot-pause ticket 02: `create_round` is refused under the game
-  // pause as well as the global `paused`, so both hold the round loop.
-  const lastRound = ctx.lastRound;
-  const revealDone =
-    lastRound === null ||
-    lastRound.status === ROUND_STATUS.VOIDED ||
-    now >= lastRound.endsAt + REVEAL_SECONDS;
-  if (
-    pool.openRoundId === 0n &&
-    !pool.paused &&
-    !pool.gamePaused &&
-    currentEpoch &&
-    revealDone
-  ) {
-    if (now + pool.roundSeconds <= currentEpoch.endsAt) {
-      await ctx.send(
-        await ctx.ix.createRound(pool, now, now + pool.roundSeconds),
-      );
-      return finish({ action: "create_round", withdrawShortfall });
-    }
-    // Ticket 21: the round would end after the epoch does, which `buy_position`
-    // refuses. Reported once per epoch, not once per tick.
-    const skip =
-      ctx.lastRoundSkipEpochId !== currentEpoch.epochId
-        ? { roundSkip: { epochId: currentEpoch.epochId, endsAt: currentEpoch.endsAt } }
-        : {};
-    return releaseOne({ ...NOTHING, withdrawShortfall, ...skip });
-  }
-
-  return releaseOne({ ...NOTHING, withdrawShortfall });
+  return finish({ ...NOTHING, withdrawShortfall });
 }
 
 /**
@@ -1026,17 +544,6 @@ async function decide(ctx: TickContext): Promise<Decision> {
  * what `ChainService.mapSendError` puts in `Error.message`.
  */
 export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
-  // `close_round` resent for a Round a previous, now-restarted process
-  // already closed (ops-and-envs ticket 08): the in-memory `forgetRound`
-  // memory does not survive a restart, and the indexer's own mirror of
-  // `RoundClosed` may not have landed yet either, so `roundsToClose` can
-  // still hand back an id whose account is already gone on chain.
-  "AccountNotInitialized",
-  // `release_leaf` for a Player that deposited or took Tickets between the
-  // tick's read of its account and the release landing (mainnet-readiness-fixes
-  // 08), or whose leaf another release already freed.
-  "LeafInUse",
-  "PlayerHasNoLeaf",
   // `request_draw` resent for an epoch a previous tick already sent to the draw.
   "EpochNotAwaitingDraw",
   "EpochNotDrawing",
@@ -1047,8 +554,6 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // request re-stamped `pending_epoch` to the epoch now running.
   "NothingPending",
   "NotPreviousEpoch",
-  // `process_withdraw` for a Player whose Position is not settled yet.
-  "OpenPositions",
   // The admin's shutdown() landed between this tick's read of `pool.shutdown`
   // and one of the steps it gates confirming (ops-and-envs ticket 02): the
   // gates above make this rare, not impossible, and the next tick reads the
@@ -1058,11 +563,6 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // landing, which is exactly the race the program guard exists for.
   "RandomnessAlreadyFulfilled",
   "RandomnessNotFulfilled",
-  "RoundAlreadyOpen",
-  "RoundNotEnded",
-  "RoundNotOpen",
-  "RoundNotRequested",
-  "RoundNotSettled",
   "VrfTimeoutNotElapsed",
   "WithdrawalNotDue",
 ]);

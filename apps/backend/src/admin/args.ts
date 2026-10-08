@@ -13,17 +13,12 @@ export interface SetParamsInput {
   readonly epochSeconds?: number;
   /** Unix seconds, from an ISO 8601 flag value. */
   readonly epochAnchor?: number;
-  readonly roundSeconds?: number;
-  readonly closeBuffer?: number;
   readonly vrfTimeout?: number;
   readonly minDeposit?: bigint;
-  readonly houseCutBps?: number;
   /** Atomic units, from a whole-USDC flag value. */
   readonly minJackpot?: bigint;
   readonly payoutTimeout?: number;
   readonly baseRateBps?: number;
-  readonly ticketsPerUsdc?: number;
-  readonly bonusCapBps?: number;
 }
 
 /** `set_venue_params`: every field optional, only the ones given are sent.
@@ -69,7 +64,6 @@ export type AdminCommand =
   | { readonly kind: "cover-deficit"; readonly amount: bigint }
   | { readonly kind: "fund-jackpot"; readonly amount: bigint }
   /** Admin path only (uncapped); the operator path is the referral job. */
-  | { readonly kind: "grant-tickets"; readonly owner: PublicKey; readonly amount: bigint }
   | { readonly kind: "set-params"; readonly params: SetParamsInput }
   | { readonly kind: "set-operator"; readonly key: PublicKey }
   | { readonly kind: "propose-admin"; readonly key: PublicKey }
@@ -106,15 +100,13 @@ export type AdminCommand =
   | { readonly kind: "sweep-house" }
   /** Permissionless stuck-state exits the operator does not yet send on its
    *  own (mainnet readiness 2026-09-28, blocker 4): an Open or Requested
-   *  Round past `vrf_timeout`, or an Ended, Drawing or Drawn Epoch past
-   *  its own deadline. The program checks the deadline; this only names the
-   *  account. */
-  | { readonly kind: "void-round"; readonly roundId: bigint }
+   *  Ended, Drawing or Drawn Epoch past its own deadline. The program checks
+   *  the deadline; this only names the account. */
   | { readonly kind: "rollover-epoch"; readonly epochId: bigint };
 
 export const USAGE = [
   "usage: admin <command> [flags]",
-  "  set-params [--epoch-seconds N] [--epoch-anchor ISO8601] [--round-seconds N] [--close-buffer N] [--vrf-timeout N] [--min-deposit N] [--house-cut-bps N] [--min-jackpot USDC] [--payout-timeout N] [--base-rate-bps N] [--tickets-per-usdc N] [--bonus-cap-bps N]",
+  "  set-params [--epoch-seconds N] [--epoch-anchor ISO8601] [--vrf-timeout N] [--min-deposit N] [--min-jackpot USDC] [--payout-timeout N] [--base-rate-bps N]",
   "  pause",
   "  unpause",
   "  pause-game | pause-jackpot   (operator or admin)",
@@ -126,7 +118,6 @@ export const USAGE = [
   "  set-treasury-accounts --treasury PUBKEY --buyback-reserve PUBKEY   (token accounts of the pool's mint)",
   "  cover-deficit --amount N   (any funded signer; pays N raw atomic USDC from its own account, capped at the deficit)",
   "  fund-jackpot --amount N   (N is raw atomic hexUSDC, 6 decimals)",
-  "  grant-tickets --owner PUBKEY --amount N   (admin path, uncapped; N is a whole number of tickets)",
   "  set-operator --key PUBKEY",
   "  propose-admin --key PUBKEY",
   "  accept-admin",
@@ -138,7 +129,6 @@ export const USAGE = [
   "  shutdown --confirm POOL_ID   (irreversible; POOL_ID must match the configured pool)",
   `  emergency-crank [--batch N]   (permissionless; N players per transaction, default ${DEFAULT_EMERGENCY_CRANK_BATCH})`,
   "  sweep-house",
-  "  void-round --round N   (permissionless; Open or Requested round past vrf_timeout)",
   "  rollover-epoch --epoch N   (permissionless; Ended, Drawing or Drawn epoch past its timeout)",
 ].join("\n");
 
@@ -146,14 +136,6 @@ function positiveInt(flag: string, raw: string): number {
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`--${flag} must be a positive whole number, got "${raw}"`);
-  }
-  return value;
-}
-
-function nonNegativeInt(flag: string, raw: string): number {
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`--${flag} must be a non-negative whole number, got "${raw}"`);
   }
   return value;
 }
@@ -170,16 +152,6 @@ function nonNegativeBigInt(flag: string, raw: string): bigint {
     throw new Error(`--${flag} must be a non-negative whole number, got "${raw}"`);
   }
   return BigInt(raw);
-}
-
-/** `tickets_per_usdc` is a u16 and must be > 0 (a rate of zero would divide
- *  by nothing when pricing a purchase). */
-function ticketsPerUsdc(flag: string, raw: string): number {
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value <= 0 || value > 65_535) {
-    throw new Error(`--${flag} must be a whole number from 1 to 65535, got "${raw}"`);
-  }
-  return value;
 }
 
 /** A basis-point field that is a u16 in `SetVenueParamsArgs`. The program's
@@ -375,30 +347,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         amount: positiveBigInt("amount", oneFlag(command, "amount", rest)),
       };
 
-    case "grant-tickets": {
-      let values: { owner?: string; amount?: string };
-      try {
-        ({ values } = parseArgs({
-          args: [...rest],
-          options: { owner: { type: "string" }, amount: { type: "string" } },
-          allowPositionals: false,
-        }));
-      } catch (cause) {
-        throw new Error(USAGE, { cause });
-      }
-      if (typeof values.owner !== "string") {
-        throw new Error(`grant-tickets needs --owner\n${USAGE}`);
-      }
-      if (typeof values.amount !== "string") {
-        throw new Error(`grant-tickets needs --amount\n${USAGE}`);
-      }
-      return {
-        kind: "grant-tickets",
-        owner: pubkey("owner", values.owner),
-        amount: positiveBigInt("amount", values.amount),
-      };
-    }
-
     case "set-operator":
       return { kind: "set-operator", key: pubkey("key", oneFlag(command, "key", rest)) };
 
@@ -455,16 +403,11 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
       let values: {
         "epoch-seconds"?: string;
         "epoch-anchor"?: string;
-        "round-seconds"?: string;
-        "close-buffer"?: string;
         "vrf-timeout"?: string;
         "min-deposit"?: string;
-        "house-cut-bps"?: string;
         "min-jackpot"?: string;
         "payout-timeout"?: string;
         "base-rate-bps"?: string;
-        "tickets-per-usdc"?: string;
-        "bonus-cap-bps"?: string;
       };
       try {
         ({ values } = parseArgs({
@@ -472,16 +415,11 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
           options: {
             "epoch-seconds": { type: "string" },
             "epoch-anchor": { type: "string" },
-            "round-seconds": { type: "string" },
-            "close-buffer": { type: "string" },
             "vrf-timeout": { type: "string" },
             "min-deposit": { type: "string" },
-            "house-cut-bps": { type: "string" },
             "min-jackpot": { type: "string" },
             "payout-timeout": { type: "string" },
             "base-rate-bps": { type: "string" },
-            "tickets-per-usdc": { type: "string" },
-            "bonus-cap-bps": { type: "string" },
           },
           allowPositionals: false,
         }));
@@ -496,20 +434,11 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         ...(values["epoch-anchor"] !== undefined && {
           epochAnchor: isoSeconds("epoch-anchor", values["epoch-anchor"]),
         }),
-        ...(values["round-seconds"] !== undefined && {
-          roundSeconds: positiveInt("round-seconds", values["round-seconds"]),
-        }),
-        ...(values["close-buffer"] !== undefined && {
-          closeBuffer: nonNegativeInt("close-buffer", values["close-buffer"]),
-        }),
         ...(values["vrf-timeout"] !== undefined && {
           vrfTimeout: positiveInt("vrf-timeout", values["vrf-timeout"]),
         }),
         ...(values["min-deposit"] !== undefined && {
           minDeposit: nonNegativeBigInt("min-deposit", values["min-deposit"]),
-        }),
-        ...(values["house-cut-bps"] !== undefined && {
-          houseCutBps: houseCutBps("house-cut-bps", values["house-cut-bps"]),
         }),
         ...(values["min-jackpot"] !== undefined && {
           minJackpot: wholeUsdc("min-jackpot", values["min-jackpot"]),
@@ -519,12 +448,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         }),
         ...(values["base-rate-bps"] !== undefined && {
           baseRateBps: houseCutBps("base-rate-bps", values["base-rate-bps"]),
-        }),
-        ...(values["tickets-per-usdc"] !== undefined && {
-          ticketsPerUsdc: ticketsPerUsdc("tickets-per-usdc", values["tickets-per-usdc"]),
-        }),
-        ...(values["bonus-cap-bps"] !== undefined && {
-          bonusCapBps: houseCutBps("bonus-cap-bps", values["bonus-cap-bps"]),
         }),
       };
       if (Object.keys(params).length === 0) {
@@ -588,12 +511,6 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
     case "sweep-house":
       rejectExtra(rest);
       return { kind: "sweep-house" };
-
-    case "void-round":
-      return {
-        kind: "void-round",
-        roundId: nonNegativeBigInt("round", oneFlag(command, "round", rest)),
-      };
 
     case "rollover-epoch":
       return {

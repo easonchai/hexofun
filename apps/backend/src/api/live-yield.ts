@@ -82,10 +82,10 @@ export function positionYield(principal: bigint, unsettled: bigint, basis: bigin
  * branch as the reset.
  */
 export function effectiveTickets(
-  player: { principal: bigint; entries: bigint; epochId: bigint },
+  player: { principal: bigint; tickets: bigint; epochId: bigint },
   currentEpochId: bigint,
 ): bigint {
-  return player.epochId < currentEpochId ? player.principal : player.entries;
+  return player.epochId < currentEpochId ? player.principal : player.tickets;
 }
 
 /** The part of Principal that earns no Ticket in the current epoch: the

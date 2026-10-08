@@ -24,8 +24,6 @@ model Pool {
   mint                String
   epochSeconds        BigInt
   epochAnchor         BigInt
-  roundSeconds        BigInt
-  closeBuffer         BigInt
   minDeposit          BigInt
   paused              Boolean
   currentEpochId      BigInt
@@ -36,34 +34,22 @@ model Pool {
   pendingWithdrawals  BigInt
   /// An epoch closing under this rolls over instead of paying a token prize.
   minJackpot          BigInt
-  houseCutBps         Int
   /// The depositors' ceiling rate (APR, basis points). Since the live yield
   /// index it caps what depositors earn; the prize takes the rest.
   baseRateBps         Int
-  /// Tickets credited per USDC spent in `buy_tickets`.
-  ticketsPerUsdc      Int
-  /// Share of totalPrincipal, in basis points, an operator grant_tickets
-  /// call may credit pool-wide per epoch.
-  bonusCapBps         Int
-  /// The epoch bonusGranted is counted against.
-  bonusEpoch          BigInt
-  /// Tickets an operator grant_tickets call has credited pool-wide so far
-  /// in bonusEpoch.
-  bonusGranted        BigInt
   /// Lets a future upgrade migrate an old account lazily (ADR 0013).
   version             Int
   /// Admin-only and irreversible: stops every inflow, the game and the
   /// draw, and lets withdrawals skip the epoch lock.
   shutdown            Boolean
-  /// Game pause: no new Round or Position (game-jackpot-pause).
+  /// Game pause: the backend game engine opens no Round (game-jackpot-pause).
   gamePaused          Boolean @default(false)
-  /// Jackpot pause: no new epoch, no ticket purchase or grant, and an ended
+  /// Jackpot pause: no new epoch, no ticket purchase, and an ended
   /// epoch does not request its draw (game-jackpot-pause).
   jackpotPaused       Boolean @default(false)
   /// Live yield (yield-claimer tickets 05 to 11). The defaults are what a
   /// pool row written before this migration reads; the next sync upserts the
   /// real values.
-  weightTree          String  @default("")
   /// The four pinned venue accounts; the names are klend's and the meaning follows venueKind. klend: program, lending market, reserve, the pool's cToken account. kVault: the kVault program, the vault state, the vault's shares mint, the pool's shares token account.
   klendProgram        String  @default("")
   klendMarket         String  @default("")
@@ -97,16 +83,13 @@ model Pool {
   // Back-relations for the pool-scoped tables (ADR 0016). A Pool row is
   // never deleted, so every child relation is onDelete: Restrict.
   epochs              Epoch[]
-  rounds              Round[]
   players             Player[]
-  positions           Position[]
   events              Event[]
   cursor              Cursor?
   operatorState       OperatorState?
   referralGrants      ReferralGrant[]
   referralGrantShares ReferralGrantShare[]
   yieldIndexPoints    YieldIndexPoint[]
-  weightTreeState     WeightTreeState?
   venueProposal       VenueProposal?
 }
 
@@ -129,35 +112,15 @@ model Epoch {
   @@id([poolAddress, id])
 }
 
-model Round {
-  poolAddress String
-  pool        Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
-  id          BigInt
-  epochId     BigInt
-  startsAt    BigInt
-  endsAt      BigInt
-  status      Int
-  pot         BigInt
-  houseCut    BigInt
-  winningTile Int?
-  tileTotals  Json
-  /// `close_round` reclaimed this Round's rent and closed the account.
-  /// `roundRow` never carries this field, so mirroring the still-open
-  /// account never resets it back to false once the RoundClosed event has
-  /// set it; the row keeps its last mirrored state instead of being
-  /// deleted or blanked (ops-and-envs ticket 08).
-  closed      Boolean @default(false)
-
-  // Round ids restart at 1 on every pool (ADR 0016).
-  @@id([poolAddress, id])
-}
-
 model Player {
   poolAddress  String
   pool         Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
   owner        String
   principal    BigInt
-  entries      BigInt
+  /// Tickets this wallet holds in the current epoch. The program no longer
+  /// holds them, so the mirror leaves the column alone until the Ticket ledger
+  /// (off-chain-tickets ticket 11) maintains it.
+  tickets      BigInt @default(0)
   epochId      BigInt
   isHouse      Boolean
   /// Requested but not yet paid; `process_withdraw` pays it and zeroes it.
@@ -170,8 +133,6 @@ model Player {
   /// The pool's yield index at this Player's last settle, scaled by 1e18.
   /// Unsettled yield is principal x (pool.yieldIndex - this) / 1e18.
   yieldIndex         Decimal @default(0) @db.Decimal(40, 0)
-  /// This Player's leaf in the Weight tree, 1-based.
-  leafIndex          Int     @default(0)
   /// The part of principal deposited in pendingDepositEpoch, which earns no
   /// Ticket until the next epoch. Already inside principal.
   pendingDeposit      BigInt @default(0)
@@ -180,11 +141,6 @@ model Player {
   boughtEpoch        BigInt
   /// USDC spent in buy_tickets so far in boughtEpoch, capped at principal.
   boughtAmount       BigInt
-  /// The epoch bonusGranted is counted against.
-  bonusEpoch         BigInt
-  /// Tickets an operator grant_tickets call has credited this Player so far
-  /// in bonusEpoch.
-  bonusGranted       BigInt
   /// The chain slot the mirror row was read at: the log path's notification
   /// slot or the sweep's snapshot slot. 0 for a row written before this
   /// column. `bindReferral` copies it to Referral.seedSlot.
@@ -195,20 +151,6 @@ model Player {
   // checks: the beta gate and the referral apply.
   @@id([poolAddress, owner])
   @@index([owner])
-}
-
-model Position {
-  // The PDA is unique across pools, so it stays the key; poolAddress scopes
-  // reads to the Active pool (ADR 0016).
-  address      String  @id
-  poolAddress  String
-  pool         Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
-  owner        String
-  roundId      BigInt
-  tiles        BigInt
-  stakePerTile BigInt
-
-  @@index([poolAddress, roundId])
 }
 
 // Finalized program events, decoded from `Program data:` logs. The key is
@@ -271,18 +213,6 @@ model YieldIndexPoint {
   yieldIndex  Decimal @db.Decimal(40, 0)
 
   @@id([poolAddress, at])
-}
-
-// The Weight tree's header and root, mirrored when the Pool changes: how many
-// leaves it holds and the total Weight of the pool's current epoch. One row
-// per pool.
-model WeightTreeState {
-  poolAddress String  @id
-  pool        Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
-  nodeCount   BigInt
-  /// The epoch `rootWeight` is for (the pool's current epoch when read).
-  epochId     BigInt
-  rootWeight  Decimal @db.Decimal(40, 0)
 }
 
 model FaucetClaim {

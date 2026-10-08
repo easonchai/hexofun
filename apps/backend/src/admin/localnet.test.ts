@@ -10,7 +10,9 @@
 //
 // Mainnet-review-fixes ticket 05: bootstrap sets the Bought tickets pause on
 // mainnet, and `start-buy-tickets` is the only thing that clears it. This
-// drives that command through `run` against a real pool, then buys Tickets.
+// drives that command through `run` against a real pool, then buys Tickets
+// (off-chain-tickets ticket 10: the purchase is a USDC sink with an event now,
+// so it is the spend counter and the jackpot vault that move).
 import "reflect-metadata";
 
 import { BN } from "@anchor-lang/core";
@@ -27,7 +29,6 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
-  type TransactionInstruction,
 } from "@solana/web3.js";
 import type { ConfigService } from "@nestjs/config";
 import bs58 from "bs58";
@@ -49,9 +50,6 @@ const RPC_URL = process.env.ANCHOR_PROVIDER_URL;
 /** Pinned on the pool at creation; `test-vrf` builds never dereference it. */
 const VRF_NETWORK_STATE = new PublicKey("5ER1oENnV4srxYdAynUfRzWeQCPQaqMiAp4VqyMbSqnK");
 
-/** `create_pool`'s Weight tree: discriminator plus the zero-copy header. */
-const WEIGHT_TREE_SPACE = 8 + 48;
-const TICKETS_PER_USDC = 10;
 const DEPOSIT = 4_000_000n;
 const BUY = 1_000_000n;
 
@@ -59,7 +57,6 @@ const BUY = 1_000_000n;
 interface TxBuilder {
   accountsPartial(accounts: Record<string, PublicKey>): TxBuilder;
   signers(signers: Keypair[]): TxBuilder;
-  preInstructions(instructions: TransactionInstruction[]): TxBuilder;
   rpc(): Promise<string>;
 }
 
@@ -102,7 +99,6 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
       } as HexVaultEnv);
       const chain = new ChainService(connection, config);
       const pool = chain.poolAddress();
-      const weightTree = Keypair.generate();
       // `test-venue` pins this program as klend, the pool as the market and
       // two PDAs of its own as the reserve and the position's token account.
       const venue = {
@@ -133,16 +129,11 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
         vrfNetworkState: VRF_NETWORK_STATE,
         epochSeconds: new BN(86_400),
         epochAnchor: new BN(Math.floor(Date.now() / 1000)),
-        roundSeconds: new BN(15),
-        closeBuffer: new BN(5),
         vrfTimeout: new BN(120),
         minDeposit: new BN(1_000_000),
-        houseCutBps: 0,
         minJackpot: new BN(1),
         payoutTimeout: new BN(30),
         baseRateBps: 0,
-        ticketsPerUsdc: TICKETS_PER_USDC,
-        bonusCapBps: 0,
         venueKind: 1, // the stub, which is what these suites pin
       })
         .accountsPartial({
@@ -154,23 +145,13 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
           principalVault: chain.principalVaultAddress(),
           jackpotVault: chain.jackpotVaultAddress(),
           house: chain.playerAddress(authority.publicKey),
-          weightTree: weightTree.publicKey,
           treasury,
           buybackReserve,
           ...venue,
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .preInstructions([
-          SystemProgram.createAccount({
-            fromPubkey: authority.publicKey,
-            newAccountPubkey: weightTree.publicKey,
-            space: WEIGHT_TREE_SPACE,
-            lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
-            programId: chain.programId,
-          }),
-        ])
-        .signers([authority, weightTree, deploy])
+        .signers([authority, deploy])
         .rpc();
       await method("testVenueInit")
         .accountsPartial({
@@ -222,6 +203,7 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
           currentEpoch: chain.epochAddress(0n),
           epochTwoBehind: chain.epochAddress(0n),
           newEpoch: chain.epochAddress(1n),
+          ...venue,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
@@ -239,7 +221,7 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
           })
           .signers([owner])
           .rpc();
-      const bought = async (): Promise<{ paused: boolean; entries: bigint }> => {
+      const bought = async (): Promise<{ paused: boolean; spent: bigint }> => {
         const [poolInfo, playerInfo] = await Promise.all([
           connection.getAccountInfo(pool),
           connection.getAccountInfo(chain.playerAddress(owner.publicKey)),
@@ -248,13 +230,13 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
           "pool",
           poolInfo?.data ?? Buffer.alloc(0),
         );
-        const player = chain.program.coder.accounts.decode<{ entries: BN }>(
+        const player = chain.program.coder.accounts.decode<{ boughtAmount: BN }>(
           "player",
           playerInfo?.data ?? Buffer.alloc(0),
         );
         return {
           paused: poolAccount.buyTicketsPaused,
-          entries: BigInt(player.entries.toString()),
+          spent: BigInt(player.boughtAmount.toString()),
         };
       };
       const admin = { signer: chain.keypair.publicKey, multisig: false };
@@ -267,8 +249,11 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
       await run({ kind: "start-buy-tickets" }, chain, admin);
       expect((await bought()).paused).toBe(false);
       await buyTickets();
-      // The deposit became Tickets when epoch 1 began; the purchase lands on top.
-      expect((await bought()).entries).toBe(DEPOSIT + BUY * BigInt(TICKETS_PER_USDC));
+      // The program credits no Tickets: it counts the spend against the epoch's
+      // cap and the USDC lands in the jackpot vault.
+      expect((await bought()).spent).toBe(BUY);
+      const vault = await connection.getTokenAccountBalance(chain.jackpotVaultAddress());
+      expect(BigInt(vault.value.amount)).toBe(BUY);
     },
     120_000,
   );

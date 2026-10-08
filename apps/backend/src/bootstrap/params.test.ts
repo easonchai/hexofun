@@ -24,13 +24,6 @@ describe("parsePoolParams", () => {
     expect(parsePoolParams([])).toEqual(DEFAULT_POOL_PARAMS);
   });
 
-  it("defaults round_seconds to 90, with close_buffer safely under it", () => {
-    expect(DEFAULT_POOL_PARAMS.roundSeconds).toBe(90);
-    expect(DEFAULT_POOL_PARAMS.closeBuffer).toBeLessThan(
-      DEFAULT_POOL_PARAMS.roundSeconds,
-    );
-  });
-
   it("overrides only the flags given", () => {
     // Above a payout timeout, which has to be shorter than the epoch.
     expect(
@@ -43,13 +36,11 @@ describe("parsePoolParams", () => {
     expect(
       parsePoolParams([
         "--epoch-seconds=1200",
-        "--round-seconds=20",
         "--payout-timeout=700",
       ]),
     ).toEqual({
       ...DEFAULT_POOL_PARAMS,
       epochSeconds: 1200,
-      roundSeconds: 20,
       payoutTimeout: 700,
     });
   });
@@ -81,13 +72,7 @@ describe("parsePoolParams", () => {
   });
 
   it("rejects values create_pool would reject", () => {
-    expect(() => parsePoolParams(["--round-seconds", "0"])).toThrow(/positive/);
     expect(() => parsePoolParams(["--epoch-seconds", "1.5"])).toThrow(/whole/);
-    // close_buffer is 5, so a 4 second round cannot satisfy
-    // close_buffer < round_seconds.
-    expect(() => parsePoolParams(["--round-seconds", "4"])).toThrow(
-      /close buffer/,
-    );
   });
 
   // game-jackpot-pause ticket 02: paused unless asked.
@@ -100,28 +85,14 @@ describe("parsePoolParams", () => {
     expect(() => parsePoolParams(["--pool-id", "2"])).toThrow(/usage/);
   });
 
-  it("overrides the House cut rate", () => {
-    expect(parsePoolParams(["--house-cut-bps", "0"])).toEqual({
-      ...DEFAULT_POOL_PARAMS,
-      houseCutBps: 0,
-    });
-    expect(parsePoolParams(["--house-cut-bps", "10000"])).toEqual({
-      ...DEFAULT_POOL_PARAMS,
-      houseCutBps: 10_000,
-    });
-  });
-
-  it("rejects a House cut rate outside 0..=10000", () => {
-    // node:util parseArgs only accepts a "-"-leading value via "=" syntax.
-    expect(() => parsePoolParams(["--house-cut-bps=-1"])).toThrow(
-      /0 to 10000/,
-    );
-    expect(() => parsePoolParams(["--house-cut-bps", "10001"])).toThrow(
-      /0 to 10000/,
-    );
-    expect(() => parsePoolParams(["--house-cut-bps", "1.5"])).toThrow(
-      /0 to 10000/,
-    );
+  it("no longer takes the flags for what the program dropped", () => {
+    // Round length and the House cut moved to the backend's Game config
+    // (off-chain-tickets ticket 10).
+    expect(() => parsePoolParams(["--round-seconds", "60"])).toThrow(/usage/);
+    expect(() => parsePoolParams(["--house-cut-bps", "600"])).toThrow(/usage/);
+    for (const key of ["roundSeconds", "closeBuffer", "houseCutBps", "ticketsPerUsdc", "bonusCapBps"]) {
+      expect(DEFAULT_POOL_PARAMS).not.toHaveProperty(key);
+    }
   });
 
   it("takes the two role keys as base58 pubkeys", () => {
@@ -298,10 +269,8 @@ describe("envInt", () => {
 });
 
 describe("DEFAULT_POOL_PARAMS", () => {
-  it("defaults the ticket-economy rates spec.md and ADR 0011 ask for", () => {
+  it("defaults the base rate spec.md and ADR 0011 ask for", () => {
     expect(DEFAULT_POOL_PARAMS.baseRateBps).toBe(488);
-    expect(DEFAULT_POOL_PARAMS.ticketsPerUsdc).toBe(10);
-    expect(DEFAULT_POOL_PARAMS.bonusCapBps).toBe(500);
   });
 });
 

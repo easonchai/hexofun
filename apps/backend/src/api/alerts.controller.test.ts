@@ -5,7 +5,6 @@ import {
   NEAR_CLOSE_SECONDS,
   OPERATOR_FAILING_SECONDS,
   SOLVENCY_DUST,
-  TREE_NEARLY_FULL_BPS,
   type AlertInputs,
   type AlertThresholds,
 } from "./alerts.controller";
@@ -26,7 +25,6 @@ const HEALTHY: AlertInputs = {
   rpcFallbackAgeMs: null,
   indexerAgeSeconds: 5,
   withdrawShortfall: 0n,
-  roundVoidedRecently: false,
   epochRolledOverRecently: false,
   withdrawSkippedCount: 0,
   operatorFailingSeconds: null,
@@ -43,7 +41,6 @@ const HEALTHY: AlertInputs = {
   reserveFreeLiquidity: 5_000_000n,
   impaired: false,
   deployPaused: false,
-  treeUsedBps: 100,
   venueProposal: null,
   paramsChanged: null,
 };
@@ -121,20 +118,8 @@ describe("evaluateAlerts", () => {
     expect(evaluateAlerts({ ...HEALTHY, withdrawShortfall: 0n }, THRESHOLDS)).toEqual([]);
   });
 
-  it("ROUND_VOIDED_RECENTLY and EPOCH_ROLLED_OVER_RECENTLY fire independently", () => {
-    expect(evaluateAlerts({ ...HEALTHY, roundVoidedRecently: true }, THRESHOLDS)).toEqual([
-      { code: "ROUND_VOIDED_RECENTLY", message: expect.any(String) },
-    ]);
+  it("EPOCH_ROLLED_OVER_RECENTLY fires when an epoch rolled over", () => {
     expect(evaluateAlerts({ ...HEALTHY, epochRolledOverRecently: true }, THRESHOLDS)).toEqual([
-      { code: "EPOCH_ROLLED_OVER_RECENTLY", message: expect.any(String) },
-    ]);
-    expect(
-      evaluateAlerts(
-        { ...HEALTHY, roundVoidedRecently: true, epochRolledOverRecently: true },
-        THRESHOLDS,
-      ),
-    ).toEqual([
-      { code: "ROUND_VOIDED_RECENTLY", message: expect.any(String) },
       { code: "EPOCH_ROLLED_OVER_RECENTLY", message: expect.any(String) },
     ]);
   });
@@ -250,13 +235,6 @@ describe("evaluateAlerts", () => {
     ]);
   });
 
-  it("WEIGHT_TREE_NEARLY_FULL fires over 80% of capacity", () => {
-    expect(evaluateAlerts({ ...HEALTHY, treeUsedBps: TREE_NEARLY_FULL_BPS + 1 }, THRESHOLDS)).toEqual([
-      { code: "WEIGHT_TREE_NEARLY_FULL", message: expect.any(String) },
-    ]);
-    expect(evaluateAlerts({ ...HEALTHY, treeUsedBps: TREE_NEARLY_FULL_BPS }, THRESHOLDS)).toEqual([]);
-  });
-
   it("WITHDRAW_FORECAST_SHORT fires when the total owed outruns vault liquidity", () => {
     expect(
       evaluateAlerts(
@@ -289,12 +267,12 @@ describe("evaluateAlerts", () => {
 
   it("PARAMS_CHANGED carries the new values and leaves the pool address out", () => {
     const [alert] = evaluateAlerts(
-      { ...HEALTHY, paramsChanged: { pool: "PoolAddr", epochSeconds: "604800", houseCutBps: 600 } },
+      { ...HEALTHY, paramsChanged: { pool: "PoolAddr", epochSeconds: "604800", baseRateBps: 488 } },
       THRESHOLDS,
     );
     expect(alert?.code).toBe("PARAMS_CHANGED");
     expect(alert?.message).toContain("epochSeconds=604800");
-    expect(alert?.message).toContain("houseCutBps=600");
+    expect(alert?.message).toContain("baseRateBps=488");
     expect(alert?.message).not.toContain("PoolAddr");
   });
 
@@ -308,7 +286,6 @@ describe("evaluateAlerts", () => {
         rpcFallbackAgeMs: 0,
         indexerAgeSeconds: 601,
         withdrawShortfall: 1n,
-        roundVoidedRecently: true,
         epochRolledOverRecently: true,
         withdrawSkippedCount: 1,
         operatorFailingSeconds: null,
@@ -325,7 +302,6 @@ describe("evaluateAlerts", () => {
         reserveFreeLiquidity: 0n,
         impaired: true,
         deployPaused: true,
-        treeUsedBps: 9_500,
         venueProposal: PROPOSAL,
         paramsChanged: { pool: "P", epochSeconds: "86400" },
       },
@@ -338,7 +314,6 @@ describe("evaluateAlerts", () => {
       "RPC_FALLBACK_ACTIVE",
       "INDEXER_STALE",
       "WITHDRAW_SHORTFALL",
-      "ROUND_VOIDED_RECENTLY",
       "EPOCH_ROLLED_OVER_RECENTLY",
       "WITHDRAW_OWNERS_SKIPPED",
       "EPOCH_NO_PROGRESS",
@@ -351,7 +326,6 @@ describe("evaluateAlerts", () => {
       "RESERVE_LIQUIDITY_LOW",
       "POOL_IMPAIRED",
       "DEPLOY_PAUSED",
-      "WEIGHT_TREE_NEARLY_FULL",
       "VENUE_PROPOSED",
       "PARAMS_CHANGED",
     ]);

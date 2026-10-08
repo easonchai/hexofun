@@ -17,14 +17,6 @@ export const EPOCH_STATUS = {
   ROLLED_OVER: 5,
 } as const;
 
-export const ROUND_STATUS = {
-  OPEN: 0,
-  REQUESTED: 1,
-  SETTLED: 2,
-  FORFEITED: 3,
-  VOIDED: 4,
-} as const;
-
 export interface PoolState {
   readonly address: PublicKey;
   readonly admin: PublicKey;
@@ -35,36 +27,27 @@ export interface PoolState {
   readonly house: PublicKey;
   readonly vrfNetworkState: PublicKey;
   readonly epochSeconds: bigint;
-  readonly roundSeconds: bigint;
-  readonly closeBuffer: bigint;
   readonly vrfTimeout: bigint;
   /** Seconds past an epoch's `drawnAt` before an unpaid Drawn epoch may roll over. */
   readonly payoutTimeout: bigint;
   readonly paused: boolean;
   readonly currentEpochId: bigint;
-  readonly nextRoundId: bigint;
-  readonly openRoundId: bigint;
   readonly totalPrincipal: bigint;
   /** Admin-only and irreversible: stops every inflow, the game and the
    *  draw, and lets withdrawals skip the epoch lock (ops-and-envs ticket
-   *  02). The operator reads this to stop the epoch and round loops. */
+   *  02). The operator reads this to stop the epoch loop. */
   readonly shutdown: boolean;
-  /** Game pause (game-jackpot-pause ticket 02): the tick opens no Round
-   *  while this is set. A new pool starts with it on. */
-  readonly gamePaused: boolean;
   /** Jackpot pause (game-jackpot-pause ticket 02): the tick skips
-   *  begin_epoch, grant_tickets and request_draw while this is set.
+   *  begin_epoch and request_draw while this is set.
    *  A new pool starts with it on. */
   readonly jackpotPaused: boolean;
-  /** The pool's Weight tree account (`has_one` on every instruction that
-   *  changes Tickets), and the four venue addresses pinned at `create_pool`
-   *  (`migrate_venue` repins them).
+  /** The four venue addresses pinned at `create_pool` (`migrate_venue` repins
+   *  them).
    *  The names are klend's; what each is follows `venueKind`. klend: the klend
    *  program, the lending market, the reserve, the pool's cToken account.
    *  kVault: the kVault program, the vault state, the vault's shares mint, the
    *  pool's shares token account. Under a `test-venue` build `klendProgram` is
    *  the hex_vault program. */
-  readonly weightTree: PublicKey;
   readonly klendProgram: PublicKey;
   readonly klendMarket: PublicKey;
   readonly klendReserve: PublicKey;
@@ -111,19 +94,6 @@ export interface EpochState {
   readonly endedAt: bigint;
 }
 
-export interface RoundState {
-  readonly roundId: bigint;
-  readonly endsAt: bigint;
-  readonly status: number;
-  readonly vrfSeed: Uint8Array;
-  readonly requestedAt: bigint;
-}
-
-/** Only the field the Sparring player spends; add more when something needs them. */
-export interface PlayerState {
-  readonly entries: bigint;
-}
-
 /** Anchor hands back BN for u64/u128 and number[] for byte arrays. */
 type Decoded = Record<
   string,
@@ -148,19 +118,13 @@ export function decodePool(
     house: raw.house as PublicKey,
     vrfNetworkState: raw.vrfNetworkState as PublicKey,
     epochSeconds: big(raw.epochSeconds),
-    roundSeconds: big(raw.roundSeconds),
-    closeBuffer: big(raw.closeBuffer),
     vrfTimeout: big(raw.vrfTimeout),
     payoutTimeout: big(raw.payoutTimeout),
     paused: raw.paused === true,
     currentEpochId: big(raw.currentEpochId),
-    nextRoundId: big(raw.nextRoundId),
-    openRoundId: big(raw.openRoundId),
     totalPrincipal: big(raw.totalPrincipal),
     shutdown: raw.shutdown === true,
-    gamePaused: raw.gamePaused === true,
     jackpotPaused: raw.jackpotPaused === true,
-    weightTree: raw.weightTree as PublicKey,
     klendProgram: raw.klendProgram as PublicKey,
     klendMarket: raw.klendMarket as PublicKey,
     klendReserve: raw.klendReserve as PublicKey,
@@ -198,22 +162,6 @@ export function decodeEpoch(program: Program<Idl>, data: Buffer): EpochState {
     drawnAt: big(raw.drawnAt),
     endedAt: big(raw.registrationOpenedAt),
   };
-}
-
-export function decodeRound(program: Program<Idl>, data: Buffer): RoundState {
-  const raw = program.coder.accounts.decode<Decoded>("round", data);
-  return {
-    roundId: big(raw.roundId),
-    endsAt: big(raw.endsAt),
-    status: Number(raw.status),
-    vrfSeed: Uint8Array.from(raw.vrfSeed as number[]),
-    requestedAt: big(raw.requestedAt),
-  };
-}
-
-export function decodePlayer(program: Program<Idl>, data: Buffer): PlayerState {
-  const raw = program.coder.accounts.decode<Decoded>("player", data);
-  return { entries: big(raw.entries) };
 }
 
 /**

@@ -29,7 +29,7 @@ describe("effectiveTickets and pendingTickets", () => {
   // 300 of Principal, 200 of it deposited in epoch 4, so 100 Tickets are active.
   const player = {
     principal: 300n,
-    entries: 100n,
+    tickets: 100n,
     epochId: 4n,
     pendingDeposit: 200n,
     pendingDepositEpoch: 4n,

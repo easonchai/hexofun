@@ -22,7 +22,6 @@ import { loadIdl } from "../chain/idl";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountingConnection } from "../test-utils/counting-connection";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
-import { ROUND_STATUS } from "./decode";
 import { IndexerService, type LogBatch } from "./indexer.service";
 
 const DB_AVAILABLE = isDatabaseReachableSync(TEST_DATABASE_URL);
@@ -41,7 +40,6 @@ let indexer: IndexerService;
 
 const OWNER = Keypair.generate().publicKey;
 const STRANGER = Keypair.generate().publicKey;
-const WEIGHT_TREE = Keypair.generate().publicKey;
 
 // Wrapped in one top-level describe, rather than adding `.skipIf` to each of
 // the six describes below, because they share this file's beforeAll/afterAll/
@@ -58,17 +56,15 @@ beforeAll(async () => {
     POOL_ID: POOL_ID.toString(),
     PROGRAM_ID: PROGRAM_ID.toBase58(),
     RPC_URL: "http://127.0.0.1:1",
-    REFERRAL_QUALIFY_SECONDS: 604_800,
   };
-  // SAFETY: ChainService reads the first four keys above through `get`;
-  // IndexerService reads REFERRAL_QUALIFY_SECONDS the same way.
+  // SAFETY: ChainService reads the four keys above through `get`.
   const config = {
     get: (key: keyof HexVaultEnv) => env[key],
   } as unknown as ConfigService<HexVaultEnv, true>;
   // SAFETY: the fake stands in for the RPC calls the indexer makes; this
   // suite drives no code path that reaches any other Connection method.
   chain = new ChainService(connection as unknown as Connection, config);
-  indexer = new IndexerService(prisma, chain, config);
+  indexer = new IndexerService(prisma, chain);
 });
 
 afterAll(async () => {
@@ -98,12 +94,9 @@ async function wipe(): Promise<void> {
     prisma.event.deleteMany(),
     prisma.cursor.deleteMany(),
     prisma.venueProposal.deleteMany(),
-    prisma.position.deleteMany(),
     prisma.player.deleteMany(),
-    prisma.round.deleteMany(),
     prisma.epoch.deleteMany(),
     prisma.yieldIndexPoint.deleteMany(),
-    prisma.weightTreeState.deleteMany(),
     prisma.referral.deleteMany(),
     prisma.referralGrantShare.deleteMany(),
     prisma.referralGrant.deleteMany(),
@@ -135,8 +128,6 @@ const poolRecord = (overrides: object = {}) => ({
   mint: STRANGER.toBase58(),
   epochSeconds: 86_400n,
   epochAnchor: 0n,
-  roundSeconds: 60n,
-  closeBuffer: 5n,
   minDeposit: 1_000_000n,
   paused: false,
   currentEpochId: 1n,
@@ -145,12 +136,7 @@ const poolRecord = (overrides: object = {}) => ({
   totalPrincipal: 100_000_000_000n, // 100,000 USDC: ample, no pool cap bind
   pendingWithdrawals: 0n,
   minJackpot: 1_000_000n,
-  houseCutBps: 600,
   baseRateBps: 0,
-  ticketsPerUsdc: 10,
-  bonusCapBps: 10_000, // 100%: no pool cap bind unless a test overrides it
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
   version: 1,
   shutdown: false,
   updatedSlot: 1n,
@@ -185,8 +171,6 @@ const poolAccount = (overrides: object = {}) => ({
   vrfNetworkState: STRANGER,
   epochSeconds: bn(86_400),
   epochAnchor: bn(1_789_315_200),
-  roundSeconds: bn(60),
-  closeBuffer: bn(5),
   vrfTimeout: bn(120),
   minDeposit: bn(1_000_000),
   paused: false,
@@ -195,8 +179,6 @@ const poolAccount = (overrides: object = {}) => ({
   currentEpochEndsAt: bn(2_000),
   previousEpochStart: bn(0),
   previousEpochEndsAt: bn(0),
-  nextRoundId: bn(2),
-  openRoundId: bn(1),
   totalPrincipal: bn(3_000_000),
   bump: 255,
   principalVaultBump: 254,
@@ -204,9 +186,7 @@ const poolAccount = (overrides: object = {}) => ({
   pendingWithdrawals: bn(0),
   minJackpot: bn(1_000_000),
   payoutTimeout: bn(86_400),
-  // Ticket 14: the venue and the Weight tree. The tree is not in the fake
-  // RPC's accounts unless a test puts it there, so the mirror reads nothing.
-  weightTree: WEIGHT_TREE,
+  // Ticket 14: the venue.
   klendProgram: STRANGER,
   klendMarket: STRANGER,
   klendReserve: STRANGER,
@@ -232,25 +212,9 @@ const epochAccount = (overrides: object = {}) => ({
   ...overrides,
 });
 
-const roundAccount = (overrides: object = {}) => ({
-  roundId: bn(1),
-  epochId: bn(1),
-  startsAt: bn(1_000),
-  endsAt: bn(1_060),
-  status: 0,
-  tileTotals: zeros(36).map((total) => bn(total)),
-  pot: bn(0),
-  vrfSeed: zeros(32),
-  requestedAt: bn(0),
-  winningTile: 0,
-  bump: 255,
-  ...overrides,
-});
-
 const playerAccount = (owner: PublicKey, overrides: object = {}) => ({
   owner,
   principal: bn(3_000_000),
-  entries: bn(2_500_000),
   epochId: bn(1),
   isHouse: false,
   bump: 255,
@@ -259,22 +223,11 @@ const playerAccount = (owner: PublicKey, overrides: object = {}) => ({
   ...overrides,
 });
 
-const positionAccount = (owner: PublicKey, round: PublicKey) => ({
-  owner,
-  round,
-  tiles: bn(0b1011),
-  stakePerTile: bn(1_000),
-  bump: 255,
-});
-
 describe("account sync", () => {
   it("mirrors one of each account into Postgres", async () => {
-    const round = chain.roundAddress(1n);
     await put("pool", chain.poolAddress(), poolAccount());
     await put("epoch", chain.epochAddress(1n), epochAccount());
-    await put("round", round, roundAccount());
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
 
     await indexer.syncAccounts();
 
@@ -292,17 +245,8 @@ describe("account sync", () => {
     // Pubkey::default means payout has not run; the column stays null.
     expect(epoch.winner).toBeNull();
 
-    const stored = await prisma.round.findUniqueOrThrow({ where: byId(1n) });
-    // Tile 0 is a real tile, so an unsettled round must not claim it won.
-    expect(stored.winningTile).toBeNull();
-    expect((stored.tileTotals as string[]).length).toBe(36);
-
     expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
-      .toMatchObject({ principal: 3_000_000n, entries: 2_500_000n, isHouse: false });
-
-    expect(await prisma.position.findMany()).toMatchObject([
-      { owner: OWNER.toBase58(), roundId: 1n, tiles: 11n, stakePerTile: 1_000n },
-    ]);
+      .toMatchObject({ principal: 3_000_000n, tickets: 0n, isHouse: false });
   });
 
   // venue-switch ticket 03
@@ -390,105 +334,75 @@ describe("account sync", () => {
     expect(await prisma.venueProposal.count()).toBe(0);
   });
 
-  it("records the winning tile once the round is settled", async () => {
+  it("leaves the Tickets column to the ledger when a sweep re-mirrors a Player", async () => {
+    // The program holds no Tickets any more, so the mirror must not zero what
+    // the ledger (off-chain-tickets ticket 11) keeps in the column.
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", chain.roundAddress(1n), roundAccount({ status: 2, winningTile: 17 }));
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
     await indexer.syncAccounts();
-    expect((await prisma.round.findUniqueOrThrow({ where: byId(1n) })).winningTile).toBe(17);
+    await prisma.player.update({ where: byOwner(OWNER.toBase58()), data: { tickets: 777n } });
+
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER, { principal: bn(4_000_000) }));
+    await indexer.syncAccounts();
+
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
+      .toMatchObject({ principal: 4_000_000n, tickets: 777n });
   });
 
-  it("no longer deletes a Position by its absence from a sweep", async () => {
+  it("does not delete the venue proposal by its absence from an incremental sweep", async () => {
     // A closed account and an unchanged one both look like "not returned" to
-    // an incremental walk, so a sweep can no longer tell them apart; only the
-    // `PositionSettled` event (see "event ingest" below) may remove the row.
+    // an incremental walk; only a log read or a full walk may remove the row.
     indexer["lastSyncedSlot"] = undefined;
-    const round = chain.roundAddress(1n);
-    const pool = chain.poolAddress();
-    await put("pool", pool, poolAccount());
-    await put("round", round, roundAccount());
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
-    await indexer.syncAccounts();
-    expect(await prisma.position.count()).toBe(1);
-
-    connection.deleteAccount(chain.positionAddress(round, OWNER));
-    await indexer.syncAccounts();
-    expect(await prisma.position.count()).toBe(1);
-  });
-
-  // ticket 06: the full walk is the backstop for a missed `PositionSettled`.
-  it("deletes a Position by its absence on a full walk", async () => {
-    indexer["lastSyncedSlot"] = undefined;
-    const round = chain.roundAddress(1n);
+    const proposal = chain.venueProposalAddress();
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
-    await indexer.syncAccounts(); // full walk, establishes the row
-    expect(await prisma.position.count()).toBe(1);
-
-    connection.deleteAccount(chain.positionAddress(round, OWNER));
-    indexer["lastFullWalkAt"] = 0; // force the next sweep full too, not incremental
+    await put("venueProposal", proposal, {
+      pool: chain.poolAddress(),
+      venueKind: 2,
+      klendProgram: STRANGER,
+      klendMarket: STRANGER,
+      klendReserve: STRANGER,
+      klendCtoken: STRANGER,
+      proposedAt: bn(1_800_000_000),
+      bump: 255,
+    });
     await indexer.syncAccounts();
+    expect(await prisma.venueProposal.count()).toBe(1);
 
-    expect(await prisma.position.count()).toBe(0);
-  });
-
-  // ticket 06: the full walk is the backstop for a missed `RoundClosed`; the
-  // row is marked closed and kept, matching ops-and-envs ticket 08, not
-  // deleted the way an absent Position is.
-  it("marks a Round closed, not deleted, on a full walk that finds its account gone", async () => {
-    indexer["lastSyncedSlot"] = undefined;
-    const round = chain.roundAddress(1n);
-    await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
-    await indexer.syncAccounts(); // full walk, establishes the row
-    expect((await prisma.round.findUniqueOrThrow({ where: byId(1n) })).closed).toBe(false);
-
-    connection.deleteAccount(round);
-    indexer["lastFullWalkAt"] = 0; // force the next sweep full too, not incremental
+    connection.deleteAccount(proposal);
     await indexer.syncAccounts();
-
-    const stored = await prisma.round.findUniqueOrThrow({ where: byId(1n) });
-    expect(stored.closed).toBe(true);
-    // Kept, not blanked: it still mirrors the round's last on-chain state.
-    expect(stored.status).toBe(ROUND_STATUS.OPEN);
+    expect(await prisma.venueProposal.count()).toBe(1);
   });
 
   it("walks every page of a multi-page result into the same rows a single page would", async () => {
     indexer["lastSyncedSlot"] = undefined;
-    const round = chain.roundAddress(1n);
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
+    await put("epoch", chain.epochAddress(1n), epochAccount());
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
-    connection.pageSize = 1; // four accounts, one per page: four calls
+    connection.pageSize = 1; // three accounts, one per page: three calls
 
     await indexer.syncAccounts();
 
-    expect(connection.callsTo("getProgramAccountsV2")).toBe(4);
+    expect(connection.callsTo("getProgramAccountsV2")).toBe(3);
     expect(await prisma.pool.findUniqueOrThrow({ where: { address: chain.poolAddress().toBase58() } }))
       .toMatchObject({ poolId: POOL_ID });
-    expect(await prisma.round.findUniqueOrThrow({ where: byId(1n) })).toMatchObject({ id: 1n });
+    expect(await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).toMatchObject({ id: 1n });
     expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
       .toMatchObject({ owner: OWNER.toBase58() });
-    expect(await prisma.position.findMany()).toMatchObject([
-      { owner: OWNER.toBase58(), roundId: 1n },
-    ]);
   });
 
   it("an incremental sweep asks for changedSinceSlot and only touches the rows the RPC reports", async () => {
     indexer["lastSyncedSlot"] = undefined;
-    const round = chain.roundAddress(1n);
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
+    await put("epoch", chain.epochAddress(1n), epochAccount());
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
     await indexer.syncAccounts(); // full walk, establishes lastSyncedSlot
     const syncedSlot = indexer["lastSyncedSlot"];
     if (typeof syncedSlot !== "bigint") throw new Error("expected lastSyncedSlot to be set by the full walk above");
     expect(syncedSlot).toBe(100n);
 
     connection.resetCalls();
-    // Simulate the RPC reporting only the Pool as changed; Round and Position
-    // are unchanged and so absent from this result.
+    // Simulate the RPC reporting only the Pool as changed; the Epoch and the
+    // Player are unchanged and so absent from this result.
     connection.clearAccounts();
     await put("pool", chain.poolAddress(), poolAccount({ totalPrincipal: bn(999) }));
     await indexer.syncAccounts();
@@ -500,9 +414,9 @@ describe("account sync", () => {
 
     expect((await prisma.pool.findUniqueOrThrow({ where: { address: chain.poolAddress().toBase58() } })).totalPrincipal)
       .toBe(999n);
-    // The old absence-based delete would have wiped these; they must survive.
-    expect(await prisma.round.count()).toBe(1);
-    expect(await prisma.position.count()).toBe(1);
+    // An absence-based delete would have wiped these; they must survive.
+    expect(await prisma.epoch.count()).toBe(1);
+    expect(await prisma.player.count()).toBe(1);
   });
 
   it("forces a fresh full walk once the safety interval has elapsed, even with a known slot", async () => {
@@ -560,10 +474,19 @@ describe("account sync", () => {
 
   it("falls back to the plain call on an RPC without getProgramAccountsV2, and stops asking for it", async () => {
     indexer["lastSyncedSlot"] = undefined;
-    const round = chain.roundAddress(1n);
+    const proposal = chain.venueProposalAddress();
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
+    await put("epoch", chain.epochAddress(1n), epochAccount());
+    await put("venueProposal", proposal, {
+      pool: chain.poolAddress(),
+      venueKind: 2,
+      klendProgram: STRANGER,
+      klendMarket: STRANGER,
+      klendReserve: STRANGER,
+      klendCtoken: STRANGER,
+      proposedAt: bn(1_800_000_000),
+      bump: 255,
+    });
     connection.noProgramAccountsV2 = true;
     connection.resetCalls();
 
@@ -572,18 +495,18 @@ describe("account sync", () => {
     // One V2 attempt, then the plain call answers with the same rows.
     expect(connection.callsTo("getProgramAccountsV2")).toBe(1);
     expect(connection.callsTo("getProgramAccounts")).toBe(1);
-    expect(await prisma.round.count()).toBe(1);
-    expect(await prisma.position.findMany()).toMatchObject([{ owner: OWNER.toBase58(), roundId: 1n }]);
+    expect(await prisma.epoch.count()).toBe(1);
+    expect(await prisma.venueProposal.count()).toBe(1);
 
     // A second sweep does not retry V2, and without changedSinceSlot it walks
-    // everything again, so a closed Position is still caught by its absence.
+    // everything again, so a closed proposal is still caught by its absence.
     connection.resetCalls();
-    connection.deleteAccount(chain.positionAddress(round, OWNER));
+    connection.deleteAccount(proposal);
     await indexer.syncAccounts();
 
     expect(connection.callsTo("getProgramAccountsV2")).toBe(0);
     expect(connection.callsTo("getProgramAccounts")).toBe(1);
-    expect(await prisma.position.count()).toBe(0);
+    expect(await prisma.venueProposal.count()).toBe(0);
   });
 
   // beta-launch-fixes ticket 08: the flag is not permanent.
@@ -652,14 +575,13 @@ describe("full-walk RPC endpoint consistency (security review ticket 14)", () =>
       POOL_ID: POOL_ID.toString(),
       PROGRAM_ID: PROGRAM_ID.toBase58(),
       RPC_URL: "http://127.0.0.1:1",
-      REFERRAL_QUALIFY_SECONDS: 604_800,
     };
     // SAFETY: same shape as the suite's own beforeAll config stub.
     const config = {
       get: (key: keyof HexVaultEnv) => env[key],
     } as unknown as ConfigService<HexVaultEnv, true>;
     const localChain = new ChainService(wrapped, config);
-    const localIndexer = new IndexerService(prisma, localChain, config);
+    const localIndexer = new IndexerService(prisma, localChain);
 
     // Two accounts on the primary so pageSize 1 needs a second page; the
     // fallback holds none, standing in for a second provider whose index
@@ -706,13 +628,12 @@ describe("full-walk RPC endpoint consistency (security review ticket 14)", () =>
       POOL_ID: POOL_ID.toString(),
       PROGRAM_ID: PROGRAM_ID.toBase58(),
       RPC_URL: "http://127.0.0.1:1",
-      REFERRAL_QUALIFY_SECONDS: 604_800,
     };
     const config = {
       get: (key: keyof HexVaultEnv) => env[key],
     } as unknown as ConfigService<HexVaultEnv, true>;
     const localChain = new ChainService(wrapped, config);
-    const localIndexer = new IndexerService(prisma, localChain, config);
+    const localIndexer = new IndexerService(prisma, localChain);
 
     const poolData = await localChain.program.coder.accounts.encode("pool", poolAccount());
     primary.setAccount(localChain.poolAddress(), poolData);
@@ -771,34 +692,23 @@ const deposited = dataLine("Deposited", {
   owner: OWNER,
   amount: bn(1_000_000),
   principal: bn(1_000_000),
-  entries: bn(1_000_000),
+  yieldIndex: bn(0),
 });
 const epochBegan = dataLine("EpochBegan", {
   epochId: bn(2),
   startsAt: bn(1_000),
   endsAt: bn(2_000),
+  yieldIndex: bn(0),
 });
-const roundOpened = dataLine("RoundOpened", {
-  roundId: bn(4),
-  epochId: bn(2),
-  startsAt: bn(1_000),
-  endsAt: bn(1_060),
-});
-const positionSettled = dataLine("PositionSettled", {
-  roundId: bn(1),
-  owner: OWNER,
-  reward: bn(0),
-  refund: bn(0),
-});
-const roundClosed = dataLine("RoundClosed", {
-  round: Keypair.generate().publicKey,
-  roundId: bn(1),
+const epochRolledOver = dataLine("EpochRolledOver", {
+  epochId: bn(1),
+  jackpotAmount: bn(0),
 });
 
 // Parameterized, not fixed consts like `deposited`: ticket 07's tests build a
 // different event sequence (cross up, dip, restore) per case.
-const depositedFor = (owner: PublicKey, amount: number, principal: number, entries: number) =>
-  dataLine("Deposited", { owner, amount: bn(amount), principal: bn(principal), entries: bn(entries) });
+const depositedFor = (owner: PublicKey, amount: number, principal: number) =>
+  dataLine("Deposited", { owner, amount: bn(amount), principal: bn(principal), yieldIndex: bn(0) });
 // A request that refunds `amount` of a pending deposit and queues nothing: the
 // refunded part is what lowers Principal, which is what the referral tracker
 // reads.
@@ -811,6 +721,8 @@ const withdrawRequestedFor = (owner: PublicKey, amount: number, pending: number,
     refunded: bn(amount),
     paid: bn(amount),
     redeemed: bn(0),
+    principal: bn(0),
+    yieldIndex: bn(0),
   });
 // Live yield settles inside the money instructions and emits no event of its
 // own; a processed withdrawal carries the Principal left, which is what the
@@ -820,7 +732,7 @@ const withdrawnFor = (owner: PublicKey, paid: number, principal: number) =>
     owner,
     amount: bn(paid),
     principal: bn(principal),
-    entries: bn(principal),
+    yieldIndex: bn(0),
   });
 const jackpotPaidFor = (
   winner: PublicKey,
@@ -828,55 +740,22 @@ const jackpotPaidFor = (
   compounded: boolean,
   epochId = 1,
   isHouse = false,
-) => dataLine("JackpotPaid", { epochId: bn(epochId), winner, amount: bn(amount), isHouse, compounded });
+) => dataLine("JackpotPaid", {
+    epochId: bn(epochId),
+    winner,
+    amount: bn(amount),
+    isHouse,
+    compounded,
+    principal: bn(0),
+    yieldIndex: bn(0),
+    index: 0,
+    tickets: bn(0),
+  });
 
 describe("event ingest", () => {
   // Event, Cursor and every other row below references the Pool row, which
   // in production the first sweep writes before any event lands (see tick).
   beforeEach(seedActivePool);
-
-  it("deletes the Position row when PositionSettled lands, without a sweep", async () => {
-    await prisma.position.create({
-      data: {
-        address: "pos-x",
-        poolAddress: active(),
-        owner: OWNER.toBase58(),
-        roundId: 1n,
-        tiles: 1n,
-        stakePerTile: 1n,
-      },
-    });
-
-    expect(await indexer.ingestLogs(batch("sig-settle", 30n, [positionSettled]))).toBe(1);
-
-    expect(await prisma.position.count()).toBe(0);
-  });
-
-  it("marks a Round closed on RoundClosed, keeping its last mirrored state", async () => {
-    await prisma.round.create({
-      data: {
-        poolAddress: active(),
-        id: 1n,
-        epochId: 5n,
-        startsAt: 0n,
-        endsAt: 60n,
-        status: ROUND_STATUS.SETTLED,
-        pot: 500_000n,
-        houseCut: 10_000n,
-        winningTile: 7,
-        tileTotals: [],
-      },
-    });
-
-    expect(await indexer.ingestLogs(batch("sig-close", 31n, [roundClosed]))).toBe(1);
-
-    const round = await prisma.round.findUniqueOrThrow({ where: byId(1n) });
-    expect(round.closed).toBe(true);
-    // The account is gone on chain; nothing here re-derives its fields, so
-    // they must be exactly what the last mirror wrote.
-    expect(round).toMatchObject({ status: ROUND_STATUS.SETTLED, pot: 500_000n, winningTile: 7 });
-  });
-
 
   it("stores an event once when the live path reports it at a later slot", async () => {
     // Surfpool's finalized log notification carries a slot ~31 past the
@@ -888,7 +767,7 @@ describe("event ingest", () => {
 
   it("stores each event once and leaves the cursor on the newest batch", async () => {
     const first = batch("sig1", 10n, [deposited, epochBegan]);
-    const second = batch("sig2", 11n, [roundOpened]);
+    const second = batch("sig2", 11n, [epochRolledOver]);
     const third = batch("sig3", 12n, [deposited]);
 
     expect(await indexer.ingestLogs(first)).toBe(2);
@@ -910,7 +789,7 @@ describe("event ingest", () => {
     ).toEqual([
       ["sig1", 0, "Deposited"],
       ["sig1", 1, "EpochBegan"],
-      ["sig2", 0, "RoundOpened"],
+      ["sig2", 0, "EpochRolledOver"],
       ["sig3", 0, "Deposited"],
     ]);
 
@@ -949,7 +828,7 @@ describe("event ingest", () => {
     const first = await prisma.referralCode.findUniqueOrThrow({ where: { owner: OWNER.toBase58() } });
 
     await indexer.ingestLogs(
-      batch("sig-second-deposit", 41n, [depositedFor(OWNER, 500_000, 1_500_000, 1_500_000)]),
+      batch("sig-second-deposit", 41n, [depositedFor(OWNER, 500_000, 1_500_000)]),
     );
 
     const codes = await prisma.referralCode.findMany({ where: { owner: OWNER.toBase58() } });
@@ -1055,7 +934,7 @@ describe("event ingest", () => {
     ];
     connection.setTransaction(
       "sig-gap",
-      batch("sig-gap", 10n, [depositedFor(STRANGER, 1, 1, 1)]).logs,
+      batch("sig-gap", 10n, [depositedFor(STRANGER, 1, 1)]).logs,
     );
     connection.setTransaction("sig-live-only", batch("sig-live-only", 50n, [deposited]).logs);
 
@@ -1083,7 +962,7 @@ describe("event catch-up", () => {
         return { signature: `sig-${slot - 1}`, slot, err: null, blockTime: 1_700_000_000 + slot };
       });
       for (let id = 0; id < total; id++) {
-        connection.setTransaction(`sig-${id}`, batch(`sig-${id}`, 1n, [roundOpened]).logs);
+        connection.setTransaction(`sig-${id}`, batch(`sig-${id}`, 1n, [epochRolledOver]).logs);
       }
 
       await indexer["catchUpEvents"]();
@@ -1109,7 +988,7 @@ describe("event catch-up", () => {
         return { signature: `sig-${slot - 1}`, slot, err: null, blockTime: 1_700_000_000 + slot };
       });
       for (let id = 0; id < total; id++) {
-        connection.setTransaction(`sig-${id}`, batch(`sig-${id}`, 1n, [roundOpened]).logs);
+        connection.setTransaction(`sig-${id}`, batch(`sig-${id}`, 1n, [epochRolledOver]).logs);
       }
       await indexer["catchUpEvents"]();
       expect(await prisma.event.count()).toBe(total);
@@ -1119,7 +998,7 @@ describe("event catch-up", () => {
         { signature: "sig-new", slot: total + 1, err: null, blockTime: 1_700_000_000 + total + 1 },
         ...connection.signaturesForAddress,
       ];
-      connection.setTransaction("sig-new", batch("sig-new", 1n, [roundOpened]).logs);
+      connection.setTransaction("sig-new", batch("sig-new", 1n, [epochRolledOver]).logs);
       connection.resetCalls();
 
       await indexer["catchUpEvents"]();
@@ -1219,103 +1098,65 @@ describe("live account refresh", () => {
   });
 
   it("re-reads the accounts one log names, in a single call, and writes them", async () => {
-    const round = chain.roundAddress(4n);
-    await put("pool", chain.poolAddress(), poolAccount({ openRoundId: bn(4), nextRoundId: bn(5) }));
+    await put("pool", chain.poolAddress(), poolAccount());
     await put("epoch", chain.epochAddress(2n), epochAccount({ epochId: bn(2) }));
-    await put("round", round, roundAccount({ roundId: bn(4), epochId: bn(2) }));
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
     connection.resetCalls();
 
-    await fire([roundOpened, deposited], 300);
+    await fire([epochBegan, deposited], 300);
 
     expect(connection.callsTo("getMultipleAccountsInfo")).toBe(1);
     // The walk is the safety net now, not the live path: no page of it here.
     expect(connection.callsTo("_rpcRequest")).toBe(0);
-    expect(await prisma.round.findUniqueOrThrow({ where: byId(4n) })).toMatchObject({
-      epochId: 2n,
-      status: 0,
+    expect(await prisma.epoch.findUniqueOrThrow({ where: byId(2n) })).toMatchObject({
+      id: 2n,
+      status: 1,
     });
     expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
       .toMatchObject({ principal: 3_000_000n });
   });
 
-  it("drops a Position the settle closed, without waiting for a full walk", async () => {
-    const round = chain.roundAddress(1n);
-    await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
-    await put("position", chain.positionAddress(round, OWNER), positionAccount(OWNER, round));
-    await indexer.syncAccounts();
-    expect(await prisma.position.count()).toBe(1);
-
-    // settle_position closed it: the account reads back as gone.
-    connection.clearAccounts();
-    await put("pool", chain.poolAddress(), poolAccount());
-    await fire([positionSettled], 301);
-
-    expect(await prisma.position.count()).toBe(0);
-  });
-
   it("keeps a sweep's older snapshot from overwriting what the log path wrote", async () => {
-    const round = chain.roundAddress(1n);
+    const epoch = chain.epochAddress(1n);
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
-    // The open Round is asked for by position rather than by event, so it
+    await put("epoch", epoch, epochAccount({ status: 0 }));
+    // The current epoch is asked for by position rather than by event, so it
     // has to be one the mirror already knows about.
     await indexer.syncAccounts();
 
-    // The live read sees the settled Round…
-    await put("round", round, roundAccount({ status: 2, winningTile: 17 }));
+    // The live read sees the epoch drawn…
+    await put("epoch", epoch, epochAccount({ status: 3, target: bn(17) }));
     await fire([], 500);
-    expect((await prisma.round.findUniqueOrThrow({ where: byId(1n) })).winningTile).toBe(17);
+    expect((await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).target.toString()).toBe("17");
 
     // …and a sweep whose snapshot predates it still reports it Open. The
     // fake answers every walk from slot 100, well behind the log's 500.
-    await put("round", round, roundAccount({ status: 0, winningTile: 0 }));
+    await put("epoch", epoch, epochAccount({ status: 0, target: bn(0) }));
     await indexer.syncAccounts();
 
-    const stored = await prisma.round.findUniqueOrThrow({ where: byId(1n) });
-    expect(stored.status).toBe(2);
-    expect(stored.winningTile).toBe(17);
+    const stored = await prisma.epoch.findUniqueOrThrow({ where: byId(1n) });
+    expect(stored.status).toBe(3);
+    expect(stored.target.toString()).toBe("17");
   });
 
   it("lets a sweep that has caught up write again", async () => {
-    const round = chain.roundAddress(1n);
+    const epoch = chain.epochAddress(1n);
     await put("pool", chain.poolAddress(), poolAccount());
-    await put("round", round, roundAccount());
+    await put("epoch", epoch, epochAccount({ status: 0 }));
     await indexer.syncAccounts();
 
-    await put("round", round, roundAccount({ status: 2, winningTile: 17 }));
+    await put("epoch", epoch, epochAccount({ status: 3, target: bn(17) }));
     await fire([], 50); // behind the fake's own sweep slot of 100
 
-    await put("round", round, roundAccount({ status: 0, winningTile: 0 }));
+    await put("epoch", epoch, epochAccount({ status: 0, target: bn(0) }));
     await indexer.syncAccounts();
 
-    expect((await prisma.round.findUniqueOrThrow({ where: byId(1n) })).status).toBe(0);
+    expect((await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).status).toBe(0);
     expect(indexer["freshWrites"].size).toBe(0);
   });
 });
 
 // ------------------------------------------------ live yield (ticket 14)
-
-/** A Weight tree account holding `nodes`, the layout weight_tree.rs reads:
- *  a 56-byte header with the node count at byte 16, then 56-byte nodes. A
- *  node is its `principal_sum` and two slots of stamp, base and a u64 Ticket count.
- *  Epoch 1 is odd, so it lives in the second slot. */
-function weightTreeAccount(
-  nodes: { principalSum: bigint; slot: { base: bigint; weight: bigint } | null }[],
-): Buffer {
-  const data = Buffer.alloc(56 + nodes.length * 56);
-  data.writeBigUInt64LE(BigInt(nodes.length), 16);
-  nodes.forEach((node, i) => {
-    const at = 56 + i * 56;
-    data.writeBigUInt64LE(node.principalSum, at);
-    if (node.slot === null) return;
-    data.writeBigUInt64LE(1n, at + 32);
-    data.writeBigUInt64LE(node.slot.base, at + 40);
-    data.writeBigUInt64LE(node.slot.weight, at + 48);
-  });
-  return data;
-}
 
 describe("live yield mirror", () => {
   const fire = async (logs: string[], slot: number): Promise<void> => {
@@ -1330,7 +1171,7 @@ describe("live yield mirror", () => {
   };
   const E18 = 10n ** 18n;
 
-  it("mirrors the new Pool fields and the Player's yield index and leaf", async () => {
+  it("mirrors the new Pool fields and the Player's yield index", async () => {
     await put(
       "pool",
       chain.poolAddress(),
@@ -1358,13 +1199,12 @@ describe("live yield mirror", () => {
     await put(
       "player",
       chain.playerAddress(OWNER),
-      playerAccount(OWNER, { yieldIndex: bn(E18), leafIndex: 3 }),
+      playerAccount(OWNER, { yieldIndex: bn(E18) }),
     );
 
     await indexer.syncAccounts();
 
     expect(await prisma.pool.findUniqueOrThrow({ where: { address: active() } })).toMatchObject({
-      weightTree: WEIGHT_TREE.toBase58(),
       klendReserve: STRANGER.toBase58(),
       venueValue: 40_000_000n,
       lastSyncAt: 1_700_000_000n,
@@ -1388,7 +1228,6 @@ describe("live yield mirror", () => {
     expect(pool.yieldIndex.toFixed(0)).toBe((E18 + E18 / 20n).toString());
     const player = await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) });
     expect(player.yieldIndex.toFixed(0)).toBe(E18.toString());
-    expect(player.leafIndex).toBe(3);
   });
 
   it("stores a Yield index point for each sync, thinned to one a minute", async () => {
@@ -1419,37 +1258,6 @@ describe("live yield mirror", () => {
     expect((await prisma.yieldIndexPoint.findMany()).map((point) => point.at)).toEqual([5_000n]);
   });
 
-  it("mirrors the Weight tree's header and the root of the current epoch", async () => {
-    // Epoch 1 runs 1,000 s. Leaf 1 sat idle at Principal 7 (7 x 1,000 = 7,000);
-    // Fenwick node 2 holds leaves 1 and 2 together: 7,000 + 2,500.
-    connection.setAccount(
-      WEIGHT_TREE,
-      weightTreeAccount([
-        { principalSum: 7n, slot: null },
-        { principalSum: 9n, slot: { base: 9n, weight: 9_500n } },
-      ]),
-    );
-    await put("pool", chain.poolAddress(), poolAccount());
-
-    await indexer.syncAccounts();
-
-    expect(await prisma.weightTreeState.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({
-      nodeCount: 2n,
-      epochId: 1n,
-    });
-    expect(
-      (await prisma.weightTreeState.findUniqueOrThrow({ where: { poolAddress: active() } })).rootWeight.toFixed(0),
-    ).toBe("9500");
-  });
-
-  it("still mirrors the Pool when the tree account cannot be read, and keeps the last tree state", async () => {
-    await put("pool", chain.poolAddress(), poolAccount());
-    await indexer.syncAccounts();
-
-    expect(await prisma.pool.count()).toBe(1);
-    expect(await prisma.weightTreeState.count()).toBe(0);
-  });
-
   it("stores each live-yield event under the Active pool, with its figures exact", async () => {
     const pool = chain.poolAddress();
     const lines = [
@@ -1467,7 +1275,7 @@ describe("live yield mirror", () => {
         owner: OWNER,
         amount: bn(480),
         principal: bn(2_500),
-        entries: bn(2_400),
+        yieldIndex: bn(E18),
       }),
       dataLine("VenueDeployed", { pool, amount: bn(40_000_000), venueValue: bn(40_000_100) }),
       dataLine("VenueRecalled", { pool, amount: bn(5_000_000), venueValue: bn(35_000_100) }),
@@ -1488,7 +1296,13 @@ describe("live yield mirror", () => {
         deficit: bn(500),
       }),
       dataLine("ImpairedCleared", { pool, deficit: bn(500), cause: 1 }),
-      dataLine("PositionSettled", { roundId: bn(1), owner: OWNER, reward: bn(0), refund: bn(250) }),
+      dataLine("TicketsBought", {
+        owner: OWNER,
+        epochId: bn(1),
+        usdc: bn(250),
+        principal: bn(2_500),
+        yieldIndex: bn(E18),
+      }),
     ];
     await seedActivePool();
 
@@ -1504,12 +1318,13 @@ describe("live yield mirror", () => {
         "Harvested",
         "ImpairedSet",
         "ImpairedCleared",
-        "PositionSettled",
+        "TicketsBought",
       ].map((name) => [active(), name]),
     );
     expect(events[0]?.data).toMatchObject({ yieldIndex: (E18 * 4n).toString(), depositorShare: "700" });
     expect(events[1]?.data).toMatchObject({ amount: "480", principal: "2500" });
-    expect(events[7]?.data).toMatchObject({ refund: "250", reward: "0" });
+    expect(events[1]?.data).toMatchObject({ yieldIndex: E18.toString() });
+    expect(events[7]?.data).toMatchObject({ usdc: "250", principal: "2500" });
   });
 
   it("clears the pending amount when a WithdrawCancelled names the Player, and stores the event", async () => {
@@ -1519,14 +1334,14 @@ describe("live yield mirror", () => {
       chain.playerAddress(OWNER),
       playerAccount(OWNER, { pendingWithdraw: bn(500), pendingEpoch: bn(3) }),
     );
-    await fire([dataLine("WithdrawRequested", { owner: OWNER, amount: bn(500), pending: bn(500), pendingEpoch: bn(3), refunded: bn(0), paid: bn(0), redeemed: bn(0) })], 419);
+    await fire([dataLine("WithdrawRequested", { owner: OWNER, amount: bn(500), pending: bn(500), pendingEpoch: bn(3), refunded: bn(0), paid: bn(0), redeemed: bn(0), principal: bn(3_000_000), yieldIndex: bn(0) })], 419);
     expect(
       await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }),
     ).toMatchObject({ pendingWithdraw: 500n });
 
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
     await fire(
-      [dataLine("WithdrawCancelled", { owner: OWNER, amount: bn(500), pendingEpoch: bn(3) })],
+      [dataLine("WithdrawCancelled", { owner: OWNER, amount: bn(500), pendingEpoch: bn(3), principal: bn(3_000_000), yieldIndex: bn(0) })],
       420,
     );
 
@@ -1535,7 +1350,7 @@ describe("live yield mirror", () => {
       pendingWithdraw: 0n,
     });
 
-    const cancelled = dataLine("WithdrawCancelled", { owner: OWNER, amount: bn(500), pendingEpoch: bn(3) });
+    const cancelled = dataLine("WithdrawCancelled", { owner: OWNER, amount: bn(500), pendingEpoch: bn(3), principal: bn(3_000_000), yieldIndex: bn(0) });
     expect(await indexer.ingestLogs(batch("sig-cancel", 41n, [cancelled]))).toBe(1);
     expect(await prisma.event.findMany({ where: { name: "WithdrawCancelled" } })).toHaveLength(1);
   });
@@ -1550,7 +1365,7 @@ describe("live yield mirror", () => {
           owner: OWNER,
           amount: bn(500),
           principal: bn(2_500),
-          entries: bn(2_500),
+          yieldIndex: bn(0),
         }),
       ],
       410,
@@ -1564,7 +1379,7 @@ describe("live yield mirror", () => {
 
 // -------------------------------------------------------- operator reads
 
-describe("operator queries", () => {
+describe("pool-scoped reads", () => {
   const ALICE = Keypair.generate().publicKey.toBase58();
   const BOB = Keypair.generate().publicKey.toBase58();
   const CAROL = Keypair.generate().publicKey.toBase58();
@@ -1574,15 +1389,13 @@ describe("operator queries", () => {
     poolAddress: active(),
     owner,
     principal: 0n,
-    entries: 0n,
+    tickets: 0n,
     epochId: 5n,
     isHouse: false,
     pendingWithdraw: 0n,
     pendingEpoch: 0n,
     boughtEpoch: 0n,
     boughtAmount: 0n,
-    bonusEpoch: 0n,
-    bonusGranted: 0n,
     ...overrides,
   });
 
@@ -1601,71 +1414,12 @@ describe("operator queries", () => {
     });
     await prisma.player.createMany({
       data: [
-        player(ALICE, { entries: 3n }),
+        player(ALICE, { tickets: 3n }),
         player(BOB),
-        player(CAROL, { entries: 9n }),
+        player(CAROL, { tickets: 9n }),
         player(DAVE, { epochId: 3n, principal: 2n }),
       ],
     });
-  });
-
-  it("finds the round the operator may still act on", async () => {
-    await prisma.round.createMany({
-      data: [
-        { poolAddress: active(), id: 1n, epochId: 5n, startsAt: 0n, endsAt: 60n, status: 2, pot: 0n, houseCut: 0n, tileTotals: [] },
-        { poolAddress: active(), id: 2n, epochId: 5n, startsAt: 60n, endsAt: 120n, status: 1, pot: 5n, houseCut: 0n, tileTotals: [] },
-      ],
-    });
-    expect(await indexer.getOpenRound()).toMatchObject({ id: 2n, status: 1 });
-  });
-
-  it("lists positions across every round that has reached a terminal status", async () => {
-    await prisma.round.createMany({
-      data: [
-        { poolAddress: active(), id: 1n, epochId: 5n, startsAt: 0n, endsAt: 60n, status: 2, pot: 0n, houseCut: 0n, tileTotals: [] }, // Settled
-        { poolAddress: active(), id: 2n, epochId: 5n, startsAt: 60n, endsAt: 120n, status: 1, pot: 5n, houseCut: 0n, tileTotals: [] }, // Requested: still live
-        { poolAddress: active(), id: 3n, epochId: 5n, startsAt: 120n, endsAt: 180n, status: 4, pot: 0n, houseCut: 0n, tileTotals: [] }, // Voided
-      ],
-    });
-    await prisma.position.createMany({
-      data: [
-        { poolAddress: active(), address: "pos-a", owner: ALICE, roundId: 1n, tiles: 1n, stakePerTile: 1n },
-        { poolAddress: active(), address: "pos-b", owner: BOB, roundId: 2n, tiles: 1n, stakePerTile: 1n },
-        { poolAddress: active(), address: "pos-c", owner: CAROL, roundId: 3n, tiles: 1n, stakePerTile: 1n },
-      ],
-    });
-    const positions = await indexer.unsettledPositions();
-    expect(positions.sort((a, b) => a.address.localeCompare(b.address))).toEqual([
-      { address: "pos-a", owner: ALICE, roundId: 1n },
-      { address: "pos-c", owner: CAROL, roundId: 3n },
-    ]);
-  });
-
-  it("finds an unsettled position past 32,767 terminal rounds (mainnet-readiness-fixes 01)", async () => {
-    await prisma.$executeRaw`
-      INSERT INTO "Round" ("poolAddress", "id", "epochId", "startsAt", "endsAt", "status", "pot", "houseCut", "tileTotals")
-      SELECT ${active()}, g, 5, 0, 60, 2, 0, 0, '[]'::jsonb FROM generate_series(1, 40000) AS g`;
-    await prisma.position.create({
-      data: { poolAddress: active(), address: "pos-late", owner: ALICE, roundId: 39_999n, tiles: 1n, stakePerTile: 1n },
-    });
-    expect(await indexer.unsettledPositions()).toEqual([
-      { address: "pos-late", owner: ALICE, roundId: 39_999n },
-    ]);
-  });
-
-  it("lists terminal, not-yet-closed rounds with nothing left owed on them", async () => {
-    await prisma.round.createMany({
-      data: [
-        { poolAddress: active(), id: 1n, epochId: 5n, startsAt: 0n, endsAt: 60n, status: 2, pot: 0n, houseCut: 0n, tileTotals: [] }, // Settled, still has a Position
-        { poolAddress: active(), id: 2n, epochId: 5n, startsAt: 60n, endsAt: 120n, status: 2, pot: 0n, houseCut: 0n, tileTotals: [] }, // Settled, clear
-        { poolAddress: active(), id: 3n, epochId: 5n, startsAt: 120n, endsAt: 180n, status: 1, pot: 5n, houseCut: 0n, tileTotals: [] }, // Requested: still live
-        { poolAddress: active(), id: 4n, epochId: 5n, startsAt: 180n, endsAt: 240n, status: 4, pot: 0n, houseCut: 0n, tileTotals: [], closed: true }, // Voided, already closed
-      ],
-    });
-    await prisma.position.create({
-      data: { poolAddress: active(), address: "pos-a", owner: ALICE, roundId: 1n, tiles: 1n, stakePerTile: 1n },
-    });
-    expect(await indexer.roundsToClose()).toEqual([2n]);
   });
 
   it("reads a single epoch and every player", async () => {
@@ -1676,7 +1430,7 @@ describe("operator queries", () => {
 
   // ADR 0016: a retired pool's rows share the tables but never reach the
   // operator.
-  it("never hands the operator a retired pool's epoch, player or round", async () => {
+  it("never hands the operator a retired pool's epoch or player", async () => {
     await prisma.pool.create({ data: poolRecord({ address: RETIRED_POOL, poolId: 0n }) });
     await prisma.epoch.create({
       data: {
@@ -1690,25 +1444,11 @@ describe("operator queries", () => {
       },
     });
     await prisma.player.create({
-      data: player(Keypair.generate().publicKey.toBase58(), { poolAddress: RETIRED_POOL, entries: 9n }),
-    });
-    await prisma.round.create({
-      data: {
-        poolAddress: RETIRED_POOL,
-        id: 9n,
-        epochId: 6n,
-        startsAt: 0n,
-        endsAt: 60n,
-        status: 0,
-        pot: 0n,
-        houseCut: 0n,
-        tileTotals: [],
-      },
+      data: player(Keypair.generate().publicKey.toBase58(), { poolAddress: RETIRED_POOL, tickets: 9n }),
     });
 
     expect(await indexer.getEpoch(6n)).toBeNull();
     expect((await indexer.getPlayers()).length).toBe(4);
-    expect(await indexer.getOpenRound()).toBeNull();
   });
 });
 
@@ -1735,7 +1475,7 @@ describe("referral qualification", () => {
   }
 
   it("ignores a Principal-changing event for a wallet with no Referral row", async () => {
-    expect(await indexer.ingestLogs(batch("sig-noref", 1n, [depositedFor(OWNER, 60_000_000, 60_000_000, 60_000_000)]))).toBe(1);
+    expect(await indexer.ingestLogs(batch("sig-noref", 1n, [depositedFor(OWNER, 60_000_000, 60_000_000)]))).toBe(1);
     expect(await prisma.referral.count()).toBe(0);
   });
 
@@ -1747,15 +1487,13 @@ describe("referral qualification", () => {
         poolAddress: active(),
         owner: referee,
         principal: 40_000_000n,
-        entries: 0n,
+        tickets: 0n,
         epochId: 1n,
         isHouse: false,
         pendingWithdraw: 0n,
         pendingEpoch: 0n,
         boughtEpoch: 0n,
         boughtAmount: 0n,
-        bonusEpoch: 0n,
-        bonusGranted: 0n,
         slot: 5n,
       },
     });
@@ -1787,7 +1525,7 @@ describe("referral qualification", () => {
       bindReferral(tx, active(), referee, STRANGER.toBase58(), "ABCD2345"),
     );
     await indexer.ingestLogs(
-      batch("sig-lagged", 100n, [depositedFor(OWNER, 60_000_000, 63_000_000, 63_000_000)]),
+      batch("sig-lagged", 100n, [depositedFor(OWNER, 60_000_000, 63_000_000)]),
     );
     expect((await prisma.referral.findUniqueOrThrow({ where: { referee } })).principal).toBe(63_000_000n);
   });
@@ -1795,7 +1533,7 @@ describe("referral qualification", () => {
   it("crosses up through 50 USDC on a deposit and stamps aboveSince", async () => {
     await seedReferral();
     await indexer.ingestLogs(
-      batch("sig-cross", 1n, [depositedFor(OWNER, 60_000_000, 60_000_000, 60_000_000)]),
+      batch("sig-cross", 1n, [depositedFor(OWNER, 60_000_000, 60_000_000)]),
     );
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
     expect(row.principal).toBe(60_000_000n);
@@ -1845,7 +1583,7 @@ describe("referral qualification", () => {
     await indexer.ingestLogs(
       batch("sig-diprestore", 1n, [
         withdrawRequestedFor(OWNER, 15_000_000, 15_000_000),
-        depositedFor(OWNER, 25_000_000, 55_000_000, 55_000_000),
+        depositedFor(OWNER, 25_000_000, 55_000_000),
       ]),
     );
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
@@ -1884,7 +1622,7 @@ describe("referral qualification", () => {
     ];
     connection.setTransaction(
       "sig-old",
-      batch("sig-old", 10n, [depositedFor(OWNER, 60_000_000, 60_000_000, 60_000_000)]).logs,
+      batch("sig-old", 10n, [depositedFor(OWNER, 60_000_000, 60_000_000)]).logs,
     );
     connection.setTransaction(
       "sig-mid",
@@ -1907,7 +1645,7 @@ describe("referral qualification", () => {
       {
         err: null,
         signature: "sig-live",
-        logs: batch("sig-live", 30n, [depositedFor(OWNER, 80_000_000, 80_000_000, 80_000_000)]).logs,
+        logs: batch("sig-live", 30n, [depositedFor(OWNER, 80_000_000, 80_000_000)]).logs,
       },
       30,
     );
@@ -1980,453 +1718,6 @@ describe("referral qualification", () => {
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
     expect(row.principal).toBe(60_000_000n);
     expect(row.aboveSince).toBe(1_600_000_000n);
-  });
-});
-
-// docs/plan/hexo-referrals ticket 08: computeBonuses' inputs and the
-// ReferralGrant bookkeeping around it, against a real Postgres.
-describe("referral bonus job (ticket 08)", () => {
-  const EPOCH_ID = 9n;
-  const REFERRER = Keypair.generate().publicKey.toBase58();
-  const WELL_PAST = 0n; // 1970: far more than REFERRAL_QUALIFY_SECONDS ago.
-
-  const referrerPlayer = (owner: string, overrides: object = {}) => ({
-    poolAddress: active(),
-    owner,
-    principal: 1_000_000_000_000n, // ample, so the referrer's own 1x cap never binds
-    entries: 0n,
-    epochId: 0n,
-    isHouse: false,
-    pendingWithdraw: 0n,
-    pendingEpoch: 0n,
-    boughtEpoch: 0n,
-    boughtAmount: 0n,
-    bonusEpoch: 0n,
-    bonusGranted: 0n,
-    ...overrides,
-  });
-
-  async function seedQualifiedReferral(overrides: object = {}): Promise<void> {
-    await prisma.referral.create({
-      data: {
-        referee: Keypair.generate().publicKey.toBase58(),
-        referrer: REFERRER,
-        code: "ABCD9999",
-        boundAt: 0n,
-        aboveSince: WELL_PAST,
-        principal: 100_000_000n, // 100 USDC
-        ...overrides,
-      },
-    });
-  }
-
-  beforeEach(async () => {
-    // poolRecord's defaults (ample totalPrincipal, 100% bonusCapBps) keep the
-    // pool cap from binding unless a test overrides them.
-    await prisma.pool.create({ data: poolRecord({ currentEpochId: EPOCH_ID }) });
-  });
-
-  // ADR 0016: epoch ids restart on every pool. Keyed by epoch alone,
-  // skipDuplicates would drop the Active pool's grant because a retired
-  // pool already holds a row for the same (epoch, referrer), and that row's
-  // amount would count against this epoch's pool cap.
-  it("writes the Active pool's grant for an epoch and referrer a retired pool already has a grant for", async () => {
-    await prisma.pool.create({ data: poolRecord({ address: RETIRED_POOL, poolId: 0n }) });
-    const retiredGrant = {
-      poolAddress: RETIRED_POOL,
-      epochId: EPOCH_ID,
-      referrer: REFERRER,
-      amount: 7n,
-      uncapped: 7n,
-      qualifiedCount: 1,
-      rateBps: 200,
-      txSig: "sig-retired",
-    };
-    await prisma.referralGrant.create({ data: retiredGrant });
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    await seedQualifiedReferral();
-
-    expect(await indexer.referralGrantsDue(EPOCH_ID)).toEqual([
-      { referrer: REFERRER, amount: 2_000_000n },
-    ]);
-    await indexer.markReferralGrantsSent(EPOCH_ID, [REFERRER], "sig-active");
-
-    expect(
-      await prisma.referralGrant.findUniqueOrThrow({
-        where: {
-          poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER },
-        },
-      }),
-    ).toMatchObject({ amount: 2_000_000n, txSig: "sig-active" });
-    expect(
-      await prisma.referralGrant.findUniqueOrThrow({
-        where: {
-          poolAddress_epochId_referrer: { poolAddress: RETIRED_POOL, epochId: EPOCH_ID, referrer: REFERRER },
-        },
-      }),
-    ).toMatchObject(retiredGrant);
-    expect(await prisma.referralGrantShare.findMany()).toMatchObject([
-      { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER, amount: 2_000_000n },
-    ]);
-  });
-
-  it("computes a qualifying referrer's bonus, records it, and hands it back unsent", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    await seedQualifiedReferral();
-
-    const due = await indexer.referralGrantsDue(EPOCH_ID);
-    expect(due).toEqual([{ referrer: REFERRER, amount: 2_000_000n }]); // 100 USDC * 2%
-
-    const row = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    expect(row).toMatchObject({
-      amount: 2_000_000n,
-      // referral-page ticket 04: the own-Principal cap and pool cap are both
-      // ample here (referrerPlayer's default Principal, poolRow's default
-      // bonusCapBps), so uncapped equals amount.
-      uncapped: 2_000_000n,
-      qualifiedCount: 1,
-      rateBps: 200,
-      txSig: null,
-    });
-  });
-
-  it("records uncapped as the raw grant when the referrer's own Principal caps amount, and it stays idempotent across restarts", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER, { principal: 10_000_000n }) }); // $10
-    for (let i = 0; i < 11; i++) {
-      await seedQualifiedReferral({ principal: 2_500_000_000n }); // $2,500 each, 11 -> 5% tier
-    }
-
-    const first = await indexer.referralGrantsDue(EPOCH_ID);
-    expect(first).toEqual([{ referrer: REFERRER, amount: 10_000_000n }]); // capped at the $10 Principal
-
-    const row = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    expect(row.uncapped).toBe(1_375_000_000n); // 5% of 11 * $2,500 raw, uncapped by the $10 cap
-
-    // A later Principal move re-clamps `amount` (see the test above this
-    // one) but must not touch the already-recorded `uncapped`: it stays
-    // idempotent across restarts / repeated ticks the same way amount's own
-    // recorded qualifiedCount and rateBps do.
-    await prisma.player.update({ where: byOwner(REFERRER), data: { principal: 5_000_000n } });
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    const after = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    expect(after.uncapped).toBe(1_375_000_000n);
-  });
-
-  it("a referral not yet qualified earns its referrer nothing", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    await seedQualifiedReferral({ aboveSince: null });
-
-    expect(await indexer.referralGrantsDue(EPOCH_ID)).toEqual([]);
-    expect(await prisma.referralGrant.count()).toBe(0);
-  });
-
-  it("a referrer with no Player earns nothing", async () => {
-    await seedQualifiedReferral();
-    expect(await indexer.referralGrantsDue(EPOCH_ID)).toEqual([]);
-  });
-
-  it("is idempotent: the recorded amount does not change on a second call even if Principal moves", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    await seedQualifiedReferral();
-
-    const first = await indexer.referralGrantsDue(EPOCH_ID);
-    await prisma.referral.updateMany({
-      where: { referrer: REFERRER },
-      data: { principal: 900_000_000n }, // would compute a different bonus if reapplied
-    });
-    const second = await indexer.referralGrantsDue(EPOCH_ID);
-
-    expect(second).toEqual(first);
-    expect(await prisma.referralGrant.count()).toBe(1);
-  });
-
-  it("re-clamps an already-recorded amount, and persists the drop, when the referrer's own Principal falls before it is sent", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER, { principal: 1_000_000_000n }) }); // 1,000 USDC
-    for (let i = 0; i < 11; i++) {
-      await seedQualifiedReferral({ principal: 2_500_000_000n }); // $2,500 each, 11 qualified -> 5% tier
-    }
-
-    const first = await indexer.referralGrantsDue(EPOCH_ID);
-    // Raw would be 5% of 11 * $2,500 = $1,375; capped at the referrer's own
-    // $1,000 Principal, not the raw figure.
-    expect(first).toEqual([{ referrer: REFERRER, amount: 1_000_000_000n }]);
-
-    // The referrer withdraws before the operator actually gets to send it.
-    await prisma.player.update({
-      where: byOwner(REFERRER),
-      data: { principal: 10_000_000n }, // 10 USDC
-    });
-
-    const second = await indexer.referralGrantsDue(EPOCH_ID);
-    expect(second).toEqual([{ referrer: REFERRER, amount: 10_000_000n }]);
-
-    const row = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    // The record itself reflects the re-clamp, not just what was returned:
-    // ticket 11 reads this row as "today's bonus".
-    expect(row.amount).toBe(10_000_000n);
-  });
-
-  it("clamping all the way to 0 drops the referrer from what is due and zeroes the recorded amount", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER, { principal: 100_000_000n }) });
-    await seedQualifiedReferral();
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    await prisma.player.update({ where: byOwner(REFERRER), data: { principal: 0n } });
-
-    expect(await indexer.referralGrantsDue(EPOCH_ID)).toEqual([]);
-    const row = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    expect(row.amount).toBe(0n);
-  });
-
-  it("skips a referrer whose on-chain bonus_epoch already covers this epoch (a crash between send and markReferralGrantsSent)", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    await seedQualifiedReferral();
-    await indexer.referralGrantsDue(EPOCH_ID); // records the row, txSig still null
-
-    await prisma.player.update({
-      where: byOwner(REFERRER),
-      data: { bonusEpoch: EPOCH_ID }, // the grant already landed on chain
-    });
-
-    expect(await indexer.referralGrantsDue(EPOCH_ID)).toEqual([]);
-  });
-
-  it("markReferralGrantsSent fills in the signature for exactly the referrers given", async () => {
-    const other = Keypair.generate().publicKey.toBase58();
-    await prisma.player.createMany({
-      data: [referrerPlayer(REFERRER), referrerPlayer(other)],
-    });
-    await seedQualifiedReferral();
-    await prisma.referral.create({
-      data: {
-        referee: Keypair.generate().publicKey.toBase58(),
-        referrer: other,
-        code: "ABCD8888",
-        boundAt: 0n,
-        aboveSince: WELL_PAST,
-        principal: 100_000_000n,
-      },
-    });
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    await indexer.markReferralGrantsSent(EPOCH_ID, [REFERRER], "sig-1");
-
-    const sent = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    const unsent = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: other } },
-    });
-    expect(sent.txSig).toBe("sig-1");
-    expect(unsent.txSig).toBeNull();
-  });
-
-  // referral-page ticket 05: ReferralGrantShare, written alongside
-  // ReferralGrant with the same idempotency, and rescaled by the same
-  // re-clamp loop.
-  it("writes a share row per qualified referee, proportional to their own basis, summing to the grant", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    const big = Keypair.generate().publicKey.toBase58();
-    const small = Keypair.generate().publicKey.toBase58();
-    await prisma.referral.create({
-      data: {
-        referee: big,
-        referrer: REFERRER,
-        code: "ABCD9999",
-        boundAt: 0n,
-        aboveSince: WELL_PAST,
-        principal: 300_000_000n, // 300 USDC
-      },
-    });
-    await prisma.referral.create({
-      data: {
-        referee: small,
-        referrer: REFERRER,
-        code: "ABCD9999",
-        boundAt: 0n,
-        aboveSince: WELL_PAST,
-        principal: 100_000_000n, // 100 USDC
-      },
-    });
-
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    const grant = await prisma.referralGrant.findUniqueOrThrow({
-      where: { poolAddress_epochId_referrer: { poolAddress: active(), epochId: EPOCH_ID, referrer: REFERRER } },
-    });
-    const shares = await prisma.referralGrantShare.findMany({
-      where: { epochId: EPOCH_ID, referrer: REFERRER },
-    });
-    expect(shares.reduce((sum, share) => sum + share.amount, 0n)).toBe(grant.amount);
-    // 300:100 basis -> 3:1 split, evenly (400 USDC basis, no remainder).
-    const bigShare = shares.find((share) => share.referee === big)!;
-    const smallShare = shares.find((share) => share.referee === small)!;
-    expect(bigShare.amount).toBe((grant.amount * 3n) / 4n);
-    expect(smallShare.amount).toBe(grant.amount - bigShare.amount);
-  });
-
-  it("share rows stay idempotent: a referee that only qualifies after the grant was first recorded gets no row", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER) });
-    const first = Keypair.generate().publicKey.toBase58();
-    await prisma.referral.create({
-      data: {
-        referee: first,
-        referrer: REFERRER,
-        code: "ABCD9999",
-        boundAt: 0n,
-        aboveSince: WELL_PAST,
-        principal: 100_000_000n,
-      },
-    });
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    const second = Keypair.generate().publicKey.toBase58();
-    await prisma.referral.create({
-      data: {
-        referee: second,
-        referrer: REFERRER,
-        code: "ABCD9999",
-        boundAt: 0n,
-        aboveSince: WELL_PAST,
-        principal: 500_000_000n,
-      },
-    });
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    const shares = await prisma.referralGrantShare.findMany({
-      where: { epochId: EPOCH_ID, referrer: REFERRER },
-    });
-    expect(shares).toHaveLength(1);
-    expect(shares[0]!.referee).toBe(first);
-  });
-
-  it("re-clamp rescales share rows to the new amount, still summing exactly", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER, { principal: 1_000_000_000n }) }); // $1,000
-    for (let i = 0; i < 11; i++) {
-      await prisma.referral.create({
-        data: {
-          referee: Keypair.generate().publicKey.toBase58(),
-          referrer: REFERRER,
-          code: "ABCD9999",
-          boundAt: 0n,
-          aboveSince: WELL_PAST,
-          principal: 2_500_000_000n, // $2,500 each, 11 -> 5% tier
-        },
-      });
-    }
-
-    await indexer.referralGrantsDue(EPOCH_ID); // capped at the $1,000 Principal
-
-    const before = await prisma.referralGrantShare.findMany({
-      where: { epochId: EPOCH_ID, referrer: REFERRER },
-    });
-    expect(before.reduce((sum, share) => sum + share.amount, 0n)).toBe(1_000_000_000n);
-
-    await prisma.player.update({ where: byOwner(REFERRER), data: { principal: 10_000_000n } }); // $10
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    const after = await prisma.referralGrantShare.findMany({
-      where: { epochId: EPOCH_ID, referrer: REFERRER },
-    });
-    // Still one row per referee: the re-clamp rescales, it doesn't drop rows.
-    expect(after).toHaveLength(11);
-    expect(after.reduce((sum, share) => sum + share.amount, 0n)).toBe(10_000_000n);
-  });
-
-  it("clamping all the way to 0 zeroes every share row too", async () => {
-    await prisma.player.create({ data: referrerPlayer(REFERRER, { principal: 100_000_000n }) });
-    await seedQualifiedReferral();
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    await prisma.player.update({ where: byOwner(REFERRER), data: { principal: 0n } });
-    await indexer.referralGrantsDue(EPOCH_ID);
-
-    const shares = await prisma.referralGrantShare.findMany({
-      where: { epochId: EPOCH_ID, referrer: REFERRER },
-    });
-    expect(shares.length).toBeGreaterThan(0);
-    expect(shares.every((share) => share.amount === 0n)).toBe(true);
-  });
-
-  // beta-launch-fixes ticket 11: the pool-wide cap is shared across the
-  // whole epoch (computeBonuses' own alreadyGrantedThisEpoch parameter,
-  // wired up here), so a referrer discovered on a later tick is scaled
-  // against the remaining headroom instead of the full cap recomputed
-  // fresh, which used to compute an amount the on-chain call then refused.
-  it("scales a later-qualifying referrer against the headroom an earlier grant already used", async () => {
-    await prisma.pool.update({
-      where: { address: chain.poolAddress().toBase58() },
-      data: { totalPrincipal: 3_000_000_000n, bonusCapBps: 500 }, // 5% of $3,000 = $150 pool cap
-    });
-    const other = Keypair.generate().publicKey.toBase58();
-    await prisma.player.createMany({
-      data: [referrerPlayer(REFERRER), referrerPlayer(other)],
-    });
-    for (let i = 0; i < 3; i++) {
-      await seedQualifiedReferral({ principal: 1_000_000_000n }); // $1,000 each, 3 -> 3% tier
-    }
-
-    // First tick: only REFERRER qualifies yet. Raw 3% of $3,000 = $90,
-    // well within the $150 pool cap.
-    const first = await indexer.referralGrantsDue(EPOCH_ID);
-    expect(first).toEqual([{ referrer: REFERRER, amount: 90_000_000n }]);
-
-    // Later the same epoch, `other` also qualifies with the same shape of
-    // referrals. Only $60 of the $150 pool cap is left ($150 - $90 already
-    // recorded for REFERRER), so `other`'s raw $90 is scaled down to fit.
-    for (let i = 0; i < 3; i++) {
-      await prisma.referral.create({
-        data: {
-          referee: Keypair.generate().publicKey.toBase58(),
-          referrer: other,
-          code: `LATE${i}`.padEnd(8, "0"),
-          boundAt: 0n,
-          aboveSince: WELL_PAST,
-          principal: 1_000_000_000n,
-        },
-      });
-    }
-    const second = await indexer.referralGrantsDue(EPOCH_ID);
-    expect(second).toEqual(
-      expect.arrayContaining([
-        { referrer: REFERRER, amount: 90_000_000n }, // unchanged: frozen once recorded
-        { referrer: other, amount: 60_000_000n }, // scaled to the remaining headroom
-      ]),
-    );
-    expect(second).toHaveLength(2);
-  });
-
-  // ticket 11: the pending-grants query has a deterministic order.
-  it("returns pending grants in a deterministic (referrer-ascending) order", async () => {
-    const referrers = ["c", "a", "b"].map(() => Keypair.generate().publicKey.toBase58());
-    await prisma.player.createMany({ data: referrers.map((owner) => referrerPlayer(owner)) });
-    for (const referrer of referrers) {
-      await prisma.referral.create({
-        data: {
-          referee: Keypair.generate().publicKey.toBase58(),
-          referrer,
-          code: referrer.slice(0, 8).padEnd(8, "0").toUpperCase(),
-          boundAt: 0n,
-          aboveSince: WELL_PAST,
-          principal: 100_000_000n,
-        },
-      });
-    }
-
-    const due = await indexer.referralGrantsDue(EPOCH_ID);
-    const sorted = [...due.map((d) => d.referrer)].sort();
-    expect(due.map((d) => d.referrer)).toEqual(sorted);
   });
 });
 });

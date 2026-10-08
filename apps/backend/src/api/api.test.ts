@@ -47,8 +47,6 @@ import {
   oddsPercent,
   operatorErrorCode,
   playerTicketExtras,
-  poolBonusCap,
-  TREE_TTL_MS,
 } from "./api.service";
 
 const NOW = BigInt(Math.floor(Date.now() / 1000));
@@ -90,9 +88,8 @@ const VAULT_BALANCE = 5_000_000n;
 /** GET /state's ticket 08 field: the fake `priorityFeeMicroLamports`'s
  *  canned answer. */
 const FAKE_PRIORITY_FEE = 4_242;
-/** The seeded Pool row's `closeBuffer`/`minDeposit`, which the browser reads
- *  off `/state` rather than off the chain (ticket 07). */
-const POOL_CLOSE_BUFFER = 15n;
+/** The seeded Pool row's `minDeposit`, which the browser reads off `/state`
+ *  rather than off the chain (ticket 07). */
 const POOL_MIN_DEPOSIT = 1_000_000n;
 
 /** Ticket 03's `/status` figures: what the pool owes, what the principal
@@ -102,13 +99,9 @@ const PRINCIPAL_VAULT_BALANCE = 9_000_000n;
 const OPERATOR_LAMPORTS = 2 * LAMPORTS_PER_SOL;
 
 /** Ticket 05's `/status`, `/pool` and `/players/:owner` figures: the ceiling
- *  rate, bought tickets and granted tickets. */
+ *  rate and bought tickets. */
 const POOL_BASE_RATE_BPS = 488;
-const POOL_TICKETS_PER_USDC = 10;
-const POOL_BONUS_CAP_BPS = 500;
-const POOL_BONUS_GRANTED = 250_000n;
 const ALICE_BOUGHT_AMOUNT = 200_000n;
-const ALICE_BONUS_GRANTED = 50_000n;
 
 /** Ticket 14's live yield. The Pool's venue position is past 2^53 so the
  *  solvency margin proves its string path, and sized so the vault plus the
@@ -128,7 +121,6 @@ const RESERVE_AVAILABLE = 500_000_000_000n;
 const RESERVE_BORROWED = 4_500_000_000_000n;
 /** Alice holds the whole draw: her 1,000,000 Tickets, one per Principal unit. */
 const ALICE_WEIGHT = 1_000_000n;
-const WEIGHT_TREE = Keypair.generate().publicKey;
 const RESERVE = Keypair.generate().publicKey;
 
 /** The operator key, which is also the authority of the mint the faucet
@@ -187,32 +179,6 @@ function tokenAccount(amount: bigint): AccountInfo<Buffer> {
   return accountInfo(data, TOKEN_PROGRAM_ID);
 }
 
-/**
- * The Weight tree with Alice on leaf 1 holding the whole epoch-7 draw, Bob on
- * leaf 2 and the House on leaf 3 holding nothing. Epoch 7 is odd, so it lives
- * in the second slot of a node. Fenwick node 2 sums leaves 1 and 2.
- */
-function weightTreeData(): Buffer {
-  const header = 56;
-  const nodeSize = 56;
-  const data = Buffer.alloc(header + 3 * nodeSize);
-  data.writeUInt8(1, 8);
-  data.writeBigUInt64LE(3n, 16);
-  const node = (index: number, principalSum: bigint, weight: bigint | null) => {
-    const at = header + index * nodeSize;
-    data.writeBigUInt64LE(principalSum, at);
-    if (weight === null) return;
-    const slot = at + 8 + 24;
-    data.writeBigUInt64LE(CURRENT_EPOCH, slot);
-    data.writeBigUInt64LE(principalSum, slot + 8);
-    data.writeBigUInt64LE(weight, slot + 16);
-  };
-  node(0, 1_000_000n, ALICE_WEIGHT);
-  node(1, 0n, ALICE_WEIGHT);
-  node(2, 0n, null);
-  return data;
-}
-
 /** A klend reserve with the fields `decodeReserve` reads, at klend's offsets:
  *  curve 0% at 0, 5.51% at 95%, 36.34% beyond; klend keeps 10%. */
 function reserveData(): Buffer {
@@ -245,15 +211,12 @@ const sentInstructions: TransactionInstruction[][] = [];
 let clockReads = 0;
 let jackpotReads = 0;
 let balanceReads = 0;
-let treeReads = 0;
 /** When set, the next `getTokenAccountBalance` call throws once and resets it. */
 let failNextJackpotRead = false;
 /** What the fake jackpot vault holds; a test sets it and restores it. */
 let vaultBalance = VAULT_BALANCE;
 /** Same, for the paired vault/operator balance read behind /status. */
 let failNextBalanceRead = false;
-/** Same, for the Weight tree account read behind a Player's Weight. */
-let failNextTreeRead = false;
 /** What the fake Clock sysvar reads. Mutable so a test can make the chain
  *  clock regress the way a real one does when it drifts behind wall time. */
 let chainClockValue = CHAIN_NOW;
@@ -266,14 +229,6 @@ const fakeChain = {
     // else: those are the only two accounts this suite reads one at a time.
     getAccountInfo: async (address: PublicKey): Promise<AccountInfo<Buffer>> => {
       if (address.equals(ACCEPTED_MINT)) return mintAccount(OPERATOR.publicKey);
-      if (address.equals(WEIGHT_TREE)) {
-        treeReads += 1;
-        if (failNextTreeRead) {
-          failNextTreeRead = false;
-          throw new Error("simulated weight tree read failure");
-        }
-        return accountInfo(weightTreeData(), SystemProgram.programId);
-      }
       clockReads += 1;
       return accountInfo(clockSysvarData(chainClockValue), SystemProgram.programId);
     },
@@ -305,7 +260,6 @@ const fakeChain = {
   poolAddress: (): PublicKey => new PublicKey(POOL_ADDRESS),
   jackpotVaultAddress: (): PublicKey => Keypair.generate().publicKey,
   principalVaultAddress: (): PublicKey => PRINCIPAL_VAULT,
-  roundAddress: (): PublicKey => Keypair.generate().publicKey,
   priorityFeeMicroLamports: async (): Promise<number> => FAKE_PRIORITY_FEE,
   keypair: OPERATOR,
   send: async (instructions: TransactionInstruction[]): Promise<string> => {
@@ -318,15 +272,13 @@ const emptyPlayer = (owner: string, poolAddress: string = POOL_ADDRESS): Player 
   poolAddress,
   owner,
   principal: 0n,
-  entries: 0n,
+  tickets: 0n,
   epochId: CURRENT_EPOCH,
   isHouse: false,
   pendingWithdraw: 0n,
   pendingEpoch: 0n,
   boughtEpoch: 0n,
   boughtAmount: 0n,
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
   slot: 0n,
   ...LIVE_PLAYER_DEFAULTS,
 });
@@ -354,7 +306,7 @@ function assertNoLargeNumbers(value: unknown, path: string): void {
 
 async function truncate(prisma: PrismaService): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE "Pool", "Epoch", "Round", "Player", "Position", "Event", "Cursor", "FaucetClaim", "OperatorState", "YieldIndexPoint", "WeightTreeState" CASCADE',
+    'TRUNCATE "Pool", "Epoch", "Player", "Event", "Cursor", "FaucetClaim", "OperatorState", "YieldIndexPoint" CASCADE',
   );
 }
 
@@ -374,16 +326,6 @@ describe("oddsPercent", () => {
   });
 });
 
-describe("poolBonusCap", () => {
-  it("mirrors the on-chain pool_bonus_cap", () => {
-    expect(poolBonusCap(1_000_000_000n, 500)).toBe(50_000_000n);
-  });
-
-  it("is zero at a zero cap", () => {
-    expect(poolBonusCap(1_000_000_000n, 0)).toBe(0n);
-  });
-});
-
 describe("playerTicketExtras", () => {
   const ALICE_ADDRESS = Keypair.generate().publicKey.toBase58();
   const player = (over: Partial<Player>): Player => ({
@@ -394,25 +336,24 @@ describe("playerTicketExtras", () => {
 
   it("reads today's counters live when their epoch matches the current one", () => {
     const extras = playerTicketExtras(
-      player({ boughtEpoch: 7n, boughtAmount: 300_000n, bonusEpoch: 7n, bonusGranted: 40_000n }),
+      player({ boughtEpoch: 7n, boughtAmount: 300_000n }),
       7n,
     );
     expect(extras).toEqual({
       boughtToday: 300_000n,
       buyAllowanceLeft: 700_000n,
-      grantedToday: 40_000n,
     });
   });
 
   it("reads a counter from a past epoch as already reset to 0", () => {
-    // The on-chain reset only happens the next time buy_tickets/grant_tickets
-    // actually runs for the new epoch, so a leftover epoch=6 value must not
+    // The on-chain reset only happens the next time buy_tickets actually
+    // runs for the new epoch, so a leftover epoch=6 value must not
     // leak into epoch 7's figures.
     const extras = playerTicketExtras(
-      player({ boughtEpoch: 6n, boughtAmount: 300_000n, bonusEpoch: 6n, bonusGranted: 40_000n }),
+      player({ boughtEpoch: 6n, boughtAmount: 300_000n }),
       7n,
     );
-    expect(extras).toEqual({ boughtToday: 0n, buyAllowanceLeft: 1_000_000n, grantedToday: 0n });
+    expect(extras).toEqual({ boughtToday: 0n, buyAllowanceLeft: 1_000_000n });
   });
 
   it("floors buyAllowanceLeft at zero once bought spend reaches or passes Principal", () => {
@@ -520,7 +461,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     await app.close();
   });
 
-  it("GET /pool returns the pool, the current epoch and the open round", async () => {
+  it("GET /pool returns the pool and the current epoch", async () => {
     const { body } = await http.get("/pool").expect(200);
     expect(body.pool).toMatchObject({
       address: POOL_ADDRESS,
@@ -534,19 +475,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       // Ticket 05: the whole Pool row rides along, so these need no route
       // change to show up.
       baseRateBps: POOL_BASE_RATE_BPS,
-      ticketsPerUsdc: POOL_TICKETS_PER_USDC,
-      bonusCapBps: POOL_BONUS_CAP_BPS,
     });
     expect(body.currentEpoch).toMatchObject({ id: "7", status: 0 });
-    expect(body.openRound).toEqual({
-      id: "100",
-      epochId: "7",
-      startsAt: String(CURRENT_START),
-      endsAt: String(CURRENT_START + 60n),
-      status: 0,
-      pot: "5000",
-      houseCut: "0",
-    });
+    // The game and the grant caps left the Pool row with the program's custody-only cut.
+    for (const gone of ["roundSeconds", "closeBuffer", "houseCutBps", "ticketsPerUsdc", "bonusCapBps", "weightTree"]) {
+      expect(body.pool).not.toHaveProperty(gone);
+    }
+    expect(body).not.toHaveProperty("openRound");
     // Registration and the Base yield budget left the Pool row.
     expect(body.pool).not.toHaveProperty("carryPot");
     expect(body.pool).not.toHaveProperty("yieldBudget");
@@ -743,26 +678,15 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     assertNoLargeNumbers(body, "/epochs/current");
   });
 
-  it("GET /rounds returns newest first with the winning tile and the pot", async () => {
-    const { body } = await http.get("/rounds").expect(200);
-    expect(body.map((round: { id: string }) => round.id)).toEqual(["100", "99"]);
-    expect(body[1]).toMatchObject({ winningTile: 17, pot: "4000", status: 2 });
-    assertNoLargeNumbers(body, "/rounds");
+  it("has no /rounds or /positions/counts routes any more", async () => {
+    // Rounds and Positions left the program; the backend's own game returns
+    // them in wave 2 (off-chain-tickets ticket 10).
+    await http.get("/rounds").expect(404);
+    await http.get("/rounds/99").expect(404);
+    await http.get(`/positions/counts?owners=${ALICE}`).expect(404);
   });
 
-  it("GET /rounds/:id returns one round with its tile totals", async () => {
-    const { body } = await http.get("/rounds/99").expect(200);
-    expect(body.id).toBe("99");
-    expect(body.tileTotals).toEqual({ "17": "4000" });
-    assertNoLargeNumbers(body, "/rounds/99");
-  });
-
-  it("GET /rounds/:id is 404 for an unknown round and 400 for a non-numeric id", async () => {
-    await http.get("/rounds/4242").expect(404);
-    await http.get("/rounds/abc").expect(400);
-  });
-
-  it("GET /players/:owner returns Principal, unsettled yield as of the last sync, and the Weight the tree holds", async () => {
+  it("GET /players/:owner returns Principal, unsettled yield as of the last sync, and the Tickets the mirror holds", async () => {
     const { body } = await http.get(`/players/${ALICE}`).expect(200);
     expect(body.owner).toBe(ALICE);
     expect(body.principal).toBe("1000000");
@@ -772,12 +696,15 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     // earned only the unsettled part.
     expect(body.positionYield).toBe("50000");
     expect(body.syncedAt).toBe(LAST_SYNC.toString());
-    // Read from the tree: she holds the whole epoch, so all of the odds.
+    // She holds every Ticket in the mirror, so all of the odds.
     expect(body.weight).toBe(ALICE_WEIGHT.toString());
     expect(body.odds).toBe("100.00");
     expect(body.pendingTickets).toBe("0");
     expect(body.pendingActivatesEpoch).toBeNull();
-    expect(body.leafIndex).toBe(1);
+    expect(body.tickets).toBe(ALICE_WEIGHT.toString());
+    for (const gone of ["entries", "leafIndex", "bonusEpoch", "bonusGranted"]) {
+      expect(body).not.toHaveProperty(gone);
+    }
     // None of the registration or Base yield fields are left.
     for (const gone of ["weightAcc", "regStart", "frozenWeight", "yieldEpoch", "yieldToDate"]) {
       expect(body).not.toHaveProperty(gone);
@@ -785,13 +712,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     assertNoLargeNumbers(body, "/players/:owner");
   });
 
-  it("GET /players/:owner reports today's bought and granted tickets", async () => {
+  it("GET /players/:owner reports today's bought tickets", async () => {
     const { body } = await http.get(`/players/${ALICE}`).expect(200);
-    // bonusEpoch/boughtEpoch both equal the current epoch (7) in the seed,
-    // so both counters read live rather than reset to 0.
+    // boughtEpoch equals the current epoch (7) in the seed, so the counter
+    // reads live rather than reset to 0.
     expect(body.boughtToday).toBe(ALICE_BOUGHT_AMOUNT.toString());
     expect(body.buyAllowanceLeft).toBe((1_000_000n - ALICE_BOUGHT_AMOUNT).toString());
-    expect(body.grantedToday).toBe(ALICE_BONUS_GRANTED.toString());
+    expect(body).not.toHaveProperty("grantedToday");
     assertNoLargeNumbers(body, "/players/:owner (tickets)");
   });
 
@@ -812,7 +739,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     }
   });
 
-  it("GET /players/:owner gives zero odds to a player with no Weight in the tree", async () => {
+  it("GET /players/:owner gives zero odds to a player with no Tickets", async () => {
     const { body } = await http.get(`/players/${BOB}`).expect(200);
     expect(body.weight).toBe("0");
     expect(body.odds).toBe("0.00");
@@ -822,10 +749,10 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
   // Ticket 20: a deposit made today is Principal with no Tickets until the
   // next epoch, and the read folds it the way `touch` does, row untouched.
   it("GET /players/:owner shows a pending deposit as pending Tickets, then folds it from the next epoch", async () => {
-    const seed = (epochId: bigint, entries: bigint, pendingDepositEpoch: bigint) =>
+    const seed = (epochId: bigint, tickets: bigint, pendingDepositEpoch: bigint) =>
       prisma.player.update({
         where: activePlayer(BOB),
-        data: { principal: 500_000n, entries, epochId, pendingDeposit: 500_000n, pendingDepositEpoch },
+        data: { principal: 500_000n, tickets, epochId, pendingDeposit: 500_000n, pendingDepositEpoch },
       });
     try {
       await seed(CURRENT_EPOCH, 0n, CURRENT_EPOCH);
@@ -841,11 +768,12 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(later.weight).toBe("500000");
       expect(later.pendingTickets).toBe("0");
       expect(later.pendingActivatesEpoch).toBeNull();
-      expect(later.odds).toBe("50.00");
+      // Her 500,000 over every Ticket the mirror holds (hers and Alice's 1,000,000).
+      expect(later.odds).toBe("33.33");
     } finally {
       await prisma.player.update({
         where: activePlayer(BOB),
-        data: { principal: 0n, entries: 0n, epochId: CURRENT_EPOCH, pendingDeposit: 0n, pendingDepositEpoch: 0n },
+        data: { principal: 0n, tickets: 0n, epochId: CURRENT_EPOCH, pendingDeposit: 0n, pendingDepositEpoch: 0n },
       });
     }
   });
@@ -931,34 +859,19 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         });
       }
     });
-
-    it("still 404s once an Epoch id exists that the indexer has not mirrored", async () => {
-      await setEpoch(1n);
-      try {
-        await http.get(`/players/${ALICE}`).expect(404);
-        await http.get("/leaderboard").expect(404);
-      } finally {
-        await setEpoch(CURRENT_EPOCH);
-      }
-    });
   });
 
   it("GET /feed keeps user-facing events only, newest first", async () => {
     const { body } = await http.get("/feed").expect(200);
     expect(body.map((event: { name: string }) => event.name)).toEqual([
-      // Ticket 14: a void refund and a processed withdrawal are history too.
-      "PositionSettled",
+      // Ticket 14: a processed withdrawal is history too.
       "Withdrawn",
-      "PositionSettled",
       "JackpotPaid",
-      "PositionSettled",
       "Deposited",
     ]);
-    expect(body[0].data).toMatchObject({ refund: "250", reward: "0" });
-    expect(body[1].data).toMatchObject({ amount: "400000", principal: "1000000" });
-    // The zero-reward PositionSettled and the operator-only RoundOpened are gone.
-    expect(body.every((event: { slot: string }) => event.slot !== "11")).toBe(true);
-    expect(body.every((event: { slot: string }) => event.slot !== "13")).toBe(true);
+    expect(body[0].data).toMatchObject({ amount: "400000", principal: "1000000" });
+    // Operator-only and game events are not news.
+    expect(body.every((event: { name: string }) => event.name !== "RoundOpened")).toBe(true);
     assertNoLargeNumbers(body, "/feed");
   });
 
@@ -967,17 +880,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     // by its `winner` field: drop that disjunct and this list loses a row.
     const alice = await http.get(`/feed?owner=${ALICE}`).expect(200);
     expect(alice.body.map((event: { name: string }) => event.name)).toEqual([
-      "PositionSettled",
       "Withdrawn",
-      "PositionSettled",
       "JackpotPaid",
-      "PositionSettled",
       "Deposited",
     ]);
     assertNoLargeNumbers(alice.body, "/feed?owner=alice");
 
-    // Bob's only owned row (slot 11) is a zero-reward PositionSettled, which
-    // the reward filter already drops, and he is nobody's JackpotPaid winner.
+    // Bob owns no feed-eligible row, and he is nobody's JackpotPaid winner.
     const bob = await http.get(`/feed?owner=${BOB}`).expect(200);
     expect(bob.body).toEqual([]);
   });
@@ -1022,59 +931,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     }
   });
 
-  it("GET /positions/counts counts from the PositionBought event log, including rounds Position has already dropped", async () => {
-    // Runs after the /feed tests above on purpose: PositionBought is a
-    // FEED_NAMES event, so seeding it earlier would perturb their exact
-    // match on the shared Event table.
-    //
-    // Carl has no Position row at all (his round settled and the indexer
-    // deleted it, same as any settled position), yet his PositionBought
-    // event is still in the log. That is the whole point of reading Event
-    // instead of Position: this case reads 0 against the old
-    // Position.groupBy implementation and must not here.
-    const CARL = Keypair.generate().publicKey.toBase58();
-    await prisma.event.createMany({
-      data: [
-        {
-          slot: 20n,
-          signature: "sig20",
-          index: 0,
-          poolAddress: POOL_ADDRESS,
-          name: "PositionBought",
-          data: { roundId: "99", owner: ALICE, tiles: "1", stakePerTile: "100", total: "100" },
-          blockTime: NOW - 20n,
-        },
-        {
-          slot: 21n,
-          signature: "sig21",
-          index: 0,
-          poolAddress: POOL_ADDRESS,
-          name: "PositionBought",
-          data: { roundId: "100", owner: ALICE, tiles: "1", stakePerTile: "100", total: "100" },
-          blockTime: NOW - 10n,
-        },
-        {
-          slot: 22n,
-          signature: "sig22",
-          index: 0,
-          poolAddress: POOL_ADDRESS,
-          name: "PositionBought",
-          data: { roundId: "99", owner: CARL, tiles: "1", stakePerTile: "50", total: "50" },
-          blockTime: NOW - 5n,
-        },
-      ],
-    });
-
-    const { body } = await http
-      .get(`/positions/counts?owners=${ALICE},${BOB},${CARL}`)
-      .expect(200);
-    expect(body).toEqual({ counts: { [ALICE]: 2, [BOB]: 0, [CARL]: 1 } });
-    assertNoLargeNumbers(body, "/positions/counts");
-  });
-
   it("GET /status reports the operator, the cursor age and rpc health", async () => {
     const { body } = await http.get("/status").expect(200);
-    expect(body.operator).toMatchObject({ lastAction: "settle_round" });
+    expect(body.operator).toMatchObject({ lastAction: "begin_epoch" });
     expect(body.operator).not.toHaveProperty("registeredCount");
     expect(body.operator).not.toHaveProperty("registeredTotal");
     // ISO, not unix seconds: the frontend `Date.parse`s it.
@@ -1131,18 +990,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(body.status).toBe("ok");
   });
 
-  it("GET /status reports the bonus grants", async () => {
-    const { body } = await http.get("/status").expect(200);
-    expect(body.bonusGrantedToday).toBe(POOL_BONUS_GRANTED.toString());
-    expect(body.bonusCap).toBe(
-      poolBonusCap(BigInt(HUGE_U64), POOL_BONUS_CAP_BPS).toString(),
-    );
-    assertNoLargeNumbers(body, "/status (bonus)");
-  });
-
   // Ticket 14: the live-yield half of /status.
   describe("GET /status live yield", () => {
-    it("reports the solvency margin, free idle against the band, the reserve and the tree", async () => {
+    it("reports the solvency margin, free idle against the band and the reserve", async () => {
       const { body } = await http.get("/status").expect(200);
       // Vault + venue less principal, past 2^53 like the inputs.
       expect(body.solvencyMargin).toBe(SOLVENCY_MARGIN.toString());
@@ -1157,10 +1007,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body.reserveFreeLiquidity).toBe(RESERVE_AVAILABLE.toString());
       expect(body.impaired).toBe(false);
       expect(body.deployPaused).toBe(false);
-      // Three leaves out of the 187,244 a tree holds.
-      expect(body.treeNodeCount).toBe("3");
-      expect(body.treeCapacity).toBe(187_244);
-      expect(body.treeUsedBps).toBe(0);
+      for (const gone of ["treeNodeCount", "treeCapacity", "treeUsedBps", "bonusGrantedToday", "bonusCap"]) {
+        expect(body).not.toHaveProperty(gone);
+      }
       assertNoLargeNumbers(body, "/status (live yield)");
     });
 
@@ -1206,14 +1055,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
   // `seedRetiredPool`). Every other test here already fails if a route reads
   // them; these name the ticket's routes outright.
   describe("with a retired pool in the database (ADR 0016)", () => {
-    it("GET /epochs and /rounds return only the Active pool's rows", async () => {
+    it("GET /epochs returns only the Active pool's rows", async () => {
       const epochs = await http.get("/epochs").expect(200);
       expect(epochs.body.map((epoch: { id: string }) => epoch.id)).toEqual(["7", "6"]);
-      const rounds = await http.get("/rounds").expect(200);
-      expect(rounds.body.map((round: { id: string }) => round.id)).toEqual(["100", "99"]);
-      const round = await http.get("/rounds/100").expect(200);
-      expect(round.body.pot).toBe("5000");
-      await http.get("/rounds/101").expect(404);
     });
 
     it("GET /players/:owner reads the Active pool's Player only", async () => {
@@ -1222,17 +1066,16 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       await http.get(`/players/${CAROL}`).expect(404);
     });
 
-    it("GET /state reads the Active pool's Pool, Epoch, Round and Player", async () => {
+    it("GET /state reads the Active pool's Pool, Epoch and Player", async () => {
       const { body } = await http.get(`/state?owner=${CAROL}`).expect(200);
       expect(body.pool.address).toBe(POOL_ADDRESS);
       expect(body.currentEpoch.id).toBe("7");
-      expect(body.openRound.id).toBe("100");
       expect(body.player).toBeNull();
     });
 
     it("GET /status reports the Active pool's operator and cursor", async () => {
       const { body } = await http.get("/status").expect(200);
-      expect(body.operator.lastAction).toBe("settle_round");
+      expect(body.operator.lastAction).toBe("begin_epoch");
       expect(body.cursor.lastSlot).toBe("15");
       expect(body.pendingWithdrawals).toBe(POOL_PENDING_WITHDRAWALS.toString());
     });
@@ -1283,22 +1126,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       }
     });
 
-    it("is 503 with ROUND_VOIDED_RECENTLY and EPOCH_ROLLED_OVER_RECENTLY, from Event rows in the last hour", async () => {
+    it("is 503 with EPOCH_ROLLED_OVER_RECENTLY, from an Event row in the last hour", async () => {
       await prisma.operatorState.update({
         where: { poolAddress: POOL_ADDRESS },
         data: { withdrawShortfall: 0n },
       });
       await prisma.event.createMany({
         data: [
-          {
-            slot: 900n,
-            signature: "sigAlertsVoided",
-            index: 0,
-            poolAddress: POOL_ADDRESS,
-            name: "RoundVoided",
-            data: { roundId: "101" },
-            blockTime: NOW - 60n,
-          },
           {
             slot: 901n,
             signature: "sigAlertsRolledOver",
@@ -1313,12 +1147,11 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       try {
         const { body } = await http.get("/alerts").expect(503);
         expect(body.alerts).toEqual([
-          { code: "ROUND_VOIDED_RECENTLY", message: expect.any(String) },
           { code: "EPOCH_ROLLED_OVER_RECENTLY", message: expect.any(String) },
         ]);
       } finally {
         await prisma.event.deleteMany({
-          where: { signature: { in: ["sigAlertsVoided", "sigAlertsRolledOver"] } },
+          where: { signature: "sigAlertsRolledOver" },
         });
         await prisma.operatorState.update({
           where: { poolAddress: POOL_ADDRESS },
@@ -1428,7 +1261,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
           index: 0,
           poolAddress: POOL_ADDRESS,
           name: "ParamsSet",
-          data: { pool: POOL_ADDRESS, epochSeconds, houseCutBps: 600 },
+          data: { pool: POOL_ADDRESS, epochSeconds, baseRateBps: 488 },
           blockTime,
         });
         await prisma.event.createMany({ data: [row("sigParamsOld", NOW - 7_200n, "1")] });
@@ -1445,35 +1278,14 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
           await restore({});
         }
       });
-
-      it("fires WEIGHT_TREE_NEARLY_FULL over 90% of the tree's capacity", async () => {
-        await quiet();
-        await prisma.weightTreeState.update({
-          where: { poolAddress: POOL_ADDRESS },
-          data: { nodeCount: 168_600n },
-        });
-        try {
-          const { body } = await http.get("/alerts").expect(503);
-          expect(body.alerts.map((alert: { code: string }) => alert.code)).toEqual([
-            "WEIGHT_TREE_NEARLY_FULL",
-          ]);
-        } finally {
-          await prisma.weightTreeState.update({
-            where: { poolAddress: POOL_ADDRESS },
-            data: { nodeCount: 3n },
-          });
-          await restore({});
-        }
-      });
     });
   });
 
   describe("GET /state", () => {
-    it("returns the pool, current epoch, open round, status and chain time for a given owner", async () => {
+    it("returns the pool, current epoch, status and chain time for a given owner", async () => {
       const { body } = await http.get(`/state?owner=${ALICE}`).expect(200);
       expect(body.pool).toMatchObject({ address: POOL_ADDRESS, currentEpochId: "7" });
-      // The browser needs both and no longer reads the Pool account itself.
-      expect(body.pool.closeBuffer).toBe(POOL_CLOSE_BUFFER.toString());
+      // The browser needs it and no longer reads the Pool account itself.
       expect(body.pool.minDeposit).toBe(POOL_MIN_DEPOSIT.toString());
       // game-jackpot-pause ticket 02: the web reads both switches off here.
       expect(body.pool.gamePaused).toBe(false);
@@ -1484,26 +1296,17 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       // Epoch 6 (the one that just ended) is seeded Ended, so the mid-draw
       // case is exercised by the default seed, not extra setup.
       expect(body.currentEpoch.drawing).toEqual({ epochId: "6", status: 1 });
-      expect(body.openRound).toEqual({
-        id: "100",
-        epochId: "7",
-        startsAt: String(CURRENT_START),
-        endsAt: String(CURRENT_START + 60n),
-        status: 0,
-        pot: "5000",
-        houseCut: "0",
-      });
       expect(body.player).toMatchObject({
         owner: ALICE,
         odds: "100.00",
         weight: ALICE_WEIGHT.toString(),
+        tickets: ALICE_WEIGHT.toString(),
       });
-      // round: the open Round's full state, no `round=` needed — it falls
-      // back to `openRound`'s id.
-      expect(body.round).toMatchObject({ id: "100", status: 0, winningTile: null });
-      // position: Alice's Position in that same Round, found the same way.
-      expect(body.position).toEqual({ tiles: "7", stakePerTile: "1000000" });
-      expect(body.status.operator).toMatchObject({ lastAction: "settle_round" });
+      // Rounds and Positions left the program (off-chain-tickets ticket 10).
+      for (const gone of ["openRound", "round", "position"]) {
+        expect(body).not.toHaveProperty(gone);
+      }
+      expect(body.status.operator).toMatchObject({ lastAction: "begin_epoch" });
       expect(body.status.cursor.lastSlot).toBe("15");
       expect(BigInt(body.chainTime)).toBeGreaterThanOrEqual(CHAIN_NOW);
       // Ticket 08: the cached estimate over the pool's hot writable accounts.
@@ -1516,56 +1319,18 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body.player).toBeNull();
       expect(body.pool).toBeDefined();
       expect(body.currentEpoch).toBeDefined();
-      expect(body.openRound).toBeDefined();
       expect(body.status).toBeDefined();
-      // No owner: still resolves the open Round as `round`, but no Position.
-      expect(body.round).toMatchObject({ id: "100" });
-      expect(body.position).toBeNull();
       assertNoLargeNumbers(body, "/state");
     });
 
-    it("keeps returning a settled Round's full state — winning tile and tile totals included — once it is no longer the open Round", async () => {
-      // Round 99 settled before this session ever polled: `openRound` never
-      // shows it, but naming it with `round=` still returns everything the
-      // reveal needs, and Bob's Position in it follows the same param.
-      const { body } = await http.get(`/state?owner=${BOB}&round=99`).expect(200);
-      expect(body.openRound).toMatchObject({ id: "100" });
-      expect(body.round).toMatchObject({
-        id: "99",
-        epochId: "7",
-        status: 2,
-        winningTile: 17,
-        pot: "4000",
-        houseCut: "240",
-      });
-      expect(body.position).toEqual({ tiles: "3", stakePerTile: "500000" });
-      assertNoLargeNumbers(body, "/state?round=99");
-    });
-
-    it("returns a null round and Position for a round id nothing was seeded under", async () => {
-      const { body } = await http.get(`/state?owner=${ALICE}&round=404`).expect(200);
-      expect(body.round).toBeNull();
-      expect(body.position).toBeNull();
-    });
-
-    it("rejects a malformed round id", async () => {
-      await http.get("/state?round=not-a-number").expect(400);
+    it("ignores the retired round query parameter", async () => {
+      await http.get(`/state?owner=${ALICE}&round=99`).expect(200);
     });
 
     it("returns a null Player, not a 404, for a wallet with no Player account yet", async () => {
       const stranger = Keypair.generate().publicKey.toBase58();
       const { body } = await http.get(`/state?owner=${stranger}`).expect(200);
       expect(body.player).toBeNull();
-    });
-
-    it("returns a null open Round once the epoch has none open", async () => {
-      await prisma.round.update({ where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: 100n } }, data: { status: 2 } });
-      try {
-        const { body } = await http.get("/state").expect(200);
-        expect(body.openRound).toBeNull();
-      } finally {
-        await prisma.round.update({ where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: 100n } }, data: { status: 0 } });
-      }
     });
 
     // Ticket 05: the deposit-only launch week. currentEpochId 0 with no
@@ -1630,44 +1395,6 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       vi.setSystemTime(Date.now() + CHAIN_CLOCK_TTL_MS + 1);
       await http.get("/state").expect(200);
       expect(clockReads).toBe(before + 2);
-    });
-
-    it("collapses a concurrent burst of Weight tree reads to one call, then reads again after the window", async () => {
-      vi.setSystemTime(Date.now() + TREE_TTL_MS + 1);
-      const before = treeReads;
-
-      const burst = await Promise.all([
-        http.get(`/players/${ALICE}`),
-        http.get("/leaderboard"),
-        http.get(`/players/${ALICE}`),
-      ]);
-      burst.forEach((response) => expect(response.status).toBe(200));
-      expect(treeReads).toBe(before + 1);
-
-      vi.setSystemTime(Date.now() + TREE_TTL_MS + 1);
-      await http.get(`/players/${ALICE}`).expect(200);
-      expect(treeReads).toBe(before + 2);
-    });
-
-    it("reports odds as unknown when the tree cannot be read, without caching that", async () => {
-      vi.setSystemTime(Date.now() + TREE_TTL_MS + 1);
-      const before = treeReads;
-      failNextTreeRead = true;
-
-      const failed = await http.get(`/players/${ALICE}`).expect(200);
-      // Her Tickets come from her row and stay. The odds need the root, and
-      // null is not "0": a failed read is not evidence the draw is empty.
-      expect(failed.body.weight).toBe(ALICE_WEIGHT.toString());
-      expect(failed.body.odds).toBeNull();
-      // Principal and the settle figures come from Postgres and stay.
-      expect(failed.body.principal).toBe("1000000");
-      expect(treeReads).toBe(before + 1);
-
-      // Still inside the window the failed read opened: the slot was cleared,
-      // so this retries the chain.
-      const recovered = await http.get(`/players/${ALICE}`).expect(200);
-      expect(recovered.body.odds).toBe("100.00");
-      expect(treeReads).toBe(before + 2);
     });
 
     it("never serves a chainTime below one it already served, when the chain clock drifts behind wall time", async () => {
@@ -2005,25 +1732,17 @@ async function seed(prisma: PrismaService): Promise<void> {
     minJackpot: 1_000_000n,
     epochSeconds: EPOCH_LENGTH,
     epochAnchor: CURRENT_START,
-    roundSeconds: 60n,
-    closeBuffer: POOL_CLOSE_BUFFER,
     minDeposit: POOL_MIN_DEPOSIT,
-    houseCutBps: 600,
     paused: false,
     currentEpochId: CURRENT_EPOCH,
     currentEpochEndsAt: CURRENT_START + EPOCH_LENGTH,
     previousEpochEndsAt: CURRENT_START,
     totalPrincipal: BigInt(HUGE_U64),
     baseRateBps: POOL_BASE_RATE_BPS,
-    ticketsPerUsdc: POOL_TICKETS_PER_USDC,
-    bonusCapBps: POOL_BONUS_CAP_BPS,
-    bonusEpoch: CURRENT_EPOCH,
-    bonusGranted: POOL_BONUS_GRANTED,
     version: 1,
     shutdown: false,
     // Ticket 14: the venue, the index and the band.
     ...LIVE_POOL_DEFAULTS,
-    weightTree: WEIGHT_TREE.toBase58(),
     klendReserve: RESERVE.toBase58(),
     yieldIndex: POOL_YIELD_INDEX.toString(),
     venueValue: POOL_VENUE_VALUE,
@@ -2063,93 +1782,30 @@ async function seed(prisma: PrismaService): Promise<void> {
     ],
   });
 
-  await prisma.round.createMany({
-    data: [
-      {
-        poolAddress: POOL_ADDRESS,
-        id: 99n,
-        epochId: CURRENT_EPOCH,
-        startsAt: CURRENT_START - 60n,
-        endsAt: CURRENT_START,
-        status: 2, // Settled
-        pot: 4_000n,
-        houseCut: 240n,
-        winningTile: 17,
-        tileTotals: { "17": "4000" },
-      },
-      {
-        poolAddress: POOL_ADDRESS,
-        id: 100n,
-        epochId: CURRENT_EPOCH,
-        startsAt: CURRENT_START,
-        endsAt: CURRENT_START + 60n,
-        status: 0, // Open
-        pot: 5_000n,
-        houseCut: 0n,
-        winningTile: null,
-        tileTotals: {},
-      },
-    ],
-  });
-
   await prisma.player.createMany({
     data: [
       {
         ...emptyPlayer(ALICE),
         principal: 1_000_000n,
-        entries: 1_000_000n,
+        tickets: 1_000_000n,
         yieldIndex: ALICE_YIELD_INDEX.toString(),
-        leafIndex: 1,
         boughtEpoch: CURRENT_EPOCH,
         boughtAmount: ALICE_BOUGHT_AMOUNT,
-        bonusEpoch: CURRENT_EPOCH,
-        bonusGranted: ALICE_BONUS_GRANTED,
       },
-      // Withdrew everything, so no entries and no weight this epoch.
-      { ...emptyPlayer(BOB), leafIndex: 2, yieldIndex: POOL_YIELD_INDEX.toString() },
-      { ...emptyPlayer(HOUSE), isHouse: true, leafIndex: 3 },
-    ],
-  });
-
-  await prisma.position.createMany({
-    data: [
-      // Alice's Position in the open round (100): the default case, no
-      // `round` query param needed to find it.
-      {
-        address: Keypair.generate().publicKey.toBase58(),
-        poolAddress: POOL_ADDRESS,
-        owner: ALICE,
-        roundId: 100n,
-        tiles: 7n,
-        stakePerTile: 1_000_000n,
-      },
-      // Bob's Position in round 99, already Settled: only reachable by
-      // naming it explicitly with `round=99`, since it is not `openRound`.
-      {
-        address: Keypair.generate().publicKey.toBase58(),
-        poolAddress: POOL_ADDRESS,
-        owner: BOB,
-        roundId: 99n,
-        tiles: 3n,
-        stakePerTile: 500_000n,
-      },
+      // Withdrew everything, so no Tickets this epoch.
+      { ...emptyPlayer(BOB), yieldIndex: POOL_YIELD_INDEX.toString() },
+      { ...emptyPlayer(HOUSE), isHouse: true },
     ],
   });
 
   await prisma.event.createMany({
     data: [
       { slot: 10n, signature: "sig10", index: 0, name: "Deposited", data: { owner: ALICE, amount: "1000000" }, blockTime: NOW - 300n },
-      { slot: 11n, signature: "sig11", index: 0, name: "PositionSettled", data: { owner: BOB, reward: "0" }, blockTime: NOW - 250n },
-      { slot: 12n, signature: "sig12", index: 0, name: "PositionSettled", data: { owner: ALICE, reward: "500" }, blockTime: NOW - 200n },
-      { slot: 13n, signature: "sig13", index: 0, name: "RoundOpened", data: { roundId: "100" }, blockTime: NOW - 150n },
       { slot: 14n, signature: "sig14", index: 0, name: "JackpotPaid", data: { winner: ALICE, amount: "12000000", isHouse: false }, blockTime: NOW - 100n },
-      // Reward stored as a JSON number rather than a string, which the feed
-      // filter has to accept just the same.
-      { slot: 15n, signature: "sig15", index: 0, name: "PositionSettled", data: { owner: ALICE, reward: 7 }, blockTime: NOW - 50n },
-      // Ticket 14: a player's history also shows a processed withdrawal and a
-      // void refund (a zero reward with a refund on PositionSettled).
-      { slot: 19n, signature: "sig19", index: 0, name: "Withdrawn", data: { owner: ALICE, amount: "400000", principal: "1000000", entries: "1000000" }, blockTime: NOW - 20n },
-      { slot: 19n, signature: "sig19", index: 1, name: "PositionSettled", data: { owner: ALICE, roundId: "98", reward: "0", refund: "250" }, blockTime: NOW - 20n },
+      // Operator-only and game events stay out of the feed.
+      { slot: 15n, signature: "sig15", index: 0, name: "RoundOpened", data: { roundId: "100" }, blockTime: NOW - 50n },
+      // Ticket 14: a player's history also shows a processed withdrawal.
+      { slot: 19n, signature: "sig19", index: 0, name: "Withdrawn", data: { owner: ALICE, amount: "400000", principal: "1000000", yieldIndex: "1000000000000000000" }, blockTime: NOW - 20n },
     ].map((row) => ({ ...row, poolAddress: POOL_ADDRESS })),
   });
 
@@ -2161,36 +1817,27 @@ async function seed(prisma: PrismaService): Promise<void> {
     data: {
       poolAddress: POOL_ADDRESS,
       lastTickAt: NOW - 2n,
-      lastAction: "settle_round",
+      lastAction: "begin_epoch",
       lastError: null,
       withdrawShortfall: 250_000n,
     },
   });
 
   // Ticket 14: the index history behind the trailing rates (5% over the 7
-  // days to LAST_SYNC, 1% over the last 24 hours), the Weight tree's header
-  // and root, and the reserve and tree addresses the Pool row pins.
+  // days to LAST_SYNC, 1% over the last 24 hours) and the reserve address the
+  // Pool row pins.
   await prisma.yieldIndexPoint.createMany({
     data: [
       { at: LAST_SYNC - 7n * EPOCH_LENGTH, yieldIndex: E18.toString() },
       { at: LAST_SYNC - EPOCH_LENGTH, yieldIndex: ((E18 * 104n) / 100n).toString() },
     ].map((row) => ({ ...row, poolAddress: POOL_ADDRESS })),
   });
-  await prisma.weightTreeState.create({
-    data: {
-      poolAddress: POOL_ADDRESS,
-      nodeCount: 3n,
-      epochId: CURRENT_EPOCH,
-      rootWeight: ALICE_WEIGHT.toString(),
-    },
-  });
 }
 
 /**
  * A retired pool's rows, left behind by a Pool cutover (ADR 0016). Each one
- * collides with an Active-pool key (epoch 7, round 100, Alice's Player and
- * Position) or sorts ahead of the Active pool's rows (epoch 9, open round
- * 101, event slots 30+), so a route that forgot its `poolAddress` filter
+ * collides with an Active-pool key (epoch 7, Alice's Player) or sorts ahead of
+ * the Active pool's rows (epoch 9, event slots 30+), so a route that forgot its `poolAddress` filter
  * returns something the exact-match assertions above do not expect.
  */
 async function seedRetiredPool(
@@ -2221,57 +1868,18 @@ async function seedRetiredPool(
       winner: null,
     })),
   });
-  await prisma.round.createMany({
-    data: [
-      {
-        poolAddress: RETIRED_POOL_ADDRESS,
-        id: 100n,
-        epochId: CURRENT_EPOCH,
-        startsAt: 0n,
-        endsAt: 1n,
-        status: 2,
-        pot: 1n,
-        houseCut: 0n,
-        winningTile: 3,
-        tileTotals: { "3": "1" },
-      },
-      {
-        poolAddress: RETIRED_POOL_ADDRESS,
-        id: 101n,
-        epochId: retiredEpoch,
-        startsAt: 0n,
-        endsAt: 1n,
-        status: 0, // Open, and newer than the Active pool's open round
-        pot: 1n,
-        houseCut: 0n,
-        winningTile: null,
-        tileTotals: {},
-      },
-    ],
-  });
   await prisma.player.createMany({
     data: [
       { ...emptyPlayer(ALICE, RETIRED_POOL_ADDRESS), principal: 777n },
-      // Holds entries, so an unscoped scan would hand her a share of the odds.
-      { ...emptyPlayer(CAROL, RETIRED_POOL_ADDRESS), principal: 5n, entries: 5n },
+      // Holds Tickets, so an unscoped scan would hand her a share of the odds.
+      { ...emptyPlayer(CAROL, RETIRED_POOL_ADDRESS), principal: 5n, tickets: 5n },
     ],
-  });
-  await prisma.position.create({
-    data: {
-      address: Keypair.generate().publicKey.toBase58(),
-      poolAddress: RETIRED_POOL_ADDRESS,
-      owner: ALICE,
-      roundId: 100n,
-      tiles: 99n,
-      stakePerTile: 1n,
-    },
   });
   await prisma.event.createMany({
     data: [
       { slot: 30n, signature: "retired30", index: 0, name: "Deposited", data: { owner: ALICE, amount: "777" }, blockTime: NOW - 20n },
-      { slot: 31n, signature: "retired31", index: 0, name: "Withdrawn", data: { owner: ALICE, amount: "1", principal: "1", entries: "1" }, blockTime: NOW - 15n },
-      { slot: 32n, signature: "retired32", index: 0, name: "PositionBought", data: { roundId: "555", owner: ALICE, tiles: "1", stakePerTile: "1", total: "1" }, blockTime: NOW - 10n },
-      { slot: 33n, signature: "retired33", index: 0, name: "RoundVoided", data: { roundId: "101" }, blockTime: NOW - 5n },
+      { slot: 31n, signature: "retired31", index: 0, name: "Withdrawn", data: { owner: ALICE, amount: "1", principal: "1", yieldIndex: "1000000000000000000" }, blockTime: NOW - 15n },
+      { slot: 33n, signature: "retired33", index: 0, name: "EpochRolledOver", data: { epochId: "9" }, blockTime: NOW - 5n },
     ].map((row) => ({ ...row, poolAddress: RETIRED_POOL_ADDRESS })),
   });
   await prisma.cursor.create({

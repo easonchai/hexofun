@@ -2,7 +2,7 @@ import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
 import { VENUE_KIND, VENUE_LOCK_SECONDS } from "../chain/venue-kind";
-import { EPOCH_STATUS, ROUND_STATUS, type EpochState, type PoolState } from "../operator/chain-state";
+import { EPOCH_STATUS, type EpochState, type PoolState } from "../operator/chain-state";
 import { OPERATOR_FAILING_SECONDS, isOperatorFailing, isOperatorStale, operatorAges } from "./alerts.controller";
 import { TodoClock, todoDrafts, type TodoCode, type TodoInput } from "./ops-todo";
 
@@ -21,19 +21,13 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   house: key(),
   vrfNetworkState: key(),
   epochSeconds: 86_400n,
-  roundSeconds: 60n,
-  closeBuffer: 0n,
   vrfTimeout: 120n,
   payoutTimeout: 86_400n,
   paused: false,
   currentEpochId: 2n,
-  nextRoundId: 1n,
-  openRoundId: 0n,
   totalPrincipal: 1_000n * USDC,
   shutdown: false,
-  gamePaused: false,
   jackpotPaused: false,
-  weightTree: key(),
   klendProgram: key(),
   klendMarket: key(),
   klendReserve: key(),
@@ -71,7 +65,7 @@ const quiet: TodoInput = {
   vaultBalance: 100n * USDC,
   proposal: null,
   harvestedThisWindow: false,
-  stuck: { round: null, epoch: null },
+  stuck: { epoch: null },
   deficit: 0n,
   dueWithdrawals: [],
 };
@@ -91,7 +85,7 @@ describe("todoDrafts", () => {
         vaultBalance: null,
         proposal: null,
         harvestedThisWindow: false,
-        stuck: { round: null, epoch: null },
+        stuck: { epoch: null },
         deficit: 0n,
         dueWithdrawals: [],
       }),
@@ -143,16 +137,12 @@ describe("todoDrafts", () => {
     expect(codes({ ...quiet, dueWithdrawals: [] })).toEqual([]);
   });
 
-  it("STUCK_ROUND and STUCK_EPOCH follow findStuck's answer", () => {
-    const stuck = {
-      round: { id: 5n, status: ROUND_STATUS.OPEN },
-      epoch: { id: 6n, status: EPOCH_STATUS.DRAWN },
-    };
+  it("STUCK_EPOCH follows findStuck's answer", () => {
+    const stuck = { epoch: { id: 6n, status: EPOCH_STATUS.DRAWN } };
     expect(todoDrafts({ ...quiet, stuck })).toEqual([
-      expect.objectContaining({ code: "STUCK_ROUND", id: 5n }),
       expect.objectContaining({ code: "STUCK_EPOCH", id: 6n }),
     ]);
-    expect(codes({ ...quiet, stuck: { round: null, epoch: null } })).toEqual([]);
+    expect(codes({ ...quiet, stuck: { epoch: null } })).toEqual([]);
     // An unknown stuck check (the chain read failed) lists nothing it cannot name.
     expect(codes({ ...quiet, stuck: null })).toEqual([]);
   });

@@ -7,8 +7,6 @@ import {
   type OperatorState,
   type Player,
   type Pool,
-  type Round,
-  type WeightTreeState,
 } from "@prisma/client";
 import { unpackAccount } from "@solana/spl-token";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
@@ -18,7 +16,6 @@ import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { clockUnixTimestamp } from "../operator/chain-state";
-import { prefixWeights, readNodes } from "../operator/weight-tree";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeReserve,
@@ -47,16 +44,10 @@ export const EPOCH_OPEN = 0;
 export const EPOCH_ENDED = 1;
 export const EPOCH_DRAWING = 2;
 
-/** Mirrors programs/hex_vault/src/constants.rs `round_status`. */
-export const ROUND_OPEN = 0;
-export const ROUND_REQUESTED = 1;
-
 /** Events the frontend feed shows. Anything else is operator noise. */
 const FEED_NAMES = [
   "Deposited",
   "Withdrawn",
-  "PositionBought",
-  "RoundSettled",
   "JackpotPaid",
   "EpochRolledOver",
 ] as const;
@@ -101,34 +92,18 @@ export const JACKPOT_BALANCE_TTL_MS = 15_000;
  */
 export const BALANCES_TTL_MS = 15_000;
 
-/** How long the Weight tree account read behind a Player's Weight answers
- *  for. The tree moves on every Ticket change, but the odds a viewer reads
- *  only need to be about right. */
-export const TREE_TTL_MS = 15_000;
-
-/** Most Players one tree holds: (10 MiB - 56-byte header) / 56-byte node, as
- *  in weight_tree.rs. Past it deposits fail with `WeightTreeFull`. */
-export const TREE_CAPACITY = 187_244;
-
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
 const toBigInt = (value: Prisma.Decimal): bigint => BigInt(value.toFixed());
 
 /**
- * `bought_epoch`/`bought_amount`, `bonus_epoch`/`bonus_granted` and
- * `yield_epoch` reset lazily on chain, the next time the matching
+ * `bought_epoch`/`bought_amount` reset lazily on chain, the next time the matching
  * instruction runs for a stale epoch, not the moment the epoch turns over.
  * A read has to apply the same gate: a counter left over from a past epoch
  * reads as though it were already reset to 0.
  */
 function ifCurrentEpoch(counterEpoch: bigint, currentEpochId: bigint, value: bigint): bigint {
   return counterEpoch === currentEpochId ? value : 0n;
-}
-
-/** Pool-wide `grant_tickets` cap for one epoch, mirroring the on-chain
- *  `pool_bonus_cap`. */
-export function poolBonusCap(totalPrincipal: bigint, bonusCapBps: number): bigint {
-  return (totalPrincipal * BigInt(bonusCapBps)) / 10_000n;
 }
 
 /** Share of the total as a percentage with two decimals, e.g. "12.34". */
@@ -222,7 +197,6 @@ export class ApiService {
   private clock: CachedRead<ClockReading> | undefined;
   private jackpotBalance: CachedRead<bigint> | undefined;
   private balances: CachedRead<ChainBalances> | undefined;
-  private tree: CachedRead<Buffer | null> | undefined;
 
   /**
    * The highest chain time `getState` has served. The Clock sysvar runs a
@@ -276,27 +250,22 @@ export class ApiService {
   }
 
   /**
-   * The Pool row, current Epoch and open Round, plus `live` (ticket 14): the
+   * The Pool row and current Epoch, plus `live` (ticket 14): the
    * 24-hour and 7-day paid rates, the estimated current rate, the ceiling,
    * the fee, the Bought Tickets switch, and the haircut while impaired.
    */
   async getPool() {
     const pool = await this.requirePool();
     const poolAddress = this.poolAddress;
-    const [currentEpoch, openRound, balances] = await Promise.all([
+    const [currentEpoch, balances] = await Promise.all([
       this.prisma.epoch.findUnique({
         where: { poolAddress_id: { poolAddress, id: pool.currentEpochId } },
-      }),
-      this.prisma.round.findFirst({
-        where: { poolAddress, status: { in: [ROUND_OPEN, ROUND_REQUESTED] } },
-        orderBy: { id: "desc" },
       }),
       this.chainBalances(pool.klendReserve),
     ]);
     return {
       pool,
       currentEpoch,
-      openRound: openRound === null ? null : summarizeRound(openRound),
       live: await this.liveYield(pool, balances),
     };
   }
@@ -475,28 +444,10 @@ export class ApiService {
     return this.jackpotBalance.result;
   }
 
-  getRounds(limit: number): Promise<Round[]> {
-    return this.prisma.round.findMany({
-      where: { poolAddress: this.poolAddress },
-      orderBy: { id: "desc" },
-      take: limit,
-    });
-  }
-
-  async getRound(id: bigint): Promise<Round> {
-    const round = await this.prisma.round.findUnique({
-      where: { poolAddress_id: { poolAddress: this.poolAddress, id } },
-    });
-    if (round === null) {
-      throw new NotFoundException(`No round ${id}. Check the round id and retry.`);
-    }
-    return round;
-  }
-
   /**
    * Principal, the yield earned since the last settle as of the pool's last
-   * sync (`unsettledYield`, `syncedAt`), the Weight the tree holds for the
-   * Player in the current epoch, `pendingMaturesAt`, when the queued
+   * sync (`unsettledYield`, `syncedAt`), the Tickets the Player holds in the
+   * current epoch, `pendingMaturesAt`, when the queued
    * withdrawal pays (null with nothing queued), and `positionYield`, what the
    * open position has earned, settled or not (`positionBasis`).
    */
@@ -553,26 +504,16 @@ export class ApiService {
   }
 
   /**
-   * Ticket 06: Pool, current Epoch, open Round, Player and operator status
+   * Ticket 06: Pool, current Epoch, Player and operator status
    * from one point-in-time snapshot. Every DB read this needs — including
    * the previous epoch and player scan that `drawingProgress`/`liveWeights`
    * would otherwise re-read on their own connections — goes through one
    * `RepeatableRead` transaction; the player scan only runs when an owner is
    * given or the previous epoch is mid-draw. The chain-cached reads (jackpot
    * balance, rpc health, clock, pool config) run after the transaction closes.
-   *
-   * Ticket 07: `roundId`, when given, also returns that Round's full state —
-   * any status, winning tile and tile totals included — as `round`, plus
-   * `owner`'s Position in it. `openRound` stays filtered to Open/Requested
-   * (an existing contract other callers rely on), so it goes null the moment
-   * a Round settles; `round` is how the browser keeps watching the same
-   * Round through settlement without a chain read, and how it learns the
-   * viewer's Position once that Round is no longer the open one. Falls back
-   * to the open Round's id when `roundId` is not given, so a first load with
-   * no known id yet still gets a Position for whatever Round is open.
    */
-  async getState(owner?: string, roundId?: bigint) {
-    const { pool, epoch, previousEpoch, openRound, operator, cursor, player, round, position } =
+  async getState(owner?: string) {
+    const { pool, epoch, previousEpoch, operator, cursor, player } =
       await this.prisma.$transaction(
         async (tx) => {
           const poolAddress = this.poolAddress;
@@ -582,7 +523,7 @@ export class ApiService {
               "The pool is not indexed yet. Try again in a few seconds.",
             );
           }
-          const [epoch, previousEpoch, openRound, operator, cursor] = await Promise.all([
+          const [epoch, previousEpoch, operator, cursor, player] = await Promise.all([
             tx.epoch.findUnique({
               where: { poolAddress_id: { poolAddress, id: pool.currentEpochId } },
             }),
@@ -591,30 +532,13 @@ export class ApiService {
               : tx.epoch.findUnique({
                   where: { poolAddress_id: { poolAddress, id: pool.currentEpochId - 1n } },
                 }),
-            tx.round.findFirst({
-              where: { poolAddress, status: { in: [ROUND_OPEN, ROUND_REQUESTED] } },
-              orderBy: { id: "desc" },
-            }),
             tx.operatorState.findUnique({ where: { poolAddress } }),
             tx.cursor.findUnique({ where: { poolAddress } }),
-          ]);
-          const trackedRoundId = roundId ?? openRound?.id;
-          const [player, round, position] = await Promise.all([
             owner === undefined
               ? Promise.resolve(null)
               : tx.player.findUnique({ where: { poolAddress_owner: { poolAddress, owner } } }),
-            trackedRoundId === undefined
-              ? Promise.resolve(null)
-              : tx.round.findUnique({
-                  where: { poolAddress_id: { poolAddress, id: trackedRoundId } },
-                }),
-            owner === undefined || trackedRoundId === undefined
-              ? Promise.resolve(null)
-              : tx.position.findFirst({
-                  where: { poolAddress, owner, roundId: trackedRoundId },
-                }),
           ]);
-          return { pool, epoch, previousEpoch, openRound, operator, cursor, player, round, position };
+          return { pool, epoch, previousEpoch, operator, cursor, player };
         },
         { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
       );
@@ -629,8 +553,7 @@ export class ApiService {
     }
 
     // The accounts a player transaction actually writes (deposit/withdraw:
-    // pool + principal vault; buyTickets: pool + jackpot vault; buyPosition:
-    // pool + the open round), so `priorityFeeMicroLamports` prices the fee
+    // pool + principal vault; buyTickets: pool + jackpot vault), so `priorityFeeMicroLamports` prices the fee
     // market they compete in rather than an unscoped network-wide estimate
     // (production-hardening ticket 08, research/notes/transactions_and_rpc.md
     // "Fee markets are local"). `priorityFeeMicroLamports` never rejects —
@@ -641,7 +564,6 @@ export class ApiService {
       poolAddress,
       this.chain.principalVaultAddress(poolAddress),
       this.chain.jackpotVaultAddress(poolAddress),
-      ...(openRound === null ? [] : [this.chain.roundAddress(openRound.id, poolAddress)]),
     ];
 
     const [jackpotAmount, rpc, chainTime, balances, priorityFeeMicroLamports] = await Promise.all([
@@ -652,11 +574,8 @@ export class ApiService {
       this.chain.priorityFeeMicroLamports(hotWritableAccounts),
     ]);
 
-    // No Epoch yet (launch week) reads zero odds inside `weightsFor`.
     const { weights, total } =
-      player === null
-        ? { weights: [], total: 0n }
-        : await this.weightsFor(pool, [player], epoch ?? undefined);
+      player === null ? { weights: [], total: 0n } : await this.weightsFor(pool, [player]);
     const mine = weights[0];
 
     return {
@@ -669,11 +588,7 @@ export class ApiService {
               jackpotAmount,
               drawing: drawingProgressFrom(previousEpoch),
             },
-      openRound: openRound === null ? null : summarizeRound(openRound),
-      round,
       player: mine === undefined ? null : playerDto(mine, total),
-      position:
-        position === null ? null : { tiles: position.tiles, stakePerTile: position.stakePerTile },
       status: statusFrom(operator, cursor, rpc, pool, balances, this.operatorSolWarn),
       chainTime,
       /** Ticket 04's cached estimate, scoped to `hotWritableAccounts` above.
@@ -687,9 +602,9 @@ export class ApiService {
   }
 
   async getLeaderboard(limit: number) {
-    // ponytail: every Player row and the whole tree per request, for the odds
-    // denominator. Fine at beta scale; page it off the mirrored root if the
-    // Player count grows into the thousands.
+    // ponytail: every Player row per request, for the odds denominator. Fine
+    // at beta scale; page it off a mirrored total if the Player count grows
+    // into the thousands.
     const pool = await this.requirePool();
     const players = await this.prisma.player.findMany({ where: { poolAddress: this.poolAddress } });
     const { weights, total } = await this.weightsFor(pool, players);
@@ -697,7 +612,7 @@ export class ApiService {
       .slice()
       .sort((a, b) => {
         // Ticket 01: a tie (most commonly two players at 0% before any
-        // Round opens) otherwise falls back to whatever order the DB
+        // Ticket exists) otherwise falls back to whatever order the DB
         // returned, which is not guaranteed stable across requests. House
         // always sorts last among ties; real players break ties by owner
         // so the order is deterministic and the test is stable.
@@ -709,19 +624,15 @@ export class ApiService {
       .map(({ player, weight }) => ({
         owner: player.owner,
         principal: player.principal,
-        entries: player.entries,
+        tickets: player.tickets,
         isHouse: player.isHouse,
         weight,
-        odds: oddsOf(weight, total),
+        odds: oddsPercent(weight, total),
       }));
   }
 
   /**
-   * Newest first. A settled Position that won nothing is not news, so the
-   * reward filter runs in Postgres: filtering it in JS would silently return
-   * fewer than `limit` rows on a board where most positions lose.
-   *
-   * `owner`, when given, keeps only events about that wallet. `JackpotPaid`
+   * Newest first. `owner`, when given, keeps only events about that wallet. `JackpotPaid`
    * carries `winner` rather than `owner`, so both keys are checked; dropping
    * the `winner` half would make a "Prize Win" row vanish from that wallet's
    * filtered history. No GIN index on `data`: a seq scan is fine at demo scale.
@@ -735,41 +646,11 @@ export class ApiService {
       SELECT slot, signature, "index", name, data, "blockTime"
       FROM "Event"
       WHERE "poolAddress" = ${this.poolAddress}
-        AND (name IN (${Prisma.join(owner === undefined ? FEED_NAMES : OWNER_FEED_NAMES)})
-         OR (name = 'PositionSettled'
-             AND (data->>'reward' ~ '^[1-9][0-9]*$' OR data->>'refund' ~ '^[1-9][0-9]*$')))
+        AND name IN (${Prisma.join(owner === undefined ? FEED_NAMES : OWNER_FEED_NAMES)})
       ${ownerFilter}
       ORDER BY slot DESC, "index" DESC
       LIMIT ${limit}
     `;
-  }
-
-  /**
-   * Distinct rounds played per owner, ever. `Position` cannot answer this:
-   * `settle_position`/`void_round` close the account and the indexer drops
-   * the row with it (indexer.service.ts `syncAccounts`), so a Position-backed
-   * count reads 0 for exactly the settled rounds a "Past Winners" row is
-   * about. `PositionBought` is append-only history instead, so this counts
-   * from the Event log: `{ roundId, owner, tiles, stakePerTile, total }`,
-   * both camelCase per `decode.ts`'s `jsonify` (checked against
-   * `decode.test.ts`'s fixture, not assumed).
-   *
-   * DISTINCT on `roundId`: a player can buy more than once in the same round
-   * (adding tiles to the same Position account), each a separate
-   * `PositionBought` event, so counting rows would overcount rounds. Round
-   * ids restart per pool, so this counts the Active pool only (ADR 0016).
-   */
-  async getPositionCounts(owners: string[]): Promise<{ counts: Record<string, number> }> {
-    const rows = await this.prisma.$queryRaw<{ owner: string; rounds: number }[]>`
-      SELECT data->>'owner' AS owner, COUNT(DISTINCT data->>'roundId')::int AS rounds
-      FROM "Event"
-      WHERE "poolAddress" = ${this.poolAddress}
-        AND name = 'PositionBought' AND data->>'owner' IN (${Prisma.join(owners)})
-      GROUP BY data->>'owner'
-    `;
-    const byOwner = new Map(rows.map((row) => [row.owner, row.rounds]));
-    const counts = Object.fromEntries(owners.map((owner) => [owner, byOwner.get(owner) ?? 0]));
-    return { counts };
   }
 
   async getStatus() {
@@ -777,12 +658,11 @@ export class ApiService {
     // A freshly cut-over pool has no OperatorState or Cursor row until its
     // first tick and sync; statusFrom reads those nulls as "never ran"
     // rather than showing the retired pool's (ADR 0016).
-    const [operator, cursor, pool, rpc, tree] = await Promise.all([
+    const [operator, cursor, pool, rpc] = await Promise.all([
       this.prisma.operatorState.findUnique({ where: { poolAddress } }),
       this.prisma.cursor.findUnique({ where: { poolAddress } }),
       this.prisma.pool.findUnique({ where: { address: poolAddress } }),
       this.rpcHealth(),
-      this.prisma.weightTreeState.findUnique({ where: { poolAddress } }),
     ]);
     const balances = await this.chainBalances(pool?.klendReserve);
     // Players whose deposit has not earned a Ticket yet: one made in the
@@ -804,7 +684,7 @@ export class ApiService {
           });
     return {
       ...statusFrom(operator, cursor, rpc, pool, balances, this.operatorSolWarn),
-      ...this.yieldStatus(pool, balances, tree),
+      ...this.yieldStatus(pool, balances),
       pendingDepositPlayers: awaitingActivation,
       // Ticket 05: null once the Pool has an Epoch, or when `LAUNCH_AT` is
       // unset — the same rule `/state`'s `launchAt` follows.
@@ -820,23 +700,18 @@ export class ApiService {
   /**
    * Live yield's half of GET /status (ticket 14): the solvency invariant as a
    * signed margin, free idle against the band, the reserve's utilisation and
-   * free liquidity, the two switches, the Weight tree's fill, and the
-   * referral bonus counters. A null pool (not indexed yet) reads as zeros and
+   * free liquidity, and the two switches. A null pool (not indexed yet) reads as zeros and
    * false, like the rest of `getStatus`; a figure that needs the vault or the
    * reserve is null when that read failed, never a made-up zero.
    */
-  private yieldStatus(pool: Pool | null, balances: ChainBalances, tree: WeightTreeState | null) {
+  private yieldStatus(pool: Pool | null, balances: ChainBalances) {
     const vault = balances.vaultLiquidity;
     const idle = pool === null || vault === null ? null : freeIdle(vault, pool.pendingWithdrawals);
     const reserve = balances.reserve;
-    const nodeCount = tree?.nodeCount ?? 0n;
     // The band is measured against free idle plus the venue position, as the
     // program measures it; `freeIdleBps` is the share of Principal.
     const band = pool === null || idle === null ? 0n : idle + pool.venueValue;
     return {
-      bonusGrantedToday:
-        pool === null ? 0n : ifCurrentEpoch(pool.bonusEpoch, pool.currentEpochId, pool.bonusGranted),
-      bonusCap: pool === null ? 0n : poolBonusCap(pool.totalPrincipal, pool.bonusCapBps),
       solvencyMargin: pool === null || vault === null ? null : solvencyMargin(pool, vault),
       freeIdle: idle,
       freeIdleBps:
@@ -854,9 +729,6 @@ export class ApiService {
       reserveFreeLiquidity: reserve?.available ?? null,
       impaired: pool?.impaired ?? false,
       deployPaused: pool?.deployPaused ?? false,
-      treeNodeCount: nodeCount,
-      treeCapacity: TREE_CAPACITY,
-      treeUsedBps: Number((nodeCount * 10_000n) / BigInt(TREE_CAPACITY)),
     };
   }
 
@@ -881,63 +753,31 @@ export class ApiService {
   }
 
   /**
-   * `players`' Tickets in the current epoch, from their rows, and the draw's
-   * total, the Weight tree's root. The two sides come from different places on
-   * purpose: the root is what the draw selects over, and a Player's share of it
-   * is their Tickets over it. `epoch` is the current Epoch when the caller has
-   * it.
+   * `players`' Tickets in the current epoch, from their rows, and the total
+   * every Player holds, which is what a Player's share is taken over. Both
+   * come from the Player mirror until the Ticket ledger (off-chain-tickets
+   * ticket 11) replaces it.
    *
-   * ponytail: the whole tree account per call for the root, cached for
-   * `TREE_TTL_MS`, parsed in memory. 56 bytes a Player, so a few thousand
-   * Players is a couple hundred KB; read the root's O(log n) nodes with
-   * `dataSlice` once that matters.
+   * ponytail: the whole Player table per call for the total, three columns
+   * wide. Fine at beta scale; keep a running total once the ledger lands.
    */
   private async weightsFor(
     pool: Pool,
     players: readonly Player[],
-    epoch?: Epoch,
-  ): Promise<{ weights: LiveWeight[]; total: bigint | null }> {
-    const current =
-      epoch ??
-      (await this.prisma.epoch.findUnique({
-        where: { poolAddress_id: { poolAddress: this.poolAddress, id: pool.currentEpochId } },
-      }));
-    if (current === null) {
-      // Deposit-only launch week: `currentEpochId` 0 means no Epoch yet, not a
-      // lagging indexer, and the draw has no Tickets, so the tree is not read.
-      if (pool.currentEpochId === 0n) {
-        return { weights: weightsFrom(players, pool.currentEpochId), total: 0n };
-      }
-      throw new NotFoundException(
-        "The current epoch is not indexed yet. Try again in a few seconds.",
-      );
+  ): Promise<{ weights: LiveWeight[]; total: bigint }> {
+    // Deposit-only launch week: `currentEpochId` 0 means no Epoch yet, so the
+    // draw has no Tickets and every share reads zero.
+    if (pool.currentEpochId === 0n) {
+      return { weights: weightsFrom(players, pool.currentEpochId), total: 0n };
     }
-    const data = await this.cachedTree(pool.weightTree);
-    const prefix = data === null ? null : prefixWeights(readNodes(data), current.id);
+    const everyone = await this.prisma.player.findMany({
+      where: { poolAddress: this.poolAddress },
+      select: { principal: true, tickets: true, epochId: true },
+    });
     return {
       weights: weightsFrom(players, pool.currentEpochId),
-      total: prefix === null ? null : (prefix[prefix.length - 1] as bigint),
+      total: everyone.reduce((sum, player) => sum + effectiveTickets(player, pool.currentEpochId), 0n),
     };
-  }
-
-  /** The tree account, or null when the read failed (logged), so Weight and
-   *  odds go out as null rather than as a made-up zero. */
-  private cachedTree(address: string): Promise<Buffer | null> {
-    this.tree = this.cached(this.tree, TREE_TTL_MS, async () => {
-      try {
-        const info = await this.chain.connection.getAccountInfo(new PublicKey(address));
-        if (info === null) throw new Error("the account does not exist");
-        return info.data;
-      } catch (cause) {
-        this.logger.warn(
-          `weight tree read failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
-        // Not cached: the next request retries the chain.
-        this.tree = undefined;
-        return null;
-      }
-    });
-    return this.tree.result;
   }
 
   /**
@@ -1103,16 +943,6 @@ export interface FeedRow {
   blockTime: bigint | null;
 }
 
-const summarizeRound = (round: Round) => ({
-  id: round.id,
-  epochId: round.epochId,
-  startsAt: round.startsAt,
-  endsAt: round.endsAt,
-  status: round.status,
-  pot: round.pot,
-  houseCut: round.houseCut,
-});
-
 /** Draw progress for the epoch that just ended, from the row already read.
  *  Null unless `previous` is Ended (waiting for the draw) or Drawing. */
 function drawingProgressFrom(previous: Epoch | null) {
@@ -1206,28 +1036,22 @@ function weightsFrom(players: readonly Player[], currentEpochId: bigint): LiveWe
   }));
 }
 
-/** `oddsPercent`, or null while the tree is unreadable. */
-function oddsOf(weight: bigint, total: bigint | null): string | null {
-  return total === null ? null : oddsPercent(weight, total);
-}
-
-/** A weighted entry as `/players/:owner` and `/state` return it. `weight` is
+/** A weighted Player as `/players/:owner` and `/state` return it. `weight` is
  *  the Player's active Tickets, `pendingTickets` the Principal that starts
  *  earning them in `pendingActivatesEpoch` (null when nothing is pending). */
-function playerDto(entry: LiveWeight, total: bigint | null) {
+function playerDto(entry: LiveWeight, total: bigint) {
   return {
     ...entry.player,
     weight: entry.weight,
     pendingTickets: entry.pending,
     pendingActivatesEpoch: entry.pending > 0n ? entry.player.pendingDepositEpoch + 1n : null,
-    odds: oddsOf(entry.weight, total),
+    odds: oddsPercent(entry.weight, total),
   };
 }
 
 /**
- * `boughtToday`, `buyAllowanceLeft` and `grantedToday` for `/players/:owner`,
- * from the epoch-gated counters `buy_tickets`/`grant_tickets` keep on the
- * Player (see `ifCurrentEpoch`). `buyAllowanceLeft` mirrors the on-chain
+ * `boughtToday` and `buyAllowanceLeft` for `/players/:owner`, from the
+ * epoch-gated counter `buy_tickets` keeps on the Player (see `ifCurrentEpoch`). `buyAllowanceLeft` mirrors the on-chain
  * cap check in `bought_amount_after`: spend is capped at locked Principal
  * (Principal less the Pending deposit) per day.
  */
@@ -1237,6 +1061,5 @@ export function playerTicketExtras(player: Player, currentEpochId: bigint) {
   return {
     boughtToday,
     buyAllowanceLeft: locked > boughtToday ? locked - boughtToday : 0n,
-    grantedToday: ifCurrentEpoch(player.bonusEpoch, currentEpochId, player.bonusGranted),
   };
 }

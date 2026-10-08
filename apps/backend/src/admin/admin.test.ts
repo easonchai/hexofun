@@ -84,8 +84,6 @@ const poolFields = {
   vrfNetworkState: Keypair.generate().publicKey,
   epochSeconds: bn(86_400),
   epochAnchor: bn(1_789_315_200),
-  roundSeconds: bn(60),
-  closeBuffer: bn(5),
   vrfTimeout: bn(120),
   minDeposit: bn(1_000_000),
   paused: false,
@@ -94,8 +92,6 @@ const poolFields = {
   currentEpochEndsAt: bn(0),
   previousEpochStart: bn(0),
   previousEpochEndsAt: bn(0),
-  nextRoundId: bn(1),
-  openRoundId: bn(0),
   totalPrincipal: bn(0),
   bump: 255,
   principalVaultBump: 254,
@@ -381,49 +377,14 @@ describe("admin run", () => {
     expect(stderr.length).toBeGreaterThan(0);
   });
 
-  it("grant-tickets in local mode signs with the loaded key as the admin path", async () => {
-    const { chain, sent } = await harness();
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-    const owner = Keypair.generate().publicKey;
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "grant-tickets", owner, amount: 500n }, chain, mode),
-    );
-
-    expect(sent).toHaveLength(1);
-    expect(stdout).toEqual([]);
-    expect(stderr.join("\n")).toContain(`grant 500 tickets to ${owner.toBase58()} (admin path, uncapped)`);
-  });
-
-  it("grant-tickets in multisig mode prints one base58 transaction signed by the multisig vault", async () => {
-    const { chain, sent } = await harness();
-    const multisigVault = Keypair.generate().publicKey;
-    const mode: AdminMode = { signer: multisigVault, multisig: true };
-    const owner = Keypair.generate().publicKey;
-
-    const { stdout } = await capture(() =>
-      run({ kind: "grant-tickets", owner, amount: 500n }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toHaveLength(1);
-    const tx = Transaction.from(bs58.decode(stdout[0] as string));
-    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
-    expect(
-      tx.instructions[0]?.keys.some(
-        (key) => key.isSigner && key.pubkey.equals(multisigVault),
-      ),
-    ).toBe(true);
-  });
-
-  it("set-params in local mode carries the base yield and ticket-economy flags", async () => {
+  it("set-params in local mode carries the base yield flag", async () => {
     const { chain, sent } = await harness();
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
 
     await run(
       {
         kind: "set-params",
-        params: { baseRateBps: 488, ticketsPerUsdc: 10, bonusCapBps: 500 },
+        params: { baseRateBps: 488 },
       },
       chain,
       mode,

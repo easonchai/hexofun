@@ -17,13 +17,12 @@ export type TodoCode =
   | "RECALL_DUE"
   | "HARVEST_DUE"
   | "WITHDRAWS_DUE"
-  | "STUCK_ROUND"
   | "STUCK_EPOCH"
   | "DEFICIT_OPEN"
   | "VENUE_LOCK_ELAPSED";
 
 /** One action due on the pool. `amount`, `owner` and `id` are what the matching
- *  console button needs: atomic USDC, a wallet, a Round or epoch id. */
+ *  console button needs: atomic USDC, a wallet, an epoch id. */
 export interface TodoItem {
   code: TodoCode;
   message: string;
@@ -36,9 +35,8 @@ export interface TodoItem {
 
 type TodoDraft = Omit<TodoItem, "due">;
 
-/** The bot never voids, rolls over, covers or migrates on its own. */
+/** The bot never rolls over, covers or migrates on its own. */
 const ALWAYS_NOW: ReadonlySet<TodoCode> = new Set([
-  "STUCK_ROUND",
   "STUCK_EPOCH",
   "DEFICIT_OPEN",
   "VENUE_LOCK_ELAPSED",
@@ -61,16 +59,13 @@ export interface TodoInput {
 /**
  * Every action due on the pool, from the Operator's own rules: `decideVenue`
  * for deploy, recall and harvest, `drainAmount` for the drain or migrate after
- * a proposal's lock, `findStuck`'s output for the two recovery cranks. Pure, so
+ * a proposal's lock, `findStuck`'s output for the recovery crank. Pure, so
  * each rule is a direct unit test. `due` is set later by `TodoClock`.
  */
 export function todoDrafts(input: TodoInput): TodoDraft[] {
   const { chain, vaultBalance, proposal, stuck } = input;
   const drafts: TodoDraft[] = [];
 
-  if (stuck?.round) {
-    drafts.push({ code: "STUCK_ROUND", message: `Round ${stuck.round.id} is stuck. Void it.`, id: stuck.round.id });
-  }
   if (stuck?.epoch) {
     drafts.push({ code: "STUCK_EPOCH", message: `Epoch ${stuck.epoch.id} is stuck. Roll it over.`, id: stuck.epoch.id });
   }

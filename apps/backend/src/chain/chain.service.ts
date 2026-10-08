@@ -30,9 +30,7 @@ import {
   jackpotVaultAddress,
   playerAddress,
   poolAddress,
-  positionAddress,
   principalVaultAddress,
-  roundAddress,
   venueProposalAddress,
 } from "./pda";
 import {
@@ -154,22 +152,11 @@ export class ChainService {
     return epochAddress(this.programId, pool, epochId);
   }
 
-  roundAddress(
-    roundId: bigint,
-    pool: PublicKey = this.poolAddress(),
-  ): PublicKey {
-    return roundAddress(this.programId, pool, roundId);
-  }
-
   playerAddress(
     owner: PublicKey,
     pool: PublicKey = this.poolAddress(),
   ): PublicKey {
     return playerAddress(this.programId, pool, owner);
-  }
-
-  positionAddress(round: PublicKey, owner: PublicKey): PublicKey {
-    return positionAddress(this.programId, round, owner);
   }
 
   principalVaultAddress(pool: PublicKey = this.poolAddress()): PublicKey {

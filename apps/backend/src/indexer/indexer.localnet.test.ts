@@ -40,24 +40,15 @@ import { loadIdl } from "../chain/idl";
 import { deployWallet } from "../chain/deploy-wallet.fixture";
 import { programDataAddress } from "../chain/pda";
 import type { HexVaultEnv } from "../config/env";
-import { randomNonce, vrfSeed } from "../operator/vrf";
 import { PrismaService } from "../prisma/prisma.service";
 import { IndexerService } from "./indexer.service";
 
 // Pinned at pool creation and forwarded to ORAO. The `test-vrf` build never
-// reads either, so any pubkey would do on localnet; these are the real devnet
-// ones so the setup matches what the operator will send.
+// reads it, so any pubkey would do on localnet; this is the real devnet one so
+// the setup matches what the operator will send.
 const VRF_NETWORK_STATE = new PublicKey("5ER1oENnV4srxYdAynUfRzWeQCPQaqMiAp4VqyMbSqnK");
-const VRF_TREASURY = new PublicKey("9ZTHWWZDpB36UFe1vszf2KEpt83vwi27jDqtHQ7NSXyR");
-const VRF_PROGRAM = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 
-const ROUND_SECONDS = 15;
 const DEPOSIT = 5_000_000n;
-const STAKE = 1_000_000n;
-/** Bit 0 of the tile mask: the position covers tile 0 and nothing else. */
-const TILE_ZERO = 1n;
-/** `create_pool`'s Weight tree: discriminator plus the zero-copy header. */
-const WEIGHT_TREE_SPACE = 8 + 48;
 
 /**
  * `Program<Idl>` types every instruction as possibly undefined, because which
@@ -75,14 +66,7 @@ type Instruction =
   | "testVenueInit"
   | "setFeaturePause"
   | "beginEpoch"
-  | "deposit"
-  | "grantTickets"
-  | "createRound"
-  | "buyPosition"
-  | "requestRoundRandomness"
-  | "testFulfill"
-  | "settleRound"
-  | "settlePosition";
+  | "deposit";
 type Methods = { [K in Instruction]: (...args: unknown[]) => MethodBuilder };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -109,40 +93,12 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
   const authority = Keypair.generate();
   const depositor = Keypair.generate();
   const poolId = BigInt(Date.now());
-  const weightTree = Keypair.generate();
 
-  let round: PublicKey;
-  let position: PublicKey;
-  let roundEndsAt: number;
   let startedAt = 0;
-
-  /** The validator's slot-derived clock, which lags wall time under load. */
-  async function chainNow(): Promise<number> {
-    const slot = await connection.getSlot("confirmed");
-    const at = await connection.getBlockTime(slot);
-    if (at === null) throw new Error("validator has no block time yet");
-    return at;
-  }
-
-  async function waitUntil(seconds: number): Promise<void> {
-    for (;;) {
-      const remaining = seconds + 1 - (await chainNow());
-      if (remaining <= 0) return;
-      await sleep(Math.max(300, remaining * 1_000));
-    }
-  }
 
   async function airdrop(to: PublicKey, sol: number): Promise<void> {
     const signature = await connection.requestAirdrop(to, sol * LAMPORTS_PER_SOL);
     await connection.confirmTransaction(signature, "confirmed");
-  }
-
-  /** The `test-vrf` stand-in randomness account for a request seed. */
-  function randomnessAddress(seed: Uint8Array): PublicKey {
-    return PublicKey.findProgramAddressSync(
-      [Buffer.from("test-vrf"), Buffer.from(seed)],
-      chain.programId,
-    )[0];
   }
 
   beforeAll(async () => {
@@ -214,21 +170,14 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         vrfNetworkState: VRF_NETWORK_STATE,
         epochSeconds: new BN(3_600),
         epochAnchor: new BN(Math.floor(Date.now() / 1000)),
-        roundSeconds: new BN(ROUND_SECONDS),
-        closeBuffer: new BN(2),
         vrfTimeout: new BN(5),
         minDeposit: new BN(1_000_000),
-        houseCutBps: 600,
         minJackpot: new BN(1),
         // Far past this run, and under the epoch length as create_pool requires.
         payoutTimeout: new BN(3_000),
-        // Base yield and grant-tickets are off (0), same reasoning as the
-        // operator localnet suite: neither is what this suite is about.
-        // `ticketsPerUsdc` only has to be positive to pass `create_pool`'s
-        // own validation.
+        // Base yield is off (0), same reasoning as the operator localnet
+        // suite: it is not what this suite is about.
         baseRateBps: 0,
-        ticketsPerUsdc: 10,
-        bonusCapBps: 0,
         venueKind: 1, // the stub, which is what these suites pin
       })
       .accountsPartial({
@@ -240,23 +189,13 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         principalVault: chain.principalVaultAddress(),
         jackpotVault: chain.jackpotVaultAddress(),
         house: chain.playerAddress(authority.publicKey),
-        weightTree: weightTree.publicKey,
         treasury,
         buybackReserve,
         ...venue,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
-      .preInstructions([
-        SystemProgram.createAccount({
-          fromPubkey: authority.publicKey,
-          newAccountPubkey: weightTree.publicKey,
-          space: WEIGHT_TREE_SPACE,
-          lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
-          programId: chain.programId,
-        }),
-      ])
-      .signers([authority, weightTree, deploy])
+      .signers([authority, deploy])
       .rpc();
     await methods
       .testVenueInit()
@@ -271,7 +210,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       })
       .rpc();
     // game-jackpot-pause ticket 02: create_pool leaves both switches on.
-    for (const feature of ["jackpot", "game"]) {
+    for (const feature of ["jackpot"]) {
       await methods
         .setFeaturePause({ [feature]: {} }, false)
         .accountsPartial({ signer: authority.publicKey, pool })
@@ -286,6 +225,8 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         currentEpoch: chain.epochAddress(0n),
         epochTwoBehind: chain.epochAddress(0n),
         newEpoch: chain.epochAddress(1n),
+        // begin_epoch syncs the venue first (the stub takes no extra accounts).
+        ...venue,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
@@ -298,58 +239,17 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     );
     await mintTo(connection, authority, mint, ata.address, authority, 10_000_000n);
 
-    await methods
+    const depositSignature = await methods
       .deposit(new BN(DEPOSIT.toString()))
       .accountsPartial({
         owner: depositor.publicKey,
         pool,
         player: chain.playerAddress(depositor.publicKey),
-        weightTree: weightTree.publicKey,
         acceptedMint: mint,
         ownerToken: ata.address,
         principalVault: chain.principalVaultAddress(),
         ...venue,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([depositor])
-      .rpc();
-    // A deposit holds no Ticket until the next epoch (ADR 0020), so the admin
-    // grants the Tickets a depositor from yesterday would hold.
-    await methods
-      .grantTickets(new BN(DEPOSIT.toString()))
-      .accountsPartial({
-        signer: authority.publicKey,
-        pool,
-        player: chain.playerAddress(depositor.publicKey),
-        weightTree: weightTree.publicKey,
-      })
-      .rpc();
-
-    const startsAt = await chainNow();
-    roundEndsAt = startsAt + ROUND_SECONDS;
-    round = chain.roundAddress(1n);
-    position = chain.positionAddress(round, depositor.publicKey);
-    await methods
-      .createRound(new BN(startsAt), new BN(roundEndsAt))
-      .accountsPartial({
-        operator: authority.publicKey,
-        pool,
-        currentEpoch: chain.epochAddress(1n),
-        round,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    const buySignature = await methods
-      .buyPosition(new BN(TILE_ZERO.toString()), new BN(STAKE.toString()))
-      .accountsPartial({
-        owner: depositor.publicKey,
-        pool,
-        player: chain.playerAddress(depositor.publicKey),
-        weightTree: weightTree.publicKey,
-        round,
-        position,
         systemProgram: SystemProgram.programId,
       })
       .signers([depositor])
@@ -364,7 +264,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     await waitFor(
       "the setup transactions to finalize",
       async () =>
-        (await connection.getSignatureStatus(buySignature)).value
+        (await connection.getSignatureStatus(depositSignature)).value
           ?.confirmationStatus === "finalized",
       90_000,
     );
@@ -373,7 +273,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     await prisma.$connect();
     await wipe(prisma);
 
-    indexer = new IndexerService(prisma, chain, config);
+    indexer = new IndexerService(prisma, chain);
     // The real boot path: the boot sweep, the confirmed-log sync trigger and
     // the finalized log subscription.
     indexer.onModuleInit();
@@ -388,119 +288,26 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     }
   });
 
-  it("mirrors the player, the round and the position within 4 s", async () => {
+  it("mirrors the pool, the epoch and the player within 4 s", async () => {
     await waitFor(
-      "the deposit and the round to reach Postgres",
-      async () =>
-        (await prisma.player.count()) > 0 &&
-        (await prisma.round.count()) > 0 &&
-        (await prisma.position.count()) > 0,
+      "the deposit and the epoch to reach Postgres",
+      async () => (await prisma.player.count()) > 0 && (await prisma.epoch.count()) > 0,
       // The boot sweep runs at once; the ticket's 4 s budget covers one RPC round trip.
       4_000 - (Date.now() - startedAt),
     );
     expect(Date.now() - startedAt).toBeLessThan(4_000);
 
     expect(await prisma.player.findMany({ where: { isHouse: false } })).toMatchObject([
-      { owner: depositor.publicKey.toBase58(), principal: DEPOSIT, entries: DEPOSIT - STAKE },
+      { owner: depositor.publicKey.toBase58(), principal: DEPOSIT, tickets: 0n },
     ]);
-    expect(await prisma.round.findMany()).toMatchObject([
-      { id: 1n, epochId: 1n, status: 0, pot: STAKE, winningTile: null },
-    ]);
-    expect(await prisma.position.findMany()).toMatchObject([
-      {
-        address: position.toBase58(),
-        owner: depositor.publicKey.toBase58(),
-        roundId: 1n,
-        tiles: TILE_ZERO,
-        stakePerTile: STAKE,
-      },
-    ]);
+    expect(await prisma.epoch.findMany()).toMatchObject([{ id: 1n, status: 0 }]);
     expect(await prisma.pool.findMany()).toMatchObject([
       { poolId, totalPrincipal: DEPOSIT, currentEpochId: 1n },
     ]);
   }, 30_000);
 
-  it("drops the Position row once settle_position closes the account", async () => {
-    await waitUntil(roundEndsAt);
-
-    // The seed is unknowable before this call (beta-launch-fixes ticket 02):
-    // it depends on a nonce this test generates fresh, mixed in by the
-    // program, so it cannot be read back off the Round account beforehand
-    // the way it could before the nonce landed.
-    const nonce = randomNonce();
-    const seed = vrfSeed("round", chain.poolAddress(), 1n, nonce);
-    const randomness = randomnessAddress(seed);
-
-    await methods
-      .requestRoundRandomness(Array.from(nonce))
-      .accountsPartial({
-        payer: authority.publicKey,
-        pool: chain.poolAddress(),
-        round,
-        randomness,
-        vrfNetworkState: VRF_NETWORK_STATE,
-        vrfTreasury: VRF_TREASURY,
-        vrfProgram: VRF_PROGRAM,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    // Any randomness will do: the tile comes from `vrf::unbiased_u64`, and the
-    // Position row goes once settle_position closes the account, win or lose.
-    const drawn = new Uint8Array(64).fill(0);
-    await methods
-      .testFulfill(Array.from(seed), Array.from(drawn))
-      .accountsPartial({
-        payer: authority.publicKey,
-        randomness,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    await methods
-      .settleRound()
-      .accountsPartial({
-        caller: authority.publicKey,
-        pool: chain.poolAddress(),
-        round,
-        randomness,
-        house: chain.playerAddress(authority.publicKey),
-        weightTree: weightTree.publicKey,
-      })
-      .rpc();
-
-    await waitFor(
-      "the settled round to reach Postgres",
-      async () =>
-        (
-          await prisma.round.findUnique({
-            where: { poolAddress_id: { poolAddress: chain.poolAddress().toBase58(), id: 1n } },
-          })
-        )?.winningTile != null,
-      8_000,
-    );
-
-    await methods
-      .settlePosition()
-      .accountsPartial({
-        pool: chain.poolAddress(),
-        weightTree: weightTree.publicKey,
-        round,
-        player: chain.playerAddress(depositor.publicKey),
-        owner: depositor.publicKey,
-        position,
-      })
-      .rpc();
-
-    await waitFor(
-      "the closed Position row to be deleted",
-      async () => (await prisma.position.count()) === 0,
-      8_000,
-    );
-  }, 120_000);
-
-  it("stores the round's finalized events and leaves a cursor behind", async () => {
-    const wanted = ["Deposited", "RoundOpened", "PositionBought", "RoundSettled", "PositionSettled"];
+  it("stores the finalized events and leaves a cursor behind", async () => {
+    const wanted = ["Deposited", "EpochBegan"];
     await waitFor(
       `events ${wanted.join(", ")}`,
       async () => {
@@ -530,15 +337,12 @@ async function wipe(prisma: PrismaService): Promise<void> {
   await prisma.$transaction([
     prisma.event.deleteMany(),
     prisma.cursor.deleteMany(),
-    prisma.position.deleteMany(),
     prisma.player.deleteMany(),
-    prisma.round.deleteMany(),
     prisma.epoch.deleteMany(),
     prisma.referralGrantShare.deleteMany(),
     prisma.referralGrant.deleteMany(),
     prisma.operatorState.deleteMany(),
     prisma.yieldIndexPoint.deleteMany(),
-    prisma.weightTreeState.deleteMany(),
     prisma.pool.deleteMany(),
   ]);
 }

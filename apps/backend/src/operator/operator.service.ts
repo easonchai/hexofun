@@ -2,7 +2,6 @@
 // `runTick` everything it needs, write down what happened, then sleep until
 // the deadline it returned instead of ticking on a fixed interval (ticket 03).
 import {
-  Inject,
   Injectable,
   Logger,
   type OnModuleDestroy,
@@ -29,17 +28,10 @@ import {
   decodeEpoch,
   decodePool,
   decodeVenueProposal,
-  decodeRound,
-  ROUND_STATUS,
   type EpochState,
   type PoolState,
-  type RoundState,
 } from "./chain-state";
-import { type GrantReclaimState, reclaimUnlandedGrants } from "./grant-reclaim";
-import { INDEXER_QUERIES, type IndexerQueries } from "./indexer-queries";
-import { decodeLeafHolder, firstReleasable, RELEASE_CANDIDATES } from "./leaf-release";
 import { OperatorInstructions } from "./instructions";
-import { SparringService } from "./sparring";
 import {
   EXPECTED_ERRORS,
   msUntilWake,
@@ -51,13 +43,7 @@ import {
 } from "./tick";
 import type { VenueState } from "./venue";
 import { isFulfilled, randomnessAddress } from "./vrf";
-import { leafHoldingTarget, readNodes } from "./weight-tree";
 
-/** How long a settled Position's address is remembered; well past any sweep lag. */
-const SETTLED_MEMORY_MS = 5 * 60_000;
-/** How many drawn epochs' winners are remembered; one is ever needed at a
- *  time, the rest only cover a payout retried after the epoch has moved on. */
-const WINNER_MEMORY = 4;
 /** The slow safety net alongside the deadline-driven sleep (ticket 03): runs
  *  regardless, so a mis-computed deadline degrades to "checked on this
  *  cadence" rather than a stall. Same cadence `nextWakeAt` falls back to. */
@@ -84,57 +70,24 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   /** The self-rescheduling deadline sleep; cleared and replaced on every
    *  tick, on `wake()`, and on shutdown. */
   private deadlineTimer: NodeJS.Timeout | null = null;
-  /**
-   * Positions this operator has already settled, by address, with when. The
-   * indexer's sweep can re-insert one for a few seconds after the close: the
-   * sync fired by the settle's own log can snapshot the chain before the
-   * close is visible. A closed Position never comes back, so remembering the
-   * address is always safe; the timestamp only bounds the map.
-   */
-  private settled = new Map<string, number>();
-  /** Same idea as `settled`, for Rounds `close_round` was just sent for
-   *  (ops-and-envs ticket 08): keeps an immediate next tick from resending
-   *  it before the indexer's `RoundClosed` mirror lands. */
-  private closingRounds = new Map<bigint, number>();
-  private grantReclaim: GrantReclaimState = { firstSeen: new Map(), confirmed: new Set() };
-  /** Epoch id to the owner whose leaf held its target. A target never moves
-   *  once drawn, so a retried payout does not re-read the whole tree. */
-  private winners = new Map<bigint, { owner: string; isHouse: boolean }>();
-  /** Mainnet-readiness-fixes 08: owners `leafToRelease` has examined or
-   *  released this epoch, mapped to that epoch, so each tick looks at fresh
-   *  candidates. Emptied of old epochs as it is read. */
-  private skippedLeaves = new Map<string, bigint>();
   /** Ticket 06: withdrawal-cranking state across ticks (see `WithdrawState`). */
   private lastWithdrawState: WithdrawState | null = null;
-  /** Ticket 12: expected-error repeat counts across ticks, by `action:target`. */
-  private lastExpectedErrors = new Map<string, number>();
   /** Ticket 13: what the venue cranks remember across ticks (see `VenueState`). */
   private lastVenueState: VenueState | null = null;
-  /** Ticket 21: the epoch whose skipped round was last logged. */
-  private lastRoundSkipEpochId: bigint | null = null;
+  /** The last `step:epoch` the tick reported as waiting on the snapshot, so
+   *  the log line appears once per step and epoch, not once per tick. */
+  private lastSnapshotPending: string | null = null;
   /** Ticket 05: holds step 3's very first `begin_epoch` back until this chain
    *  timestamp; null when `LAUNCH_AT` is unset. */
   private readonly launchAt: bigint | null;
   /** Logged once, the first tick that sees the pool shut down, so the
-   *  epoch and round loops stopping is announced instead of just
+   *  epoch loop stopping is announced instead of just
    *  going quiet (ops-and-envs ticket 08). Shutdown is irreversible, so
    *  this never needs to reset. */
   private shutdownAnnounced = false;
-  /**
-   * The Round randomness address currently watched via subscription, and its
-   * websocket subscription id (ticket 04): kept in sync with `openRound` on
-   * every tick, not only the one that sent `request_round_randomness`, so a
-   * restart mid-wait re-subscribes instead of falling back to polling. The
-   * subscription only shortens the wait by calling `wake()`; `decide()`'s own
-   * `fulfilled` check inside a tick stays the one authoritative read.
-   */
-  private randomnessWatch: { address: string; subscriptionId: number } | undefined;
-
   constructor(
     private readonly chain: ChainService,
     private readonly prisma: PrismaService,
-    @Inject(INDEXER_QUERIES) private readonly indexer: IndexerQueries,
-    private readonly sparring: SparringService,
     config: ConfigService<HexVaultEnv, true>,
   ) {
     const launchAtIso = config.get("LAUNCH_AT", { infer: true });
@@ -177,12 +130,6 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         // runOnce() never rejects (see tick()'s comment); this is just in
         // case a future change makes it, so shutdown still proceeds.
       });
-    }
-    if (this.randomnessWatch) {
-      await this.chain.connection.removeAccountChangeListener(
-        this.randomnessWatch.subscriptionId,
-      );
-      this.randomnessWatch = undefined;
     }
   }
 
@@ -254,26 +201,23 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       if (ctx.pool.shutdown && !this.shutdownAnnounced) {
         this.shutdownAnnounced = true;
         this.logger.log(
-          "pool is shut down: the epoch and new-round loops have stopped; " +
-            "settling already-open rounds, paying an already-drawn epoch and processing withdrawals continue",
+          "pool is shut down: the epoch loop has stopped; " +
+            "paying an already-drawn epoch and processing withdrawals continue",
         );
       }
       const outcome = await runTick(ctx);
-      this.syncRandomnessWatch(ctx.openRound);
       if (outcome.withdrawState) this.lastWithdrawState = outcome.withdrawState;
       if (outcome.venueState) this.lastVenueState = outcome.venueState;
-      if (outcome.expectedErrors) this.lastExpectedErrors = new Map(outcome.expectedErrors);
-      if (outcome.roundSkip) {
-        this.lastRoundSkipEpochId = outcome.roundSkip.epochId;
-        this.logger.log(
-          `not opening a round: it would end after epoch ${outcome.roundSkip.epochId} ends at ${outcome.roundSkip.endsAt}`,
-        );
+      if (outcome.snapshotPending) {
+        const { step, epochId } = outcome.snapshotPending;
+        const key = `${step}:${epochId}`;
+        if (key !== this.lastSnapshotPending) {
+          this.lastSnapshotPending = key;
+          this.logger.log(`snapshot_pending: ${step} for epoch ${epochId} waits on the Epoch snapshot`);
+        }
       }
       if (outcome.action) this.logger.log(`sent ${outcome.action}`);
       if (outcome.stepError) this.logger.warn(`tick step failed: ${outcome.stepError}`);
-      // A new Round exists on chain now; the Sparring player buys in without
-      // waiting for its own (much slower) safety tick to notice.
-      if (outcome.action === "create_round") this.sparring.wake();
       const waitMs = msUntilWake(ctx.now, outcome.nextWakeAt);
       await this.writeState(outcome, outcome.stepError ?? null, waitMs);
       return { ...outcome, waitMs };
@@ -353,16 +297,13 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     const now = clockUnixTimestamp(clockInfo?.data);
     this.chain.recordChainTime(now);
 
-    const { currentEpoch, previousEpoch, openRound, lastRound } =
-      await this.readCycle(pool);
+    const { currentEpoch, previousEpoch } = await this.readCycle(pool);
 
     return {
       now,
       pool,
       currentEpoch,
       previousEpoch,
-      openRound,
-      lastRound,
       ix: this.instructions,
       lastWithdrawState: this.lastWithdrawState,
       lastVenueState: this.lastVenueState,
@@ -372,54 +313,15 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
           ? decodeVenueProposal(this.chain.program, proposalInfo.data)
           : null,
       venueAvailable: () => this.venueAvailable(pool),
-      lastExpectedErrors: this.lastExpectedErrors,
-      lastRoundSkipEpochId: this.lastRoundSkipEpochId,
       launchAt: this.launchAt,
       fulfilled: (seed) => this.fulfilled(seed),
       principalVaultBalance: () => this.principalVaultBalance(),
       duePendingWithdrawals: (currentEpochId, deadline) =>
         this.duePendingWithdrawals(currentEpochId, deadline),
-      referralGrantsDue: async (epochId) => {
-        await reclaimUnlandedGrants({
-          rows: await this.indexer.sentReferralGrants(epochId),
-          connection: this.chain.connection,
-          clear: (referrers) => this.indexer.markReferralGrantsSent(epochId, referrers, null),
-          state: this.grantReclaim,
-          now: Date.now(),
-        });
-        return this.indexer.referralGrantsDue(epochId);
-      },
-      markReferralGrantsSent: (epochId, referrers, txSig) =>
-        this.indexer.markReferralGrantsSent(epochId, referrers, txSig),
-      unsettledPositions: async () =>
-        (await this.indexer.unsettledPositions()).filter(
-          (position) => !this.settled.has(position.address),
-        ),
-      forgetPositions: async (addresses) => {
-        const now = Date.now();
-        for (const [address, at] of this.settled) {
-          if (now - at > SETTLED_MEMORY_MS) this.settled.delete(address);
-        }
-        for (const address of addresses) this.settled.set(address, now);
-      },
-      roundsToClose: async () =>
-        (await this.indexer.roundsToClose()).filter((id) => !this.closingRounds.has(id)),
-      forgetRound: (id) => {
-        const now = Date.now();
-        for (const [closedId, at] of this.closingRounds) {
-          if (now - at > SETTLED_MEMORY_MS) this.closingRounds.delete(closedId);
-        }
-        this.closingRounds.set(id, now);
-      },
-      winner: (epoch) => this.winner(pool, epoch),
-      leafToRelease: () => this.leafToRelease(pool),
-      skipLeaf: (owner) => {
-        this.skippedLeaves.set(owner, pool.currentEpochId);
-      },
-      send: (instructions, hooks) =>
-        tables.length === 0 && !hooks
+      send: (instructions) =>
+        tables.length === 0
           ? this.chain.send(instructions)
-          : this.chain.send(instructions, undefined, tables, hooks),
+          : this.chain.send(instructions, undefined, tables),
       warn: (message) => this.logger.warn(message),
     };
   }
@@ -434,13 +336,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     return value;
   }
 
-  /** Current epoch, previous epoch, open round and last round in one
-   *  `getMultipleAccounts`. */
+  /** Current epoch and previous epoch in one `getMultipleAccounts`. */
   private async readCycle(pool: PoolState): Promise<{
     currentEpoch: EpochState | null;
     previousEpoch: EpochState | null;
-    openRound: RoundState | null;
-    lastRound: RoundState | null;
   }> {
     const wanted: PublicKey[] = [];
     const currentIndex =
@@ -451,82 +350,21 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       pool.currentEpochId > 1n
         ? wanted.push(this.chain.epochAddress(pool.currentEpochId - 1n)) - 1
         : -1;
-    const roundIndex =
-      pool.openRoundId > 0n
-        ? wanted.push(this.chain.roundAddress(pool.openRoundId)) - 1
-        : -1;
-    // `nextRoundId - 1` is the most recently created Round, open or already
-    // terminal; equal to `openRoundId` while one is open. Round ids start at
-    // 1, so `nextRoundId <= 1` means none has ever been created.
-    const lastRoundIndex =
-      pool.nextRoundId > 1n
-        ? wanted.push(this.chain.roundAddress(pool.nextRoundId - 1n)) - 1
-        : -1;
-    if (wanted.length === 0) {
-      return {
-        currentEpoch: null,
-        previousEpoch: null,
-        openRound: null,
-        lastRound: null,
-      };
-    }
+    if (wanted.length === 0) return { currentEpoch: null, previousEpoch: null };
 
     const infos = await this.chain.connection.getMultipleAccountsInfo(wanted);
     const epochAt = (index: number): EpochState | null => {
       const data = index >= 0 ? infos[index]?.data : undefined;
       return data ? decodeEpoch(this.chain.program, data) : null;
     };
-    const roundAt = (index: number): RoundState | null => {
-      const data = index >= 0 ? infos[index]?.data : undefined;
-      return data ? decodeRound(this.chain.program, data) : null;
-    };
 
-    return {
-      currentEpoch: epochAt(currentIndex),
-      previousEpoch: epochAt(previousIndex),
-      openRound: roundAt(roundIndex),
-      lastRound: roundAt(lastRoundIndex),
-    };
+    return { currentEpoch: epochAt(currentIndex), previousEpoch: epochAt(previousIndex) };
   }
 
   private async fulfilled(seed: Uint8Array): Promise<boolean> {
     const address = randomnessAddress(this.chain.programId, seed, this.testVrf);
     const info = await this.chain.connection.getAccountInfo(address);
     return isFulfilled(info?.data);
-  }
-
-  /**
-   * Ticket 04: watches the Requested Round's randomness address so a
-   * fulfilment wakes the operator immediately, instead of waiting for
-   * `nextWakeAt`'s `vrfTimeout` fallback. Idempotent (a repeat call for the
-   * same Round is a no-op) and self-correcting: called after every tick with
-   * the freshly-read `openRound`, so it starts watching a Round found already
-   * Requested at boot, and stops watching one that just settled or voided.
-   * A subscription that drops is re-established by web3.js itself (it owns
-   * the websocket and resubscribes on reconnect); a fulfilment that arrives
-   * in that gap is still caught by the safety tick's own `fulfilled` check.
-   */
-  private syncRandomnessWatch(openRound: RoundState | null): void {
-    const wanted =
-      openRound?.status === ROUND_STATUS.REQUESTED
-        ? randomnessAddress(this.chain.programId, openRound.vrfSeed, this.testVrf).toBase58()
-        : undefined;
-    if (wanted === this.randomnessWatch?.address) return;
-    if (this.randomnessWatch) {
-      void this.chain.connection.removeAccountChangeListener(
-        this.randomnessWatch.subscriptionId,
-      );
-      this.randomnessWatch = undefined;
-    }
-    if (wanted === undefined) return;
-    const subscriptionId = this.chain.connection.onAccountChange(
-      new PublicKey(wanted),
-      (info) => {
-        if (isFulfilled(info.data)) this.wake();
-      },
-      "confirmed",
-    );
-    this.randomnessWatch = { address: wanted, subscriptionId };
   }
 
   /**
@@ -596,105 +434,6 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       owner: player.owner,
       amount: player.pendingWithdraw,
     }));
-  }
-
-  /**
-   * Mainnet-readiness-fixes 08: one Player whose Weight tree leaf may go back
-   * to the free stack. The Read model nominates the oldest empty Players with
-   * a leaf; each is then read off the chain, and only one that is still empty
-   * there is returned. Every examined owner is skipped for the rest of the
-   * epoch, so a stale mirror row cannot hold the same slot every tick.
-   */
-  private async leafToRelease(pool: PoolState): Promise<string | null> {
-    for (const [owner, epoch] of this.skippedLeaves) {
-      if (epoch !== pool.currentEpochId) this.skippedLeaves.delete(owner);
-    }
-    const rows = await this.prisma.player.findMany({
-      where: {
-        poolAddress: pool.address.toBase58(),
-        leafIndex: { gt: 0 },
-        isHouse: false,
-        principal: 0n,
-        pendingWithdraw: 0n,
-        epochId: { lte: pool.currentEpochId - 2n },
-        owner: { notIn: [...this.skippedLeaves.keys()] },
-      },
-      orderBy: { epochId: "asc" },
-      take: RELEASE_CANDIDATES,
-      select: { owner: true },
-    });
-    if (rows.length === 0) return null;
-    const infos = await this.chain.connection.getMultipleAccountsInfo(
-      rows.map((row) => this.chain.playerAddress(new PublicKey(row.owner))),
-    );
-    const holders = rows.map((row, i) => {
-      const info = infos[i];
-      return info ? decodeLeafHolder(this.chain.program, row.owner, info.data) : null;
-    });
-    const pick = firstReleasable(holders, pool.currentEpochId);
-    for (const row of rows) {
-      if (row.owner !== pick) this.skippedLeaves.set(row.owner, pool.currentEpochId);
-    }
-    return pick;
-  }
-
-  /**
-   * The owner of the leaf that holds the drawn epoch's target (spec §3.4 step
-   * 6, ADR 0018). The target indexes into the epoch's Weight, so the answer
-   * comes from the Weight tree: find the leaf, then the Player account that
-   * was assigned it. No Read model table holds this, so a mirror gap cannot
-   * cost a winner their Prize. Null when no leaf holds the target.
-   *
-   * ponytail: scans every Player account of the program once per drawn epoch
-   * (fine at beta scale, same trade `ApiService.liveWeights` makes), cached
-   * in `winners`. Add a `getProgramAccounts` memcmp filter on `leaf_index` if
-   * it ever grows.
-   */
-  private async winner(
-    pool: PoolState,
-    epoch: EpochState,
-  ): Promise<{ owner: string; isHouse: boolean } | null> {
-    const cached = this.winners.get(epoch.epochId);
-    if (cached !== undefined) return cached;
-
-    const treeInfo = await this.chain.connection.getAccountInfo(pool.weightTree);
-    if (!treeInfo) throw new Error(`weight tree ${pool.weightTree.toBase58()} does not exist`);
-    const leaf = leafHoldingTarget(readNodes(treeInfo.data), epoch);
-    if (leaf === null) return null;
-
-    interface DecodedPlayer {
-      owner: PublicKey;
-      leafIndex: number;
-      isHouse: boolean;
-    }
-    // SAFETY: `program.account` is keyed by plain strings in `Program<Idl>`
-    // (no generated per-account types), same reason `instructions.ts`'s
-    // `method()` casts; the shape is checked structurally by `DecodedPlayer`.
-    const accountNamespace = this.chain.program.account as unknown as Record<
-      string,
-      { all(): Promise<{ publicKey: PublicKey; account: DecodedPlayer }[]> } | undefined
-    >;
-    const playerAccounts = accountNamespace.player;
-    if (!playerAccounts) throw new Error("player account namespace is missing from the IDL");
-    const hits = (await playerAccounts.all()).filter(
-      ({ publicKey, account }) =>
-        account.leafIndex === leaf && publicKey.equals(this.chain.playerAddress(account.owner)),
-    );
-    // Leaf reuse (mainnet-readiness-fixes 08) must leave one owner per leaf: a
-    // released Player has leaf_index 0. Two would mean the prize could go to
-    // the wrong wallet, so refuse to pick one.
-    if (hits.length > 1) {
-      throw new Error(`leaf ${leaf} is held by ${hits.length} Players; refusing to pick a winner`);
-    }
-    const hit = hits[0];
-    if (!hit) return null;
-
-    // The House Player's `owner` is the operator key, not `pool.house` (its
-    // PDA), so the flag is the only reliable test (mainnet-readiness-fixes 09).
-    const winner = { owner: hit.account.owner.toBase58(), isHouse: hit.account.isHouse };
-    this.winners.set(epoch.epochId, winner);
-    for (const id of [...this.winners.keys()].slice(0, -WINNER_MEMORY)) this.winners.delete(id);
-    return winner;
   }
 
   /**

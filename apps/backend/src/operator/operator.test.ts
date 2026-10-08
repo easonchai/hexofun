@@ -23,19 +23,16 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { loadIdl } from "../chain/idl";
-import { playerAddress, poolAddress, venueProposalAddress } from "../chain/pda";
+import { poolAddress, venueProposalAddress } from "../chain/pda";
 import {
   EPOCH_STATUS,
-  ROUND_STATUS,
   clockUnixTimestamp,
   type EpochState,
   type PoolState,
-  type RoundState,
 } from "./chain-state";
 import { OperatorInstructions } from "./instructions";
 import {
   DRAWN_UNPAID_ALERT_SECONDS,
-  EXPECTED_ERROR_REPEAT_LIMIT,
   EXPECTED_ERRORS,
   msUntilWake,
   runTick,
@@ -46,13 +43,12 @@ import {
   type WithdrawState,
 } from "./tick";
 import { HARVEST_LEAD_SECONDS, VENUE_RETRY_SECONDS } from "./venue";
-import { isFulfilled, keccak256, randomnessAddress, vrfSeed } from "./vrf";
+import { isFulfilled, randomnessAddress } from "./vrf";
 
 const AUTHORITY = Keypair.generate().publicKey;
 const MINT = Keypair.generate().publicKey;
 const PROGRAM_ID = new PublicKey("LFk9ba6QXuM9oYRRNGGPxMGzfo13X3DAr8ghSPz72C6");
 const POOL = poolAddress(PROGRAM_ID, 1n);
-const WEIGHT_TREE = Keypair.generate().publicKey;
 
 // No RPC is reached: every account is passed explicitly, so Anchor never has
 // to resolve one.
@@ -98,19 +94,13 @@ const pool = (over: Partial<PoolState> = {}): PoolState => ({
   house: Keypair.generate().publicKey,
   vrfNetworkState: Keypair.generate().publicKey,
   epochSeconds: 86_400n,
-  roundSeconds: 60n,
-  closeBuffer: 0n,
   vrfTimeout: 120n,
   payoutTimeout: 86_400n,
   paused: false,
   currentEpochId: 2n,
-  nextRoundId: 4n,
-  openRoundId: 3n,
   totalPrincipal: 1_000_000_000n,
   shutdown: false,
-  gamePaused: false,
   jackpotPaused: false,
-  weightTree: WEIGHT_TREE,
   // Unpinned by default (`Pubkey::default()`), so the venue cranks stay quiet
   // in every test that is not about them; `venuePool` below pins klend.
   klendProgram: PublicKey.default,
@@ -156,45 +146,27 @@ const ended = (over: Partial<EpochState> = {}): EpochState =>
     ...over,
   });
 
-const round = (over: Partial<RoundState> = {}): RoundState => ({
-  roundId: 3n,
-  endsAt: NOW + 30n,
-  status: ROUND_STATUS.OPEN,
-  vrfSeed: new Uint8Array(32).fill(5),
-  requestedAt: 0n,
-  ...over,
-});
-
 interface Recorder {
   ctx: TickContext;
   sent: TransactionInstruction[][];
   warned: string[];
-  markedSent: { epochId: bigint; referrers: string[]; txSig: string | null }[];
 }
 
 function context(over: Partial<TickContext> = {}): Recorder {
   const sent: TransactionInstruction[][] = [];
   const warned: string[] = [];
-  const markedSent: { epochId: bigint; referrers: string[]; txSig: string | null }[] = [];
   const ctx: TickContext = {
     now: NOW,
     pool: pool(),
-    // A healthy mid-round state: epoch running, previous one already paid,
-    // round open and not yet over.
+    // A healthy mid-epoch state: epoch running, previous one already paid.
     currentEpoch: epoch(),
     previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.PAID }),
-    openRound: round(),
-    // Null by default: only the step 7 tests below care, and null means "no
-    // previous round", which never delays opening the next one.
-    lastRound: null,
     ix: instructions,
     lastWithdrawState: null,
     lastVenueState: null,
     // No venue change open by default (venue-switch ticket 04).
     venueProposal: null,
     venueAvailable: async () => null,
-    lastExpectedErrors: new Map(),
-    lastRoundSkipEpochId: null,
     // Unconfigured by default (ticket 05): begin_epoch is never withheld in
     // any test that is not about the launch window.
     launchAt: null,
@@ -202,26 +174,14 @@ function context(over: Partial<TickContext> = {}): Recorder {
     principalVaultBalance: async () => 0n,
     // Empty by default so step 6b stays quiet in every test that is not about it.
     duePendingWithdrawals: async () => [],
-    unsettledPositions: async () => [],
-    forgetPositions: async () => {},
-    // Empty by default so step 2c stays quiet in every test that is not about it.
-    roundsToClose: async () => [],
-    forgetRound: () => {},
-    winner: async () => null,
-    // Empty by default so step 3b stays quiet in every test that is not about it.
-    referralGrantsDue: async () => [],
-    markReferralGrantsSent: async (epochId, referrers, txSig) => {
-      markedSent.push({ epochId, referrers: [...referrers], txSig });
-    },
-    send: async (ixs, hooks) => {
+    send: async (ixs) => {
       sent.push(ixs);
-      await hooks?.onSent("signature");
       return "signature";
     },
     warn: (message) => warned.push(message),
     ...over,
   };
-  return { ctx, sent, warned, markedSent };
+  return { ctx, sent, warned };
 }
 
 const keysOfIx = (ixs: readonly TransactionInstruction[]): string[] =>
@@ -247,343 +207,45 @@ async function tickLabels(over: Partial<TickContext> = {}): Promise<{
 }
 
 describe("runTick", () => {
-  it("sends nothing on a healthy mid-round state", async () => {
+  it("sends nothing on a healthy mid-epoch state", async () => {
     const result = await tickLabels();
     expect(result.transactions).toBe(0);
     expect(result.action).toBeNull();
-    // Round end minus the close buffer is the closest of the round end,
-    // epoch end and safety-interval candidates.
-    expect(result.nextWakeAt).toBe(NOW + 30n);
+    // The epoch end is a day off, so the safety interval is the soonest
+    // thing that could re-check.
+    expect(result.nextWakeAt).toBe(NOW + SAFETY_INTERVAL_SECONDS);
   });
 
-  // --- 1. Round: open-and-ended, requested, or voided. Runs before any Epoch
-  // step, so a Round can never straddle the boundary step 3 might open.
-
-  it("1. requests randomness for a round that has ended", async () => {
-    const result = await tickLabels({ openRound: round({ endsAt: NOW }) });
-    expect(result.labels).toEqual(["request_round_randomness"]);
-    // Acted this tick: look again immediately rather than waiting on a
-    // boundary that already fired.
-    expect(result.nextWakeAt).toBe(NOW);
-  });
-
-  it("1. does not request randomness one second before the close", async () => {
-    const result = await tickLabels({
-      pool: pool({ closeBuffer: 5n }),
-      openRound: round({ endsAt: NOW + 6n }),
-    });
-    expect(result.transactions).toBe(0);
-    // The close buffer is part of the deadline: endsAt minus closeBuffer.
-    expect(result.nextWakeAt).toBe(NOW + 1n);
-  });
-
-  it("1. requests randomness at the close, `closeBuffer` seconds before `endsAt`", async () => {
-    const result = await tickLabels({
-      pool: pool({ closeBuffer: 5n }),
-      openRound: round({ endsAt: NOW + 5n }),
-    });
-    expect(result.labels).toEqual(["request_round_randomness"]);
-  });
-
-  it("1. settles a requested round once the randomness is fulfilled", async () => {
-    const result = await tickLabels({
-      openRound: round({
-        status: ROUND_STATUS.REQUESTED,
-        requestedAt: NOW - 5n,
-      }),
-      fulfilled: async () => true,
-    });
-    expect(result.labels).toEqual(["settle_round"]);
-  });
-
-  it("1. voids a requested round after the timeout", async () => {
-    const result = await tickLabels({
-      openRound: round({
-        status: ROUND_STATUS.REQUESTED,
-        requestedAt: NOW - 121n,
-      }),
-    });
-    expect(result.labels).toEqual(["void_round"]);
-  });
-
-  it("1. voids an Open round still unrequested `vrfTimeout` past its end, instead of requesting again", async () => {
-    const result = await tickLabels({
-      openRound: round({ status: ROUND_STATUS.OPEN, endsAt: NOW - 121n }),
-    });
-    expect(result.labels).toEqual(["void_round"]);
-    // One second earlier the request path still wins; the program would
-    // refuse the void anyway.
-    const early = await tickLabels({
-      openRound: round({ status: ROUND_STATUS.OPEN, endsAt: NOW - 120n }),
-    });
-    expect(early.labels).toEqual(["request_round_randomness"]);
-  });
-
-  it("1. requests round randomness before begin_epoch when the epoch has also ended", async () => {
-    const result = await tickLabels({
-      currentEpoch: epoch({ endsAt: NOW }),
-      openRound: round({ endsAt: NOW }),
-    });
-    expect(result.labels).toEqual(["request_round_randomness"]);
-    expect(result.action).toBe("request_round_randomness");
-  });
-
-  it("1. settles a requested round before begin_epoch when the epoch has also ended", async () => {
-    const result = await tickLabels({
-      currentEpoch: epoch({ endsAt: NOW }),
-      openRound: round({
-        status: ROUND_STATUS.REQUESTED,
-        requestedAt: NOW - 5n,
-      }),
-      fulfilled: async () => true,
-    });
-    expect(result.labels).toEqual(["settle_round"]);
-  });
-
-  // --- 2. Sweep: unsettled Positions on any terminal Round, not just the
-  // newest.
-
-  it("2. settles up to eight leftover positions per transaction", async () => {
-    const positions = Array.from({ length: 9 }, () => ({
-      address: Keypair.generate().publicKey.toBase58(),
-      owner: Keypair.generate().publicKey.toBase58(),
-      roundId: 3n,
-    }));
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      unsettledPositions: async () => positions,
-    });
-    expect(result.labels).toEqual(Array(8).fill("settle_position"));
-    expect(result.action).toBe("settle_position");
-  });
-
-  it("2. forgets the positions it settled, and only those, once the send confirms", async () => {
-    const positions = Array.from({ length: 9 }, () => ({
-      address: Keypair.generate().publicKey.toBase58(),
-      owner: Keypair.generate().publicKey.toBase58(),
-      roundId: 3n,
-    }));
-    const forgotten: string[][] = [];
-    await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      unsettledPositions: async () => positions,
-      forgetPositions: async (addresses) => {
-        forgotten.push(addresses);
-      },
-    });
-    expect(forgotten).toEqual([positions.slice(0, 8).map((position) => position.address)]);
-  });
-
-  it("2. (ticket 06) keeps the rows when the send fails, records the error, and lets the tick continue", async () => {
-    const forgotten: string[][] = [];
-    const { ctx } = context({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      unsettledPositions: async () => [
-        {
-          address: Keypair.generate().publicKey.toBase58(),
-          owner: Keypair.generate().publicKey.toBase58(),
-          roundId: 3n,
-        },
-      ],
-      forgetPositions: async (addresses) => {
-        forgotten.push(addresses);
-      },
-      send: async (ixs) => {
-        if (ixs.some((ix) => label(ix) === "settle_position")) {
-          throw new Error("blockhash expired");
-        }
-        return "signature";
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(forgotten).toEqual([]);
-    expect(outcome.stepError).toMatch(/blockhash expired/);
-    // Falls through to open the next round instead of aborting the tick.
-    expect(outcome.action).toBe("create_round");
-  });
-
-  it("2. (mainnet-readiness-fixes 01) a failing unsettledPositions read is recorded and steps 4 to 7 still run", async () => {
-    const { ctx, sent } = context({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      unsettledPositions: async () => {
-        throw new Error("too many bind variables in prepared statement");
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(outcome.stepError).toMatch(/too many bind variables/);
-    expect(outcome.action).toBe("create_round");
-    expect((sent[0] ?? []).map(label)).toEqual(["create_round"]);
-  });
-
-  it("2. (ticket 12) an AccountNotInitialized race is treated as already settled", async () => {
-    const address = Keypair.generate().publicKey.toBase58();
-    const forgotten: string[][] = [];
-    const { ctx } = context({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      unsettledPositions: async () => [
-        { address, owner: Keypair.generate().publicKey.toBase58(), roundId: 3n },
-      ],
-      forgetPositions: async (addresses) => {
-        forgotten.push(addresses);
-      },
-      send: async () => {
-        throw new Error("AccountNotInitialized");
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(forgotten).toEqual([[address]]);
-    expect(outcome.stepError).toBeUndefined();
-  });
-
-  it("2. (ticket 12) an expected race is swallowed twice, then escalates to a recorded error", async () => {
-    const positions = () => [
-      {
-        address: Keypair.generate().publicKey.toBase58(),
-        owner: Keypair.generate().publicKey.toBase58(),
-        roundId: 3n,
-      },
-    ];
-    let expectedErrors: ReadonlyMap<string, number> = new Map();
-    let outcome;
-    for (let i = 0; i < EXPECTED_ERROR_REPEAT_LIMIT; i += 1) {
-      const { ctx } = context({
-        pool: pool({ openRoundId: 0n }),
-        openRound: null,
-        lastExpectedErrors: expectedErrors,
-        unsettledPositions: async () => positions(),
-        send: async (ixs) => {
-          if (ixs.some((ix) => label(ix) === "settle_position")) {
-            throw new Error("RoundNotSettled");
-          }
-          return "signature";
-        },
-      });
-      outcome = await runTick(ctx);
-      expectedErrors = outcome.expectedErrors ?? expectedErrors;
-    }
-    expect(outcome?.stepError).toMatch(/RoundNotSettled/);
-  });
-
-  it("2. sweeps a leftover position before begin_epoch when the epoch has also ended", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      currentEpoch: epoch({ endsAt: NOW }),
-      openRound: null,
-      unsettledPositions: async () => [
-        {
-          address: Keypair.generate().publicKey.toBase58(),
-          owner: Keypair.generate().publicKey.toBase58(),
-          roundId: 3n,
-        },
-      ],
-    });
-    expect(result.labels).toEqual(["settle_position"]);
-    expect(result.action).toBe("settle_position");
-  });
-
-  it("2. sweeps an older round's position while a newer round is open", async () => {
-    // Default openRound is round 3, open; the leftover position sits on
-    // round 1, two ids behind, and gets swept anyway.
-    const result = await tickLabels({
-      unsettledPositions: async () => [
-        {
-          address: Keypair.generate().publicKey.toBase58(),
-          owner: Keypair.generate().publicKey.toBase58(),
-          roundId: 1n,
-        },
-      ],
-    });
-    expect(result.labels).toEqual(["settle_position"]);
-  });
-
-  // --- 2c. Close a terminal Round once nothing settled on it is still owed
-  // (ops-and-envs ticket 08): reclaims its rent for the operator.
-
-  it("2c. closes a round once roundsToClose names one", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      roundsToClose: async () => [7n],
-    });
-    expect(result.labels).toEqual(["close_round"]);
-    expect(result.action).toBe("close_round");
-  });
-
-  it("2c. forgets the round it closed once the send confirms", async () => {
-    const forgotten: bigint[] = [];
-    await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      roundsToClose: async () => [7n],
-      forgetRound: (id) => forgotten.push(id),
-    });
-    expect(forgotten).toEqual([7n]);
-  });
-
-  it("2c. sweeps leftover positions before closing any round", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      unsettledPositions: async () => [
-        {
-          address: Keypair.generate().publicKey.toBase58(),
-          owner: Keypair.generate().publicKey.toBase58(),
-          roundId: 3n,
-        },
-      ],
-      roundsToClose: async () => [7n],
-    });
-    expect(result.action).toBe("settle_position");
-  });
-
-  it("2c. closes a round even while the pool is shut down: close_round is permissionless throughout", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n, shutdown: true }),
-      openRound: null,
-      currentEpoch: null,
-      previousEpoch: null,
-      roundsToClose: async () => [7n],
-    });
-    expect(result.action).toBe("close_round");
-  });
-
-  // --- 3. Begin Epoch: only once the Round and sweep above are clear, and
-  // the previous Epoch (if any) is Paid or Rolled over.
+  // --- 3. Begin Epoch: only once the previous Epoch (if any) is Paid or
+  // Rolled over. The Round steps left with the program (off-chain-tickets
+  // ticket 10).
 
   it("3. begins the first epoch when the pool has none", async () => {
     const result = await tickLabels({
-      pool: pool({ currentEpochId: 0n, nextRoundId: 1n, openRoundId: 0n }),
+      pool: pool({ currentEpochId: 0n }),
       currentEpoch: null,
       previousEpoch: null,
-      openRound: null,
     });
     expect(result.labels).toEqual(["begin_epoch"]);
     expect(result.action).toBe("begin_epoch");
   });
 
-  it("3. begins the next epoch once it has ended, the round is clear, and the previous epoch is paid", async () => {
+  it("3. begins the next epoch once it has ended and the previous epoch is paid", async () => {
     const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
+      pool: pool(),
       currentEpoch: epoch({ endsAt: NOW }),
-      openRound: null,
     });
     expect(result.labels).toEqual(["begin_epoch"]);
   });
 
   it("3. does not begin the epoch while the previous epoch has not been sent to the draw", async () => {
     const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
+      pool: pool(),
       currentEpoch: epoch({ endsAt: NOW }),
-      openRound: null,
       previousEpoch: ended(),
     });
     expect(result.action).not.toBe("begin_epoch");
-    expect(result.labels).toEqual(["request_draw"]);
+    expect(result.transactions).toBe(0);
   });
 
   // --- 3 (ticket 05): LAUNCH_AT holds back only the Pool's very first
@@ -592,10 +254,9 @@ describe("runTick", () => {
 
   it("3. a future launch time withholds the first begin_epoch", async () => {
     const result = await tickLabels({
-      pool: pool({ currentEpochId: 0n, nextRoundId: 1n, openRoundId: 0n }),
+      pool: pool({ currentEpochId: 0n }),
       currentEpoch: null,
       previousEpoch: null,
-      openRound: null,
       launchAt: NOW + 3_600n,
     });
     expect(result.transactions).toBe(0);
@@ -607,10 +268,9 @@ describe("runTick", () => {
 
   it("3. sleeps straight to the launch time once it is closer than the safety interval", async () => {
     const result = await tickLabels({
-      pool: pool({ currentEpochId: 0n, nextRoundId: 1n, openRoundId: 0n }),
+      pool: pool({ currentEpochId: 0n }),
       currentEpoch: null,
       previousEpoch: null,
-      openRound: null,
       launchAt: NOW + 10n,
     });
     expect(result.transactions).toBe(0);
@@ -619,10 +279,9 @@ describe("runTick", () => {
 
   it("3. a past launch time begins the first epoch", async () => {
     const result = await tickLabels({
-      pool: pool({ currentEpochId: 0n, nextRoundId: 1n, openRoundId: 0n }),
+      pool: pool({ currentEpochId: 0n }),
       currentEpoch: null,
       previousEpoch: null,
-      openRound: null,
       launchAt: NOW - 1n,
     });
     expect(result.labels).toEqual(["begin_epoch"]);
@@ -633,10 +292,9 @@ describe("runTick", () => {
   // pause, and a new pool starts that way.
   it("3. does not begin the first epoch while the jackpot is paused", async () => {
     const result = await tickLabels({
-      pool: pool({ currentEpochId: 0n, nextRoundId: 1n, openRoundId: 0n, jackpotPaused: true }),
+      pool: pool({ currentEpochId: 0n, jackpotPaused: true }),
       currentEpoch: null,
       previousEpoch: null,
-      openRound: null,
     });
     expect(result.transactions).toBe(0);
     expect(result.action).toBeNull();
@@ -644,9 +302,8 @@ describe("runTick", () => {
 
   it("3. does not begin the next epoch while the jackpot is paused", async () => {
     const result = await tickLabels({
-      pool: pool({ openRoundId: 0n, jackpotPaused: true }),
+      pool: pool({ jackpotPaused: true }),
       currentEpoch: epoch({ endsAt: NOW }),
-      openRound: null,
     });
     expect(result.transactions).toBe(0);
     expect(result.action).toBeNull();
@@ -654,229 +311,53 @@ describe("runTick", () => {
 
   it("3. LAUNCH_AT does not hold back a later epoch once one already exists", async () => {
     const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
+      pool: pool(),
       currentEpoch: epoch({ endsAt: NOW }),
-      openRound: null,
       launchAt: NOW + 3_600n,
     });
     expect(result.labels).toEqual(["begin_epoch"]);
   });
 
-  // --- 3b. Referral bonuses (docs/plan/hexo-referrals ticket 08): grants
-  // due for the epoch that just began, batched like withdrawals.
+  // --- 3 (begin_epoch accounts): the program syncs the venue first, so the
+  // instruction carries the pinned venue accounts and the sync's extras.
 
-  it("3b. grants up to eight referral bonuses per transaction and records the signature", async () => {
-    const referrers = Array.from({ length: 10 }, () =>
-      Keypair.generate().publicKey.toBase58(),
-    );
-    const { ctx, sent, markedSent } = context({
-      referralGrantsDue: async (epochId) => {
-        expect(epochId).toBe(2n); // currentEpoch's id, not previousEpoch's
-        return referrers.map((referrer) => ({ referrer, amount: 1_000_000n }));
-      },
-    });
-    const outcome = await runTick(ctx);
-
-    expect(outcome.action).toBe("grant_tickets");
-    expect(sent).toHaveLength(1);
-    expect((sent[0] ?? []).map(label)).toEqual(Array(8).fill("grant_tickets"));
-    expect(markedSent).toEqual([
-      { epochId: 2n, referrers: referrers.slice(0, 8), txSig: "signature" },
-    ]);
-  });
-
-  it("3b. does nothing once every referral bonus for the epoch is granted", async () => {
-    const result = await tickLabels({ referralGrantsDue: async () => [] });
-    expect(result.action).toBeNull();
-  });
-
-  it("3b. does nothing before the first epoch has begun", async () => {
-    const result = await tickLabels({
-      pool: pool({ currentEpochId: 0n, nextRoundId: 1n, openRoundId: 0n }),
+  it("3. passes the pinned venue accounts to begin_epoch", async () => {
+    const venue = {
+      klendProgram: Keypair.generate().publicKey,
+      klendMarket: Keypair.generate().publicKey,
+      klendReserve: Keypair.generate().publicKey,
+      klendCtoken: Keypair.generate().publicKey,
+    };
+    const { ctx, sent } = context({
+      pool: pool({ currentEpochId: 0n, ...venue }),
       currentEpoch: null,
       previousEpoch: null,
-      openRound: null,
-      referralGrantsDue: () => {
-        throw new Error("must not be asked before an epoch exists");
-      },
     });
-    expect(result.labels).toEqual(["begin_epoch"]);
+    await runTick(ctx);
+    const keys = keysOfIx(sent[0] ?? []);
+    for (const key of Object.values(venue)) expect(keys).toContain(key.toBase58());
   });
 
-  it("3b. logs a warning and falls through instead of throwing when the on-chain cap is exceeded", async () => {
-    const referrer = Keypair.generate().publicKey.toBase58();
-    const { ctx, sent, warned } = context({
-      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
-      send: async () => {
-        throw new Error("custom program error: DailyPoolGrantCapExceeded");
-      },
-    });
-    const outcome = await runTick(ctx);
+  // --- 4. request_draw: the ended epoch goes to the draw once the backend has
+  // built its snapshot (ticket 12). Until then the step reports it is waiting.
 
-    expect(outcome.action).toBeNull();
-    expect(sent).toHaveLength(0);
-    expect(warned).toHaveLength(1);
-    expect(warned[0]).toMatch(/DailyPoolGrantCapExceeded/);
-    // The error itself does not say which referrer in the batch tripped it,
-    // so every one of them (and the amount tried) is named in the log.
-    expect(warned[0]).toContain(`${referrer}:1000000`);
-  });
-
-  it("3b. does not grant tickets once the pool is shut down: grant_tickets is refused", async () => {
-    const result = await tickLabels({
-      pool: pool({ shutdown: true }),
-      referralGrantsDue: () => {
-        throw new Error("must not be asked while shut down");
-      },
-    });
-    expect(result.action).toBeNull();
-  });
-
-  // game-jackpot-pause ticket 02: grant_tickets is refused under jackpot pause.
-  it("3b. does not grant tickets while the jackpot is paused", async () => {
-    const result = await tickLabels({
-      pool: pool({ jackpotPaused: true }),
-      referralGrantsDue: () => {
-        throw new Error("must not be asked while the jackpot is paused");
-      },
-    });
-    expect(result.action).toBeNull();
-  });
-
-  // mainnet-readiness-fixes 02: a global pause refuses grant_tickets, and a
-  // due grant must not hold the withdrawals below it.
-  it("3b. skips grants while the pool is paused and still pays a due withdrawal", async () => {
-    const referrer = Keypair.generate().publicKey.toBase58();
-    const owner = Keypair.generate().publicKey.toBase58();
-    const { ctx, sent } = context({
-      pool: pool({ paused: true }),
-      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
-      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
-    });
-    const outcome = await runTick(ctx);
-    expect(outcome.action).toBe("process_withdraw");
-    expect(sent.flat().map(label)).not.toContain("grant_tickets");
-  });
-
-  it("3b. records an unknown grant failure and still reaches the withdrawals", async () => {
-    const referrer = Keypair.generate().publicKey.toBase58();
-    const owner = Keypair.generate().publicKey.toBase58();
-    const { ctx } = context({
-      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
-      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
-      send: async (ixs) => {
-        if (ixs.some((ix) => label(ix) === "grant_tickets")) throw new Error("PoolPaused");
-        return "signature";
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(outcome.stepError).toMatch(/PoolPaused/);
-    expect(outcome.action).toBe("process_withdraw");
-  });
-
-  // mainnet-readiness-fixes 07: the signature is recorded when the transaction
-  // is sent, so a confirmation that times out does not leave the rows unmarked.
-  it("3b. a grant whose confirmation times out keeps its recorded signature, so the next tick does not resend", async () => {
-    const referrer = Keypair.generate().publicKey.toBase58();
-    const rows = new Map<string, string | null>([[referrer, null]]);
-    const recorder = context({
-      referralGrantsDue: async () =>
-        [...rows].filter(([, sig]) => sig === null).map(([r]) => ({ referrer: r, amount: 1n })),
-      markReferralGrantsSent: async (_epochId, referrers, txSig) => {
-        for (const r of referrers) rows.set(r, txSig);
-      },
-      send: async (ixs, hooks) => {
-        recorder.sent.push(ixs);
-        await hooks?.onSent("sig-1");
-        throw new Error("transaction sig-1 still pending after 30000ms");
-      },
-    });
-    const first = await runTick(recorder.ctx);
-    expect(first.stepError).toMatch(/still pending/);
-    expect(rows.get(referrer)).toBe("sig-1");
-
-    await runTick(recorder.ctx);
-    expect(recorder.sent.flat().filter((ix) => label(ix) === "grant_tickets")).toHaveLength(1);
-  });
-
-  it("3b. a batch of one refused with AlreadyGranted marks its row sent without a resend", async () => {
-    const referrer = Keypair.generate().publicKey.toBase58();
-    let calls = 0;
-    const { ctx, markedSent } = context({
-      referralGrantsDue: async () => [{ referrer, amount: 1n }],
-      send: async () => {
-        calls += 1;
-        throw new Error("AlreadyGranted");
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(calls).toBe(1);
-    expect(outcome.stepError).toBeUndefined();
-    expect(markedSent).toEqual([{ epochId: 2n, referrers: [referrer], txSig: "already-granted" }]);
-  });
-
-  // mainnet-readiness-fixes 16: simulation names only the first refused
-  // instruction, so a mixed batch is resent one referrer at a time.
-  it("3b. a mixed batch refused with AlreadyGranted marks only the referrer refused alone", async () => {
-    const [granted, fresh] = [Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58()];
-    let calls = 0;
-    const { ctx, markedSent } = context({
-      referralGrantsDue: async () => [granted, fresh].map((referrer) => ({ referrer, amount: 1n })),
-      send: async (_ixs, hooks) => {
-        calls += 1;
-        // 1: the batch, 2: `granted` alone, 3: `fresh` alone.
-        if (calls <= 2) throw new Error("AlreadyGranted");
-        await hooks?.onSent("sig-fresh");
-        return "sig-fresh";
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(calls).toBe(3);
-    expect(outcome.stepError).toBeUndefined();
-    expect(markedSent).toEqual([
-      { epochId: 2n, referrers: [granted], txSig: "already-granted" },
-      { epochId: 2n, referrers: [fresh], txSig: "sig-fresh" },
-    ]);
-  });
-
-  it("3b. a throw from referralGrantsDue is recorded and the withdrawals still go out", async () => {
-    const owner = Keypair.generate().publicKey.toBase58();
-    const { ctx, sent } = context({
-      referralGrantsDue: async () => {
-        throw new Error("getSignatureStatuses: too many signatures");
-      },
-      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
-    });
-    const outcome = await runTick(ctx);
-    expect(outcome.stepError).toMatch(/too many signatures/);
-    expect(outcome.action).toBe("process_withdraw");
-    expect(sent.flat().map(label)).toContain("process_withdraw");
-  });
-
-  // --- 4. request_draw: the ended epoch goes to the draw straight away. There
-  // is no registration, no indexer wait and no window (ticket 13).
-
-  it("4. sends an ended epoch to the draw, with the Weight tree", async () => {
+  it("4. reports an ended epoch as waiting on the snapshot and sends nothing", async () => {
     const { ctx, sent } = context({ previousEpoch: ended() });
     const outcome = await runTick(ctx);
 
-    expect(sent).toHaveLength(1);
-    expect((sent[0] ?? []).map(label)).toEqual(["request_draw"]);
-    expect(outcome.action).toBe("request_draw");
-    expect(keysOfIx(sent[0] ?? [])).toContain(WEIGHT_TREE.toBase58());
-    // Acted this tick, so look again straight away.
-    expect(outcome.nextWakeAt).toBe(NOW);
+    expect(sent).toHaveLength(0);
+    expect(outcome.action).toBeNull();
+    expect(outcome.snapshotPending).toEqual({ step: "request_draw", epochId: 1n });
   });
 
-  it("4. waits while the pool is shut down: request_draw is refused", async () => {
-    const result = await tickLabels({ pool: pool({ shutdown: true }), previousEpoch: ended() });
-    expect(result.action).toBeNull();
-  });
-
-  it("4. waits while the jackpot is paused", async () => {
-    const result = await tickLabels({ pool: pool({ jackpotPaused: true }), previousEpoch: ended() });
-    expect(result.transactions).toBe(0);
-    expect(result.action).toBeNull();
+  it("4. waits, and reports nothing, while the pool is shut down or the jackpot is paused", async () => {
+    for (const over of [{ shutdown: true }, { jackpotPaused: true }]) {
+      const { ctx, sent } = context({ pool: pool(over), previousEpoch: ended() });
+      const outcome = await runTick(ctx);
+      expect(sent).toHaveLength(0);
+      expect(outcome.action).toBeNull();
+      expect(outcome.snapshotPending).toBeUndefined();
+    }
   });
 
   it("4. a request_draw that lost a race is an expected error, not a failure", () => {
@@ -946,91 +427,23 @@ describe("runTick", () => {
     expect(result.labels).toEqual(["rollover_epoch"]);
   });
 
-  // --- 6. Payout.
+  // --- 6. Payout: needs the winner's proof out of the snapshot (ticket 12),
+  // so for now the step reports it is waiting. A drawn epoch still rolls over.
 
-  it("6. pays the winner, compounding the prize into their principal", async () => {
-    const winner = Keypair.generate().publicKey.toBase58();
-    const result = await tickLabels({
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 10n,
-      }),
-      winner: async (drawn) => (drawn.epochId === 1n && drawn.target === 42n ? { owner: winner, isHouse: false } : null),
-    });
-    // No winner token account any more (ticket 02): the prize goes into
-    // principal_vault instead, so payout is the whole transaction.
-    expect(result.labels).toEqual(["payout"]);
-  });
-
-  it("6. still pays an already-drawn epoch once the pool is shut down: payout is allowed throughout", async () => {
-    const winner = Keypair.generate().publicKey.toBase58();
-    const result = await tickLabels({
-      pool: pool({ shutdown: true }),
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 10n,
-      }),
-      winner: async () => ({ owner: winner, isHouse: false }),
-    });
-    expect(result.labels).toEqual(["payout"]);
-  });
-
-  it("6. logs the winner and retries when the payout will not land", async () => {
-    const winner = Keypair.generate().publicKey.toBase58();
-    const { ctx, sent, warned } = context({
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 60n,
-      }),
-      winner: async () => ({ owner: winner, isHouse: false }),
-      send: async (ixs) => {
-        if (ixs.some((ix) => label(ix) === "payout")) {
-          throw new Error("AccountFrozen");
-        }
-        sent.push(ixs);
-        return "signature";
-      },
+  it("6. reports a drawn epoch as waiting on the snapshot and sends nothing", async () => {
+    const { ctx, sent } = context({
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWN, target: 42n, drawnAt: NOW - 10n }),
     });
     const outcome = await runTick(ctx);
-
-    expect(outcome.action).toBeNull();
     expect(sent).toHaveLength(0);
-    expect(warned).toEqual([
-      `payout of epoch 1 to ${winner} failed: AccountFrozen`,
-    ]);
-  });
-
-  it("6. lets any other send failure fail the tick", async () => {
-    // An RPC blip is not an unpayable winner: swallowing it would retry
-    // quietly until `payout_timeout` rolled a payable epoch over, with
-    // /status showing no error the whole time.
-    const { ctx, warned } = context({
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 60n,
-      }),
-      winner: async () => ({ owner: Keypair.generate().publicKey.toBase58(), isHouse: false }),
-      send: async () => {
-        throw new Error("blockhash expired");
-      },
-    });
-    await expect(runTick(ctx)).rejects.toThrow("blockhash expired");
-    expect(warned).toEqual([]);
+    expect(outcome.action).toBeNull();
+    expect(outcome.snapshotPending).toEqual({ step: "payout", epochId: 1n });
   });
 
   it("6. wakes at the payout timeout of a drawn epoch", async () => {
-    // Paused with no Round, so nothing else contributes a nearer deadline.
+    // Paused, so nothing else contributes a nearer deadline.
     const result = await tickLabels({
-      pool: pool({ openRoundId: 0n, paused: true, payoutTimeout: 30n }),
-      openRound: null,
+      pool: pool({ paused: true, payoutTimeout: 30n }),
       previousEpoch: epoch({
         epochId: 1n,
         status: EPOCH_STATUS.DRAWN,
@@ -1043,8 +456,7 @@ describe("runTick", () => {
   });
 
   it("6. rolls the drawn epoch over once payout_timeout and the drawn-unpaid alert window have both passed", async () => {
-    const winner = Keypair.generate().publicKey.toBase58();
-    const { ctx, sent, warned } = context({
+    const { ctx, sent } = context({
       pool: pool({ payoutTimeout: 30n }),
       previousEpoch: epoch({
         epochId: 1n,
@@ -1052,27 +464,16 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n),
       }),
-      winner: async () => ({ owner: winner, isHouse: false }),
-      send: async (ixs) => {
-        if (ixs.some((ix) => label(ix) === "payout")) {
-          throw new Error("AccountFrozen");
-        }
-        sent.push(ixs);
-        return "signature";
-      },
     });
     const outcome = await runTick(ctx);
 
     expect(outcome.action).toBe("rollover_epoch");
     expect((sent[0] ?? []).map(label)).toEqual(["rollover_epoch"]);
-    expect(warned).toHaveLength(1);
   });
 
-  it("6. (ticket 12) withholds rolling a human winner over until the drawn-unpaid alert window has passed, even past payout_timeout", async () => {
-    const winner = Keypair.generate().publicKey.toBase58();
-    const { ctx, warned } = context({
-      pool: pool({ payoutTimeout: 30n, openRoundId: 0n, paused: true }),
-      openRound: null,
+  it("6. (ticket 12) withholds rolling a drawn epoch over until the drawn-unpaid alert window has passed, even past payout_timeout", async () => {
+    const { ctx, sent } = context({
+      pool: pool({ payoutTimeout: 30n, paused: true }),
       previousEpoch: epoch({
         epochId: 1n,
         status: EPOCH_STATUS.DRAWN,
@@ -1080,50 +481,11 @@ describe("runTick", () => {
         // Past payoutTimeout, but well inside DRAWN_UNPAID_ALERT_SECONDS.
         drawnAt: NOW - 31n,
       }),
-      winner: async () => ({ owner: winner, isHouse: false }),
-      send: async (ixs) => {
-        if (ixs.some((ix) => label(ix) === "payout")) throw new Error("AccountFrozen");
-        throw new Error("must not roll over yet");
-      },
     });
     const outcome = await runTick(ctx);
     expect(outcome.action).toBeNull();
-    expect(warned).toHaveLength(1);
-  });
-
-  it("6. (ticket 12) still rolls a House win over immediately past payout_timeout: nobody is owed a Prize", async () => {
-    const housePool = pool({ payoutTimeout: 30n });
-    const { ctx, sent } = context({
-      pool: housePool,
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 31n,
-      }),
-      // The House Player's owner is the operator key, never `pool.house`.
-      winner: async () => ({ owner: Keypair.generate().publicKey.toBase58(), isHouse: true }),
-      send: async (ixs) => {
-        if (ixs.some((ix) => label(ix) === "payout")) throw new Error("AccountFrozen");
-        sent.push(ixs);
-        return "signature";
-      },
-    });
-    const outcome = await runTick(ctx);
-    expect(outcome.action).toBe("rollover_epoch");
-  });
-
-  it("6. waits when no leaf holds the target yet", async () => {
-    const result = await tickLabels({
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWN,
-        target: 42n,
-        drawnAt: NOW - 10n,
-      }),
-      openRound: round({ endsAt: NOW + 1n }),
-    });
-    expect(result.transactions).toBe(0);
+    expect(sent).toHaveLength(0);
+    expect(outcome.snapshotPending).toEqual({ step: "payout", epochId: 1n });
   });
 
   // --- 6b. Pending withdrawals whose epoch has ended.
@@ -1137,8 +499,7 @@ describe("runTick", () => {
   it("6b. pays a due withdrawal, creating the owner's token account first", async () => {
     const due = pending(1);
     const { ctx, sent } = context({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ paused: true }),
       duePendingWithdrawals: async (epochId) => (epochId === 2n ? due : []),
     });
     const outcome = await runTick(ctx);
@@ -1177,10 +538,8 @@ describe("runTick", () => {
     expect(size).toBeLessThanOrEqual(PACKET_DATA_SIZE);
   });
 
-  it("6b. reports the gap and opens the round anyway when the vault is short", async () => {
+  it("6b. reports the gap and carries on when the vault is short", async () => {
     const { ctx, sent, warned } = context({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
       duePendingWithdrawals: async () => pending(3, 4_000_000n),
       principalVaultBalance: async () => 5_000_000n,
       send: async (ixs) => {
@@ -1196,15 +555,29 @@ describe("runTick", () => {
     // 12 USDC due against 5 in the vault.
     expect(outcome.withdrawShortfall).toBe(7_000_000n);
     expect(warned).toHaveLength(1);
-    // A short vault delays cash, never the game: the round still opens.
-    expect(outcome.action).toBe("create_round");
-    expect((sent[0] ?? []).map(label)).toEqual(["create_round"]);
+    // A short vault delays cash and nothing else.
+    expect(outcome.action).toBeNull();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("computes the VRF timeout as the deadline when it is the closest one", async () => {
+    const result = await tickLabels({
+      pool: pool({ paused: true }),
+      previousEpoch: epoch({
+        epochId: 1n,
+        status: EPOCH_STATUS.DRAWING,
+        requestedAt: NOW - 70n,
+      }),
+    });
+    expect(result.transactions).toBe(0);
+    // vrfTimeout (120n) minus the 70 elapsed seconds beats both the epoch
+    // end and the 60 s safety interval.
+    expect(result.nextWakeAt).toBe(NOW + 50n);
   });
 
   it("6b. sizes the shortfall against the batch it tried, not the whole queue", async () => {
     const { ctx } = context({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ paused: true }),
       duePendingWithdrawals: async () =>
         pending(WITHDRAW_BATCH_SIZE + 3, 4_000_000n),
       principalVaultBalance: async () => 5_000_000n,
@@ -1243,8 +616,7 @@ describe("runTick", () => {
       return due;
     };
     const impaired = context({
-      pool: pool({ openRoundId: 0n, paused: true, impaired: true }),
-      openRound: null,
+      pool: pool({ paused: true, impaired: true }),
       duePendingWithdrawals: withdrawals,
     });
     const held = await runTick(impaired.ctx);
@@ -1254,8 +626,7 @@ describe("runTick", () => {
     expect(asked).toBe(0);
 
     const cleared = context({
-      pool: pool({ openRoundId: 0n, paused: true, impaired: false }),
-      openRound: null,
+      pool: pool({ paused: true, impaired: false }),
       duePendingWithdrawals: withdrawals,
     });
     const resumed = await runTick(cleared.ctx);
@@ -1263,63 +634,11 @@ describe("runTick", () => {
     expect((cleared.sent[0] ?? []).filter((ix) => label(ix) === "process_withdraw")).toHaveLength(2);
   });
 
-  it("6b. retries an owner whose Position is still open on a later tick, with no alert", async () => {
-    const owners = pending(3);
-    let refuse = true;
-    const send = async (ixs: TransactionInstruction[]) => {
-      if (refuse && ixs.some((ix) => label(ix) === "process_withdraw")) {
-        throw new Error("OpenPositions");
-      }
-      return "signature";
-    };
-    const first = await runTick(
-      context({
-        pool: pool({ openRoundId: 0n, paused: true }),
-        openRound: null,
-        duePendingWithdrawals: async () => owners,
-        send,
-      }).ctx,
-    );
-    expect(first.action).toBeNull();
-    expect(first.stepError).toBeUndefined();
-    // Single sends from here, and nobody is skipped or counted as failing.
-    expect(first.withdrawState?.singleMode).toBe(true);
-    expect(first.withdrawState?.skipped.size).toBe(0);
-
-    // Still open on the next tick: the same quiet answer.
-    const second = await runTick(
-      context({
-        pool: pool({ openRoundId: 0n, paused: true }),
-        openRound: null,
-        duePendingWithdrawals: async () => owners,
-        lastWithdrawState: first.withdrawState ?? null,
-        send,
-      }).ctx,
-    );
-    expect(second.stepError).toBeUndefined();
-    expect(second.withdrawState?.failures.size).toBe(0);
-    expect(second.withdrawState?.skipped.size).toBe(0);
-
-    // Settled: the same owner is paid.
-    refuse = false;
-    const third = await runTick(
-      context({
-        pool: pool({ openRoundId: 0n, paused: true }),
-        openRound: null,
-        duePendingWithdrawals: async () => owners,
-        lastWithdrawState: second.withdrawState ?? null,
-        send,
-      }).ctx,
-    );
-    expect(third.action).toBe("process_withdraw");
-  });
-
   it("6b. (ticket 06) falls back to single sends after a batch failure", async () => {
     const owners = pending(3);
     let attempt = 0;
     const { ctx, sent } = context({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ paused: true }),
       duePendingWithdrawals: async () => owners,
       send: async (ixs) => {
         attempt += 1;
@@ -1335,8 +654,7 @@ describe("runTick", () => {
 
     // Second tick: pays exactly one, still in single-send mode (two remain).
     const { ctx: ctx2 } = context({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ paused: true }),
       duePendingWithdrawals: async () => owners,
       lastWithdrawState: first.withdrawState ?? null,
       send: async (ixs) => {
@@ -1357,8 +675,7 @@ describe("runTick", () => {
     let outcome;
     for (let i = 0; i < WITHDRAW_FAILURE_LIMIT; i += 1) {
       const { ctx, warned: w } = context({
-        pool: pool({ openRoundId: 0n, paused: true }),
-        openRound: null,
+        pool: pool({ paused: true }),
         lastWithdrawState: i === 0 ? { epochId: 2n, singleMode: true, failures: new Map(), skipped: new Set() } : state,
         duePendingWithdrawals: async () => [entry],
         send: async () => {
@@ -1377,8 +694,7 @@ describe("runTick", () => {
 
     // Once skipped, the owner is filtered out of the queue entirely.
     const { ctx: finalCtx } = context({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ paused: true }),
       lastWithdrawState: state,
       duePendingWithdrawals: async () => [entry],
       send: () => {
@@ -1404,248 +720,23 @@ describe("runTick", () => {
 
   it("6b. leaves the last reported shortfall alone on a tick that acted earlier", async () => {
     const { ctx } = context({
-      openRound: round({ endsAt: NOW }),
+      currentEpoch: epoch({ endsAt: NOW }),
       duePendingWithdrawals: async () => pending(1),
     });
     const outcome = await runTick(ctx);
-    expect(outcome.action).toBe("request_round_randomness");
+    expect(outcome.action).toBe("begin_epoch");
     expect(outcome.withdrawShortfall).toBeUndefined();
   });
 
   // --- 7. Create Round.
 
-  it("7. opens the next round when the last one is fully settled", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-    });
-    expect(result.labels).toEqual(["create_round"]);
-  });
-
-  it("7. does not open a round that would outlast the epoch", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      currentEpoch: epoch({ endsAt: NOW + 59n }),
-      openRound: null,
-    });
-    expect(result.transactions).toBe(0);
-    // The epoch end is the closest candidate: sooner than the 60 s safety
-    // interval, and there is no open round to bound it further.
-    expect(result.nextWakeAt).toBe(NOW + 59n);
-  });
-
-  it("7. reports a skipped round once per epoch, not once per tick", async () => {
-    const straddling = {
-      pool: pool({ openRoundId: 0n }),
-      currentEpoch: epoch({ endsAt: NOW + 59n }),
-      openRound: null,
-    };
-    const first = await runTick(context(straddling).ctx);
-    expect(first.action).toBeNull();
-    expect(first.roundSkip).toEqual({ epochId: 2n, endsAt: NOW + 59n });
-
-    // The service remembers the epoch it logged, so the next tick stays quiet.
-    const later = await runTick(
-      context({ ...straddling, lastRoundSkipEpochId: 2n }).ctx,
-    );
-    expect(later.roundSkip).toBeUndefined();
-
-    // A round that fits is no skip at all.
-    const fits = await runTick(
-      context({ pool: pool({ openRoundId: 0n }), openRound: null }).ctx,
-    );
-    expect(fits.roundSkip).toBeUndefined();
-  });
-
-  it("7. does not open a round while the pool is paused", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
-    });
-    expect(result.transactions).toBe(0);
-    // Nothing closer than the running epoch's own (far-off) end: falls back
-    // to the safety interval.
-    expect(result.nextWakeAt).toBe(NOW + SAFETY_INTERVAL_SECONDS);
-  });
-
   // game-jackpot-pause ticket 02: create_round is refused under game pause.
-  it("7. does not open a round while the game is paused", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n, gamePaused: true }),
-      openRound: null,
-    });
-    expect(result.transactions).toBe(0);
-    expect(result.nextWakeAt).toBe(NOW + SAFETY_INTERVAL_SECONDS);
-  });
-
   // --- 7. The previous Round gets REVEAL_SECONDS (1 s) past its `endsAt`
   // before the next one opens; the reveal itself fires when the draw lands,
   // usually before `endsAt`.
 
-  it("7. holds the next round at a settled lastRound's endsAt", async () => {
-    const settledLastRound = round({
-      status: ROUND_STATUS.SETTLED,
-      endsAt: NOW,
-    });
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      lastRound: settledLastRound,
-    });
-    expect(result.transactions).toBe(0);
-    // The reveal wait (lastRound.endsAt + REVEAL_SECONDS) is the closest
-    // candidate.
-    expect(result.nextWakeAt).toBe(NOW + 1n);
-  });
-
-  it("computes the VRF timeout as the deadline when it is the closest one", async () => {
-    // Paused, so no Round opens: acting would make the deadline "now" and
-    // hide the candidate this test is about.
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n, paused: true }),
-      openRound: null,
-      previousEpoch: epoch({
-        epochId: 1n,
-        status: EPOCH_STATUS.DRAWING,
-        requestedAt: NOW - 70n,
-      }),
-    });
-    expect(result.transactions).toBe(0);
-    // vrfTimeout (120n) minus the 70 elapsed seconds beats both the epoch
-    // end and the 60 s safety interval.
-    expect(result.nextWakeAt).toBe(NOW + 50n);
-  });
-
-  it("7. opens the next round one second past a settled lastRound's endsAt", async () => {
-    const settledLastRound = round({
-      status: ROUND_STATUS.SETTLED,
-      endsAt: NOW,
-    });
-    const result = await tickLabels({
-      now: NOW + 1n,
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      lastRound: settledLastRound,
-    });
-    expect(result.labels).toEqual(["create_round"]);
-  });
-
-  it("7. a voided lastRound opens the next round immediately", async () => {
-    const result = await tickLabels({
-      pool: pool({ openRoundId: 0n }),
-      openRound: null,
-      lastRound: round({ status: ROUND_STATUS.VOIDED, endsAt: NOW }),
-    });
-    expect(result.labels).toEqual(["create_round"]);
-  });
-
   // --- 8. Release a leaf (mainnet-readiness-fixes 08): lowest priority, one
   // per tick, only for the owner `leafToRelease` names.
-
-  describe("8. release_leaf", () => {
-    const owner = Keypair.generate().publicKey.toBase58();
-
-    it("releases the named owner's leaf on an otherwise idle tick", async () => {
-      const { ctx, sent } = context({ leafToRelease: async () => owner });
-      const outcome = await runTick(ctx);
-      expect(outcome.action).toBe("release_leaf");
-      expect(sent.map((ixs) => ixs.map(label))).toEqual([["release_leaf"]]);
-      expect(keysOfIx(sent[0] ?? [])).toContain(
-        playerAddress(PROGRAM_ID, POOL, new PublicKey(owner)).toBase58(),
-      );
-    });
-
-    it("sends one release per tick and paces the next by the safety interval", async () => {
-      const asked: string[] = [];
-      const skipped: string[] = [];
-      const queue = [owner, Keypair.generate().publicKey.toBase58()];
-      const { ctx, sent } = context({
-        leafToRelease: async () => {
-          const next = queue.shift() ?? null;
-          if (next !== null) asked.push(next);
-          return next;
-        },
-        skipLeaf: (o) => skipped.push(o),
-      });
-      const outcome = await runTick(ctx);
-      expect(sent).toHaveLength(1);
-      expect(asked).toEqual([owner]);
-      expect(skipped).toEqual([owner]);
-      // Not "now": a backlog must not become a hot loop.
-      expect(outcome.nextWakeAt).toBeGreaterThan(NOW);
-    });
-
-    it("sends nothing when no leaf is due", async () => {
-      const { ctx, sent } = context({ leafToRelease: async () => null });
-      const outcome = await runTick(ctx);
-      expect(sent).toHaveLength(0);
-      expect(outcome.action).toBeNull();
-    });
-
-    it("yields to every crank: never asks while another step sends", async () => {
-      let asked = 0;
-      const result = await tickLabels({
-        pool: pool({ openRoundId: 0n }),
-        openRound: null,
-        leafToRelease: async () => {
-          asked += 1;
-          return owner;
-        },
-      });
-      expect(result.labels).toEqual(["create_round"]);
-      expect(asked).toBe(0);
-    });
-
-    it("does not run once the pool is shut down", async () => {
-      let asked = 0;
-      const result = await tickLabels({
-        pool: pool({ shutdown: true }),
-        leafToRelease: async () => {
-          asked += 1;
-          return owner;
-        },
-      });
-      expect(result.transactions).toBe(0);
-      expect(asked).toBe(0);
-    });
-
-    it("records a refused release without throwing and skips the owner", async () => {
-      const skipped: string[] = [];
-      const { ctx } = context({
-        leafToRelease: async () => owner,
-        skipLeaf: (o) => skipped.push(o),
-        send: async () => {
-          throw new Error("some unexpected refusal");
-        },
-      });
-      const outcome = await runTick(ctx);
-      expect(outcome.action).toBeNull();
-      expect(outcome.stepError).toContain(`release_leaf:${owner}`);
-      expect(skipped).toEqual([owner]);
-    });
-
-    // mainnet-readiness-fixes 16: a read failure keeps the tick's shortfall.
-    it("records a leafToRelease throw and still returns the 6b shortfall", async () => {
-      const { ctx, sent } = context({
-        duePendingWithdrawals: async () => pending(1, 4_000_000n),
-        principalVaultBalance: async () => 1_000_000n,
-        leafToRelease: async () => {
-          throw new Error("prisma down");
-        },
-        send: async (ixs) => {
-          if (ixs.some((ix) => label(ix) === "process_withdraw")) {
-            throw new Error("InsufficientVaultLiquidity");
-          }
-          sent.push(ixs);
-          return "signature";
-        },
-      });
-      const outcome = await runTick(ctx);
-      expect(outcome.withdrawShortfall).toBe(3_000_000n);
-      expect(outcome.stepError).toMatch(/prisma down/);
-      expect(sent).toHaveLength(0);
-    });
-  });
 
   // --- Ticket 09: epochNoProgress and drawnUnpaid are computed off the
   // previous epoch every tick, regardless of which step (if any) acts.
@@ -1685,8 +776,7 @@ describe("runTick", () => {
 
   it("drawnUnpaid fires once a drawn epoch outlives DRAWN_UNPAID_ALERT_SECONDS, before payout_timeout does", async () => {
     const { ctx } = context({
-      pool: pool({ payoutTimeout: 86_400n, openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ payoutTimeout: 86_400n, paused: true }),
       previousEpoch: epoch({
         epochId: 1n,
         status: EPOCH_STATUS.DRAWN,
@@ -1699,8 +789,7 @@ describe("runTick", () => {
 
   it("drawnUnpaid stays false for a drawn epoch still inside the alert window", async () => {
     const { ctx } = context({
-      pool: pool({ payoutTimeout: 86_400n, openRoundId: 0n, paused: true }),
-      openRound: null,
+      pool: pool({ payoutTimeout: 86_400n, paused: true }),
       previousEpoch: epoch({
         epochId: 1n,
         status: EPOCH_STATUS.DRAWN,
@@ -1735,7 +824,6 @@ describe("venue cranks (ticket 13)", () => {
       klendMarket: MARKET,
       klendReserve: RESERVE,
       klendCtoken: CTOKEN,
-      openRoundId: 0n,
       paused: true,
       ...over,
     });
@@ -1743,7 +831,6 @@ describe("venue cranks (ticket 13)", () => {
   const venueTick = (vault: bigint, over: Partial<TickContext> = {}) =>
     context({
       pool: venuePool(),
-      openRound: null,
       principalVaultBalance: async () => vault,
       ...over,
     });
@@ -2216,7 +1303,6 @@ describe("venue cranks (ticket 13)", () => {
   it("harvests inside the window before the epoch ends, and only once", async () => {
     const first = context({
       pool: harvestPool(),
-      openRound: null,
       currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
       principalVaultBalance: async () => 1_000n * U,
     });
@@ -2229,7 +1315,6 @@ describe("venue cranks (ticket 13)", () => {
     // Next tick: the epoch is marked, so nothing more goes out.
     const again = context({
       pool: harvestPool(),
-      openRound: null,
       currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
       principalVaultBalance: async () => 1_000n * U,
       lastVenueState: outcome.venueState ?? null,
@@ -2244,7 +1329,6 @@ describe("venue cranks (ticket 13)", () => {
     ] as const) {
       const { ctx } = context({
         pool: pool_,
-        openRound: null,
         currentEpoch: epoch_,
         principalVaultBalance: async () => 1_000n * U,
       });
@@ -2255,7 +1339,6 @@ describe("venue cranks (ticket 13)", () => {
   it("wakes when the harvest window opens", async () => {
     const { ctx } = context({
       pool: harvestPool({ paused: true }),
-      openRound: null,
       currentEpoch: endingIn(HARVEST_LEAD_SECONDS + 50n),
       principalVaultBalance: async () => 1_000n * U,
     });
@@ -2265,9 +1348,9 @@ describe("venue cranks (ticket 13)", () => {
   it("a failed harvest does not block the rest of the tick", async () => {
     const { ctx, sent } = context({
       pool: harvestPool(),
-      openRound: null,
       currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
       principalVaultBalance: async () => 1_000n * U,
+      duePendingWithdrawals: async () => [{ owner: Keypair.generate().publicKey.toBase58(), amount: 1n }],
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "harvest")) throw new Error("ReserveStale");
         sent.push(ixs);
@@ -2277,7 +1360,7 @@ describe("venue cranks (ticket 13)", () => {
     const outcome = await runTick(ctx);
 
     expect(outcome.stepError).toBe("harvest failed: ReserveStale");
-    expect(outcome.action).toBe("create_round");
+    expect(outcome.action).toBe("process_withdraw");
     expect(outcome.venueState?.failedAt.harvest).toBe(NOW);
     expect(outcome.venueState?.harvestedEpoch).toBeNull();
   });
@@ -2285,7 +1368,6 @@ describe("venue cranks (ticket 13)", () => {
   it("NothingToHarvest counts as harvested for the epoch", async () => {
     const { ctx } = context({
       pool: harvestPool(),
-      openRound: null,
       currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
       principalVaultBalance: async () => 1_000n * U,
       send: async (ixs) => {
@@ -2347,14 +1429,9 @@ describe("instruction builders", () => {
   const keysOf = (ixs: readonly TransactionInstruction[]): string[] =>
     (ixs[0]?.keys ?? []).map((key) => key.pubkey.toBase58());
 
-  it("hand void_round and rollover_epoch the request's randomness account", async () => {
-    // The program matches both against the seed on the Round or Epoch, so a
-    // builder that forgets the account cannot void or roll over at all.
-    const openRound = round({ status: ROUND_STATUS.REQUESTED });
-    expect(keysOf(await instructions.voidRound(pool(), openRound))).toContain(
-      instructions.randomnessFor(openRound.vrfSeed).toBase58(),
-    );
-
+  it("hands rollover_epoch the request's randomness account", async () => {
+    // The program matches it against the seed on the Epoch, so a builder that
+    // forgets the account cannot roll over at all.
     const drawing = epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWING });
     expect(keysOf(await instructions.rolloverEpoch(pool(), drawing))).toContain(
       instructions.randomnessFor(drawing.vrfSeed).toBase58(),
@@ -2363,38 +1440,8 @@ describe("instruction builders", () => {
 });
 
 describe("randomness", () => {
-  it("hashes seeds the way solana_keccak_hasher does", () => {
-    expect(Buffer.from(keccak256(new Uint8Array(0))).toString("hex")).toBe(
-      "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
-    );
-    expect(Buffer.from(keccak256(Buffer.from("abc"))).toString("hex")).toBe(
-      "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
-    );
-  });
-
-  const NONCE_A = new Uint8Array(32).fill(1);
-  const NONCE_B = new Uint8Array(32).fill(2);
-
-  it("separates seeds by domain, pool, id and nonce", () => {
-    const other = poolAddress(PROGRAM_ID, 2n);
-    const base = vrfSeed("epoch", POOL, 7n, NONCE_A);
-    expect(Buffer.from(vrfSeed("epoch", POOL, 7n, NONCE_A))).toEqual(Buffer.from(base));
-    expect(Buffer.from(vrfSeed("round", POOL, 7n, NONCE_A))).not.toEqual(
-      Buffer.from(base),
-    );
-    expect(Buffer.from(vrfSeed("epoch", other, 7n, NONCE_A))).not.toEqual(
-      Buffer.from(base),
-    );
-    expect(Buffer.from(vrfSeed("epoch", POOL, 8n, NONCE_A))).not.toEqual(
-      Buffer.from(base),
-    );
-    expect(Buffer.from(vrfSeed("epoch", POOL, 7n, NONCE_B))).not.toEqual(
-      Buffer.from(base),
-    );
-  });
-
   it("uses this program's PDA under test-vrf and ORAO's otherwise", () => {
-    const seed = vrfSeed("round", POOL, 1n, NONCE_A);
+    const seed = new Uint8Array(32).fill(1);
     const test = randomnessAddress(PROGRAM_ID, seed, true);
     const orao = randomnessAddress(PROGRAM_ID, seed, false);
     expect(test.equals(orao)).toBe(false);

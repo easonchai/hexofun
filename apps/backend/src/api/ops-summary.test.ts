@@ -17,7 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
-import { EPOCH_STATUS, ROUND_STATUS } from "../operator/chain-state";
+import { EPOCH_STATUS } from "../operator/chain-state";
 import { PrismaService } from "../prisma/prisma.service";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
 import { LIVE_POOL_DEFAULTS } from "../test-utils/live-yield-defaults";
@@ -29,14 +29,6 @@ const VRF_TIMEOUT = 180n;
 const PAYOUT_TIMEOUT = 3_600n;
 
 const poolTimes = { vrfTimeout: VRF_TIMEOUT, payoutTimeout: PAYOUT_TIMEOUT, jackpotPaused: false };
-const round = (over: Partial<Parameters<typeof findStuck>[0]["openRound"] & object>) => ({
-  roundId: 5n,
-  endsAt: NOW - 10n,
-  status: ROUND_STATUS.OPEN,
-  vrfSeed: new Uint8Array(32),
-  requestedAt: 0n,
-  ...over,
-});
 const epoch = (over: Partial<Parameters<typeof findStuck>[0]["previousEpoch"] & object>) => ({
   epochId: 6n,
   startsAt: 0n,
@@ -58,33 +50,13 @@ describe("findStuck", () => {
     findStuck({
       now: NOW,
       pool: poolTimes,
-      openRound: null,
       previousEpoch: null,
       fulfilled: unfulfilled,
       ...over,
     });
 
-  it("names nothing when there is no Round or epoch", async () => {
-    expect(await stuck({})).toEqual({ round: null, epoch: null });
-  });
-
-  it("names an Open Round once it is past its end plus vrf_timeout", async () => {
-    expect((await stuck({ openRound: round({ endsAt: NOW - VRF_TIMEOUT - 1n }) })).round).toEqual({
-      id: 5n,
-      status: ROUND_STATUS.OPEN,
-    });
-    expect((await stuck({ openRound: round({ endsAt: NOW - VRF_TIMEOUT }) })).round).toBeNull();
-  });
-
-  it("names a Requested Round past vrf_timeout, but not a fulfilled one", async () => {
-    const requested = round({ status: ROUND_STATUS.REQUESTED, requestedAt: NOW - VRF_TIMEOUT - 1n });
-    expect((await stuck({ openRound: requested })).round).toEqual({
-      id: 5n,
-      status: ROUND_STATUS.REQUESTED,
-    });
-    expect((await stuck({ openRound: requested, fulfilled })).round).toBeNull();
-    const fresh = round({ status: ROUND_STATUS.REQUESTED, requestedAt: NOW - 5n });
-    expect((await stuck({ openRound: fresh })).round).toBeNull();
+  it("names nothing when there is no epoch", async () => {
+    expect(await stuck({})).toEqual({ epoch: null });
   });
 
   it("names an Ended epoch past vrf_timeout, unless the jackpot is paused", async () => {
@@ -211,7 +183,6 @@ const fakeChain = {
   keypair: Keypair.generate(),
   poolAddress: () => POOL,
   epochAddress: (id: bigint) => address("e", id),
-  roundAddress: (id: bigint) => address("r", id),
   jackpotVaultAddress: () => Keypair.generate().publicKey,
   principalVaultAddress: () => PRINCIPAL_VAULT,
 };
@@ -237,8 +208,6 @@ const poolRow = (address: string) => ({
   mint: address,
   epochSeconds: 86_400n,
   epochAnchor: 0n,
-  roundSeconds: 60n,
-  closeBuffer: 5n,
   minDeposit: 0n,
   paused: false,
   currentEpochId: 7n,
@@ -247,12 +216,7 @@ const poolRow = (address: string) => ({
   totalPrincipal: 20_000_000n,
   pendingWithdrawals: 3_000_000n,
   minJackpot: 0n,
-  houseCutBps: 0,
   baseRateBps: 488,
-  ticketsPerUsdc: 1,
-  bonusCapBps: 0,
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
   version: 1,
   shutdown: false,
   updatedSlot: 1n,
@@ -271,7 +235,7 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
 
   beforeEach(async () => {
     await prisma.$executeRawUnsafe(
-      'TRUNCATE "Pool", "Epoch", "Round", "Player", "Position", "Event", "Cursor", "OperatorState", "YieldIndexPoint", "WeightTreeState" CASCADE',
+      'TRUNCATE "Pool", "Epoch", "Player", "Event", "Cursor", "OperatorState", "YieldIndexPoint" CASCADE',
     );
     chainAccounts.clear();
     // New services per test: the balance read is cached for 15 s.
@@ -379,8 +343,8 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     await seedActive();
     const wallet = Keypair.generate().publicKey.toBase58();
     const player = {
-      poolAddress: POOL.toBase58(), principal: 0n, entries: 0n, epochId: 0n, isHouse: false,
-      pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n, bonusEpoch: 0n, bonusGranted: 0n,
+      poolAddress: POOL.toBase58(), principal: 0n, tickets: 0n, epochId: 0n, isHouse: false,
+      pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n,
     };
     await prisma.player.createMany({
       data: [
@@ -408,31 +372,26 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     const summary = await ops.getOpsSummary();
     expect(summary.harvestedToTreasury).toBe(0n);
     expect(summary.harvestedToJackpot).toBe(0n);
-    expect(summary.stuck).toEqual({ round: null, epoch: null });
+    expect(summary.stuck).toEqual({ epoch: null });
   });
 
-  it("names the Round and epoch the chain says are stuck", async () => {
+  it("names the epoch the chain says is stuck", async () => {
     await seedActive();
     chainAccounts.set(
       POOL.toBase58(),
       program({
         ...Object.fromEntries(
           [
-            "epochSeconds", "roundSeconds", "closeBuffer", "pendingWithdrawals", "venueValue",
+            "epochSeconds", "pendingWithdrawals", "venueValue",
             "feeOwed", "prizeOwed", "idleFloorBps", "idleTargetBps", "minVenueMove",
-            "nextRoundId", "totalPrincipal",
+            "totalPrincipal",
           ].map((k) => [k, "0"]),
         ),
         vrfTimeout: String(VRF_TIMEOUT),
         payoutTimeout: String(PAYOUT_TIMEOUT),
         currentEpochId: "7",
-        openRoundId: "5",
         jackpotPaused: false,
       }),
-    );
-    chainAccounts.set(
-      address("r", 5n).toBase58(),
-      program({ roundId: "5", endsAt: String(NOW - 1_000n), status: ROUND_STATUS.OPEN, vrfSeed: [], requestedAt: "0" }),
     );
     chainAccounts.set(
       address("e", 6n).toBase58(),
@@ -448,7 +407,6 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
 
     const { stuck } = await ops.getOpsSummary();
     expect(stuck).toEqual({
-      round: { id: 5n, status: ROUND_STATUS.OPEN },
       epoch: { id: 6n, status: EPOCH_STATUS.ENDED },
     });
   });
@@ -487,7 +445,7 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect(summary.venueKind).toBeNull();
     expect(summary.venueProposal).toBeNull();
     expect(summary.supplyRateBps).toBeNull();
-    expect(summary.stuck).toEqual({ round: null, epoch: null });
+    expect(summary.stuck).toEqual({ epoch: null });
     expect(summary.todo).toEqual([]);
     expect(summary.fastPauseWallets).toEqual([]);
     expect(summary.pendingWithdrawals).toBe(0n);

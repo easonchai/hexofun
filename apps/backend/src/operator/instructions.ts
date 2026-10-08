@@ -17,24 +17,15 @@ import {
 
 import {
   epochAddress,
-  freeLeavesAddress,
   jackpotVaultAddress,
   playerAddress,
-  positionAddress,
   principalVaultAddress,
-  roundAddress,
   venueProposalAddress,
 } from "../chain/pda";
 import { kvaultRemaining } from "../chain/kvault";
 import { VENUE_KIND } from "../chain/venue-kind";
-import type { EpochState, PoolState, RoundState } from "./chain-state";
-import {
-  ORAO_VRF_PROGRAM_ID,
-  ORAO_VRF_TREASURY,
-  randomNonce,
-  randomnessAddress,
-  vrfSeed,
-} from "./vrf";
+import type { EpochState, PoolState } from "./chain-state";
+import { randomnessAddress } from "./vrf";
 
 const bn = (value: bigint): BN => new BN(value.toString());
 
@@ -94,10 +85,6 @@ export class OperatorInstructions {
 
   private epoch(pool: PoolState, epochId: bigint): PublicKey {
     return epochAddress(this.programId, pool.address, epochId);
-  }
-
-  private round(pool: PoolState, roundId: bigint): PublicKey {
-    return roundAddress(this.programId, pool.address, roundId);
   }
 
   private player(pool: PoolState, owner: PublicKey): PublicKey {
@@ -165,6 +152,11 @@ export class OperatorInstructions {
     ];
   }
 
+  /**
+   * `begin_epoch` syncs the venue first, so `EpochBegan` carries the Yield
+   * index the Ticket reset prices unsettled yield at: it takes the pinned
+   * venue accounts and the sync's remaining accounts, like `process_withdraw`.
+   */
   async beginEpoch(pool: PoolState): Promise<TransactionInstruction[]> {
     // `current_epoch` does not exist before the first epoch; the program skips
     // it in that case, but the address still has to be supplied.
@@ -180,39 +172,17 @@ export class OperatorInstructions {
           currentEpoch: this.epoch(pool, pool.currentEpochId),
           epochTwoBehind: this.epoch(pool, twoBehindId),
           newEpoch: this.epoch(pool, pool.currentEpochId + 1n),
+          ...this.venue(pool),
           systemProgram: SystemProgram.programId,
         })
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }
 
   /**
-   * Step 3b (docs/plan/hexo-referrals ticket 08): one `grant_tickets` per
-   * referrer, batched into one transaction. Signed by the operator, so every grant is capped on chain per
-   * Player per day at their own Principal and pool-wide at `bonus_cap_bps`
-   * of `total_principal` (`grant_tickets`' operator path).
-   */
-  async grantTickets(
-    pool: PoolState,
-    grants: readonly { referrer: string; amount: bigint }[],
-  ): Promise<TransactionInstruction[]> {
-    return Promise.all(
-      grants.map((grant) =>
-        this.method("grantTickets", bn(grant.amount))
-          .accountsPartial({
-            signer: this.operator,
-            pool: pool.address,
-            player: this.player(pool, new PublicKey(grant.referrer)),
-            weightTree: pool.weightTree,
-          })
-          .instruction(),
-      ),
-    );
-  }
-
-  /**
    * Step 6b: pay one batch of due withdrawal requests. `process_withdraw`
-   * syncs, settles and writes the Weight tree, so it names both. The optional
+   * syncs and settles, so it names the venue accounts. The optional
    * owner signer is left out (the tick sends none while the pool is impaired,
    * the only time the program wants it), so the operator is here only as the fee payer and as
    * the payer of the owner token accounts it creates. Each payout is
@@ -243,7 +213,6 @@ export class OperatorInstructions {
               player: this.player(pool, owner),
               // Null, not omitted: the client would fill the operator in.
               owner: null,
-              weightTree: pool.weightTree,
               acceptedMint: pool.acceptedMint,
               ownerToken,
               principalVault,
@@ -256,33 +225,6 @@ export class OperatorInstructions {
       }),
     );
     return batches.flat();
-  }
-
-  /**
-   * Step 4: sends the ended epoch to the draw, or rolls it over when it holds
-   * no Weight or a prize under `min_jackpot`. Operator-only. A fresh nonce is
-   * generated per call and mixed into the seed (beta-launch-fixes ticket 02),
-   * so the randomness address is derived here rather than read back off the
-   * Epoch, and is unknowable before this call.
-   */
-  async requestDraw(pool: PoolState, epochId: bigint): Promise<TransactionInstruction[]> {
-    const nonce = randomNonce();
-    return [
-      await this.method("requestDraw", Array.from(nonce))
-        .accountsPartial({
-          operator: this.operator,
-          pool: pool.address,
-          epoch: this.epoch(pool, epochId),
-          weightTree: pool.weightTree,
-          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
-          randomness: this.randomnessFor(vrfSeed("epoch", pool.address, epochId, nonce)),
-          vrfNetworkState: pool.vrfNetworkState,
-          vrfTreasury: ORAO_VRF_TREASURY,
-          vrfProgram: ORAO_VRF_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .instruction(),
-    ];
   }
 
   /** Permissionless (production-hardening ticket 01): the operator still
@@ -314,207 +256,6 @@ export class OperatorInstructions {
           pool: pool.address,
           epoch: this.epoch(pool, epoch.epochId),
           randomness: this.randomnessFor(epoch.vrfSeed),
-        })
-        .instruction(),
-    ];
-  }
-
-  /**
-   * Permissionless: the instruction takes no signer, so the operator is here
-   * only as the fee payer. A non-House winner needs no token account of
-   * their own any more (docs/plan/hexo-referrals ticket 02): the prize
-   * compounds into `principal_vault` and the winner's Principal instead of
-   * being paid to a token account, so there is nothing to create first.
-   */
-  async payout(
-    pool: PoolState,
-    epochId: bigint,
-    winner: PublicKey,
-  ): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("payout")
-        .accountsPartial({
-          pool: pool.address,
-          weightTree: pool.weightTree,
-          acceptedMint: pool.acceptedMint,
-          epoch: this.epoch(pool, epochId),
-          winner: this.player(pool, winner),
-          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
-          principalVault: principalVaultAddress(this.programId, pool.address),
-          treasury: pool.treasury,
-          buybackReserve: pool.buybackReserve,
-          ...this.venue(pool),
-          tokenProgram: TOKEN_PROGRAM_ID,
-        })
-        .remainingAccounts(this.venueRemaining(pool, "sync"))
-        .instruction(),
-    ];
-  }
-
-  /**
-   * A fresh nonce is generated per call and mixed into the seed
-   * (beta-launch-fixes ticket 02), so the randomness address is derived here
-   * from `round.roundId` rather than read back off `round.vrfSeed` (still
-   * `[0; 32]` before the first successful request), and is unknowable before
-   * this call.
-   */
-  async requestRoundRandomness(
-    pool: PoolState,
-    round: RoundState,
-  ): Promise<TransactionInstruction[]> {
-    const nonce = randomNonce();
-    return [
-      await this.method("requestRoundRandomness", Array.from(nonce))
-        .accountsPartial({
-          payer: this.operator,
-          pool: pool.address,
-          round: this.round(pool, round.roundId),
-          randomness: this.randomnessFor(vrfSeed("round", pool.address, round.roundId, nonce)),
-          vrfNetworkState: pool.vrfNetworkState,
-          vrfTreasury: ORAO_VRF_TREASURY,
-          vrfProgram: ORAO_VRF_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .instruction(),
-    ];
-  }
-
-  /** Permissionless (production-hardening ticket 01): first account is
-   *  `caller`, not `operator`; `house` still pins to `pool.house`. */
-  async settleRound(pool: PoolState, round: RoundState): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("settleRound")
-        .accountsPartial({
-          caller: this.operator,
-          pool: pool.address,
-          round: this.round(pool, round.roundId),
-          randomness: this.randomnessFor(round.vrfSeed),
-          house: pool.house,
-          weightTree: pool.weightTree,
-        })
-        .instruction(),
-    ];
-  }
-
-  /**
-   * Takes the Round rather than its id: the program checks the randomness
-   * account against the round's own seed before it will void. Permissionless
-   * (production-hardening ticket 01): first account is `caller`, not
-   * `operator`.
-   */
-  async voidRound(pool: PoolState, round: RoundState): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("voidRound")
-        .accountsPartial({
-          caller: this.operator,
-          pool: pool.address,
-          round: this.round(pool, round.roundId),
-          randomness: this.randomnessFor(round.vrfSeed),
-        })
-        .instruction(),
-    ];
-  }
-
-  async settlePositions(
-    pool: PoolState,
-    roundId: bigint,
-    positions: readonly { address: string; owner: string }[],
-  ): Promise<TransactionInstruction[]> {
-    const round = this.round(pool, roundId);
-    return Promise.all(
-      positions.map((position) => {
-        const owner = new PublicKey(position.owner);
-        return this.method("settlePosition")
-          .accountsPartial({
-            pool: pool.address,
-            weightTree: pool.weightTree,
-            round,
-            player: this.player(pool, owner),
-            owner,
-            position: new PublicKey(position.address),
-          })
-          .instruction();
-      }),
-    );
-  }
-
-  /**
-   * Permissionless, and the only builder here whose signer is not the
-   * operator: the Sparring player buys for itself, so the owner is passed in
-   * and `ChainService.send` gets its keypair.
-   */
-  async buyPosition(
-    pool: PoolState,
-    roundId: bigint,
-    owner: PublicKey,
-    tiles: bigint,
-    stakePerTile: bigint,
-  ): Promise<TransactionInstruction[]> {
-    const round = this.round(pool, roundId);
-    return [
-      await this.method("buyPosition", bn(tiles), bn(stakePerTile))
-        .accountsPartial({
-          owner,
-          pool: pool.address,
-          player: this.player(pool, owner),
-          weightTree: pool.weightTree,
-          round,
-          position: positionAddress(this.programId, round, owner),
-          systemProgram: SystemProgram.programId,
-        })
-        .instruction(),
-    ];
-  }
-
-  /**
-   * Permissionless (ops-and-envs ticket 08): reclaims a terminal Round's
-   * rent for the operator once nothing settled on it is still owed. The
-   * operator is both the fee payer and the rent destination, so it is
-   * passed once for both roles.
-   */
-  async closeRound(pool: PoolState, roundId: bigint): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("closeRound")
-        .accountsPartial({
-          pool: pool.address,
-          operator: this.operator,
-          round: this.round(pool, roundId),
-        })
-        .instruction(),
-    ];
-  }
-
-  /** mainnet-readiness-fixes 08: gives an empty Player's Weight tree leaf
-   *  back. Permissionless, so the operator key only pays the rent if the free
-   *  stack has to grow. */
-  async releaseLeaf(pool: PoolState, owner: string): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("releaseLeaf")
-        .accountsPartial({
-          payer: this.operator,
-          pool: pool.address,
-          player: playerAddress(this.programId, pool.address, new PublicKey(owner)),
-          weightTree: pool.weightTree,
-          freeLeaves: freeLeavesAddress(this.programId, pool.address),
-          systemProgram: SystemProgram.programId,
-        })
-        .instruction(),
-    ];
-  }
-
-  async createRound(
-    pool: PoolState,
-    startsAt: bigint,
-    endsAt: bigint,
-  ): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("createRound", bn(startsAt), bn(endsAt))
-        .accountsPartial({
-          operator: this.operator,
-          pool: pool.address,
-          currentEpoch: this.epoch(pool, pool.currentEpochId),
-          round: this.round(pool, pool.nextRoundId),
-          systemProgram: SystemProgram.programId,
         })
         .instruction(),
     ];

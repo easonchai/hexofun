@@ -115,7 +115,7 @@ async function main(): Promise<void> {
     );
   });
 
-  // Step 2. Fees and Position rent for weeks of hourly epochs.
+  // Step 2. Fees and rent for weeks of hourly epochs.
   await step("topping up the Sparring wallet's SOL", async () => {
     const lamports = await connection.getBalance(sparring.publicKey);
     if (lamports >= MIN_LAMPORTS) {

@@ -45,7 +45,6 @@ import {
 import { assertPoolMatchesExpected } from "./boot-guard";
 import { loadIdl } from "./chain/idl";
 import {
-  freeLeavesAddress,
   jackpotVaultAddress,
   playerAddress,
   poolAddress,
@@ -60,10 +59,6 @@ const DEVNET_VRF_NETWORK_STATE = new PublicKey(
 
 const HEXUSDC_DECIMALS = 6;
 
-/** `create_pool`'s Weight tree: discriminator plus the zero-copy header, a tree
- * with zero nodes (tests/helpers/hx.ts `WEIGHT_TREE_SPACE`). */
-const WEIGHT_TREE_SPACE = 8 + 48;
-
 /** Only the Pool fields this script reads back on a re-run. */
 interface PoolAccount {
   admin: PublicKey;
@@ -71,7 +66,6 @@ interface PoolAccount {
   acceptedMint: PublicKey;
   treasury: PublicKey;
   buybackReserve: PublicKey;
-  weightTree: PublicKey;
   klendProgram: PublicKey;
   klendMarket: PublicKey;
   klendReserve: PublicKey;
@@ -270,11 +264,6 @@ async function createPool(
     );
   }
 
-  // A top-level create_account has to precede create_pool in the same
-  // transaction: the program only fills the tree, it cannot allocate it. The
-  // keypair is not kept, the Pool records the address.
-  const weightTree = Keypair.generate();
-  const connection = program.provider.connection;
   await createPoolMethod({
     poolId: new BN(poolId.toString()),
     admin: roles.admin,
@@ -282,16 +271,11 @@ async function createPool(
     vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
     epochSeconds: new BN(params.epochSeconds),
     epochAnchor: new BN(params.epochAnchor),
-    roundSeconds: new BN(params.roundSeconds),
-    closeBuffer: new BN(params.closeBuffer),
     vrfTimeout: new BN(params.vrfTimeout),
     minDeposit: new BN(params.minDeposit.toString()),
-    houseCutBps: params.houseCutBps,
     minJackpot: new BN(params.minJackpot.toString()),
     payoutTimeout: new BN(params.payoutTimeout),
     baseRateBps: params.baseRateBps,
-    ticketsPerUsdc: params.ticketsPerUsdc,
-    bonusCapBps: params.bonusCapBps,
     venueKind: venue.kind,
   })
     .accountsPartial({
@@ -306,8 +290,6 @@ async function createPool(
       house: playerAddress(program.programId, pool, roles.operator),
       treasury,
       buybackReserve,
-      weightTree: weightTree.publicKey,
-      freeLeaves: freeLeavesAddress(program.programId, pool),
       klendProgram: venue.klendProgram,
       klendMarket: venue.klendMarket,
       klendReserve: venue.klendReserve,
@@ -315,19 +297,10 @@ async function createPool(
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
-    .preInstructions([
-      SystemProgram.createAccount({
-        fromPubkey: payer.publicKey,
-        newAccountPubkey: weightTree.publicKey,
-        space: WEIGHT_TREE_SPACE,
-        lamports: await connection.getMinimumBalanceForRentExemption(WEIGHT_TREE_SPACE),
-        programId: program.programId,
-      }),
-    ])
-    .signers([payer, weightTree])
+    .signers([payer])
     .rpc();
   log(
-    `created pool ${pool.toBase58()} (epoch ${params.epochSeconds}s, round ${params.roundSeconds}s)`,
+    `created pool ${pool.toBase58()} (epoch ${params.epochSeconds}s)`,
   );
   // Print the grid the anchor produces, so a mistyped anchor is obvious now
   // rather than a week later when the draws land at the wrong hour.
@@ -704,7 +677,6 @@ async function main(): Promise<void> {
       `TREASURY=${treasury.toBase58()}`,
       `BUYBACK_RESERVE=${buybackReserve.toBase58()}`,
       `AUTHORITY_ATA=${authorityAta.toBase58()}`,
-      `WEIGHT_TREE=${pinned.weightTree.toBase58()}`,
       `KLEND_PROGRAM=${pinned.klendProgram.toBase58()}`,
       `KLEND_MARKET=${pinned.klendMarket.toBase58()}`,
       `KLEND_RESERVE=${pinned.klendReserve.toBase58()}`,

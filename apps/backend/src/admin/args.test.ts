@@ -46,33 +46,14 @@ describe("parseAdminCommand", () => {
     );
   });
 
-  it("parses grant-tickets' owner and amount", () => {
-    const owner = Keypair.generate().publicKey;
-    expect(
-      parseAdminCommand([
-        "grant-tickets",
-        "--owner",
-        owner.toBase58(),
-        "--amount",
-        "500",
-      ]),
-    ).toEqual({ kind: "grant-tickets", owner, amount: 500n });
-  });
-
-  it("rejects grant-tickets missing either flag, or a bad one", () => {
-    const owner = Keypair.generate().publicKey.toBase58();
-    expect(() => parseAdminCommand(["grant-tickets", "--amount", "1"])).toThrow(
-      /needs --owner/,
-    );
-    expect(() => parseAdminCommand(["grant-tickets", "--owner", owner])).toThrow(
-      /needs --amount/,
-    );
-    expect(() =>
-      parseAdminCommand(["grant-tickets", "--owner", "nope", "--amount", "1"]),
-    ).toThrow(/base58 pubkey/);
-    expect(() =>
-      parseAdminCommand(["grant-tickets", "--owner", owner, "--amount=-1"]),
-    ).toThrow(/positive whole number/);
+  it("no longer has grant-tickets, void-round or the round and ticket-rate flags", () => {
+    // The program dropped them (off-chain-tickets ticket 10); grants return as
+    // a signed backend request in wave 3.
+    expect(() => parseAdminCommand(["grant-tickets", "--owner", "x", "--amount", "1"])).toThrow(/usage/);
+    expect(() => parseAdminCommand(["void-round", "--round", "1"])).toThrow(/usage/);
+    for (const flag of ["--round-seconds", "--close-buffer", "--house-cut-bps", "--tickets-per-usdc", "--bonus-cap-bps"]) {
+      expect(() => parseAdminCommand(["set-params", flag, "1"])).toThrow(/usage/);
+    }
   });
 
   it("parses only the set-params flags given", () => {
@@ -80,27 +61,9 @@ describe("parseAdminCommand", () => {
       kind: "set-params",
       params: { epochSeconds: 900 },
     });
-    expect(
-      parseAdminCommand([
-        "set-params",
-        "--round-seconds",
-        "20",
-        "--close-buffer",
-        "0",
-      ]),
-    ).toEqual({
-      kind: "set-params",
-      params: { roundSeconds: 20, closeBuffer: 0 },
-    });
     expect(parseAdminCommand(["set-params", "--min-deposit", "0"])).toEqual({
       kind: "set-params",
       params: { minDeposit: 0n },
-    });
-    expect(
-      parseAdminCommand(["set-params", "--house-cut-bps", "600"]),
-    ).toEqual({
-      kind: "set-params",
-      params: { houseCutBps: 600 },
     });
   });
 
@@ -112,53 +75,19 @@ describe("parseAdminCommand", () => {
     expect(() =>
       parseAdminCommand(["set-params", "--epoch-seconds", "0"]),
     ).toThrow(/positive whole number/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--close-buffer=-1"]),
-    ).toThrow(/non-negative whole number/);
   });
 
-  it("rejects a House cut rate above 10000", () => {
-    expect(() =>
-      parseAdminCommand(["set-params", "--house-cut-bps", "10001"]),
-    ).toThrow(/0 to 10000/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--house-cut-bps=-1"]),
-    ).toThrow(/0 to 10000/);
-  });
-
-  it("parses the base yield, bought and granted tickets flags (ticket 05)", () => {
-    expect(
-      parseAdminCommand([
-        "set-params",
-        "--base-rate-bps",
-        "488",
-        "--tickets-per-usdc",
-        "10",
-        "--bonus-cap-bps",
-        "500",
-      ]),
-    ).toEqual({
+  it("parses the base yield flag (ticket 05)", () => {
+    expect(parseAdminCommand(["set-params", "--base-rate-bps", "488"])).toEqual({
       kind: "set-params",
-      params: { baseRateBps: 488, ticketsPerUsdc: 10, bonusCapBps: 500 },
+      params: { baseRateBps: 488 },
     });
   });
 
-  it("rejects a base yield or bonus cap rate outside 0..=10000", () => {
+  it("rejects a base yield rate outside 0..=10000", () => {
     expect(() =>
       parseAdminCommand(["set-params", "--base-rate-bps", "10001"]),
     ).toThrow(/0 to 10000/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--bonus-cap-bps=-1"]),
-    ).toThrow(/0 to 10000/);
-  });
-
-  it("rejects a tickets-per-usdc rate of zero or above a u16", () => {
-    expect(() =>
-      parseAdminCommand(["set-params", "--tickets-per-usdc", "0"]),
-    ).toThrow(/1 to 65535/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--tickets-per-usdc", "65536"]),
-    ).toThrow(/1 to 65535/);
   });
 
   it("parses the two flags ticket 10 added to the program", () => {
@@ -417,17 +346,12 @@ describe("parseAdminCommand", () => {
     );
   });
 
-  it("parses void-round and rollover-epoch ids as bigints", () => {
-    expect(parseAdminCommand(["void-round", "--round", "17"])).toEqual({
-      kind: "void-round",
-      roundId: 17n,
-    });
+  it("parses the rollover-epoch id as a bigint", () => {
     expect(parseAdminCommand(["rollover-epoch", "--epoch", "3"])).toEqual({
       kind: "rollover-epoch",
       epochId: 3n,
     });
-    expect(() => parseAdminCommand(["void-round"])).toThrow(/--round/);
-    expect(() => parseAdminCommand(["rollover-epoch", "--epoch", "-1"])).toThrow(/whole number/);
+    expect(() => parseAdminCommand(["rollover-epoch", "--epoch", "-1"])).toThrow(/usage/);
   });
 
   it("rejects an unknown command", () => {

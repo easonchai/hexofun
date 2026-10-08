@@ -15,7 +15,6 @@ export type AlertCode =
   | "RPC_FALLBACK_ACTIVE"
   | "INDEXER_STALE"
   | "WITHDRAW_SHORTFALL"
-  | "ROUND_VOIDED_RECENTLY"
   | "EPOCH_ROLLED_OVER_RECENTLY"
   | "WITHDRAW_OWNERS_SKIPPED"
   | "OPERATOR_SOL_READ_FAILED"
@@ -30,7 +29,6 @@ export type AlertCode =
   | "RESERVE_LIQUIDITY_LOW"
   | "POOL_IMPAIRED"
   | "DEPLOY_PAUSED"
-  | "WEIGHT_TREE_NEARLY_FULL"
   | "VENUE_PROPOSED"
   | "PARAMS_CHANGED";
 
@@ -42,7 +40,7 @@ export interface Alert {
 /** Not env-tunable: spec.md's alerts decision only names `OPERATOR_SOL_WARN`,
  *  `ALERT_TICK_STALE_S` and `ALERT_INDEXER_STALE_S` as thresholds. */
 export const RPC_FALLBACK_RECENT_MS = 10 * 60 * 1000;
-export const VOID_OR_ROLLOVER_RECENT_S = 60 * 60;
+export const ROLLOVER_RECENT_S = 60 * 60;
 /** mainnet-readiness-fixes 04: how long `PARAMS_CHANGED` stays up after a
  *  `ParamsSet` event, long enough for a once-a-minute monitor to page. */
 export const PARAMS_CHANGED_RECENT_S = 60 * 60;
@@ -53,10 +51,6 @@ export const OPERATOR_FAILING_SECONDS = 5 * 60;
 /** Ticket 09: "inside the last hour before close" for the jackpot and
  *  principal-out conditions, straight from spec.md's own wording. */
 export const NEAR_CLOSE_SECONDS = 60 * 60;
-/** Yield-claimer ticket 14: the Weight tree alerts above this share of its
- *  capacity, in basis points (80% since mainnet-readiness-fixes 08, which
- *  also lets the Operator release empty leaves). */
-export const TREE_NEARLY_FULL_BPS = 8_000;
 /** A negative solvency margin smaller than this is rounding dust from a
  *  redeem, which the program charges to the fee owed (spec "Sync"). */
 export const SOLVENCY_DUST = 10n;
@@ -93,7 +87,6 @@ export interface AlertInputs {
   /** OperatorState.withdrawShortfall, already 0n for "never checked" and
    *  "covered" alike (ApiService.getStatus already collapses the two). */
   withdrawShortfall: bigint;
-  roundVoidedRecently: boolean;
   epochRolledOverRecently: boolean;
   /** Ticket 06: OperatorState.withdrawSkippedCount, 0 for "never checked"
    *  and "none skipped" alike. */
@@ -131,8 +124,6 @@ export interface AlertInputs {
   reserveFreeLiquidity: bigint | null;
   impaired: boolean;
   deployPaused: boolean;
-  /** `/status`'s `treeUsedBps`. */
-  treeUsedBps: number;
   /** The open venue proposal, null when there is none. */
   venueProposal: VenueProposalAlert | null;
   /** The newest `ParamsSet` event's values inside the last hour, null when
@@ -243,9 +234,6 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The principal vault fell short of a pending withdrawal on the last tick.",
     });
   }
-  if (inputs.roundVoidedRecently) {
-    alerts.push({ code: "ROUND_VOIDED_RECENTLY", message: "A round voided in the last hour." });
-  }
   if (inputs.epochRolledOverRecently) {
     alerts.push({
       code: "EPOCH_ROLLED_OVER_RECENTLY",
@@ -319,12 +307,6 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
   if (inputs.deployPaused) {
     alerts.push({ code: "DEPLOY_PAUSED", message: "Deployment to the venue is paused." });
   }
-  if (inputs.treeUsedBps > TREE_NEARLY_FULL_BPS) {
-    alerts.push({
-      code: "WEIGHT_TREE_NEARLY_FULL",
-      message: "The Weight tree is over 80% of its capacity.",
-    });
-  }
   if (inputs.venueProposal !== null) {
     const p = inputs.venueProposal;
     // The 48 hour lock is the window to cancel a proposal nobody expected.
@@ -386,7 +368,7 @@ export class AlertsController {
   async getAlerts(): Promise<{ alerts: Alert[] }> {
     const [status, recent, venueProposal, paramsChanged] = await Promise.all([
       this.api.getStatus(),
-      this.recentVoidOrRollover(),
+      this.recentRollover(),
       this.openVenueProposal(),
       this.recentParamsSet(),
     ]);
@@ -410,7 +392,6 @@ export class AlertsController {
           status.rpcFallbackAt === null ? null : Date.now() - status.rpcFallbackAt.getTime(),
         indexerAgeSeconds: status.cursor.ageSeconds,
         withdrawShortfall: status.withdrawShortfall,
-        roundVoidedRecently: recent.roundVoidedRecently,
         epochRolledOverRecently: recent.epochRolledOverRecently,
         withdrawSkippedCount: status.withdrawSkippedCount,
         epochNoProgress: status.operator?.epochNoProgress ?? false,
@@ -426,7 +407,6 @@ export class AlertsController {
         reserveFreeLiquidity: status.reserveFreeLiquidity,
         impaired: status.impaired,
         deployPaused: status.deployPaused,
-        treeUsedBps: status.treeUsedBps,
         venueProposal,
         paramsChanged,
       },
@@ -478,26 +458,14 @@ export class AlertsController {
       : null;
   }
 
-  /** `RoundVoided`/`EpochRolledOver` are two of `FEED_NAMES` in
-   *  api.service.ts; `decode.ts`'s `declaredName` is what puts them in the
-   *  Event table under those exact names. `distinct` caps this at two rows. */
-  private async recentVoidOrRollover(): Promise<{
-    roundVoidedRecently: boolean;
-    epochRolledOverRecently: boolean;
-  }> {
-    const cutoff = BigInt(Math.floor(Date.now() / 1000) - VOID_OR_ROLLOVER_RECENT_S);
-    const rows = await this.prisma.event.findMany({
-      where: {
-        poolAddress: this.api.poolAddress,
-        name: { in: ["RoundVoided", "EpochRolledOver"] },
-        blockTime: { gte: cutoff },
-      },
+  /** `EpochRolledOver` is one of `FEED_NAMES` in api.service.ts; `decode.ts`'s
+   *  `declaredName` is what puts it in the Event table under that exact name. */
+  private async recentRollover(): Promise<{ epochRolledOverRecently: boolean }> {
+    const cutoff = BigInt(Math.floor(Date.now() / 1000) - ROLLOVER_RECENT_S);
+    const row = await this.prisma.event.findFirst({
+      where: { poolAddress: this.api.poolAddress, name: "EpochRolledOver", blockTime: { gte: cutoff } },
       select: { name: true },
-      distinct: ["name"],
     });
-    return {
-      roundVoidedRecently: rows.some((row) => row.name === "RoundVoided"),
-      epochRolledOverRecently: rows.some((row) => row.name === "EpochRolledOver"),
-    };
+    return { epochRolledOverRecently: row !== null };
   }
 }
