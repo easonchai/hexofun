@@ -4,7 +4,7 @@ The product is HEXO (hexo.fun). `hex_vault` is the program name and HexVault the
 
 A no-loss savings app on Solana: users deposit USDC into a pool, earn a Base yield on it, the rest of the pool's yield becomes the daily draw's prize, and each depositor's Tickets decide their odds. Tickets can be risked in a MinePEA-style hex-tile game against other depositors to win more Tickets, but principal is never at stake.
 
-Player-facing words differ from mechanism names in three places, on purpose: the screen says "day" where the code says epoch, "prize" or "hexpot" where the code says jackpot, and "tickets" where the code says entries. Code, API and program identifiers keep the mechanism names.
+Player-facing words differ from mechanism names in two places, on purpose: the screen says "day" where the code says epoch, and "prize" or "hexpot" where the code says jackpot. Code, API and program identifiers keep the mechanism names.
 
 ## Language
 
@@ -35,11 +35,11 @@ Principal deposited in the current epoch. It earns yield from the second it land
 _Avoid_: Unconfirmed deposit, escrow, queued deposit, activation queue
 
 **Player**:
-One wallet's account in one pool: its Principal, Tickets, any Pending deposit and Pending withdrawal, the Yield index at its last settle, and its Leaf in the Weight tree.
+One wallet's account in one pool: its Principal, any Pending deposit and Pending withdrawal, and the Yield index at its last settle. Its Tickets live in the Ticket ledger, not on the account.
 _Avoid_: User account, position (a game concept)
 
 **House**:
-The Player account owned by the Operator key. It holds no Principal, receives forfeited round pots as Tickets, and competes in the draw like any player. Its Tickets reset to zero each epoch.
+The Player account owned by the Operator key, and the matching wallet in the Ticket ledger. It holds no Principal, receives forfeited round pots and the House cut as Tickets, and competes in the draw like any player, which is why it stays an on-chain Player: `payout` must be able to pay it. Its Tickets reset to zero each epoch.
 _Avoid_: Admin wallet, protocol player, operator (a service, not an account)
 
 **Treasury**:
@@ -99,12 +99,12 @@ _Avoid_: Loss (the venue's fall in value), slashing, penalty, exit fee
 ### Lottery
 
 **Bought tickets**:
-Tickets a depositor pays USDC for, at a pool-set number of Tickets per USDC, up to their locked Principal (the Pending deposit excluded) in USDC per epoch. The USDC goes to the jackpot vault and is never returned. Bought tickets are ordinary Tickets from the moment they land. `buy_tickets` is refused while the pool's on-chain buy-tickets pause is set, which only the Admin changes and which is on at mainnet launch.
+Tickets a depositor pays USDC for, at the Game config's number of Tickets per USDC, up to their locked Principal (the Pending deposit excluded) in USDC per epoch. The USDC goes to the jackpot vault and is never returned; the program emits the purchase and the Ticket ledger credits the Tickets. Bought tickets are ordinary Tickets from the moment they land. `buy_tickets` is refused while the pool's on-chain buy-tickets pause is set, which only the Admin changes and which is on at mainnet launch.
 _Avoid_: Purchased entries, deposit (a bought ticket is not Principal)
 
 **Granted tickets**:
-Tickets credited to a Player by the Operator key or the Admin rather than earned by depositing, buying or playing. Operator grants are capped per Player at their locked Principal (the Pending deposit excluded) and per pool at the Principal total as the epoch began; Admin grants are not. Ordinary Tickets once credited.
-_Avoid_: Minted tickets, airdrop, free tickets (those are the daily reset)
+Tickets credited to a wallet by a signed request rather than earned by depositing, buying or playing: the Operator's Referral bonus, or a manual grant signed by a team wallet through the admin CLI or the Ops console. Operator grants are capped per wallet at their locked Principal (the Pending deposit excluded) and per pool at the Principal total as the epoch began; team grants are not. Every grant is a Ticket ledger row that names its signer. Ordinary Tickets once credited.
+_Avoid_: Minted tickets, airdrop, free tickets (those are the daily reset), raw SQL
 
 **Referral bonus**:
 The Granted tickets a Referrer receives at the start of each epoch: a rate set by their count of Qualified referrals, applied to those referrals' Principal.
@@ -112,26 +112,34 @@ _Avoid_: Commission, referral reward pool
 
 
 **Tickets**:
-A whole-unit count, one per micro-USDC, and the number the draw selects over. A Player holds Principal's worth of Tickets in each epoch, and fresh Principal joins from the next epoch, so a deposit made today is in tomorrow's draw. Settled yield is fresh Principal too and joins the same way. Bought tickets, Granted tickets, round rewards, void refunds, House credits and the Prize add Tickets the moment they land. The game moves them between players, and Tickets reset to equal Principal at each new epoch. Non-transferable, non-redeemable, never USDC. Code, the API and the program call them entries (`Player.entries`); the screen and this glossary say Tickets.
-_Avoid_: Entries (on screen), ET, entry token, chances, chips, TWAB
+A whole-unit count, one per micro-USDC, and the number the draw selects over. A wallet holds Principal's worth of Tickets in each epoch, and fresh Principal joins from the next epoch, so a deposit made today is in tomorrow's draw. Settled yield is fresh Principal too and joins the same way. Bought tickets, Granted tickets, round rewards, void refunds, House credits and the Prize add Tickets the moment they land. The game moves them between players, and Tickets reset to equal Principal at each new epoch. Non-transferable, non-redeemable, never USDC, and never on chain: they are rows in the Ticket ledger, and only the Epoch snapshot's root reaches the program.
+_Avoid_: Entries (retired everywhere), ET, entry token, chances, chips, TWAB
+
+**Ticket ledger**:
+The backend's append-only record of every Ticket movement: one row per change with its amount, reason, cause and signer, and a balance per wallet kept beside it. Chain events (deposits, withdrawals, the Prize, bought Tickets) and backend events (bets, settles, grants, the epoch reset) write it; nothing else does, and no row is ever edited.
+_Avoid_: Balance table, entries, on-chain Tickets
+
+**Epoch snapshot**:
+Every wallet's Tickets at the moment an epoch ends, taken at the next epoch's first event and published. The Operator hashes it as a Merkle sum tree and commits the root, total, depth and leaf count to the Epoch when it requests the draw, so the draw selects over a list that was fixed before the randomness existed. A wallet's proof is built from it on demand.
+_Avoid_: Registration, Weight tree (retired), Merkle tree (the structure, not the record)
 
 **Weight**:
-Retired as a quantity. It was Tickets times seconds held, and the draw now selects over Tickets, so the number on screen is the number the draw uses. The word survives only in "Weight tree".
-_Avoid_: TWAB, average balance, odds, registered weight (retired), ticket-seconds
+Retired. It was Tickets times seconds held; the draw selects over Tickets.
+_Avoid_: TWAB, average balance, odds, registered weight, ticket-seconds
 
 **Weight tree**:
-One zero-copy account per pool that holds every Player's Tickets as a Fenwick tree, one entry per Player ever created. Each entry keeps two epoch-parity slots, so a new epoch starts with no transaction and the ended one stays readable until the epoch after next begins. The root is the epoch's total Tickets, and the Draw walks down from it to the winner. It grows by one 56-byte entry at a Player's first deposit, paid for by that depositor, up to 10 MiB, about 187,000 Players. It replaced per-Player registration.
-_Avoid_: Sum tree (the general structure), registration, snapshot, Merkle tree
+Retired. The on-chain Fenwick tree that held every Player's Tickets until ADR 0025 moved Tickets to the Ticket ledger. The Epoch snapshot replaces it.
+_Avoid_: Sum tree, registration, snapshot, Merkle tree
 
 **Leaf**:
-A Player's place in the Weight tree: an index assigned at first deposit and stored on the Player, 0 once released. A Leaf has one owner at a time. A Fenwick entry holds a range sum, not one Player's value, so a Player's own Tickets in the tree are the difference of two prefix sums; the Indexer reads the Player's Tickets directly. `payout` checks that the winner's Leaf range holds the draw's target.
-_Avoid_: Node, entry (a tree slot that sums a range), slot (one epoch-parity half of an entry), registration interval
+Retired as an on-chain concept. A wallet's place in the Weight tree. The word survives only for an Epoch snapshot's leaf, one wallet and its Tickets.
+_Avoid_: Node, entry, slot, registration interval
 
 **FreeLeaves**:
-One zero-copy account per pool (seeds `["free_leaves", pool]`, created by `create_pool`) that holds a stack of released Leaf indices. `deposit` pops from it when a Player has no Leaf, and appends to the Weight tree only when it is empty, so a refunded wallet's Leaf serves the next depositor and the tree stops growing. The account only grows, one 4-byte entry per release, paid for by whoever called `release_leaf`.
+Retired with the Weight tree.
 
 **Leaf release**:
-`release_leaf(player)`, callable by anyone, moves an empty Player's Leaf onto FreeLeaves and sets the Player's `leaf_index` to 0. It needs zero Principal, no queued withdrawal, no open Position, and no Tickets on that Leaf in the current epoch or the one before it, and it refuses the House. The Operator releases one empty Player's Leaf per tick once the Player has been empty for more than one epoch.
+Retired with the Weight tree.
 
 **Epoch**:
 One lottery cycle. Its boundaries are points on a fixed grid: the pool's Anchor sets where the grid sits, and the cycle length, a pool parameter, sets the spacing. Epochs are contiguous, and a late crank lands on the same grid a punctual one would, so an operator outage skips whole epochs instead of moving the boundary. A pool's first epoch is the short stub from launch to the next grid point.
@@ -154,11 +162,11 @@ The jackpot vault's current balance: this epoch's prize once funded, plus anythi
 _Avoid_: Jackpot (on screen), honeypot, prize pool
 
 **Draw**:
-The verifiable random selection of one point in an epoch's Ticket total via ORAO VRF. The program hashes all 64 bytes of the randomness and reduces the digest to a target under the 64-bit total of Tickets. The Player whose Leaf in the Weight tree covers the target wins the Prize.
+The verifiable random selection of one point in an epoch's Ticket total via ORAO VRF. The Epoch snapshot's root is mixed into the randomness seed, the program hashes all 64 bytes of the randomness and reduces the digest to a target under the snapshot's total, and the wallet whose leaf range covers the target wins the Prize.
 _Avoid_: Snapshot, lottery, raffle
 
 **Payout**:
-Moving the Prize from the jackpot vault into the principal vault and adding it to the winner's Principal, so it compounds and is withdrawn like any other Principal. No claim step, and no signer: the operator cranks it, but anyone can, because the winner is fixed on chain. If the House wins, the Prize splits 50% buyback reserve, 30% stays for the next epoch, 20% treasury.
+Moving the Prize from the jackpot vault into the principal vault and adding it to the winner's Principal, so it compounds and is withdrawn like any other Principal. No claim step, and no signer: the operator cranks it, but anyone can, because the winner is fixed on chain. The caller passes the winner's leaf and its proof, and the program accepts only a proof that reaches the committed root, sums to the committed total and covers the target. If the House wins, the Prize splits 50% buyback reserve, 30% stays for the next epoch, 20% treasury.
 _Avoid_: Claim, redeem
 
 **Rollover**:
@@ -168,16 +176,32 @@ _Avoid_: Expiry, unclaimed prize
 ### Game
 
 **Round**:
-One 60 second game on the 36-tile hex board. Players place Tickets on tiles; VRF selects one winning tile; the round pot goes to the positions on it.
-_Avoid_: Game, match, session
+One game on the 36-tile hex board, run by the backend. It opens with its first bet, closes on the first minute mark at least a full minute later, and its winning tile comes from a seed the backend committed at open mixed with a Beacon that did not exist at close. The round pot goes to the Positions on the winning tile. Everything about it is published as its Round record.
+_Avoid_: Game, match, session (a Session key's lifetime)
 
 **Tile**:
 One of the 36 indexed hex cells (0 to 35) on a round's board.
 _Avoid_: Hex, cell, square
 
 **Position**:
-A Player's immutable placement in one round: a set of tiles and one uniform stake per tile, paid in Tickets. One per Player per round; the Position address is derived from the round and the owner, so a second `buy_position` in the same round fails.
-_Avoid_: Bet, wager, deployment, mine, top-up
+A wallet's immutable placement in one Round: a set of tiles and one uniform stake per tile, paid in Tickets, created by a bet message signed with the wallet's Session key and stored with that signature. One per wallet per Round; a second is refused.
+_Avoid_: Bet (the signed message that creates a Position), wager, deployment, mine, top-up
+
+**Session key**:
+A keypair the browser makes and the wallet delegates once a day by signing a Sign-In-With-Solana shaped message that names it. It can sign bets and nothing else, expires after 24 hours, and can be revoked. A wallet that cannot sign a message (a Ledger through wallet-adapter) has no Session key and cannot play.
+_Avoid_: Login, cookie, API key, burner (the devnet test wallet)
+
+**Round record**:
+The published account of one Round, served by the API: the Game config in force, the seed commitment and open time, every delegation of a wallet that bet, every Position in accepted order with its signature, the close time and the hash of the bet list, the Beacon, the revealed seed and the tile, and the settle. A third party can verify it with public keys alone.
+_Avoid_: Receipt, audit log, memo (declined)
+
+**Beacon**:
+One drand quicknet value: a BLS signature over a round number that the League of Entropy publishes every 3 seconds and anyone can verify against one public key. A Round uses the beacon two drand rounds after its close, so nobody could see it while bets were open. No beacon within 10 minutes voids the Round; there is no fallback source.
+_Avoid_: Blockhash, oracle, VRF (the draw's source), seed (the backend's half)
+
+**Game config**:
+The game's parameters for one pool as a signed, append-only row: round length, House cut, Tickets per USDC, the grant cap, the referral rate tiers. A team wallet changes them by signing a request, and each Round record quotes the row in force.
+_Avoid_: Pool parameters (the on-chain ones), settings, env
 
 **Round pot**:
 All Tickets staked in a round. The positions covering the winning tile get their own stakes back, and the losers' pot, the rest of the pot after the House cut, is distributed to them pro rata, so the total Tickets in the pool is unchanged by a round.
@@ -196,7 +220,7 @@ A round pot whose winning tile nobody covered. It is credited to the House as Ti
 _Avoid_: Burn, rollover (a lottery concept)
 
 **Void**:
-A round whose randomness never arrived within `vrf_timeout`. Every Position's stake comes back as Tickets when it settles, and no House cut is taken.
+A round whose Beacon no relay served within 10 minutes of its due time. Every Position's stake comes back as Tickets, and no House cut is taken.
 _Avoid_: Cancel, carry (the retired rule that moved a voided pot into the next round)
 
 ### Growth
@@ -224,11 +248,11 @@ The multisig or wallet that changes pool parameters, venue parameters included, 
 _Avoid_: Authority (the removed program role), owner, admin wallet, Operator
 
 **Operator key**:
-The hot keypair on the VPS that the Operator service signs with, and `Pool.operator` in the program. It exclusively opens epochs and rounds and requests the draw's randomness; settling, voiding, drawing and rolling over an epoch are permissionless (production-hardening ticket 01), and so are deploy, recall and Harvest, so the Operator key still cranks them but a stalled or stolen one cannot withhold a fulfilled result or leave a timed-out request stuck. It owns the House Player. Paying the winner needs no signer, so it only pays that transaction's fee. It can pause deployment but not restart it. It cannot change parameters, unpause, or move principal. The Admin rotates it in one transaction.
+The hot keypair on the VPS that the Operator service signs with, and `Pool.operator` in the program. It exclusively opens epochs and requests the draw's randomness, and it alone commits the Epoch snapshot's root in that request; drawing, paying and rolling over an epoch are permissionless, and so are deploy, recall and Harvest, so the Operator key still cranks them but a stalled or stolen one cannot withhold a fulfilled result or leave a timed-out request stuck. It owns the House Player and signs the Referral bonus grants in the Ticket ledger. It can pause deployment but not restart it. It cannot change parameters, unpause, move principal, or pay a wallet the draw did not pick. The Admin rotates it in one transaction.
 _Avoid_: Authority keypair, pool authority, admin key, hot wallet
 
 **Operator**:
-The backend service that advances the protocol: opens epochs and rounds, requests randomness, settles rounds and positions, deploys to and recalls from the venue to keep the Idle band, runs Harvest once per epoch, pays the winner, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
+The backend service that advances the protocol: opens epochs, builds and commits the Epoch snapshot, requests the draw's randomness, pays the winner with its proof, runs the game's Rounds from first bet to settle, grants the Referral bonus, deploys to and recalls from the venue to keep the Idle band, runs Harvest once per epoch, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
 _Avoid_: Bot, cron, CLI, admin (a separate role), authority (the removed program role)
 
 **Ops console**:
@@ -240,11 +264,11 @@ A request from the Ops console that has the Operator set one of the four switche
 _Avoid_: Kill switch, emergency stop, Shutdown (permanent, Admin only)
 
 **Sparring player**:
-A backend-owned Player that deposits once and buys one Position in every Round, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House. It runs only when its backend environment flag is set, and no production env file sets it.
+A backend-owned Player that deposits once and takes one Position in every open Round, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. It bets through a Session key like any wallet, so its bets verify in the Round record, and it never opens a Round. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House. It runs only when its backend environment flag is set, and no production env file sets it.
 _Avoid_: Bot, house player, NPC, dummy user
 
 **Read model**:
-The Indexer's Postgres mirror of program accounts and finalized events, and the only path by which the browser learns anything about the protocol. A cache may be bypassed for a fresher read; the Read model may not, since the browser keeps no chain read of its own to fall back to.
+The Indexer's Postgres mirror of program accounts and finalized events, plus the Ticket ledger and the game's rows, and the only path by which the browser learns anything about the protocol. A cache may be bypassed for a fresher read; the Read model may not, since the browser keeps no chain read of its own to fall back to.
 _Avoid_: Cache, backend
 
 **Indexer**:
@@ -252,7 +276,7 @@ The backend component that mirrors program accounts and finalized events into Po
 _Avoid_: Cache, backend (too broad)
 
 **Pause**:
-A reversible pool state (`Pool.paused`) that stops all Ticket movement, `buy_position` and both `grant_tickets` paths, while leaving an open Round free to finish: Withdraw, `settle_round`, `void_round`, `settle_position`, `close_round`, the epoch cranks and `fund_jackpot` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
+A reversible pool state (`Pool.paused`) that stops deposits and bought Tickets on chain, and bets and grants in the backend, while leaving an open Round free to finish: Withdraw, the epoch cranks and `fund_jackpot` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
 _Avoid_: Shutdown (a separate, irreversible state), freeze, halt
 
 **Shutdown**:
@@ -260,7 +284,7 @@ An admin-only, irreversible pool state (`Pool.shutdown`) that stops every inflow
 _Avoid_: Pause (a separate, reversible state), wind-down, freeze
 
 **Game pause**:
-A reversible pool switch (`Pool.game_paused`) that stops new Rounds opening and new Positions being bought. A Round already open still settles or voids, so no stake is stuck. Either key can turn it on; only the Admin can turn it off, and never after Shutdown. A new pool starts with it on, so turning it off is how the game starts. Set by `set_feature_pause`.
+A reversible pool switch (`Pool.game_paused`) that the backend reads from the Read model to stop new Rounds opening and new bets being accepted. A Round already open still reveals and settles, so no stake is stuck. Either key can turn it on; only the Admin can turn it off, and never after Shutdown. A new pool starts with it on, so turning it off is how the game starts. Set by `set_feature_pause`; the program itself has nothing left to refuse.
 _Avoid_: Freeze, stop the board
 
 **Jackpot pause**:
