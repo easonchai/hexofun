@@ -31,7 +31,8 @@ export type AlertCode =
   | "DEPLOY_PAUSED"
   | "VENUE_PROPOSED"
   | "PARAMS_CHANGED"
-  | "TICKET_LEDGER_MISMATCH";
+  | "TICKET_LEDGER_MISMATCH"
+  | "SNAPSHOT_MISMATCH";
 
 export interface Alert {
   code: AlertCode;
@@ -101,6 +102,8 @@ export interface AlertInputs {
   epochNoProgress: boolean;
   /** Ticket 09: OperatorState.drawnUnpaid. */
   drawnUnpaid: boolean;
+  /** Off-chain-tickets 12: OperatorState.snapshotMismatch. */
+  snapshotMismatch: boolean;
   /** Ticket 09: null when the sparring player is not configured, or its
    *  balance read failed; both read as "nothing to warn about" the same way
    *  a failed operator SOL read does not itself mean the operator is low. */
@@ -262,6 +265,12 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The epoch drew a winner more than a few minutes ago and it is still unpaid.",
     });
   }
+  if (inputs.snapshotMismatch) {
+    alerts.push({
+      code: "SNAPSHOT_MISMATCH",
+      message: "The drawn epoch's winner proof does not match the committed snapshot root, and the operator has stopped retrying it.",
+    });
+  }
   if (inputs.sparringSolLow === true) {
     alerts.push({
       code: "SPARRING_SOL_LOW",
@@ -407,6 +416,7 @@ export class AlertsController {
         withdrawSkippedCount: status.withdrawSkippedCount,
         epochNoProgress: status.operator?.epochNoProgress ?? false,
         drawnUnpaid: status.operator?.drawnUnpaid ?? false,
+        snapshotMismatch: status.operator?.snapshotMismatch ?? false,
         sparringSolLow: status.sparringSolLow,
         secondsToEpochClose,
         jackpotAmount: status.jackpotAmount,

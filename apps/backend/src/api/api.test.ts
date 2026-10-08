@@ -33,7 +33,9 @@ import { ChainService } from "../chain/chain.service";
 import { ConfigModule } from "../config/config.module";
 import { HealthController } from "../health/health.controller";
 import { PrismaModule } from "../prisma/prisma.module";
+import { epochSeed, randomnessAddress } from "../operator/vrf";
 import { PrismaService } from "../prisma/prisma.service";
+import { buildSumTree, verifyPayout } from "../snapshot/sum-tree";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
 import { LIVE_PLAYER_DEFAULTS, LIVE_POOL_DEFAULTS } from "../test-utils/live-yield-defaults";
 import { AlertsController } from "./alerts.controller";
@@ -61,6 +63,7 @@ const PREVIOUS_START = CURRENT_START - EPOCH_LENGTH;
 const CHAIN_NOW = NOW + 10_000n;
 
 const POOL_ADDRESS = Keypair.generate().publicKey.toBase58();
+const PROGRAM_ID = Keypair.generate().publicKey;
 const ALICE = Keypair.generate().publicKey.toBase58();
 const BOB = Keypair.generate().publicKey.toBase58();
 const HOUSE = Keypair.generate().publicKey.toBase58();
@@ -258,6 +261,9 @@ const fakeChain = {
     },
   },
   poolAddress: (): PublicKey => new PublicKey(POOL_ADDRESS),
+  // `/epochs/:id/draw` names the randomness account, which depends on the build.
+  programId: PROGRAM_ID,
+  program: { idl: { instructions: [] as { name: string }[] } },
   jackpotVaultAddress: (): PublicKey => Keypair.generate().publicKey,
   principalVaultAddress: (): PublicKey => PRINCIPAL_VAULT,
   priorityFeeMicroLamports: async (): Promise<number> => FAKE_PRIORITY_FEE,
@@ -904,6 +910,129 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         await prisma.referralGrantShare.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
         await prisma.referralGrant.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
       }
+    });
+  });
+
+  describe("GET /epochs/:id/draw", () => {
+    const owners = [ALICE, BOB, HOUSE].sort((a, b) =>
+      Buffer.compare(new PublicKey(a).toBuffer(), new PublicKey(b).toBuffer()),
+    );
+    const tree = buildSumTree(
+      owners.map((owner, i) => ({ wallet: new PublicKey(owner).toBuffer(), tickets: BigInt(10 * (i + 1)) })),
+    );
+    const NONCE = "07".repeat(32);
+    const epochKey = { poolAddress_id: { poolAddress: POOL_ADDRESS, id: PREVIOUS_EPOCH } };
+    const seed = epochSeed(new PublicKey(POOL_ADDRESS), PREVIOUS_EPOCH, Buffer.from(NONCE, "hex"), tree.root, tree.total);
+    /** Epoch 6 as the ledger leaves it at `EpochBegan`, then `data` on top. */
+    const withSnapshot = async (data: Prisma.EpochUpdateInput, body: () => Promise<void>) => {
+      await prisma.epoch.update({
+        where: epochKey,
+        data: {
+          snapshotRoot: tree.root.toString("hex"),
+          snapshotDepth: tree.depth,
+          leafCount: tree.leafCount,
+          totalTickets: tree.total,
+          ...data,
+        },
+      });
+      await prisma.epochSnapshot.createMany({
+        data: owners.map((owner, index) => ({
+          poolAddress: POOL_ADDRESS,
+          epochId: PREVIOUS_EPOCH,
+          index,
+          owner,
+          tickets: BigInt(10 * (index + 1)),
+        })),
+      });
+      try {
+        await body();
+      } finally {
+        await prisma.epochSnapshot.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+        await prisma.epoch.update({
+          where: epochKey,
+          data: {
+            status: 1,
+            target: "0",
+            winner: null,
+            nonce: null,
+            snapshotRoot: null,
+            snapshotDepth: null,
+            leafCount: null,
+            totalTickets: null,
+          },
+        });
+      }
+    };
+
+    it("is 404 until the snapshot exists", async () => {
+      await http.get(`/epochs/${PREVIOUS_EPOCH}/draw`).expect(404);
+      await http.get("/epochs/99/draw").expect(404);
+      await http.get("/epochs/x/draw").expect(400);
+    });
+
+    it("serves the commitment but keeps the nonce back until request_draw has landed", async () => {
+      await withSnapshot({ nonce: NONCE }, async () => {
+        const { body } = await http.get(`/epochs/${PREVIOUS_EPOCH}/draw`).expect(200);
+        expect(body).toMatchObject({
+          epochId: PREVIOUS_EPOCH.toString(),
+          status: 1,
+          root: tree.root.toString("hex"),
+          depth: tree.depth,
+          leafCount: 3,
+          totalTickets: "60",
+          nonce: null,
+          seed: null,
+          randomness: null,
+          target: null,
+          winner: null,
+          proof: null,
+        });
+      });
+    });
+
+    it("serves the nonce, seed and randomness account once the epoch is Drawing", async () => {
+      await withSnapshot({ nonce: NONCE, status: 2 }, async () => {
+        const { body } = await http.get(`/epochs/${PREVIOUS_EPOCH}/draw`).expect(200);
+        expect(body.nonce).toBe(NONCE);
+        expect(body.seed).toBe(seed.toString("hex"));
+        expect(body.randomness).toBe(randomnessAddress(PROGRAM_ID, seed, false).toBase58());
+        expect(body.winner).toBeNull();
+        expect(body.proof).toBeNull();
+      });
+    });
+
+    it("serves the winner and a proof that reaches the root once the epoch is Drawn", async () => {
+      // Tickets 10, 20, 30 in leaf order: the ranges are [0, 10), [10, 30) and [30, 60).
+      for (const [target, index] of [[0n, 0], [9n, 0], [10n, 1], [29n, 1], [30n, 2], [59n, 2]] as const) {
+        await withSnapshot({ nonce: NONCE, status: 3, target: target.toString() }, async () => {
+          const { body } = await http.get(`/epochs/${PREVIOUS_EPOCH}/draw`).expect(200);
+          expect(body).toMatchObject({ target: target.toString(), winner: owners[index], winnerIndex: index });
+          assertNoLargeNumbers(body, "/epochs/:id/draw");
+          const siblings = body.proof.map((s: { hash: string; sum: string }) => ({
+            hash: Buffer.from(s.hash, "hex"),
+            sum: BigInt(s.sum),
+          }));
+          expect(siblings).toHaveLength(tree.depth);
+          expect(
+            verifyPayout(
+              tree,
+              target,
+              body.winnerIndex,
+              new PublicKey(body.winner).toBuffer(),
+              BigInt(body.winnerTickets),
+              siblings,
+            ),
+          ).toBe(true);
+        });
+      }
+    });
+
+    it("reads the winner as null, not absent, when the stored rows cannot back the root", async () => {
+      await withSnapshot({ nonce: NONCE, status: 3, target: "5" }, async () => {
+        await prisma.epochSnapshot.deleteMany({ where: { poolAddress: POOL_ADDRESS, index: 2 } });
+        const { body } = await http.get(`/epochs/${PREVIOUS_EPOCH}/draw`).expect(200);
+        expect(body).toMatchObject({ target: "5", winner: null, proof: null });
+      });
     });
   });
 

@@ -1,6 +1,6 @@
 // Randomness plumbing shared by the tick and its tests: the address of the
 // account that answers a request and the fulfilled check.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { PublicKey } from "@solana/web3.js";
 import { utils } from "@anchor-lang/core";
@@ -60,6 +60,35 @@ export function randomnessAddress(
         [SEED_ORAO_REQUEST, Buffer.from(seed)],
         ORAO_VRF_PROGRAM_ID,
       )[0];
+}
+
+/**
+ * The epoch draw's randomness seed, `utils::epoch_seed` in the program:
+ * `sha256("epoch" || pool || epoch_id u64le || nonce || root || total u64le)`.
+ * The root and total are in it, so no other snapshot can be swapped in once
+ * the request lands. `GET /epochs/:id/draw` serves the inputs so anyone can
+ * recompute it.
+ */
+export function epochSeed(
+  pool: PublicKey,
+  epochId: bigint,
+  nonce: Uint8Array,
+  root: Uint8Array,
+  total: bigint,
+): Buffer {
+  const u64le = (value: bigint): Buffer => {
+    const bytes = Buffer.alloc(8);
+    bytes.writeBigUInt64LE(value);
+    return bytes;
+  };
+  return createHash("sha256")
+    .update("epoch")
+    .update(pool.toBuffer())
+    .update(u64le(epochId))
+    .update(nonce)
+    .update(root)
+    .update(u64le(total))
+    .digest();
 }
 
 /**

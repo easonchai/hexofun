@@ -30,6 +30,7 @@ const HEALTHY: AlertInputs = {
   operatorFailingSeconds: null,
   epochNoProgress: false,
   drawnUnpaid: false,
+  snapshotMismatch: false,
   sparringSolLow: false,
   secondsToEpochClose: 7 * 24 * 60 * 60,
   jackpotAmount: 5_000_000n,
@@ -284,6 +285,11 @@ describe("evaluateAlerts", () => {
     expect(alert?.message).toContain("3 wallets");
   });
 
+  it("SNAPSHOT_MISMATCH fires while the operator holds a refused winner proof", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, snapshotMismatch: true }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "SNAPSHOT_MISMATCH" });
+  });
+
   it("stacks every active condition at once", () => {
     const codes = evaluateAlerts(
       {
@@ -299,6 +305,7 @@ describe("evaluateAlerts", () => {
         operatorFailingSeconds: null,
         epochNoProgress: true,
         drawnUnpaid: true,
+        snapshotMismatch: true,
         sparringSolLow: true,
         secondsToEpochClose: NEAR_CLOSE_SECONDS,
         jackpotAmount: 0n,
@@ -327,6 +334,7 @@ describe("evaluateAlerts", () => {
       "WITHDRAW_OWNERS_SKIPPED",
       "EPOCH_NO_PROGRESS",
       "DRAWN_UNPAID",
+      "SNAPSHOT_MISMATCH",
       "SPARRING_SOL_LOW",
       "JACKPOT_LOW_NEAR_CLOSE",
       "WITHDRAW_FORECAST_SHORT",

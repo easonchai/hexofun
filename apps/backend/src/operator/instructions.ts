@@ -24,8 +24,10 @@ import {
 } from "../chain/pda";
 import { kvaultRemaining } from "../chain/kvault";
 import { VENUE_KIND } from "../chain/venue-kind";
+import type { SnapshotCommitment } from "../snapshot/sum-tree";
+import type { WinnerProof } from "../snapshot/epoch-draw";
 import type { EpochState, PoolState } from "./chain-state";
-import { randomnessAddress } from "./vrf";
+import { epochSeed, ORAO_VRF_PROGRAM_ID, ORAO_VRF_TREASURY, randomnessAddress } from "./vrf";
 
 const bn = (value: bigint): BN => new BN(value.toString());
 
@@ -227,6 +229,44 @@ export class OperatorInstructions {
     return batches.flat();
   }
 
+  /**
+   * Commits the Epoch snapshot (root, total, depth, leaf count) and asks for
+   * the draw's randomness. The nonce is the epoch's stored one, mixed into the
+   * seed with the root and total, so the randomness address is derived here and
+   * is unknowable before the request lands. An empty snapshot commits zeros,
+   * which the program rolls over without spending the request.
+   */
+  async requestDraw(
+    pool: PoolState,
+    epochId: bigint,
+    nonce: Uint8Array,
+    snapshot: SnapshotCommitment,
+  ): Promise<TransactionInstruction[]> {
+    const seed = epochSeed(pool.address, epochId, nonce, snapshot.root, snapshot.total);
+    return [
+      await this.method(
+        "requestDraw",
+        Array.from(nonce),
+        Array.from(snapshot.root),
+        bn(snapshot.total),
+        snapshot.depth,
+        snapshot.leafCount,
+      )
+        .accountsPartial({
+          operator: this.operator,
+          pool: pool.address,
+          epoch: this.epoch(pool, epochId),
+          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
+          randomness: this.randomnessFor(seed),
+          vrfNetworkState: pool.vrfNetworkState,
+          vrfTreasury: ORAO_VRF_TREASURY,
+          vrfProgram: ORAO_VRF_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .instruction(),
+    ];
+  }
+
   /** Permissionless (production-hardening ticket 01): the operator still
    *  cranks it, but the first account is `caller`, not `operator`. */
   async draw(pool: PoolState, epoch: EpochState): Promise<TransactionInstruction[]> {
@@ -257,6 +297,42 @@ export class OperatorInstructions {
           epoch: this.epoch(pool, epoch.epochId),
           randomness: this.randomnessFor(epoch.vrfSeed),
         })
+        .instruction(),
+    ];
+  }
+
+  /**
+   * Permissionless: `caller` only pays the fee, because the proof is what
+   * authorises the payment. The winner's Player comes from the leaf's wallet;
+   * a non-House prize compounds into the principal vault, so there is no token
+   * account to create. It syncs the venue first, like `begin_epoch`.
+   */
+  async payout(
+    pool: PoolState,
+    epochId: bigint,
+    proof: Pick<WinnerProof, "index" | "owner" | "tickets" | "siblings">,
+  ): Promise<TransactionInstruction[]> {
+    return [
+      await this.method(
+        "payout",
+        proof.index,
+        bn(proof.tickets),
+        proof.siblings.map(({ hash, sum }) => ({ hash: Array.from(hash), sum: bn(sum) })),
+      )
+        .accountsPartial({
+          caller: this.operator,
+          pool: pool.address,
+          acceptedMint: pool.acceptedMint,
+          epoch: this.epoch(pool, epochId),
+          winner: this.player(pool, new PublicKey(proof.owner)),
+          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          treasury: pool.treasury,
+          buybackReserve: pool.buybackReserve,
+          ...this.venue(pool),
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }

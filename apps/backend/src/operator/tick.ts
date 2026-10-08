@@ -1,16 +1,19 @@
 // Spec §3.4: the steps, in order, at most one transaction per tick. Step 6a
 // runs the venue cranks (deploy, recall, harvest) and 6b pays out the
 // withdrawals whose epoch has ended. The epoch goes `begin_epoch` (3),
-// `request_draw` (4), `draw` (5), `payout` (6). Off-chain-tickets ticket 10:
-// the program is custody only, so there are no Round steps; steps 4 and 6 wait
-// on the Epoch snapshot (ticket 12) and report `snapshot_pending` until it
-// exists.
+// `request_draw` (4), `draw` (5), `payout` (6). The program is custody only
+// (off-chain-tickets ticket 10), so there are no Round steps. Step 4 waits until
+// the ledger has booked `EpochBegan` and the Epoch row holds the snapshot, then
+// commits it; step 6 pays with the winner's proof out of the same rows
+// (ticket 12).
 //
 // Everything the steps touch arrives in the context, so a test drives them
 // with a fabricated chain state and a recording `send`, and the service is
 // left with nothing but plumbing.
 import type { TransactionInstruction } from "@solana/web3.js";
 
+import type { WinnerProof } from "../snapshot/epoch-draw";
+import type { SnapshotCommitment } from "../snapshot/sum-tree";
 import { EPOCH_STATUS, type EpochState, type PoolState } from "./chain-state";
 import type { OperatorInstructions } from "./instructions";
 import {
@@ -46,6 +49,21 @@ export const WITHDRAW_BATCH_SIZE = 4;
 /** What the program answers when the principal vault cannot cover a payout;
  *  `ChainService.mapSendError` puts the IDL name in `Error.message`. */
 const SHORT_VAULT = "InsufficientVaultLiquidity";
+
+/**
+ * What `payout` answers when the proof does not stand against the committed
+ * snapshot (programs/hex_vault/src/snapshot.rs). Retrying cannot change the
+ * answer: the snapshot rows and the chain's root disagree, which a human
+ * resolves (docs/ops/incidents.md, "Snapshot proof refused").
+ */
+export const PROOF_REFUSED: ReadonlySet<string> = new Set([
+  "ProofWrongLength",
+  "ProofIndexOutOfRange",
+  "ProofRootMismatch",
+  "ProofSumMismatch",
+  "ProofRangeMismatch",
+  "ZeroTicketLeaf",
+]);
 
 /** Every catch below narrows `unknown` the same way. */
 const errorMessage = (cause: unknown): string =>
@@ -148,6 +166,17 @@ export interface TickContext {
   readonly launchAt: bigint | null;
   /** Has the oracle answered the request for this seed? */
   fulfilled(seed: Uint8Array): Promise<boolean>;
+  /** Step 4: the ended epoch's snapshot commitment and the nonce to request
+   *  its draw with, or null until the ledger has taken the snapshot. */
+  drawRequest(
+    epochId: bigint,
+  ): Promise<{ readonly nonce: Uint8Array; readonly snapshot: SnapshotCommitment } | null>;
+  /** Step 6: the winner's proof out of the stored snapshot, or null when the
+   *  rows cannot back the root the chain holds. */
+  payoutProof(epochId: bigint, target: bigint): Promise<WinnerProof | null>;
+  /** The epoch whose proof was refused on an earlier tick, which step 6 then
+   *  leaves alone. Null when none. */
+  readonly snapshotMismatchEpoch: bigint | null;
   /** The principal vault's balance, in atomic units. Read only when a payout
    *  has already failed for want of liquidity, to size the shortfall. */
   principalVaultBalance(): Promise<bigint>;
@@ -191,11 +220,18 @@ export interface TickOutcome {
    */
   readonly stepError?: string;
   /**
-   * Off-chain-tickets ticket 10: the draw step this tick would have sent but
-   * for the missing Epoch snapshot (ticket 12). The service logs it once per
-   * step and epoch.
+   * The draw step this tick would have sent but for the missing Epoch
+   * snapshot (the ledger has not booked `EpochBegan` yet). The service logs it
+   * once per epoch.
    */
-  readonly snapshotPending?: { readonly step: "request_draw" | "payout"; readonly epochId: bigint };
+  readonly snapshotPending?: { readonly step: "request_draw"; readonly epochId: bigint };
+  /**
+   * Off-chain-tickets ticket 12: the Drawn epoch whose winner proof was
+   * refused or could not be built, which step 6 no longer retries; null when
+   * there is none. Present on every tick, so the service can remember it and
+   * `OperatorState.snapshotMismatch` follows it.
+   */
+  readonly snapshotMismatchEpoch?: bigint | null;
   /** Ticket 09: whether the previous epoch has missed its expected deadline
    *  to reach a terminal status. Present on every tick. */
   readonly epochNoProgress?: boolean;
@@ -291,6 +327,7 @@ async function decide(ctx: TickContext): Promise<Decision> {
   let stepError: string | undefined;
   let withdrawStateOut: WithdrawState | undefined;
   let snapshotPending: Decision["snapshotPending"];
+  let proofRefusedFor = ctx.snapshotMismatchEpoch;
   // Ticket 13: the venue cranks' memory, folded into every return the same way.
   let venueState = ctx.lastVenueState ?? EMPTY_VENUE_STATE;
   let venueChanged = false;
@@ -306,6 +343,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
     ...(stepError !== undefined ? { stepError } : {}),
     ...(withdrawStateOut !== undefined ? { withdrawState: withdrawStateOut } : {}),
     ...(snapshotPending !== undefined ? { snapshotPending } : {}),
+    // Clears itself once the epoch leaves Drawn (rolled over, or paid by hand).
+    snapshotMismatchEpoch:
+      proofRefusedFor !== null &&
+      previousEpoch?.epochId === proofRefusedFor &&
+      previousEpoch.status === EPOCH_STATUS.DRAWN
+        ? proofRefusedFor
+        : null,
     ...(venueChanged ? { venueState } : {}),
   });
 
@@ -333,17 +377,27 @@ async function decide(ctx: TickContext): Promise<Decision> {
   }
 
   // 4. The ended epoch goes to the draw. `request_draw` commits the Epoch
-  // snapshot's root, which the backend builds in off-chain-tickets ticket 12;
-  // until then this step only reports that it is waiting. Refused in shutdown
-  // and while the jackpot is paused, and the tick falls through in both so
-  // withdrawals are not held. `begin_epoch` and `rollover_epoch` are refused
-  // too, so an Ended epoch waits out the pause the same way it always did.
+  // snapshot's root, total and shape, so it waits until the ledger has booked
+  // `EpochBegan` and the Epoch row holds them (`snapshot_pending`; the tick
+  // falls through, so withdrawals are not held). An empty snapshot commits
+  // zeros and the program rolls the epoch over. Refused in shutdown and while
+  // the jackpot is paused, and the tick falls through in both. `begin_epoch`
+  // and `rollover_epoch` are refused too, so an Ended epoch waits out the pause
+  // the same way it always did.
   if (
     !pool.shutdown &&
     !pool.jackpotPaused &&
     previousEpoch?.status === EPOCH_STATUS.ENDED
   ) {
-    snapshotPending = { step: "request_draw", epochId: previousEpoch.epochId };
+    const request = await ctx.drawRequest(previousEpoch.epochId);
+    if (request === null) {
+      snapshotPending = { step: "request_draw", epochId: previousEpoch.epochId };
+    } else {
+      await ctx.send(
+        await ctx.ix.requestDraw(pool, previousEpoch.epochId, request.nonce, request.snapshot),
+      );
+      return finish({ action: "request_draw" });
+    }
   }
 
   // 5. Waiting on the draw's randomness. `draw` is refused in shutdown
@@ -360,20 +414,41 @@ async function decide(ctx: TickContext): Promise<Decision> {
     }
   }
 
-  // 6. Drawn: `payout` needs the winner's proof out of the Epoch snapshot
-  // (ticket 12), so for now this step only reports that it is waiting. A
-  // drawn epoch still rolls over past `payout_timeout`, so the prize stays in
-  // the vault for the next draw rather than stranding the epoch forever.
-  // Ticket 12: a winner is never rolled over until the drawn-unpaid condition
-  // has had `DRAWN_UNPAID_ALERT_SECONDS` to page someone, regardless of how
-  // short `payout_timeout` is set.
+  // 6. Drawn: `payout` carries the winner's leaf and proof, built from the
+  // snapshot rows. Permissionless, and allowed after shutdown. If the proof
+  // cannot be built or the chain refuses it, retrying cannot help: the tick
+  // records it (`snapshotMismatchEpoch`, the SNAPSHOT_MISMATCH alert) and
+  // leaves the epoch to the rollover below. A drawn epoch rolls over past
+  // `payout_timeout`, so the prize stays in the vault for the next draw rather
+  // than stranding the epoch forever. A winner is never rolled over until the
+  // drawn-unpaid condition has had `DRAWN_UNPAID_ALERT_SECONDS` to page
+  // someone, regardless of how short `payout_timeout` is set.
   if (previousEpoch?.status === EPOCH_STATUS.DRAWN) {
+    const epochId = previousEpoch.epochId;
+    if (proofRefusedFor !== epochId) {
+      const proof = await ctx.payoutProof(epochId, previousEpoch.target);
+      if (proof === null) {
+        proofRefusedFor = epochId;
+        ctx.warn(
+          `epoch ${epochId}: the snapshot rows do not back the committed root, so no payout proof can be built; not retrying`,
+        );
+      } else {
+        try {
+          await ctx.send(await ctx.ix.payout(pool, epochId, proof));
+          return finish({ action: "payout" });
+        } catch (cause) {
+          const message = errorMessage(cause);
+          if (!PROOF_REFUSED.has(message)) throw cause;
+          proofRefusedFor = epochId;
+          ctx.warn(`epoch ${epochId}: payout proof refused (${message}); not retrying`);
+        }
+      }
+    }
     const alertHasFired = now > previousEpoch.drawnAt + DRAWN_UNPAID_ALERT_SECONDS;
     if (now > previousEpoch.drawnAt + pool.payoutTimeout && alertHasFired) {
       await ctx.send(await ctx.ix.rolloverEpoch(pool, previousEpoch));
       return finish({ action: "rollover_epoch" });
     }
-    snapshotPending = { step: "payout", epochId: previousEpoch.epochId };
   }
 
   // 6a. Venue cranks (ticket 13): harvest inside the last minutes of the

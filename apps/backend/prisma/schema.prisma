@@ -114,8 +114,10 @@ model Epoch {
   snapshotDepth     Int?
   leafCount         Int?
   totalTickets      BigInt?
-  /// The `request_draw` nonce the Operator chose; written by the operator.
-  nonce             BigInt?
+  /// The `request_draw` nonce the Operator chose, 32 bytes as hex. Written
+  /// before the request is sent and reused on a retry; served on
+  /// `/epochs/:id/draw` only once the request has landed.
+  nonce             String?
 
   // Epoch ids restart at 1 on every pool (ADR 0016).
   @@id([poolAddress, id])
@@ -440,6 +442,10 @@ model OperatorState {
    *  a few minutes ago and still has not been paid; false once it is. Null
    *  before any tick has ever looked. */
   drawnUnpaid      Boolean?
+  /** Off-chain-tickets 12: true while the previous epoch's winner proof was
+   *  refused (or could not be built from the snapshot rows) and the operator
+   *  has stopped retrying it. Null before any tick has ever looked. */
+  snapshotMismatch Boolean?
 }
 
 // beta-launch-fixes ticket 16: decoded send failures and error-boundary

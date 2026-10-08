@@ -31,6 +31,7 @@ import {
   type EpochState,
   type PoolState,
 } from "./chain-state";
+import { claimNonce, readCommitment, winnerProof } from "../snapshot/epoch-draw";
 import { OperatorInstructions } from "./instructions";
 import { grantReferralBonuses } from "./referral-grants";
 import {
@@ -78,6 +79,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   /** The last `step:epoch` the tick reported as waiting on the snapshot, so
    *  the log line appears once per step and epoch, not once per tick. */
   private lastSnapshotPending: string | null = null;
+  /** The Drawn epoch whose payout proof was refused (ticket 12). Kept in memory
+   *  only: a restart tries the payout once more, which fails the same way and
+   *  records it again. */
+  private snapshotMismatchEpoch: bigint | null = null;
   /** Ticket 05: holds step 3's very first `begin_epoch` back until this chain
    *  timestamp; null when `LAUNCH_AT` is unset. */
   private readonly launchAt: bigint | null;
@@ -211,12 +216,13 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       const outcome = await runTick(ctx);
       if (outcome.withdrawState) this.lastWithdrawState = outcome.withdrawState;
       if (outcome.venueState) this.lastVenueState = outcome.venueState;
+      this.snapshotMismatchEpoch = outcome.snapshotMismatchEpoch ?? null;
       if (outcome.snapshotPending) {
         const { step, epochId } = outcome.snapshotPending;
         const key = `${step}:${epochId}`;
         if (key !== this.lastSnapshotPending) {
           this.lastSnapshotPending = key;
-          this.logger.log(`snapshot_pending: ${step} for epoch ${epochId} waits on the Epoch snapshot`);
+          this.logger.log(`snapshot_pending: ${step} for epoch ${epochId} waits for the ledger to take the Epoch snapshot`);
         }
       }
       if (outcome.action) this.logger.log(`sent ${outcome.action}`);
@@ -320,6 +326,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     this.chain.recordChainTime(now);
 
     const { currentEpoch, previousEpoch } = await this.readCycle(pool);
+    const poolKey = poolAddress.toBase58();
 
     return {
       now,
@@ -337,6 +344,14 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       venueAvailable: () => this.venueAvailable(pool),
       launchAt: this.launchAt,
       fulfilled: (seed) => this.fulfilled(seed),
+      drawRequest: async (epochId) => {
+        const snapshot = await readCommitment(this.prisma, poolKey, epochId);
+        return snapshot === null
+          ? null
+          : { snapshot, nonce: await claimNonce(this.prisma, poolKey, epochId) };
+      },
+      payoutProof: (epochId, target) => winnerProof(this.prisma, poolKey, epochId, target),
+      snapshotMismatchEpoch: this.snapshotMismatchEpoch,
       principalVaultBalance: () => this.principalVaultBalance(),
       duePendingWithdrawals: (currentEpochId, deadline) =>
         this.duePendingWithdrawals(currentEpochId, deadline),
@@ -476,6 +491,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       | "withdrawState"
       | "epochNoProgress"
       | "drawnUnpaid"
+      | "snapshotMismatchEpoch"
     >,
     error: string | null,
     waitMs: number,
@@ -504,6 +520,9 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       // always reflect the freshest read.
       ...(outcome.epochNoProgress === undefined ? {} : { epochNoProgress: outcome.epochNoProgress }),
       ...(outcome.drawnUnpaid === undefined ? {} : { drawnUnpaid: outcome.drawnUnpaid }),
+      ...(outcome.snapshotMismatchEpoch === undefined
+        ? {}
+        : { snapshotMismatch: outcome.snapshotMismatchEpoch !== null }),
     };
     const poolAddress = this.chain.poolAddress().toBase58();
     try {

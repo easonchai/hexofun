@@ -12,6 +12,7 @@ process.env.DATABASE_URL = TEST_DATABASE_URL;
 import {
   AnchorProvider,
   BN,
+  BorshInstructionCoder,
   Program,
   Wallet,
   type Idl,
@@ -31,6 +32,7 @@ import { loadIdl } from "../chain/idl";
 import { epochAddress, poolAddress } from "../chain/pda";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
+import { buildSumTree } from "../snapshot/sum-tree";
 import { CountingConnection } from "../test-utils/counting-connection";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
 import { EPOCH_STATUS } from "./chain-state";
@@ -654,9 +656,9 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
   });
 });
 
-// Off-chain-tickets ticket 10: until the Epoch snapshot exists (ticket 12) the
-// draw steps send nothing and say why, once per step and epoch. No database:
-// the state write is a fake.
+// Off-chain-tickets tickets 10 and 12: until the ledger has taken the Epoch
+// snapshot the draw request sends nothing and says why, once per epoch. No
+// database: the state write is a fake.
 describe("OperatorService snapshot_pending", () => {
   it("reports request_draw as waiting on the snapshot without sending, and logs it once", async () => {
     const CHAIN_NOW = 1_800_000_000n;
@@ -708,6 +710,8 @@ describe("OperatorService snapshot_pending", () => {
       {
         operatorState: { upsert: async () => {} },
         player: { findMany: async () => [] },
+        // The ledger has not taken the snapshot: no Epoch row carries one.
+        epoch: { findUnique: async () => null },
       } as unknown as PrismaService,
       fakeConfig,
     );
@@ -721,5 +725,163 @@ describe("OperatorService snapshot_pending", () => {
     expect(second.snapshotPending).toEqual({ step: "request_draw", epochId: 1n });
     expect(sent).toEqual([]);
     expect(log.mock.calls.filter(([line]) => String(line).includes("snapshot_pending"))).toHaveLength(1);
+  });
+});
+
+// Off-chain-tickets ticket 12: the draw steps read the Epoch row and snapshot
+// rows the ledger wrote. Real Postgres, fake chain.
+describe.skipIf(!DB_AVAILABLE)("OperatorService draw steps", () => {
+  const DRAW_POOL = poolAddress(PROGRAM_ID, 77n);
+  const DRAW_POOL_ADDRESS = DRAW_POOL.toBase58();
+  const CHAIN_NOW = 1_800_000_000n;
+  const owners = Array.from({ length: 5 }, () => Keypair.generate().publicKey).sort((a, b) =>
+    Buffer.compare(a.toBuffer(), b.toBuffer()),
+  );
+  const tree = buildSumTree(owners.map((owner, i) => ({ wallet: owner.toBuffer(), tickets: BigInt(10 * (i + 1)) })));
+  const epochKey = { poolAddress_id: { poolAddress: DRAW_POOL_ADDRESS, id: 1n } };
+
+  /** Epoch 1 on chain in `status`, epoch 1 in Postgres with the snapshot the
+   *  ledger would have written, and a service whose `send` is `send`. */
+  async function rig(status: number, send: (instructions: TransactionInstruction[]) => Promise<string>) {
+    const prisma = new PrismaService();
+    await prisma.$connect();
+    await ensurePoolRow(prisma, DRAW_POOL_ADDRESS, 77n);
+    await prisma.operatorState.deleteMany({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+    await prisma.epochSnapshot.deleteMany({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+    await prisma.epoch.deleteMany({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+    await prisma.epoch.create({
+      data: {
+        poolAddress: DRAW_POOL_ADDRESS,
+        id: 1n,
+        startsAt: 0n,
+        endsAt: 1n,
+        status,
+        jackpotAmount: 0n,
+        target: "5",
+        snapshotRoot: tree.root.toString("hex"),
+        snapshotDepth: tree.depth,
+        leafCount: tree.leafCount,
+        totalTickets: tree.total,
+      },
+    });
+    await prisma.epochSnapshot.createMany({
+      data: owners.map((owner, index) => ({
+        poolAddress: DRAW_POOL_ADDRESS,
+        epochId: 1n,
+        index,
+        owner: owner.toBase58(),
+        tickets: BigInt(10 * (index + 1)),
+      })),
+    });
+
+    const epoch = (epochId: bigint, epochStatus: number, endsAt: bigint) => ({
+      epochId: bn(epochId),
+      startsAt: bn(endsAt - 86_400n),
+      endsAt: bn(endsAt),
+      status: epochStatus,
+      jackpotAmount: bn(0),
+      vrfSeed: Array(32).fill(0),
+      requestedAt: bn(0),
+      target: bn(5),
+      winner: PublicKey.default,
+      drawnAt: bn(CHAIN_NOW - 10n),
+      registrationOpenedAt: bn(0),
+      bump: 255,
+    });
+    const accounts = new Map<string, Buffer>();
+    accounts.set(DRAW_POOL_ADDRESS, await program.coder.accounts.encode("pool", pool({ poolId: bn(77), currentEpochId: bn(2) })));
+    accounts.set(
+      epochAddress(PROGRAM_ID, DRAW_POOL, 1n).toBase58(),
+      await program.coder.accounts.encode("epoch", epoch(1n, status, CHAIN_NOW - 1_000n)),
+    );
+    accounts.set(
+      epochAddress(PROGRAM_ID, DRAW_POOL, 2n).toBase58(),
+      await program.coder.accounts.encode("epoch", epoch(2n, EPOCH_STATUS.OPEN, CHAIN_NOW + 85_400n)),
+    );
+    const clock = Buffer.alloc(40);
+    clock.writeBigInt64LE(CHAIN_NOW, 32);
+    accounts.set(SYSVAR_CLOCK_PUBKEY.toBase58(), clock);
+
+    const fakeChain = {
+      program,
+      programId: PROGRAM_ID,
+      keypair: Keypair.generate(),
+      connection: new CountingConnection(accounts),
+      poolAddress: () => DRAW_POOL,
+      venueProposalAddress: () => PublicKey.default,
+      epochAddress: (id: bigint) => epochAddress(PROGRAM_ID, DRAW_POOL, id),
+      recordChainTime: () => {},
+      send,
+    };
+    const operator = new OperatorService(fakeChain as unknown as ChainService, prisma, fakeConfig);
+    vi.spyOn(operator["logger"], "log").mockImplementation(() => {});
+    vi.spyOn(operator["logger"], "warn").mockImplementation(() => {});
+    vi.spyOn(operator["logger"], "error").mockImplementation(() => {});
+    return { operator, prisma };
+  }
+
+  const cleanUp = async (prisma: PrismaService) => {
+    await prisma.operatorState.deleteMany({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+    await prisma.epochSnapshot.deleteMany({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+    await prisma.epoch.deleteMany({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+    await prisma.$disconnect();
+  };
+
+  const argsOf = (ixs: TransactionInstruction[] | undefined) =>
+    new BorshInstructionCoder(idl).decode((ixs?.[0] as TransactionInstruction).data)?.data as Record<string, unknown>;
+
+  it("requests the draw with the Epoch row's fields and keeps the same nonce across a failed send", async () => {
+    const sent: TransactionInstruction[][] = [];
+    let failFirst = true;
+    const { operator, prisma } = await rig(EPOCH_STATUS.ENDED, async (instructions) => {
+      sent.push(instructions);
+      if (failFirst) {
+        failFirst = false;
+        throw new Error("blockhash expired");
+      }
+      return "signature";
+    });
+    try {
+      const failed = await operator.runOnce();
+      expect(failed.action).toBeNull();
+      const stored = (await prisma.epoch.findUniqueOrThrow({ where: epochKey })).nonce;
+      expect(stored).toMatch(/^[0-9a-f]{64}$/);
+
+      const landed = await operator.runOnce();
+      expect(landed.action).toBe("request_draw");
+      expect(sent).toHaveLength(2);
+      for (const args of sent.map(argsOf)) {
+        expect(Buffer.from(args.nonce as number[]).toString("hex")).toBe(stored);
+        expect(Buffer.from(args.root as number[])).toEqual(tree.root);
+        expect([String(args.total_tickets), args.depth, args.leaf_count]).toEqual(["150", tree.depth, 5]);
+      }
+    } finally {
+      await cleanUp(prisma);
+    }
+  });
+
+  it("pays the target's leaf with its proof, and a refused proof is recorded once and not retried", async () => {
+    const sent: TransactionInstruction[][] = [];
+    const { operator, prisma } = await rig(EPOCH_STATUS.DRAWN, async (instructions) => {
+      sent.push(instructions);
+      throw new Error("ProofRootMismatch");
+    });
+    try {
+      const first = await operator.runOnce();
+      expect(first.action).toBeNull();
+      expect(first.snapshotMismatchEpoch).toBe(1n);
+      expect(sent).toHaveLength(1);
+      const args = argsOf(sent[0]) as { index: number; siblings: unknown[] };
+      // Target 5 lies in the first leaf's range [0, 10).
+      expect(args.index).toBe(0);
+      expect(args.siblings).toHaveLength(tree.depth);
+      const state = await prisma.operatorState.findUniqueOrThrow({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+      expect(state.snapshotMismatch).toBe(true);
+
+      await operator.runOnce();
+      expect(sent).toHaveLength(1);
+    } finally {
+      await cleanUp(prisma);
+    }
   });
 });

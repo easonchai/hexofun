@@ -23,7 +23,9 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { loadIdl } from "../chain/idl";
-import { poolAddress, venueProposalAddress } from "../chain/pda";
+import { playerAddress, poolAddress, venueProposalAddress } from "../chain/pda";
+import type { WinnerProof } from "../snapshot/epoch-draw";
+import { buildSumTree } from "../snapshot/sum-tree";
 import {
   EPOCH_STATUS,
   clockUnixTimestamp,
@@ -43,7 +45,7 @@ import {
   type WithdrawState,
 } from "./tick";
 import { HARVEST_LEAD_SECONDS, VENUE_RETRY_SECONDS } from "./venue";
-import { isFulfilled, randomnessAddress } from "./vrf";
+import { epochSeed, isFulfilled, randomnessAddress } from "./vrf";
 
 const AUTHORITY = Keypair.generate().publicKey;
 const MINT = Keypair.generate().publicKey;
@@ -146,6 +148,29 @@ const ended = (over: Partial<EpochState> = {}): EpochState =>
     ...over,
   });
 
+/** An Epoch snapshot of five wallets, in leaf order (by wallet bytes), 10 to 50 Tickets each. */
+const SNAPSHOT_OWNERS = Array.from({ length: 5 }, () => Keypair.generate().publicKey).sort((a, b) =>
+  Buffer.compare(a.toBuffer(), b.toBuffer()),
+);
+const SNAPSHOT = buildSumTree(
+  SNAPSHOT_OWNERS.map((owner, i) => ({ wallet: owner.toBuffer(), tickets: BigInt(10 * (i + 1)) })),
+);
+const NONCE = new Uint8Array(32).fill(9);
+/** The winner `findWinner` names for `target`, as the Epoch snapshot rows would back it. */
+function proofAt(target: bigint): WinnerProof {
+  const { index, tickets } = SNAPSHOT.findWinner(target);
+  return {
+    commitment: SNAPSHOT,
+    index,
+    owner: (SNAPSHOT_OWNERS[index] as PublicKey).toBase58(),
+    tickets,
+    siblings: SNAPSHOT.proof(index),
+  };
+}
+/** The arguments of the first recorded instruction, decoded back off its data. */
+const argsOf = (ixs: readonly TransactionInstruction[] | undefined): Record<string, unknown> =>
+  (coder.decode((ixs?.[0] as TransactionInstruction).data)?.data ?? {}) as Record<string, unknown>;
+
 interface Recorder {
   ctx: TickContext;
   sent: TransactionInstruction[][];
@@ -171,6 +196,10 @@ function context(over: Partial<TickContext> = {}): Recorder {
     // any test that is not about the launch window.
     launchAt: null,
     fulfilled: async () => false,
+    // No snapshot yet, no proof by default: the draw steps wait on them.
+    drawRequest: async () => null,
+    payoutProof: async () => null,
+    snapshotMismatchEpoch: null,
     principalVaultBalance: async () => 0n,
     // Empty by default so step 6b stays quiet in every test that is not about it.
     duePendingWithdrawals: async () => [],
@@ -350,6 +379,43 @@ describe("runTick", () => {
     expect(outcome.snapshotPending).toEqual({ step: "request_draw", epochId: 1n });
   });
 
+  it("4. holds as snapshot_pending until the Epoch row has a root, then sends request_draw with its four fields", async () => {
+    const waiting = context({ previousEpoch: ended() });
+    const first = await runTick(waiting.ctx);
+    expect(first.snapshotPending).toEqual({ step: "request_draw", epochId: 1n });
+    expect(waiting.sent).toHaveLength(0);
+
+    const ready = context({
+      previousEpoch: ended(),
+      drawRequest: async () => ({ nonce: NONCE, snapshot: SNAPSHOT }),
+    });
+    const outcome = await runTick(ready.ctx);
+    expect(outcome.action).toBe("request_draw");
+    expect(outcome.snapshotPending).toBeUndefined();
+    expect(ready.sent.map((ixs) => ixs.map(label))).toEqual([["request_draw"]]);
+    const args = argsOf(ready.sent[0]) as Record<string, { toString(): string }>;
+    expect(Buffer.from(args.nonce as unknown as number[])).toEqual(Buffer.from(NONCE));
+    expect(Buffer.from(args.root as unknown as number[])).toEqual(SNAPSHOT.root);
+    expect(args.total_tickets?.toString()).toBe(SNAPSHOT.total.toString());
+    expect(args.depth).toBe(SNAPSHOT.depth);
+    expect(args.leaf_count).toBe(SNAPSHOT.leafCount);
+    // The randomness account is the one the seed over those fields names.
+    const seed = epochSeed(POOL, 1n, NONCE, SNAPSHOT.root, SNAPSHOT.total);
+    expect(keysOfIx(ready.sent[0] ?? [])).toContain(randomnessAddress(PROGRAM_ID, seed, true).toBase58());
+  });
+
+  it("4. an empty snapshot commits zeros, which the program rolls over", async () => {
+    const empty = { root: Buffer.alloc(32), depth: 0, leafCount: 0, total: 0n };
+    const { ctx, sent } = context({
+      previousEpoch: ended(),
+      drawRequest: async () => ({ nonce: NONCE, snapshot: empty }),
+    });
+    await runTick(ctx);
+    const args = argsOf(sent[0]) as Record<string, { toString(): string }>;
+    expect(Buffer.from(args.root as unknown as number[])).toEqual(Buffer.alloc(32));
+    expect([args.total_tickets?.toString(), args.depth, args.leaf_count]).toEqual(["0", 0, 0]);
+  });
+
   it("4. waits, and reports nothing, while the pool is shut down or the jackpot is paused", async () => {
     for (const over of [{ shutdown: true }, { jackpotPaused: true }]) {
       const { ctx, sent } = context({ pool: pool(over), previousEpoch: ended() });
@@ -427,17 +493,115 @@ describe("runTick", () => {
     expect(result.labels).toEqual(["rollover_epoch"]);
   });
 
-  // --- 6. Payout: needs the winner's proof out of the snapshot (ticket 12),
-  // so for now the step reports it is waiting. A drawn epoch still rolls over.
+  // --- 6. Payout: the winner's leaf and proof, out of the snapshot rows.
 
-  it("6. reports a drawn epoch as waiting on the snapshot and sends nothing", async () => {
+  const drawn = (over: Partial<EpochState> = {}): EpochState =>
+    epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWN, target: 42n, drawnAt: NOW - 10n, ...over });
+
+  it("6. pays the winner with a proof as long as the snapshot is deep", async () => {
+    const target = 42n;
+    const winner = proofAt(target);
     const { ctx, sent } = context({
-      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWN, target: 42n, drawnAt: NOW - 10n }),
+      previousEpoch: drawn({ target }),
+      payoutProof: async (epochId, drawnTarget) => {
+        expect([epochId, drawnTarget]).toEqual([1n, target]);
+        return winner;
+      },
     });
     const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("payout");
+    expect(outcome.snapshotMismatchEpoch).toBeNull();
+    expect(sent.map((ixs) => ixs.map(label))).toEqual([["payout"]]);
+    const args = argsOf(sent[0]) as { index: number; tickets: { toString(): string }; siblings: unknown[] };
+    expect(args.siblings).toHaveLength(SNAPSHOT.depth);
+    expect(args.index).toBe(winner.index);
+    expect(args.tickets.toString()).toBe(winner.tickets.toString());
+    expect(keysOfIx(sent[0] ?? [])).toContain(playerAddress(PROGRAM_ID, POOL, new PublicKey(winner.owner)).toBase58());
+  });
+
+  it("6. a refused proof raises the mismatch once and the next tick does not retry", async () => {
+    const proof = proofAt(42n);
+    let attempts = 0;
+    const warned: string[] = [];
+    const common = {
+      pool: pool({ paused: true }),
+      previousEpoch: drawn(),
+      payoutProof: async () => proof,
+      send: async () => {
+        attempts += 1;
+        throw new Error("ProofRootMismatch");
+      },
+      warn: (message: string) => warned.push(message),
+    };
+    const first = await runTick(context(common).ctx);
+    expect(first.action).toBeNull();
+    expect(first.snapshotMismatchEpoch).toBe(1n);
+
+    // The service hands the outcome back in as the next tick's context.
+    const second = await runTick(context({ ...common, snapshotMismatchEpoch: first.snapshotMismatchEpoch ?? null }).ctx);
+    expect(second.snapshotMismatchEpoch).toBe(1n);
+    expect(attempts).toBe(1);
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain("ProofRootMismatch");
+  });
+
+  it("6. rows that cannot back the root are the same mismatch, with nothing sent", async () => {
+    const { ctx, sent, warned } = context({ previousEpoch: drawn(), payoutProof: async () => null });
+    const outcome = await runTick(ctx);
     expect(sent).toHaveLength(0);
-    expect(outcome.action).toBeNull();
-    expect(outcome.snapshotPending).toEqual({ step: "payout", epochId: 1n });
+    expect(outcome.snapshotMismatchEpoch).toBe(1n);
+    expect(warned).toHaveLength(1);
+  });
+
+  it("6. any other payout failure still fails the tick, and a Drawn epoch with a stopped proof rolls over once its timeouts pass", async () => {
+    const boom = context({
+      previousEpoch: drawn(),
+      payoutProof: async () => proofAt(42n),
+      send: async () => {
+        throw new Error("InsufficientVaultLiquidity");
+      },
+    });
+    await expect(runTick(boom.ctx)).rejects.toThrow("InsufficientVaultLiquidity");
+
+    const stopped = context({
+      pool: pool({ payoutTimeout: 30n }),
+      previousEpoch: drawn({ drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n) }),
+      payoutProof: async () => {
+        throw new Error("not asked: this epoch's proof was refused");
+      },
+      snapshotMismatchEpoch: 1n,
+    });
+    const outcome = await runTick(stopped.ctx);
+    expect(outcome.action).toBe("rollover_epoch");
+    // Rolled over, no longer Drawn: the alert clears with the next tick's read.
+    expect(outcome.snapshotMismatchEpoch).toBe(1n);
+    const next = await runTick(
+      context({ previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.ROLLED_OVER }), snapshotMismatchEpoch: 1n }).ctx,
+    );
+    expect(next.snapshotMismatchEpoch).toBeNull();
+  });
+
+  it("no tick, in any epoch state, sends a Round instruction", async () => {
+    const proof = proofAt(42n);
+    const labels = new Set<string>();
+    for (const status of Object.values(EPOCH_STATUS)) {
+      for (const over of [{}, { shutdown: true }, { jackpotPaused: true }]) {
+        const { ctx, sent } = context({
+          pool: pool(over),
+          currentEpoch: epoch({ endsAt: NOW }),
+          previousEpoch: epoch({ epochId: 1n, status, target: 42n, drawnAt: NOW - 10n, endsAt: NOW - 100n }),
+          drawRequest: async () => ({ nonce: NONCE, snapshot: SNAPSHOT }),
+          payoutProof: async () => proof,
+          fulfilled: async () => true,
+        });
+        await runTick(ctx);
+        for (const ixs of sent) for (const ix of ixs) labels.add(label(ix));
+      }
+    }
+    expect([...labels].filter((name) => /round|position|grant|leaf/.test(name))).toEqual([]);
+    expect(labels).toContain("request_draw");
+    expect(labels).toContain("payout");
   });
 
   it("6. wakes at the payout timeout of a drawn epoch", async () => {
@@ -485,7 +649,8 @@ describe("runTick", () => {
     const outcome = await runTick(ctx);
     expect(outcome.action).toBeNull();
     expect(sent).toHaveLength(0);
-    expect(outcome.snapshotPending).toEqual({ step: "payout", epochId: 1n });
+    // No proof to send, so the epoch is only waiting out the alert window.
+    expect(outcome.snapshotMismatchEpoch).toBe(1n);
   });
 
   // --- 6b. Pending withdrawals whose epoch has ended.

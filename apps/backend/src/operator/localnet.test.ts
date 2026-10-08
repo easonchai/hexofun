@@ -9,9 +9,10 @@
 //
 // Skipped everywhere else, so `pnpm test` in this package stays offline. The
 // operator drives the whole custody protocol here; the test only deposits. The
-// venue is the `test-venue` stub, so deploy runs for real against it. The
-// draw steps wait on the Epoch snapshot (off-chain-tickets ticket 12), so the
-// run ends with epoch 1 Ended and the operator reporting `snapshot_pending`.
+// venue is the `test-venue` stub, so deploy runs for real against it. No
+// indexer runs here, so no Epoch row carries a snapshot: the run ends with
+// epoch 1 Ended and the operator reporting `snapshot_pending`.
+// `draw.localnet.test.ts` runs the indexer too and covers the whole draw.
 import "reflect-metadata";
 
 import { BN } from "@anchor-lang/core";

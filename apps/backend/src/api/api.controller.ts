@@ -81,6 +81,14 @@ export class ApiController {
     return this.api.getEpochReferralGrants(BigInt(id));
   }
 
+  /** The draw's commitment, seed, target, winner and proof: enough to check it
+   *  or to send the permissionless `payout`. */
+  @Get("epochs/:id/draw")
+  getEpochDraw(@Param("id") id: string) {
+    if (!/^\d+$/.test(id)) throw new BadRequestException("`id` must be a whole number.");
+    return this.api.getEpochDraw(BigInt(id));
+  }
+
   @Get("players/:owner")
   getPlayer(@Param("owner") owner: string) {
     return this.api.getPlayer(parseOwner(owner));

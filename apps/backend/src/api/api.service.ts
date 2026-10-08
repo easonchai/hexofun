@@ -17,7 +17,9 @@ import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { clockUnixTimestamp } from "../operator/chain-state";
 import { referralGrantsForEpoch } from "../operator/referral-grants";
+import { epochSeed, randomnessAddress } from "../operator/vrf";
 import { PrismaService } from "../prisma/prisma.service";
+import { winnerProof, type WinnerProof } from "../snapshot/epoch-draw";
 import {
   decodeReserve,
   dailyPaidRates,
@@ -44,6 +46,8 @@ import { readRoundState } from "./round-state";
 export const EPOCH_OPEN = 0;
 export const EPOCH_ENDED = 1;
 export const EPOCH_DRAWING = 2;
+const EPOCH_DRAWN = 3;
+const EPOCH_PAID = 4;
 
 /** Events the frontend feed shows. Anything else is operator noise. */
 const FEED_NAMES = [
@@ -231,6 +235,9 @@ export class ApiService {
    *  same way. */
   readonly poolAddress: string;
 
+  /** Winner proofs of drawn epochs, newest few (see `winnerFor`). */
+  private readonly winners = new Map<string, WinnerProof>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly chain: ChainService,
@@ -413,6 +420,69 @@ export class ApiService {
   /** The epoch's Referral bonus grants and their inputs (ticket 22); the job lives in operator/referral-grants.ts. */
   getEpochReferralGrants(id: bigint) {
     return referralGrantsForEpoch(this.prisma, this.poolAddress, id);
+  }
+
+  /**
+   * Everything needed to check the epoch's draw, or to send its `payout`
+   * (permissionless): the committed root, depth, leaf count and total, the
+   * nonce and the seed they make, the randomness account, the drawn target and
+   * the winner's leaf with its proof. A field is null until it exists, and the
+   * nonce stays private until `request_draw` has landed, since nobody should
+   * be able to pre-create the randomness account before then. A winner the
+   * stored rows cannot prove reads as null, not as no winner.
+   */
+  async getEpochDraw(id: bigint) {
+    const epoch = await this.prisma.epoch.findUnique({
+      where: { poolAddress_id: { poolAddress: this.poolAddress, id } },
+    });
+    if (epoch === null || epoch.leafCount === null) {
+      throw new NotFoundException("That epoch has no snapshot yet. It is taken when the next epoch begins.");
+    }
+    const total = epoch.totalTickets ?? 0n;
+    const requested = epoch.nonce !== null && total > 0n && epoch.status >= EPOCH_DRAWING;
+    const seed = requested
+      ? epochSeed(
+          new PublicKey(this.poolAddress),
+          id,
+          Buffer.from(epoch.nonce as string, "hex"),
+          Buffer.from(epoch.snapshotRoot as string, "hex"),
+          total,
+        )
+      : null;
+    const testVrf = this.chain.program.idl.instructions.some((ix) => ix.name === "testFulfill");
+    const paidOrDrawn = epoch.status === EPOCH_DRAWN || epoch.status === EPOCH_PAID;
+    const winner = paidOrDrawn ? await this.winnerFor(id, toBigInt(epoch.target)) : null;
+    return {
+      epochId: id,
+      status: epoch.status,
+      root: epoch.snapshotRoot,
+      depth: epoch.snapshotDepth,
+      leafCount: epoch.leafCount,
+      totalTickets: epoch.totalTickets,
+      nonce: seed === null ? null : epoch.nonce,
+      seed: seed?.toString("hex") ?? null,
+      randomness:
+        seed === null ? null : randomnessAddress(this.chain.programId, seed, testVrf).toBase58(),
+      target: paidOrDrawn ? toBigInt(epoch.target) : null,
+      winner: winner?.owner ?? null,
+      winnerIndex: winner?.index ?? null,
+      winnerTickets: winner?.tickets ?? null,
+      proof: winner?.siblings.map(({ hash, sum }) => ({ hash: hash.toString("hex"), sum })) ?? null,
+    };
+  }
+
+  /** A proof is a pure function of rows that stop changing once the epoch is
+   *  drawn, and building one reads every leaf, so the last few are kept. */
+  private async winnerFor(id: bigint, target: bigint): Promise<WinnerProof | null> {
+    const key = `${id}:${target}`;
+    const cached = this.winners.get(key);
+    if (cached) return cached;
+    const proof = await winnerProof(this.prisma, this.poolAddress, id, target);
+    if (proof !== null) {
+      if (this.winners.size >= 8) this.winners.delete(this.winners.keys().next().value as string);
+      this.winners.set(key, proof);
+    }
+    return proof;
   }
 
   /**
