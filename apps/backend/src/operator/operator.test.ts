@@ -799,17 +799,58 @@ describe("runTick", () => {
     expect(recorder.sent.flat().filter((ix) => label(ix) === "grant_tickets")).toHaveLength(1);
   });
 
-  it("3b. a batch refused with AlreadyGranted marks its rows sent", async () => {
-    const referrers = [Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58()];
+  it("3b. a batch of one refused with AlreadyGranted marks its row sent without a resend", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    let calls = 0;
     const { ctx, markedSent } = context({
-      referralGrantsDue: async () => referrers.map((referrer) => ({ referrer, amount: 1n })),
+      referralGrantsDue: async () => [{ referrer, amount: 1n }],
       send: async () => {
+        calls += 1;
         throw new Error("AlreadyGranted");
       },
     });
     const outcome = await runTick(ctx);
+    expect(calls).toBe(1);
     expect(outcome.stepError).toBeUndefined();
-    expect(markedSent).toEqual([{ epochId: 2n, referrers, txSig: "already-granted" }]);
+    expect(markedSent).toEqual([{ epochId: 2n, referrers: [referrer], txSig: "already-granted" }]);
+  });
+
+  // mainnet-readiness-fixes 16: simulation names only the first refused
+  // instruction, so a mixed batch is resent one referrer at a time.
+  it("3b. a mixed batch refused with AlreadyGranted marks only the referrer refused alone", async () => {
+    const [granted, fresh] = [Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58()];
+    let calls = 0;
+    const { ctx, markedSent } = context({
+      referralGrantsDue: async () => [granted, fresh].map((referrer) => ({ referrer, amount: 1n })),
+      send: async (_ixs, hooks) => {
+        calls += 1;
+        // 1: the batch, 2: `granted` alone, 3: `fresh` alone.
+        if (calls <= 2) throw new Error("AlreadyGranted");
+        await hooks?.onSent("sig-fresh");
+        return "sig-fresh";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(calls).toBe(3);
+    expect(outcome.stepError).toBeUndefined();
+    expect(markedSent).toEqual([
+      { epochId: 2n, referrers: [granted], txSig: "already-granted" },
+      { epochId: 2n, referrers: [fresh], txSig: "sig-fresh" },
+    ]);
+  });
+
+  it("3b. a throw from referralGrantsDue is recorded and the withdrawals still go out", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const { ctx, sent } = context({
+      referralGrantsDue: async () => {
+        throw new Error("getSignatureStatuses: too many signatures");
+      },
+      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toMatch(/too many signatures/);
+    expect(outcome.action).toBe("process_withdraw");
+    expect(sent.flat().map(label)).toContain("process_withdraw");
   });
 
   // --- 4. request_draw: the ended epoch goes to the draw straight away. There
@@ -1581,6 +1622,28 @@ describe("runTick", () => {
       expect(outcome.action).toBeNull();
       expect(outcome.stepError).toContain(`release_leaf:${owner}`);
       expect(skipped).toEqual([owner]);
+    });
+
+    // mainnet-readiness-fixes 16: a read failure keeps the tick's shortfall.
+    it("records a leafToRelease throw and still returns the 6b shortfall", async () => {
+      const { ctx, sent } = context({
+        duePendingWithdrawals: async () => pending(1, 4_000_000n),
+        principalVaultBalance: async () => 1_000_000n,
+        leafToRelease: async () => {
+          throw new Error("prisma down");
+        },
+        send: async (ixs) => {
+          if (ixs.some((ix) => label(ix) === "process_withdraw")) {
+            throw new Error("InsufficientVaultLiquidity");
+          }
+          sent.push(ixs);
+          return "signature";
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.withdrawShortfall).toBe(3_000_000n);
+      expect(outcome.stepError).toMatch(/prisma down/);
+      expect(sent).toHaveLength(0);
     });
   });
 

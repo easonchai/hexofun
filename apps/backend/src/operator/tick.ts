@@ -113,6 +113,8 @@ const GRANT_CAP_EXCEEDED = ["DailyPlayerGrantCapExceeded", "DailyPoolGrantCapExc
 const alreadyGranted = (cause: unknown): boolean =>
   errorMessage(cause).includes("AlreadyGranted");
 
+type Grant = { referrer: string; amount: bigint };
+
 const capExceeded = (cause: unknown): boolean =>
   GRANT_CAP_EXCEEDED.some((marker) => errorMessage(cause).includes(marker));
 
@@ -255,7 +257,7 @@ export interface TickContext {
    * granting. Empty once every grant for the epoch is sent or already
    * granted on chain.
    */
-  referralGrantsDue(epochId: bigint): Promise<{ referrer: string; amount: bigint }[]>;
+  referralGrantsDue(epochId: bigint): Promise<Grant[]>;
   /** Records the signature of a batch of grants just sent; null clears it. */
   markReferralGrantsSent(
     epochId: bigint,
@@ -644,26 +646,54 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // 02), and any other refusal here is recorded, not thrown, so it never
   // blocks steps 4 to 7.
   if (!pool.shutdown && !pool.jackpotPaused && !pool.paused && currentEpoch) {
-    const grants = await ctx.referralGrantsDue(currentEpoch.epochId);
+    const epochId = currentEpoch.epochId;
+    // The signature is recorded the moment the transaction is on the wire
+    // (ticket 07): a send that times out while the blockhash is live may
+    // still land, and a row without it would be granted a second time.
+    const sendGrants = async (grants: Grant[]): Promise<void> => {
+      const referrers = grants.map((grant) => grant.referrer);
+      await ctx.send(await ctx.ix.grantTickets(pool, grants), {
+        onSent: (signature) => ctx.markReferralGrantsSent(epochId, referrers, signature),
+        onDropped: () => ctx.markReferralGrantsSent(epochId, referrers, null),
+      });
+    };
+    // Mainnet-readiness-fixes 16: the read runs the signature reclaim (RPC and
+    // DB), so its throw is recorded like a send's and steps 4 to 7 still run.
+    let grants: Grant[] = [];
+    try {
+      grants = await ctx.referralGrantsDue(epochId);
+    } catch (cause) {
+      stepError = stepError ?? `referral grants read failed: ${errorMessage(cause)}`;
+    }
     if (grants.length > 0) {
       const batch = grants.slice(0, BATCH_SIZE);
-      const epochId = currentEpoch.epochId;
       const referrers = batch.map((grant) => grant.referrer);
       try {
-        // The signature is recorded the moment the transaction is on the wire
-        // (ticket 07): a send that times out while the blockhash is live may
-        // still land, and a row without it would be granted a second time.
-        await ctx.send(await ctx.ix.grantTickets(pool, batch), {
-          onSent: (signature) => ctx.markReferralGrantsSent(epochId, referrers, signature),
-          onDropped: () => ctx.markReferralGrantsSent(epochId, referrers, null),
-        });
+        await sendGrants(batch);
         return finish({ action: "grant_tickets" });
       } catch (cause) {
         if (alreadyGranted(cause)) {
           // The program refused a second grant to a referrer this epoch, so
           // an earlier send landed. There is no signature of ours to record
           // (the refusal is at simulation), so the rows get a marker.
-          await ctx.markReferralGrantsSent(epochId, referrers, ALREADY_GRANTED_MARKER);
+          // Mainnet-readiness-fixes 16: simulation names only the first
+          // refused instruction, so a batch of more than one cannot say which
+          // referrer that was. Each is resent alone, and only a referrer
+          // refused on its own gets the marker.
+          if (batch.length === 1) {
+            await ctx.markReferralGrantsSent(epochId, referrers, ALREADY_GRANTED_MARKER);
+          } else {
+            for (const grant of batch) {
+              try {
+                await sendGrants([grant]).catch(async (single: unknown) => {
+                  if (!alreadyGranted(single)) throw single;
+                  await ctx.markReferralGrantsSent(epochId, [grant.referrer], ALREADY_GRANTED_MARKER);
+                });
+              } catch (single) {
+                stepError = stepError ?? `grant_tickets to ${grant.referrer} failed: ${errorMessage(single)}`;
+              }
+            }
+          }
           return finish({ action: "grant_tickets" });
         }
         if (!capExceeded(cause)) {
@@ -933,7 +963,15 @@ async function decide(ctx: TickContext): Promise<Decision> {
    */
   async function releaseOne(decision: Decision): Promise<Decision> {
     if (pool.shutdown || ctx.leafToRelease === undefined) return finish(decision);
-    const owner = await ctx.leafToRelease();
+    let owner: string | null;
+    try {
+      owner = await ctx.leafToRelease();
+    } catch (cause) {
+      // Mainnet-readiness-fixes 16: a read failure must not lose the tick's
+      // shortfall and step errors on the way out.
+      stepError = stepError ?? `leaf release read failed: ${errorMessage(cause)}`;
+      return finish(decision);
+    }
     if (owner === null) return finish(decision);
     const sent = await attempt(
       `release_leaf:${owner}`,

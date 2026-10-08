@@ -1,10 +1,13 @@
-import type { Connection } from "@solana/web3.js";
+import type { Connection, SignatureStatus } from "@solana/web3.js";
 
 /** A blockhash lives about a minute; this is past it with room to spare. */
 export const GRANT_RECLAIM_WINDOW_MS = 120_000;
 
 /** Mainnet-readiness-fixes 07: the marker the tick writes when the program refuses a repeat grant. */
 export const ALREADY_GRANTED_MARKER = "already-granted";
+
+/** The most signatures one `getSignatureStatuses` call accepts. */
+const SIGNATURE_STATUSES_LIMIT = 256;
 
 export interface GrantReclaimState {
   /** First time this process saw each unconfirmed signature. In memory: a
@@ -21,9 +24,7 @@ export interface GrantReclaimState {
  * never be granted. This asks the cluster about every recorded signature and
  * clears the ones that failed, or that it still does not know after
  * `GRANT_RECLAIM_WINDOW_MS`, so the rows are due again. A landed one stays.
- *
- * ponytail: one `getSignatureStatuses` call, so 256 signatures (2,048
- * referrers at 8 per batch) is the ceiling; chunk it if an epoch ever has more.
+ * The RPC answers at most 256 signatures a call, so they go in chunks.
  */
 export async function reclaimUnlandedGrants(args: {
   rows: { referrer: string; txSig: string }[];
@@ -38,9 +39,13 @@ export async function reclaimUnlandedGrants(args: {
   );
   const sigs = [...new Set(open.map((row) => row.txSig))];
   if (sigs.length === 0) return;
-  const { value } = await connection.getSignatureStatuses(sigs, {
-    searchTransactionHistory: true,
-  });
+  const value: (SignatureStatus | null)[] = [];
+  for (let i = 0; i < sigs.length; i += SIGNATURE_STATUSES_LIMIT) {
+    const chunk = await connection.getSignatureStatuses(sigs.slice(i, i + SIGNATURE_STATUSES_LIMIT), {
+      searchTransactionHistory: true,
+    });
+    value.push(...chunk.value);
+  }
   const dropped = new Set<string>();
   sigs.forEach((sig, i) => {
     const status = value[i];

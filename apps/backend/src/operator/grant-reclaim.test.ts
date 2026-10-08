@@ -46,6 +46,26 @@ describe("reclaimUnlandedGrants (mainnet-readiness-fixes 07)", () => {
     expect(cleared).toEqual([["R"]]);
   });
 
+  it("asks about more than 256 signatures in chunks, and drops across both", async () => {
+    const calls: number[] = [];
+    const cleared: string[][] = [];
+    const rows = Array.from({ length: 300 }, (_, i) => ({ referrer: `R${i}`, txSig: `sig${i}` }));
+    await reclaimUnlandedGrants({
+      rows,
+      connection: {
+        getSignatureStatuses: async (sigs: string[]) => {
+          calls.push(sigs.length);
+          return { value: sigs.map(() => ({ err: { InstructionError: [0, { Custom: 1 }] } })) };
+        },
+      } as never,
+      clear: async (referrers) => void cleared.push(referrers),
+      state: { firstSeen: new Map(), confirmed: new Set() },
+      now: 0,
+    });
+    expect(calls).toEqual([256, 44]);
+    expect(cleared).toEqual([rows.map((row) => row.referrer)]);
+  });
+
   it("ignores the already-granted marker", async () => {
     const { run, cleared } = harness(null);
     const rows = [{ referrer: "R", txSig: ALREADY_GRANTED_MARKER }];
