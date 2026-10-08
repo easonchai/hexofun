@@ -32,7 +32,7 @@ import {
   type RememberedBoard,
 } from "./engine.js";
 import { formatAtomic, formatAtomic2, parseAtomic } from "./lib/money.js";
-import { decodeBetRefusal } from "./playerErrors.js";
+import { decodeBetRefusal, decodePlayerError, thrownReason } from "./playerErrors.js";
 import { sfx, setSoundOn, subscribeSound, isSoundOn } from "./sfx.js";
 import { SHUTDOWN_BANNER, SHUTDOWN_REASON } from "./shutdown.js";
 import { SoundIcon } from "./SoundIcon.js";
@@ -232,6 +232,13 @@ export function App() {
   const [deployNote, setDeployNote] = useState<string | null>(null);
   const lastDeployRef = useRef<RememberedBoard | null>(null);
   const autoRoundRef = useRef<string | null>(null);
+  // The Round a bet names, read after the wallet prompt: approving a first
+  // delegation can take longer than the countdown the click saw.
+  const betTargetRef = useRef<bigint | null>(null);
+  useEffect(() => {
+    betTargetRef.current =
+      state === null ? null : open && phaseFor(open, roundNow ?? 0n) === "mine" ? open.roundId : BigInt(state.nextRoundId);
+  }, [state, open, roundNow]);
   const stake =parseAtomic(stakeText, DECIMALS) ?? 0n;
   const position = engine.position;
   // One bet per wallet per Round, so the panel locks on the open Round's.
@@ -282,7 +289,8 @@ export function App() {
           setDeployNote(ensured ? ensured.message : decodeBetRefusal("SessionInvalid"));
           return null;
         }
-        const target = open && phaseFor(open, roundNow ?? 0n) === "mine" ? open.roundId : BigInt(state.nextRoundId);
+        const target = betTargetRef.current;
+        if (target === null) return null;
         const outcome = await sendBet(
           {
             api: httpBetApi(apiBaseUrl()),
@@ -312,11 +320,16 @@ export function App() {
         sfx("prime");
         statePoll.kick();
         return outcome.roundId;
+      } catch (error) {
+        // A browser without WebCrypto Ed25519, or a network failure, lands here.
+        track("position_failed", { reason: thrownReason(error) });
+        setDeployNote(decodePlayerError(error));
+        return null;
       } finally {
         setDeployBusy(false);
       }
     },
-    [canBet, state, open, roundNow, ensureSession, betSession, expectedPoolAddress, statePoll.kick],
+    [canBet, state, ensureSession, betSession, expectedPoolAddress, statePoll.kick],
   );
 
   // Auto-rounds: re-place the last board in the next Round. The counter only

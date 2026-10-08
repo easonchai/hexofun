@@ -129,7 +129,7 @@ const BET_COPY: Record<BetRefusalCode | "Throttled" | "network", string> = {
   RoundAlreadyOpen: "A round is already open. Bet again to join it.",
   RoundOutsideEpoch: "A new round would end after the day does. Wait for the new day's first round.",
   GamePaused: "The game is paused right now. Try again once it restarts.",
-  BadTiles: "Pick at least one tile and stake at least 1 Ticket on each.",
+  BadTiles: "Pick between one tile and the most a bet allows, and stake at least 1 Ticket on each.",
   InsufficientTickets: "You don't have enough Tickets for that.",
   PositionExists: "You already have a bet in this round.",
   Throttled: "Too many bets too fast. Wait a few seconds and try again.",
