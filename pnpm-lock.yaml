@@ -47,6 +47,9 @@ importers:
       commander:
         specifier: 15.0.0
         version: 15.0.0
+      drand-client:
+        specifier: 1.4.2
+        version: 1.4.2
       fastify:
         specifier: 5.12.1
         version: 5.12.1

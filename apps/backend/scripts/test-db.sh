@@ -28,7 +28,7 @@ if ! pg_isready -q -h "$host" -p "$port" && [ "$host:$port" = "127.0.0.1:5433" ]
   echo "test-db: started hexvault-test-pg"
 fi
 
-for db in hexvault_api hexvault_access hexvault_referrals hexvault_indexer hexvault_operator hexvault_error_reports hexvault_ops hexvault_sessions hexvault_referral_grants hexvault_rounds hexvault_reveal hexvault_sparring; do
+for db in hexvault_api hexvault_access hexvault_referrals hexvault_indexer hexvault_operator hexvault_error_reports hexvault_ops hexvault_sessions hexvault_referral_grants hexvault_rounds hexvault_reveal hexvault_sparring hexvault_round_record; do
   exists=$(psql -h "$host" -p "$port" -U "$user" -d postgres -tAc \
     "SELECT 1 FROM pg_database WHERE datname = '$db'")
   if [ "$exists" != "1" ]; then

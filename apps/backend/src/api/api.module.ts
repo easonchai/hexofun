@@ -16,6 +16,7 @@ import { GrantsController } from "./grants.controller";
 import { OpsController } from "./ops.controller";
 import { OpsSummaryService } from "./ops-summary";
 import { ReferralsController } from "./referrals.controller";
+import { RoundRecordController } from "./round-record.controller";
 import { RoundsService } from "./rounds.service";
 import { SerializationInterceptor } from "./serialization.interceptor";
 import { SessionsController } from "./sessions.controller";
@@ -76,6 +77,7 @@ import { SparringService } from "./sparring.service";
     GrantsController,
     SessionsController,
     BetsController,
+    RoundRecordController,
   ],
   providers: [
     ApiService,
