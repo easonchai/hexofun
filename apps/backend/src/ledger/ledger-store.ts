@@ -15,11 +15,19 @@ export const LEDGER_CHECK_INTERVAL_S = 24n * 60n * 60n;
 
 /** First half of the lock key; the second is the pool address hash. */
 const LEDGER_LOCK_KEY = 0x4c454447;
+/**
+ * `$transaction` options for every taker of the ledger lock. An `EpochBegan`
+ * snapshots and resets every wallet under it, so a bet, close or grant queued
+ * behind that must be allowed to wait it out rather than die at Prisma's 5 s
+ * default.
+ */
+export const LEDGER_TRANSACTION = { timeout: 120_000 } as const;
 
 /**
  * Serializes every writer of a pool's ledger (indexer, grants, bets) until the
  * caller's transaction ends. The indexer writes balances read earlier in the
  * same transaction, so without it a concurrent grant's increment is lost.
+ * Pass `LEDGER_TRANSACTION` to the enclosing `$transaction`.
  */
 export async function lockLedger(tx: Prisma.TransactionClient, poolAddress: string): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK_KEY}::int, hashtext(${poolAddress}))`;

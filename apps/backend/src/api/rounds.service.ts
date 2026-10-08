@@ -22,7 +22,7 @@ import type { ChainClient } from "drand-client";
 import { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
-import { lockLedger } from "../ledger/ledger-store";
+import { LEDGER_TRANSACTION, lockLedger } from "../ledger/ledger-store";
 import { betListHash, checkBet, parseBetMessage, seedCommitment, TILE_COUNT, type BetRefusal } from "./bet";
 import { beaconRoundFor, beaconTime, defaultRelays, fetchVerifiedBeacon, VOID_AFTER_MS, type VerifiedBeacon } from "./drand";
 import { deriveTile, potOf, settleRows, voidRows, type SettlePosition, type SettleRow } from "./round-settle";
@@ -81,7 +81,7 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
     await this.prisma.$transaction(async (tx) => {
       await lockLedger(tx, this.poolAddress);
       await this.closeDueIn(tx, now);
-    });
+    }, LEDGER_TRANSACTION);
   }
 
   /** Writes `betListHash` and sets `closed` on a Round past its `closeAt`. Caller holds the lock. */
@@ -131,7 +131,7 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
             await lockLedger(tx, poolAddress);
             await this.settleIn(tx, id, beacon);
           },
-          { timeout: 30_000 },
+          LEDGER_TRANSACTION,
         );
       }
     } finally {
@@ -318,6 +318,6 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
       });
       await tx.session.update({ where: { id: session!.id }, data: { nextSeq: { increment: 1 } } });
       return { ok: true, roundId: round.id, positionId: position.id, opened: opens !== null, closeAt: round.closeAt, receivedAt: now };
-    });
+    }, LEDGER_TRANSACTION);
   }
 }

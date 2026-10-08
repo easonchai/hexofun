@@ -178,6 +178,8 @@ export class SparringService implements OnModuleInit, OnModuleDestroy {
       session.seq += 1;
       this.logger.log(`bet in round ${open.id}`);
     } else {
+      // A bet that committed but threw on the way back leaves `seq` one behind; the refusal carries the fix.
+      if (result.code === "SeqMismatch" && result.nextSeq !== undefined) session.seq = result.nextSeq;
       this.logger.warn(`bet in round ${open.id} refused: ${result.code}`);
     }
   }

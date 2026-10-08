@@ -4,6 +4,7 @@ import {
   evaluateAlerts,
   NEAR_CLOSE_SECONDS,
   OPERATOR_FAILING_SECONDS,
+  SNAPSHOT_LEAF_CAP,
   SOLVENCY_DUST,
   type AlertInputs,
   type AlertThresholds,
@@ -45,6 +46,7 @@ const HEALTHY: AlertInputs = {
   venueProposal: null,
   paramsChanged: null,
   ticketLedgerMismatches: 0,
+  ticketHolders: 12,
 };
 
 const PROPOSAL = {
@@ -285,6 +287,13 @@ describe("evaluateAlerts", () => {
     expect(alert?.message).toContain("3 wallets");
   });
 
+  it("SNAPSHOT_NEAR_CAP fires at 90% of the leaves a snapshot can hold", () => {
+    expect(evaluateAlerts({ ...HEALTHY, ticketHolders: SNAPSHOT_LEAF_CAP * 0.9 - 1 }, THRESHOLDS)).toEqual([]);
+    const [alert] = evaluateAlerts({ ...HEALTHY, ticketHolders: SNAPSHOT_LEAF_CAP * 0.9 }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "SNAPSHOT_NEAR_CAP" });
+    expect(alert?.message).toContain(`${SNAPSHOT_LEAF_CAP}`);
+  });
+
   it("SNAPSHOT_MISMATCH fires while the operator holds a refused winner proof", () => {
     const [alert] = evaluateAlerts({ ...HEALTHY, snapshotMismatch: true }, THRESHOLDS);
     expect(alert).toMatchObject({ code: "SNAPSHOT_MISMATCH" });
@@ -320,6 +329,7 @@ describe("evaluateAlerts", () => {
         venueProposal: PROPOSAL,
         paramsChanged: { pool: "P", epochSeconds: "86400" },
         ticketLedgerMismatches: 1,
+        ticketHolders: SNAPSHOT_LEAF_CAP,
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -346,6 +356,7 @@ describe("evaluateAlerts", () => {
       "VENUE_PROPOSED",
       "PARAMS_CHANGED",
       "TICKET_LEDGER_MISMATCH",
+      "SNAPSHOT_NEAR_CAP",
     ]);
   });
 });

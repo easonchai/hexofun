@@ -4,6 +4,7 @@ import { ConfigService } from "@nestjs/config";
 import type { HexVaultEnv } from "../config/env";
 import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import { PrismaService } from "../prisma/prisma.service";
+import { MAX_SNAPSHOT_DEPTH } from "../snapshot/sum-tree";
 import { ApiService, EPOCH_OPEN } from "./api.service";
 
 /** production-hardening ticket 05's codes, kept identical to
@@ -32,7 +33,8 @@ export type AlertCode =
   | "VENUE_PROPOSED"
   | "PARAMS_CHANGED"
   | "TICKET_LEDGER_MISMATCH"
-  | "SNAPSHOT_MISMATCH";
+  | "SNAPSHOT_MISMATCH"
+  | "SNAPSHOT_NEAR_CAP";
 
 export interface Alert {
   code: AlertCode;
@@ -46,6 +48,11 @@ export const ROLLOVER_RECENT_S = 60 * 60;
 /** mainnet-readiness-fixes 04: how long `PARAMS_CHANGED` stays up after a
  *  `ParamsSet` event, long enough for a once-a-minute monitor to page. */
 export const PARAMS_CHANGED_RECENT_S = 60 * 60;
+/** Ticket holders the snapshot can fit, `2^MAX_SNAPSHOT_DEPTH`. Past it the
+ *  cutoff's `buildSumTree` throws and the indexer stops at that `EpochBegan`,
+ *  so `SNAPSHOT_NEAR_CAP` pages at this share of it. */
+export const SNAPSHOT_LEAF_CAP = 2 ** MAX_SNAPSHOT_DEPTH;
+export const SNAPSHOT_NEAR_CAP_SHARE = 0.9;
 /** Ticket 09: how long the operator's last error may persist, while ticks
  *  keep running, before OPERATOR_FAILING pages someone. Not env-tunable, for
  *  the same reason as the two constants above. */
@@ -137,6 +144,8 @@ export interface AlertInputs {
   /** Wallets whose `TicketBalance` differs from their ledger sum at the last
    *  nightly check; 0 before the first check. */
   ticketLedgerMismatches: number;
+  /** Wallets holding Tickets now, the next snapshot's leaf count. */
+  ticketHolders: number;
 }
 
 /** `/status`'s operator block, which both the alerts and the ops todo list read. */
@@ -344,6 +353,12 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: `${inputs.ticketLedgerMismatches} wallets hold Tickets that their ledger rows do not sum to.`,
     });
   }
+  if (inputs.ticketHolders >= SNAPSHOT_LEAF_CAP * SNAPSHOT_NEAR_CAP_SHARE) {
+    alerts.push({
+      code: "SNAPSHOT_NEAR_CAP",
+      message: `${inputs.ticketHolders} wallets hold Tickets; the snapshot fits ${SNAPSHOT_LEAF_CAP}, and past that the indexer stops at the next EpochBegan.`,
+    });
+  }
   return alerts;
 }
 
@@ -385,12 +400,13 @@ export class AlertsController {
 
   @Get("alerts")
   async getAlerts(): Promise<{ alerts: Alert[] }> {
-    const [status, recent, venueProposal, paramsChanged, ledgerCheck] = await Promise.all([
+    const [status, recent, venueProposal, paramsChanged, ledgerCheck, ticketHolders] = await Promise.all([
       this.api.getStatus(),
       this.recentRollover(),
       this.openVenueProposal(),
       this.recentParamsSet(),
       this.prisma.ledgerCheck.findUnique({ where: { poolAddress: this.api.poolAddress } }),
+      this.prisma.ticketBalance.count({ where: { poolAddress: this.api.poolAddress, tickets: { gt: 0n } } }),
     ]);
     const nowSeconds = Math.floor(Date.now() / 1000);
     const secondsToEpochClose =
@@ -431,6 +447,7 @@ export class AlertsController {
         venueProposal,
         paramsChanged,
         ticketLedgerMismatches: ledgerCheck?.mismatches ?? 0,
+        ticketHolders,
       },
       {
         tickStaleSeconds: this.tickStaleSeconds,

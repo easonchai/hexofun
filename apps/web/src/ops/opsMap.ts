@@ -32,6 +32,7 @@ export const ALERT_CODES = [
   "PARAMS_CHANGED",
   "TICKET_LEDGER_MISMATCH",
   "SNAPSHOT_MISMATCH",
+  "SNAPSHOT_NEAR_CAP",
 ] as const;
 export type AlertCode = (typeof ALERT_CODES)[number];
 
@@ -84,6 +85,7 @@ export const OPS_MAP: Record<AlertCode | TodoCode, OpsEntry> = {
   PARAMS_CHANGED: AMBER(),
   TICKET_LEDGER_MISMATCH: AMBER(),
   SNAPSHOT_MISMATCH: AMBER(),
+  SNAPSHOT_NEAR_CAP: AMBER(),
   DEPLOY_DUE: AMBER("deploy"),
   RECALL_DUE: AMBER("recall"),
   HARVEST_DUE: AMBER("harvest"),

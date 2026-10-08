@@ -455,7 +455,12 @@ export class ApiService {
       throw new NotFoundException("That epoch has no snapshot yet. It is taken when the next epoch begins.");
     }
     const total = epoch.totalTickets ?? 0n;
-    const requested = epoch.nonce !== null && total > 0n && epoch.status >= EPOCH_DRAWING;
+    // Not `>= EPOCH_DRAWING`: an epoch rolled over at `end_epoch` (jackpot under the floor) holds a
+    // claimed nonce but never had a randomness account.
+    const requested =
+      epoch.nonce !== null &&
+      total > 0n &&
+      (epoch.status === EPOCH_DRAWING || epoch.status === EPOCH_DRAWN || epoch.status === EPOCH_PAID);
     const seed = requested
       ? epochSeed(
           new PublicKey(this.poolAddress),

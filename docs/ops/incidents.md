@@ -311,6 +311,21 @@ so a wrong balance can put the wrong count in a leaf.
 3. An epoch whose snapshot is already committed on chain keeps that snapshot. Fix the wallet before the next
    `EpochBegan`, which snapshots and resets every balance.
 
+<a id="snapshot-near-cap"></a>
+## Snapshot near its leaf cap
+
+Starts with `SNAPSHOT_NEAR_CAP`. Wallets holding Tickets are at 90% of `2^MAX_SNAPSHOT_DEPTH` (262,144),
+the most leaves a snapshot can hold. Past the cap, the cutoff's `buildSumTree` throws inside the indexer's
+`EpochBegan` transaction, the batch rolls back every tick, and `INDEXER_STALE` follows with no draw for
+that epoch and no bets booked after it.
+
+1. Count them: `SELECT count(*) FROM "TicketBalance" WHERE "poolAddress" = '<pool>' AND tickets > 0`.
+2. The cap is shared with the program (`MAX_SNAPSHOT_DEPTH` in `programs/hex_vault/src/constants.rs`), so
+   raising it is a program upgrade plus the backend constant in `apps/backend/src/snapshot/sum-tree.ts`.
+   Land it before the next `EpochBegan`.
+3. If the cap is already hit, the indexer is stopped at that `EpochBegan`. Nothing is lost: once the raised
+   cap deploys, the next tick retries the same batch.
+
 <a id="snapshot-mismatch"></a>
 ## Snapshot proof refused
 

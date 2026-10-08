@@ -1080,6 +1080,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       });
     });
 
+    it("names no seed or randomness account for an epoch rolled over without a draw", async () => {
+      await withSnapshot({ nonce: NONCE, status: 5 }, async () => {
+        const { body } = await http.get(`/epochs/${PREVIOUS_EPOCH}/draw`).expect(200);
+        expect(body).toMatchObject({ status: 5, nonce: null, seed: null, randomness: null, winner: null });
+      });
+    });
+
     it("serves the winner and a proof that reaches the root once the epoch is Drawn", async () => {
       // Tickets 10, 20, 30 in leaf order: the ranges are [0, 10), [10, 30) and [30, 60).
       for (const [target, index] of [[0n, 0], [9n, 0], [10n, 1], [29n, 1], [30n, 2], [59n, 2]] as const) {

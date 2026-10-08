@@ -18,7 +18,7 @@ import {
 } from "../api/referral";
 import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
-import { bookBatch, checkLedgerIfDue } from "../ledger/ledger-store";
+import { bookBatch, checkLedgerIfDue, LEDGER_TRANSACTION } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeEventLogs,
@@ -975,7 +975,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         }
       }
       return created.count;
-    }, { timeout: 120_000 }); // an EpochBegan snapshots and resets every wallet in this transaction
+    }, LEDGER_TRANSACTION); // an EpochBegan snapshots and resets every wallet in this transaction
   }
 
   /**

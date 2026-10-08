@@ -209,6 +209,25 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     expect(placeBet).toHaveBeenCalledTimes(1);
   });
 
+  it("adopts nextSeq from a SeqMismatch instead of waiting for the next delegation", async () => {
+    await fund(sparringWalletKey, 100n * STAKE_PER_TILE);
+    vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    const service = sparring();
+    await openRoundByHuman(1n, at(10));
+    await service.tick(at(11));
+    // A bet that committed but whose response was lost: the row is ahead of the in-memory count.
+    await prisma.session.updateMany({ where: { wallet: sparringWalletKey }, data: { nextSeq: 5 } });
+
+    await openRoundByHuman(2n, at(130));
+    await service.tick(at(131)); // refused with SeqMismatch, nextSeq 5
+    await openRoundByHuman(3n, at(250));
+    await service.tick(at(251));
+
+    const seqs = (await prisma.position.findMany({ where: { owner: sparringWalletKey }, orderBy: { roundId: "asc" } }))
+      .map((row) => [row.roundId, row.seq]);
+    expect(seqs).toEqual([[1n, 0], [3n, 5]]);
+  });
+
   it("signs a new delegation before the 24 hours end and bets with the new key", async () => {
     await fund(sparringWalletKey, 100n * STAKE_PER_TILE);
     const service = sparring();

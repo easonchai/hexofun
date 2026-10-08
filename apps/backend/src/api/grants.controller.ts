@@ -15,7 +15,7 @@ import bs58 from "bs58";
 
 import { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
-import { lockLedger } from "../ledger/ledger-store";
+import { LEDGER_TRANSACTION, lockLedger } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
 import { verifyGrant, type GrantRefusal } from "./grants";
 
@@ -126,7 +126,7 @@ export class GrantsController {
           update: { tickets: { increment: verdict.amount } },
         });
         return booked;
-      });
+      }, LEDGER_TRANSACTION);
       this.logger.warn(`grant ${row.id}: ${row.signer} gave ${verdict.amount} Tickets to ${owner}`);
       return row;
     } catch (cause) {
