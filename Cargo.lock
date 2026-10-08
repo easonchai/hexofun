@@ -845,7 +845,7 @@ dependencies = [
  "bytemuck",
  "klend-interface",
  "kvault-interface",
- "solana-keccak-hasher",
+ "serde_json",
  "solana-security-txt",
  "solana-sha256-hasher 2.3.0",
 ]
@@ -1700,18 +1700,6 @@ dependencies = [
  "solana-instruction 3.5.0",
  "solana-program-entrypoint",
  "solana-stable-layout",
-]
-
-[[package]]
-name = "solana-keccak-hasher"
-version = "2.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7aeb957fbd42a451b99235df4942d96db7ef678e8d5061ef34c9b34cae12f79"
-dependencies = [
- "sha3",
- "solana-define-syscall 2.3.0",
- "solana-hash 2.3.0",
- "solana-sanitize 2.2.1",
 ]
 
 [[package]]

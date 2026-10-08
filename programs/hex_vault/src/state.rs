@@ -207,15 +207,17 @@ pub struct Epoch {
     pub ends_at: i64,
     /// [`EpochStatus`]
     pub status: u8,
-    /// The Ticket total of this epoch, given by the Operator to `request_draw`.
-    /// The name is from before the Weight tree; ticket 09 renames it.
-    pub registered_weight: u64,
-    pub registered_count: u32,
+    /// The Ticket total of this epoch's snapshot, committed by the Operator in
+    /// `request_draw` with the three fields below. Frozen once the status is
+    /// Drawing.
+    pub total_tickets: u64,
+    /// Leaves in the snapshot, padding excluded.
+    pub leaf_count: u32,
     /// Jackpot vault balance snapshotted at the draw request.
     pub jackpot_amount: u64,
     pub vrf_seed: [u8; 32],
     pub requested_at: i64,
-    /// Point in `registered_weight` selected by the draw.
+    /// Point in `total_tickets` selected by the draw.
     pub target: u64,
     pub winner: Pubkey,
     pub bump: u8,
@@ -229,9 +231,14 @@ pub struct Epoch {
     /// Set to [`crate::constants::EPOCH_VERSION`] by `begin_epoch`. See
     /// `Pool::version`.
     pub version: u8,
+    /// Root of the snapshot's Merkle sum tree, committed by `request_draw`.
+    /// All zeros until then.
+    pub snapshot_root: [u8; 32],
+    /// Levels above the leaves, so the tree holds `2^snapshot_depth` leaves.
+    pub snapshot_depth: u8,
     /// Take new fields from here. Their zero value must be the safe default,
     /// or bump `version` and migrate on first touch. See ADR 0013.
-    pub _reserved: [u8; 64],
+    pub _reserved: [u8; 31],
 }
 
 /// One wallet's account in one pool.

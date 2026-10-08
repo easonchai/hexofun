@@ -10,6 +10,7 @@ pub mod custody;
 pub mod epochs;
 pub mod errors;
 pub mod events;
+pub mod snapshot;
 pub mod state;
 pub mod sync;
 #[cfg(feature = "test-venue")]
@@ -26,6 +27,7 @@ use anchor_lang::prelude::*;
 
 use custody::*;
 use epochs::*;
+use snapshot::SumNode;
 use venue_change::*;
 #[cfg(feature = "test-venue")]
 use test_venue::*;
@@ -184,26 +186,33 @@ pub mod hex_vault {
         epochs::fund_jackpot(ctx, amount)
     }
 
-    /// Operator-only: snapshots the ended epoch's prize, takes its Ticket
-    /// total from the Operator, then asks the VRF for the draw, or rolls the
-    /// epoch over. The total is unchecked until ticket 09 commits a Merkle
-    /// root beside it.
+    /// Operator-only: snapshots the ended epoch's prize, commits the Ticket
+    /// snapshot's Merkle sum root, total and shape, then asks the VRF for the
+    /// draw with the root in the seed, or rolls the epoch over.
     pub fn request_draw(
         ctx: Context<RequestDraw>,
         nonce: [u8; 32],
+        root: [u8; 32],
         total_tickets: u64,
+        depth: u8,
+        leaf_count: u32,
     ) -> Result<()> {
-        epochs::request_draw(ctx, nonce, total_tickets)
+        epochs::request_draw(ctx, nonce, root, total_tickets, depth, leaf_count)
     }
 
     pub fn draw(ctx: Context<Draw>) -> Result<()> {
         epochs::draw(ctx)
     }
 
-    /// Operator-signed until ticket 09 verifies the winner's proof, since
-    /// nothing on chain says who holds the target any more.
-    pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
-        epochs::payout(ctx)
+    /// Permissionless: pays only when `siblings` carry the winner's leaf to
+    /// the committed root and the drawn target falls in the leaf's range.
+    pub fn payout<'info>(
+        ctx: Context<'info, Payout<'info>>,
+        index: u32,
+        tickets: u64,
+        siblings: Vec<SumNode>,
+    ) -> Result<()> {
+        epochs::payout(ctx, index, tickets, siblings)
     }
 
     pub fn rollover_epoch(ctx: Context<RolloverEpoch>) -> Result<()> {

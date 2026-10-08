@@ -36,7 +36,6 @@ devnew = []
 [dependencies]
 anchor-lang = { version = "1.1.2", features = ["init-if-needed"] }
 anchor-spl = { version = "1.1.2", features = ["token_2022"] }
-solana-keccak-hasher = "2.2.1"
 solana-sha256-hasher = "2.2.1"
 # Anchor's `#[account(zero_copy)]` (the Weight tree, yield-claimer ticket 04)
 # derives bytemuck's Pod and Zeroable by path, so the crate must name it.
@@ -59,3 +58,5 @@ kvault-interface = "0.1.0"
 
 [dev-dependencies]
 bytemuck = "1"
+# snapshot.rs reads tests/fixtures/sum-tree-vectors.json. Already in the lockfile.
+serde_json = "1"

@@ -1,28 +1,30 @@
 //! Epoch lifecycle (spec §2.3 "Epochs").
 //!
 //! `begin_epoch` is operator-only via `has_one = operator` on the Pool
-//! account. `fund_jackpot` is permissionless. `payout` is operator-signed
-//! until ticket 09 lets anyone crank it with a proof.
+//! account. `fund_jackpot` is permissionless.
 //!
-//! `draw` and `rollover_epoch` are permissionless too (production-hardening
-//! ticket 01): the first account, `caller`, is any signer, so an operator
-//! that stops cranking cannot withhold a fulfilled result or leave a
-//! timed-out request stuck.
+//! `draw`, `payout` and `rollover_epoch` are permissionless too
+//! (production-hardening ticket 01): the first account, `caller`, is any
+//! signer, so an operator that stops cranking cannot withhold a fulfilled
+//! result, a prize or a timed-out request. `payout` pays only against a proof.
 //!
 //! The epoch flow is `begin_epoch`, play, `request_draw`, `draw`, `payout`.
 //! `begin_epoch` does no work per Player. The Tickets of the ended epoch live
-//! in the backend's ledger, and the Operator hands `request_draw` their total
-//! (off-chain-tickets ticket 08, ADR 0025).
+//! in the backend's ledger as a Merkle sum tree. The Operator commits its root,
+//! total and shape in `request_draw`, which mixes them into the VRF seed, and
+//! `payout` checks the winner's proof against them (off-chain-tickets tickets
+//! 08 and 09, ADR 0025).
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 use crate::constants::{
-    epoch_status, EPOCH_VERSION, SEED_EPOCH, SEED_JACKPOT, SEED_PLAYER, SEED_POOL,
-    SEED_PRINCIPAL,
+    epoch_status, EPOCH_VERSION, MAX_SNAPSHOT_DEPTH, SEED_EPOCH, SEED_JACKPOT, SEED_PLAYER,
+    SEED_POOL, SEED_PRINCIPAL,
 };
 use crate::errors::HexVaultError;
 use crate::events::{EpochBegan, EpochDrawn, EpochRolledOver, JackpotFunded, JackpotPaid};
+use crate::snapshot::{self, Commitment, SumNode};
 use crate::state::{Epoch, Player, Pool};
 use crate::sync::settle_before_growth;
 use crate::touch::touch;
@@ -132,8 +134,10 @@ pub fn begin_epoch<'info>(ctx: Context<'info, BeginEpoch<'info>>) -> Result<()> 
     new_epoch.starts_at = starts_at;
     new_epoch.ends_at = ends_at;
     new_epoch.status = epoch_status::OPEN;
-    new_epoch.registered_weight = 0;
-    new_epoch.registered_count = 0;
+    new_epoch.total_tickets = 0;
+    new_epoch.leaf_count = 0;
+    new_epoch.snapshot_root = [0u8; 32];
+    new_epoch.snapshot_depth = 0;
     new_epoch.jackpot_amount = 0;
     new_epoch.vrf_seed = [0u8; 32];
     new_epoch.requested_at = 0;
@@ -175,17 +179,24 @@ pub fn fund_jackpot(ctx: Context<FundJackpot>, amount: u64) -> Result<()> {
     Ok(())
 }
 
-/// Operator-only. Sends an Ended epoch to the draw: snapshots the prize, takes
-/// the epoch's Ticket total from the Operator, and requests randomness. The
-/// total and the prize are final by then. Nothing checks the total until
-/// ticket 09 commits a Merkle root beside it.
+/// Operator-only. Sends an Ended epoch to the draw: snapshots the prize,
+/// commits the Ticket snapshot's root, total and shape, and requests
+/// randomness with the root and total in the seed. The four commitment fields
+/// and the prize are final by then: nothing writes them once the status is
+/// Drawing, so no other snapshot can be swapped in.
+///
+/// An epoch with no Tickets has no snapshot to commit, so `total_tickets == 0`
+/// rolls over without the shape checks.
 ///
 /// Needs `begin_epoch` to have run once and not twice since the epoch ended.
 /// An epoch the Operator never sends here leaves through `rollover_epoch`.
 pub fn request_draw(
     ctx: Context<RequestDraw>,
     nonce: [u8; 32],
+    root: [u8; 32],
     total_tickets: u64,
+    depth: u8,
+    leaf_count: u32,
 ) -> Result<()> {
     let now = utils::now()?;
     let pool = &mut ctx.accounts.pool;
@@ -210,11 +221,20 @@ pub fn request_draw(
         .jackpot_vault
         .amount
         .saturating_sub(pool.jackpot_reserved);
-    epoch.registered_weight = total_tickets;
+    epoch.total_tickets = total_tickets;
+    if total_tickets > 0 {
+        snapshot::check_commitment(
+            &Commitment { root, total_tickets, depth, leaf_count },
+            MAX_SNAPSHOT_DEPTH,
+        )?;
+        epoch.snapshot_root = root;
+        epoch.snapshot_depth = depth;
+        epoch.leaf_count = leaf_count;
+    }
 
     // Nothing to draw for, or too little to be worth drawing for: roll the
     // prize into the next epoch rather than spend a randomness request on it.
-    if epoch.registered_weight == 0 || epoch.jackpot_amount < pool.min_jackpot {
+    if total_tickets == 0 || epoch.jackpot_amount < pool.min_jackpot {
         epoch.status = epoch_status::ROLLED_OVER;
         emit!(EpochRolledOver {
             epoch_id: epoch.epoch_id,
@@ -223,7 +243,7 @@ pub fn request_draw(
         return Ok(());
     }
 
-    let seed = utils::vrf_seed(b"epoch", &pool.key(), epoch.epoch_id, &nonce);
+    let seed = utils::epoch_seed(&pool.key(), epoch.epoch_id, &nonce, &root, total_tickets);
     require_keys_eq!(
         ctx.accounts.randomness.key(),
         vrf::randomness_address(&seed),
@@ -266,19 +286,28 @@ pub fn draw(ctx: Context<Draw>) -> Result<()> {
 
     let randomness = vrf::read_fulfilled(&ctx.accounts.randomness.to_account_info(), &epoch.vrf_seed)?;
 
-    epoch.target = vrf::unbiased_u64(&randomness, epoch.registered_weight)?;
+    epoch.target = vrf::unbiased_u64(&randomness, epoch.total_tickets)?;
     epoch.status = epoch_status::DRAWN;
     epoch.drawn_at = now;
 
     emit!(EpochDrawn {
         epoch_id: epoch.epoch_id,
         target: epoch.target,
-        registered_weight: epoch.registered_weight,
+        total_tickets: epoch.total_tickets,
     });
     Ok(())
 }
 
-pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
+/// Pays the drawn epoch's prize to `winner` once `siblings` carry the leaf
+/// `(winner.owner, tickets)` at `index` to the committed root and the drawn
+/// target falls in its range. Anyone can crank it with the proof the API
+/// serves.
+pub fn payout<'info>(
+    ctx: Context<'info, Payout<'info>>,
+    index: u32,
+    tickets: u64,
+    siblings: Vec<SumNode>,
+) -> Result<()> {
     let a = &mut *ctx.accounts;
     let venue = Venue {
         program: &a.klend_program,
@@ -296,8 +325,19 @@ pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         epoch.status == epoch_status::DRAWN,
         HexVaultError::EpochNotDrawn
     );
-    // Nothing here checks that `winner` holds `epoch.target`: the Operator
-    // signs for it until ticket 09 verifies the winner's proof.
+    snapshot::verify(
+        &Commitment {
+            root: epoch.snapshot_root,
+            total_tickets: epoch.total_tickets,
+            depth: epoch.snapshot_depth,
+            leaf_count: epoch.leaf_count,
+        },
+        epoch.target,
+        index,
+        &winner.owner,
+        tickets,
+        &siblings,
+    )?;
 
     let amount = epoch.jackpot_amount;
     let is_house = winner.is_house;
@@ -391,6 +431,8 @@ pub fn payout<'info>(ctx: Context<'info, Payout<'info>>) -> Result<()> {
         compounded: !is_house,
         principal: winner.principal,
         yield_index: winner.yield_index,
+        index,
+        tickets,
     });
     Ok(())
 }
@@ -620,14 +662,13 @@ pub struct Draw<'info> {
     pub randomness: UncheckedAccount<'info>,
 }
 
-/// Operator-signed until ticket 09: nothing on chain says who holds the drawn
-/// target any more, so the Operator vouches for `winner`. Ticket 09 replaces
-/// the signer with the winner's proof and makes it permissionless again. A
+/// Permissionless: `caller` may be any signer, only paying the transaction's
+/// fee, because the winner's proof is what authorises the payment. A
 /// non-House winner needs no token account of their own: the prize compounds
 /// into `principal_vault`.
 #[derive(Accounts)]
 pub struct Payout<'info> {
-    pub operator: Signer<'info>,
+    pub caller: Signer<'info>,
 
     // Boxed: unboxed, this struct's `try_accounts` overflows the BPF stack
     // frame (8 accounts including 5 token accounts).
@@ -635,7 +676,6 @@ pub struct Payout<'info> {
         mut,
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
-        has_one = operator,
         has_one = treasury,
         has_one = buyback_reserve,
     )]

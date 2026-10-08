@@ -144,7 +144,7 @@ pub struct JackpotFunded {
 pub struct EpochDrawn {
     pub epoch_id: u64,
     pub target: u64,
-    pub registered_weight: u64,
+    pub total_tickets: u64,
 }
 
 #[event]
@@ -160,6 +160,10 @@ pub struct JackpotPaid {
     /// The winner's Principal after the prize. The House's stays 0.
     pub principal: u64,
     pub yield_index: u128,
+    /// The winner's leaf in the snapshot and the Tickets it held, so the
+    /// indexer can book the prize's Tickets.
+    pub index: u32,
+    pub tickets: u64,
 }
 
 #[event]

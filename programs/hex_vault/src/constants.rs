@@ -14,6 +14,10 @@ pub const EPOCH_VERSION: u8 = 1;
 /// byte of them.
 pub const LAYOUT_VERSION: u8 = 3;
 
+/// Deepest Merkle sum tree `request_draw` accepts: 2^18 leaves, a 720-byte
+/// proof (off-chain-tickets ticket 09, spec "Transaction size").
+pub const MAX_SNAPSHOT_DEPTH: u8 = 18;
+
 /// Denominator for `base_rate_bps`, an annual rate: seconds in a 365-day year.
 pub const SECONDS_PER_YEAR: u128 = 31_536_000;
 

@@ -280,4 +280,25 @@ pub enum HexVaultError {
     HouseLeafCannotBeReleased,
     #[msg("the free-leaves account is malformed")]
     FreeLeavesInvalid,
+
+    // off-chain-tickets ticket 09, the snapshot commitment and the payout
+    // proof. Appended too.
+    #[msg("the snapshot is deeper than the program allows")]
+    SnapshotDepthTooLarge,
+    #[msg("the snapshot's leaf count is zero or more than 2^depth")]
+    SnapshotLeafCountInvalid,
+    #[msg("the snapshot root is all zeros")]
+    SnapshotRootZero,
+    #[msg("a leaf with no Tickets cannot win")]
+    ZeroTicketLeaf,
+    #[msg("the proof does not have one sibling per level")]
+    ProofWrongLength,
+    #[msg("the leaf index is past the snapshot's leaf count")]
+    ProofIndexOutOfRange,
+    #[msg("the proof does not reach the committed root")]
+    ProofRootMismatch,
+    #[msg("the proof's sums do not reach the committed Ticket total")]
+    ProofSumMismatch,
+    #[msg("the drawn target is outside the leaf's range")]
+    ProofRangeMismatch,
 }
