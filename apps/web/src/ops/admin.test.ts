@@ -10,7 +10,6 @@ import {
   diffParams,
   encodeForSquads,
   fundJackpotIx,
-  grantTicketsIx,
   parseUsdc,
   pauseIx,
   PARAMS_FIELDS,
@@ -28,16 +27,11 @@ const program = new Program(idl, {
 const params: Values = {
   epochSeconds: 86_400n,
   epochAnchor: 1_700_000_000n,
-  roundSeconds: 60n,
-  closeBuffer: 15n,
   vrfTimeout: 300n,
   minDeposit: 1_000_000n,
-  houseCutBps: 600n,
   minJackpot: 5_000_000n,
   payoutTimeout: 900n,
   baseRateBps: 8_000n,
-  ticketsPerUsdc: 1n,
-  bonusCapBps: 1_000n,
 };
 const venue: Values = {
   yieldFeeBps: 1_000n,
@@ -65,7 +59,7 @@ describe("diffParams", () => {
   it("leaves out blank and unchanged fields", () => {
     const { changes, errors } = diffParams(PARAMS_FIELDS, params, {
       epochSeconds: "86400",
-      houseCutBps: "",
+      minJackpot: "",
       baseRateBps: "7500",
     });
     expect(errors).toEqual([]);
@@ -82,8 +76,8 @@ describe("diffParams", () => {
 
   it("reports input that is not a whole number or does not fit the field", () => {
     const { changes, errors } = diffParams(PARAMS_FIELDS, params, {
-      houseCutBps: "6.5",
-      ticketsPerUsdc: "70000",
+      epochSeconds: "6.5",
+      baseRateBps: "70000",
       minDeposit: "-1",
     });
     expect(changes).toEqual([]);
@@ -126,20 +120,14 @@ describe("checkBounds", () => {
 
   it("holds the set_params rules, judged on the merged result", () => {
     for (const input of [
-      { houseCutBps: "10001" },
       { baseRateBps: "10001" },
-      { bonusCapBps: "10001" },
-      { ticketsPerUsdc: "0" },
       { epochSeconds: "0" },
-      { closeBuffer: "60" },
       { vrfTimeout: "179" },
       { payoutTimeout: "599" },
       { payoutTimeout: "86400" },
-      { roundSeconds: "15" },
     ]) {
       expect(bounds(PARAMS_FIELDS, params, input, "params"), JSON.stringify(input)).not.toEqual([]);
     }
-    expect(bounds(PARAMS_FIELDS, params, { closeBuffer: "90", roundSeconds: "120" }, "params")).toEqual([]);
     expect(bounds(PARAMS_FIELDS, params, { epochSeconds: "900", payoutTimeout: "600" }, "params")).toEqual([]);
   });
 });
@@ -207,17 +195,8 @@ describe("Admin instructions and the Squads encoding", () => {
     const decoded = coder.decode(p.data);
     expect(decoded.name).toBe("setParams");
     expect(decoded.data.params.baseRateBps).toBe(7_500);
-    expect(decoded.data.params.houseCutBps).toBeNull();
+    expect(decoded.data.params.minJackpot).toBeNull();
     expect(decoded.data.params.epochSeconds).toBeNull();
-  });
-
-  it("round-trips grant_tickets with the Player's PDA and the Admin as signer", async () => {
-    const owner = key();
-    const tree = key();
-    const ix = await grantTicketsIx(program, admin, pool, tree, owner, 25n);
-    same(roundTrip([ix]).instructions[0]!, ix);
-    expect(ix.keys.map((k) => k.pubkey.toBase58())).toContain(tree.toBase58());
-    expect(ix.keys.find((k) => k.isSigner)?.pubkey.equals(admin)).toBe(true);
   });
 
   it("fund_jackpot signs with the given wallet and draws from its token account", async () => {

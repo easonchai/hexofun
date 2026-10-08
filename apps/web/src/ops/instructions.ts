@@ -2,8 +2,8 @@
  * The seven permissionless cranks as instructions, built in the browser. The
  * account lists mirror the backend's `OperatorInstructions`
  * (apps/backend/src/operator/instructions.ts): every account is passed
- * explicitly, so building costs no RPC read. The pool and the stuck Round or
- * epoch are read from the chain once, at click time, by the `load*` helpers.
+ * explicitly, so building costs no RPC read. The pool and the stuck epoch are
+ * read from the chain once, at click time, by the `load*` helpers.
  */
 import {
   createAssociatedTokenAccountIdempotentInstruction,
@@ -29,7 +29,6 @@ import {
   POOL_ID,
   poolAddress,
   principalVaultAddress,
-  roundAddress,
   venueProposalAddress,
   VENUE_KIND,
   type HexVaultProgram,
@@ -45,7 +44,6 @@ export interface VenuePool {
   admin: PublicKey;
   acceptedMint: PublicKey;
   treasury: PublicKey;
-  weightTree: PublicKey;
   klendProgram: PublicKey;
   klendMarket: PublicKey;
   klendReserve: PublicKey;
@@ -62,11 +60,7 @@ export interface VenuePool {
  *  `move` also deposits, `redeem` may withdraw. klend ignores it. */
 type VenueUse = "sync" | "move" | "redeem";
 
-/** A Round or epoch's randomness request seed, read off its account. */
-export interface RoundSeed {
-  roundId: bigint;
-  vrfSeed: Uint8Array;
-}
+/** An epoch's randomness request seed, read off its account. */
 export interface EpochSeed {
   epochId: bigint;
   vrfSeed: Uint8Array;
@@ -268,7 +262,6 @@ export async function processWithdraw(
       pool: pool.address,
       player: playerAddress(pool.address, owner),
       owner: null,
-      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
@@ -277,14 +270,6 @@ export async function processWithdraw(
     }, [], pool.venueKind === VENUE_KIND.kvault ? venueRemaining(pool, "sync") : []),
   ];
 }
-
-export const voidRound = (program: HexVaultProgram, pool: VenuePool, caller: PublicKey, round: RoundSeed) =>
-  build(program, "voidRound", {
-    caller,
-    pool: pool.address,
-    round: roundAddress(pool.address, round.roundId),
-    randomness: randomnessFor(program, round.vrfSeed),
-  });
 
 export const rolloverEpoch = (program: HexVaultProgram, pool: VenuePool, caller: PublicKey, epoch: EpochSeed) =>
   build(program, "rolloverEpoch", {
@@ -307,7 +292,6 @@ export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
     admin: asKey(a.admin),
     acceptedMint: asKey(a.acceptedMint),
     treasury: asKey(a.treasury),
-    weightTree: asKey(a.weightTree),
     klendProgram: asKey(a.klendProgram),
     klendMarket: asKey(a.klendMarket),
     klendReserve: asKey(a.klendReserve),
@@ -325,11 +309,6 @@ export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
 }
 
 const seedOf = (value: unknown): Uint8Array => Uint8Array.from(value as ArrayLike<number>);
-
-export async function loadRoundSeed(program: HexVaultProgram, roundId: bigint): Promise<RoundSeed> {
-  const a = (await accountOf(program, "round").fetch(roundAddress(poolAddress(POOL_ID), roundId))) as Record<string, unknown>;
-  return { roundId, vrfSeed: seedOf(a.vrfSeed) };
-}
 
 export async function loadEpochSeed(program: HexVaultProgram, epochId: bigint): Promise<EpochSeed> {
   const a = (await accountOf(program, "epoch").fetch(epochAddress(poolAddress(POOL_ID), epochId))) as Record<string, unknown>;

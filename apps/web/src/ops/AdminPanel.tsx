@@ -9,8 +9,6 @@ import {
   diffParams,
   encodeForSquads,
   fundJackpotIx,
-  grantTicketsIx,
-  parseAmount,
   parseUsdc,
   PARAMS_FIELDS,
   setParamsIx,
@@ -184,22 +182,6 @@ export function AdminPanel() {
           )
         }
       />
-      <GrantTicketsForm
-        mode={mode}
-        disabled={disabled || !pool?.pool.weightTree}
-        offReason={whyOff(
-          [mode === "unknown", "Waiting for the Admin address."],
-          [!pool, "The pool is not loaded yet."],
-          [!pool?.pool.weightTree, "The pool's Weight tree is not indexed yet."],
-        )}
-        onSubmit={(owner, amount) =>
-          run("Grant tickets", async (signer) => {
-            if (!pool?.pool.weightTree) throw new Error("The pool's Weight tree is not indexed yet");
-            return [await grantTicketsIx(program, signer, poolKey, new PublicKey(pool.pool.weightTree), owner, amount)];
-          })
-        }
-      />
-
       {(error || localError) && (
         <p className="ops-error" role="alert" data-testid="admin-error">
           {localError ?? error}
@@ -346,53 +328,6 @@ function FundJackpotForm({
         Fund jackpot
       </button>
       <Why reason={offReason ?? whyOff([amount === null, "Enter an amount in USDC."])} />
-    </form>
-  );
-}
-
-function GrantTicketsForm({
-  mode,
-  disabled,
-  offReason,
-  onSubmit,
-}: {
-  mode: ReturnType<typeof adminMode>;
-  disabled: boolean;
-  offReason: string | null;
-  onSubmit: (owner: PublicKey, amount: bigint) => Promise<void>;
-}) {
-  const [wallet, setWallet] = useState("");
-  const [text, setText] = useState("");
-  const amount = parseAmount(text);
-  const owner = useMemo(() => {
-    try {
-      return wallet.trim() ? new PublicKey(wallet.trim()) : null;
-    } catch {
-      return null;
-    }
-  }, [wallet]);
-  return (
-    <form
-      className="ops-admin-form"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (owner && amount !== null) void onSubmit(owner, amount);
-      }}
-    >
-      <h3>Grant tickets</h3>
-      <label>
-        <span>Player wallet</span>
-        <input value={wallet} onChange={(e) => setWallet(e.target.value)} data-testid="admin-grant-wallet" />
-      </label>
-      <label>
-        <span>Tickets</span>
-        <input inputMode="numeric" value={text} onChange={(e) => setText(e.target.value)} data-testid="admin-grant-amount" />
-      </label>
-      {wallet.trim() && !owner && <p className="ops-error" role="alert">That is not a valid wallet address.</p>}
-      <button type="submit" disabled={disabled || !owner || amount === null}>
-        {mode === "sign" ? "Grant tickets" : "Prepare grant"}
-      </button>
-      <Why reason={offReason ?? whyOff([!owner || amount === null, "Enter a player wallet and a ticket count."])} />
     </form>
   );
 }

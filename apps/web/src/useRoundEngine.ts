@@ -82,7 +82,7 @@ export interface EngineOutput {
   dismissTakeover: () => void;
   /** True for 0.85 s when a freshly opened Round's core is fading in. */
   coreEnter: boolean;
-  /** Round pot in Entries, for the stake panel. */
+  /** Round pot in Tickets, for the stake panel. */
   pot: bigint;
   lastWin: { tile: number; kind: string } | null;
   /** `input.feed`, with a held row's Round removed until the reveal lands. */

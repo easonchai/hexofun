@@ -9,7 +9,7 @@ import { BN, utils } from "@anchor-lang/core";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js";
 
-import { acceptedAta, jackpotVaultAddress, method, playerAddress, type HexVaultProgram } from "../chain.js";
+import { acceptedAta, jackpotVaultAddress, method, type HexVaultProgram } from "../chain.js";
 
 /** Field name to value, in the program's own units (atomic USDC, seconds, bps). */
 export type Values = Record<string, bigint>;
@@ -26,16 +26,11 @@ export interface Field {
 export const PARAMS_FIELDS: readonly Field[] = [
   { key: "epochSeconds", label: "Epoch length (s)", bits: "i64" },
   { key: "epochAnchor", label: "Epoch anchor (unix s)", bits: "i64" },
-  { key: "roundSeconds", label: "Round length (s)", bits: "i64" },
-  { key: "closeBuffer", label: "Close buffer (s)", bits: "i64" },
   { key: "vrfTimeout", label: "VRF timeout (s)", bits: "i64" },
   { key: "minDeposit", label: "Minimum deposit (atomic)", bits: "u64", usdc: true },
-  { key: "houseCutBps", label: "House cut (bps)", bits: "u16" },
   { key: "minJackpot", label: "Minimum jackpot (atomic)", bits: "u64", usdc: true },
   { key: "payoutTimeout", label: "Payout timeout (s)", bits: "i64" },
   { key: "baseRateBps", label: "Base rate (bps)", bits: "u16" },
-  { key: "ticketsPerUsdc", label: "Tickets per USDC", bits: "u16" },
-  { key: "bonusCapBps", label: "Bonus cap (bps)", bits: "u16" },
 ];
 
 export const VENUE_FIELDS: readonly Field[] = [
@@ -153,18 +148,13 @@ export function checkBounds(
     return errors;
   }
 
-  for (const k of ["epochSeconds", "epochAnchor", "roundSeconds"]) {
+  for (const k of ["epochSeconds", "epochAnchor"]) {
     need(!touched(k) || g(k) > 0n, `${k} must be above 0`);
   }
-  need(!touched("closeBuffer") || g("closeBuffer") < g("roundSeconds"), "Close buffer must be under the round length");
-  need(!touched("roundSeconds") || g("roundSeconds") > g("closeBuffer"), "Round length must be above the close buffer");
   need(!touched("vrfTimeout") || g("vrfTimeout") >= MIN_VRF_TIMEOUT, "VRF timeout must be at least 180 s");
   need(!touched("payoutTimeout") || g("payoutTimeout") >= MIN_PAYOUT_TIMEOUT, "Payout timeout must be at least 600 s");
   need(g("payoutTimeout") < g("epochSeconds"), "Payout timeout must be under the epoch length");
-  for (const k of ["houseCutBps", "baseRateBps", "bonusCapBps"]) {
-    need(!touched(k) || g(k) <= BPS, `${k} is at most 10000 bps (100%)`);
-  }
-  need(!touched("ticketsPerUsdc") || g("ticketsPerUsdc") > 0n, "Tickets per USDC must be above 0");
+  need(!touched("baseRateBps") || g("baseRateBps") <= BPS, "baseRateBps is at most 10000 bps (100%)");
   return errors;
 }
 
@@ -174,13 +164,6 @@ export function parseUsdc(input: string): bigint | null {
   if (!m) return null;
   const atomic = BigInt(m[1]!) * 1_000_000n + BigInt((m[2] ?? "").padEnd(6, "0"));
   return atomic > 0n && atomic <= MAX.u64 ? atomic : null;
-}
-
-/** Whole number above zero, or null. */
-export function parseAmount(input: string): bigint | null {
-  if (!/^\d+$/.test(input.trim())) return null;
-  const n = BigInt(input.trim());
-  return n > 0n && n <= MAX.u64 ? n : null;
 }
 
 export type AdminModeName = "sign" | "prepare" | "unknown";
@@ -240,20 +223,6 @@ export function setVenueParamsIx(
   changes: readonly Change[],
 ): Promise<TransactionInstruction> {
   return method(program, "setVenueParams")(argsOf(VENUE_FIELDS, changes)).accounts({ admin, pool }).instruction();
-}
-
-/** The Admin path of `grant_tickets`, uncapped. */
-export function grantTicketsIx(
-  program: HexVaultProgram,
-  admin: PublicKey,
-  pool: PublicKey,
-  weightTree: PublicKey,
-  owner: PublicKey,
-  amount: bigint,
-): Promise<TransactionInstruction> {
-  return method(program, "grantTickets")(new BN(amount.toString()))
-    .accounts({ signer: admin, pool, player: playerAddress(pool, owner), weightTree })
-    .instruction();
 }
 
 /** Not Admin-gated: the signer pays from its own USDC account. */

@@ -4,12 +4,6 @@
  * Runs every 2 s, tightens to 500 ms for 15 s after `kick()` (call once a
  * sent transaction confirms), pauses while the tab is hidden and does one
  * immediate poll on focus.
- *
- * Also carries whichever Round the game screen is tracking: once a Round is
- * seen open, its id rides along on every request (`round=`), so the response
- * keeps returning that Round's full state — winning tile and tile totals
- * included — through settlement, until a newer Round replaces it (see
- * api.service.ts `getState`'s comment for the backend half of this).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -40,7 +34,7 @@ export interface StatePollResult {
  *
  * Every write the UI can send has to land in here or `pending` never clears:
  * deposit and request_withdraw move `principal`, process_withdraw moves only
- * `pendingWithdraw`, and buy_position moves `entries` and `position`. The
+ * `pendingWithdraw`, and buy_tickets moves `tickets` once the ledger books it. The
  * faucet moves none of them — it mints to
  * the wallet, which `/state` does not carry — so it refreshes the balance
  * directly instead of arming this watch (see App.tsx `onFunded`).
@@ -49,11 +43,8 @@ export function snapshot(data: StateDto): string {
   const player = data.player;
   return JSON.stringify({
     principal: player?.principal ?? null,
-    entries: player?.entries ?? null,
+    tickets: player?.tickets ?? null,
     pendingWithdraw: player?.pendingWithdraw ?? null,
-    position: data.position,
-    round: data.round,
-    openRound: data.openRound,
     // Ticket 05: null before the pool has ever had an Epoch.
     jackpot: data.currentEpoch?.jackpotAmount ?? null,
     totalPrincipal: data.pool.totalPrincipal,
@@ -67,7 +58,6 @@ export function useStatePoll(baseUrl: string, owner: string | undefined): StateP
   const [stillConfirming, setStillConfirming] = useState(false);
 
   const dataRef = useRef<StateDto | null>(null);
-  const trackedRoundRef = useRef<string | undefined>(undefined);
   const burstUntilRef = useRef(0);
   const watchBaselineRef = useRef<string | null>(null);
   const runRef = useRef<() => void>(() => {});
@@ -100,13 +90,12 @@ export function useStatePoll(baseUrl: string, owner: string | undefined): StateP
         timer = null;
       }
       if (document.hidden) return; // resumed by the visibility listener below
-      const result = await fetchState(baseUrl, owner, trackedRoundRef.current, controller.signal);
+      const result = await fetchState(baseUrl, owner, controller.signal);
       if (cancelled) return;
       if (result.ok) {
         dataRef.current = result.data;
         setData(result.data);
         setError(null);
-        trackedRoundRef.current = result.data.openRound?.id ?? trackedRoundRef.current;
         const baseline = watchBaselineRef.current;
         if (baseline !== null) {
           if (snapshot(result.data) !== baseline) {

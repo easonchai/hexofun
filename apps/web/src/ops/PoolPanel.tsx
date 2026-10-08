@@ -35,7 +35,6 @@ export function PoolPanel() {
         <Row label="Deficit" value={usdc(s.deficit)} raw={s.deficit} />
         <Row label="Impaired" value={s.impaired ? "Yes" : "No"} />
         <Row label="Shutdown" value={s.shutdown ? "Yes, permanent" : "No"} />
-        <Row label="Stuck Round" value={stuck(s.stuck?.round)} />
         <Row label="Stuck epoch" value={stuck(s.stuck?.epoch)} />
       </dl>
     </Panel>

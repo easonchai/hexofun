@@ -1,6 +1,7 @@
 /**
- * PRD §9 demo loop, end to end: faucet, deposit, play a round, settle, and
- * withdraw. See docs/product-requirements.md §9.
+ * PRD §9 demo loop, end to end: faucet, deposit and withdraw. See
+ * docs/product-requirements.md §9. The play and settle steps left with the
+ * Rounds (ADR 0025); wave 2 ticket 18 brings them back through the API.
  *
  * The withdrawal is one `request_withdraw` (ADR 0020): the part still pending
  * from today's deposit refunds in the same transaction and any rest queues.
@@ -39,12 +40,6 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
-/** Round length the target pool is running, for the settle-wait budget. Matches spec.md §7's 90s default; override for a faster demo pool (see the runbook's "changing epoch length" recipe, which also covers --round-seconds). */
-const ROUND_SECONDS = Number(process.env.E2E_ROUND_SECONDS ?? 90);
-const VRF_TIMEOUT_SECONDS = Number(process.env.E2E_VRF_TIMEOUT_SECONDS ?? 120);
-/** Generous: a round can void and retry once before ORAO answers. */
-const SETTLE_TIMEOUT_MS = (ROUND_SECONDS + VRF_TIMEOUT_SECONDS + 60) * 1000;
-
 async function connectBurnerWallet(page: Page): Promise<void> {
   await page.goto("/#play");
   // The invite gate (AccessGate.tsx) covers the app until a wallet with
@@ -80,16 +75,7 @@ function parseAfterLabel(text: string, label: string): number {
   return Number(match[1]);
 }
 
-/** Clicks a tile until it reports selected. Tiles only respond once an open round is in its "mine" phase (see src/App.tsx's canPick). */
-async function selectTile(page: Page, tileNumber: number): Promise<void> {
-  const tile = page.getByTestId(`tile-${tileNumber}`);
-  await expect(async () => {
-    await tile.click();
-    await expect(tile).toHaveAttribute("data-selected", "1");
-  }).toPass({ timeout: 90_000 });
-}
-
-test("faucet, deposit, play a round, settle, withdraw", async ({
+test("faucet, deposit, withdraw", async ({
   page,
 }) => {
   await connectBurnerWallet(page);
@@ -125,39 +111,6 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   await page.getByTestId("deposit-modal-ok").click();
   await expect(page.getByTestId("deposit-modal")).toHaveCount(0);
 
-  // 3. Buy a position on 3 tiles.
-  await page.getByTestId("tab-mine").click();
-  const entriesBefore = parseAfterLabel(
-    await page.getByTestId("wallet-entries").innerText(),
-    "Tickets",
-  );
-  await page.getByTestId("stake-input").fill("1");
-  await selectTile(page, 0);
-  await selectTile(page, 1);
-  await selectTile(page, 2);
-  await expect(page.getByTestId("tile-count")).toHaveText("3");
-
-  const deployButton = page.getByTestId("deploy");
-  await expect(deployButton).toBeEnabled({ timeout: 10_000 });
-  await deployButton.click();
-  await expect(page.getByTestId("deploy-note")).toBeVisible({ timeout: 30_000 });
-
-  // 4. Wait for the round to settle, then settle this position.
-  await expect(page.getByTestId("reward-hint")).toBeVisible({
-    timeout: SETTLE_TIMEOUT_MS,
-  });
-  await page.getByTestId("settle-position").click();
-  await expect(page.getByTestId("deploy-note")).toContainText(/settled/i, {
-    timeout: 30_000,
-  });
-
-  // 5. Entries changed (buying a position always spends some, win or lose).
-  const entriesAfter = parseAfterLabel(
-    await page.getByTestId("wallet-entries").innerText(),
-    "Tickets",
-  );
-  expect(entriesAfter).not.toBe(entriesBefore);
-
   // The dashboard's Withdraw button opens the widget already on that tab.
   await page.getByTestId("tab-dashboard").click();
   await page.getByTestId("dash-withdraw").click();
@@ -168,7 +121,7 @@ test("faucet, deposit, play a round, settle, withdraw", async ({
   );
   expect(shownWithdrawable).toBeGreaterThan(0);
 
-  // 6. Withdraw that much. Today's deposit never held a Ticket, so the form
+  // 3. Withdraw that much. Today's deposit never held a Ticket, so the form
   // says it pays now and the USDC lands in the wallet.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
   await expect(page.getByTestId("withdraw-expected")).toContainText("Now");

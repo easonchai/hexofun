@@ -1,7 +1,7 @@
 /**
  * Ticket 08 (production-hardening): `sendMany`'s own behavior, stubbed at
  * `program.provider.connection` and `.wallet` — no network, no real Program.
- * The exported action functions (`deposit`, `buyPosition`, ...) are thin
+ * The exported action functions (`deposit`, `buyTickets`, ...) are thin
  * builders on top of this and stay untested here; `sendMany` is where the
  * compute-budget, signing and confirmation logic actually lives.
  */

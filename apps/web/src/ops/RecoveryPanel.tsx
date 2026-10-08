@@ -1,15 +1,15 @@
 /**
- * The rare permissionless cranks that undo a stall or a loss: Cover deficit,
- * Void round and Roll over epoch. The bot never covers; it voids and rolls
- * over on its own timeouts, so these are for when that backstop has not fired.
+ * The rare permissionless cranks that undo a stall or a loss: Cover deficit
+ * and Roll over epoch. The bot never covers; it rolls over on its own
+ * timeout, so these are for when that backstop has not fired.
  */
 import { useEffect, useState } from "react";
 
 import { formatAtomic } from "../lib/money.js";
-import { labelEpochStatus, labelRoundStatus } from "../lib/protocol.js";
+import { labelEpochStatus } from "../lib/protocol.js";
 import { TxStatus, useCrank } from "./crank.js";
 import { stuckLine, usdc, USDC_DECIMALS } from "./format.js";
-import { coverDeficit, loadEpochSeed, loadRoundSeed, parseUsdcAmount, rolloverEpoch, voidRound } from "./instructions.js";
+import { coverDeficit, loadEpochSeed, parseUsdcAmount, rolloverEpoch } from "./instructions.js";
 import { Panel, Why, whyOff } from "./ui.js";
 import { useOps } from "./useOps.js";
 
@@ -25,7 +25,6 @@ export function RecoveryPanel() {
   }, [deficit]);
   const parsed = parseUsdcAmount(amount);
 
-  const stuckRound = s?.stuck?.round ?? null;
   const stuckEpoch = s?.stuck?.epoch ?? null;
   const stuckUnknown = s === null || s.stuck === null;
   // When the stuck epoch could first have moved on: the end of the current or previous epoch.
@@ -36,9 +35,6 @@ export function RecoveryPanel() {
     if (BigInt(id) + 1n === BigInt(p.currentEpochId)) return Number(p.previousEpochEndsAt);
     return null;
   };
-  const voidWhy = stuckRound
-    ? `Round ${stuckRound.id} ${stuckLine(labelRoundStatus(stuckRound.status), null)}.`
-    : whyOff([stuckUnknown, "Cannot tell whether a Round is stuck."], [true, "No stuck Round."]);
   const rolloverWhy = stuckEpoch
     ? `Epoch ${stuckEpoch.id} ${stuckLine(labelEpochStatus(stuckEpoch.status), epochEndedAt(stuckEpoch.id))}.`
     : whyOff([stuckUnknown, "Cannot tell whether an epoch is stuck."], [true, "No stuck epoch."]);
@@ -67,21 +63,8 @@ export function RecoveryPanel() {
         reason={whyOff([deficit === null, "No deficit to cover."], [parsed === null, "Enter an amount in USDC."])}
       />
 
-      <h3>Stuck Round or epoch</h3>
+      <h3>Stuck epoch</h3>
       <div className="ops-actions">
-        <button
-          type="button"
-          id="ops-action-void"
-          disabled={off || !stuckRound}
-          onClick={() =>
-            stuckRound &&
-            void run(async (p, pool, caller) => [
-              await voidRound(p, pool, caller, await loadRoundSeed(p, BigInt(stuckRound.id))),
-            ])
-          }
-        >
-          Void round
-        </button>
         <button
           type="button"
           id="ops-action-rollover"
@@ -96,7 +79,6 @@ export function RecoveryPanel() {
           Roll over epoch
         </button>
       </div>
-      <Why reason={voidWhy} />
       <Why reason={rolloverWhy} />
 
       <TxStatus crank={crank} />

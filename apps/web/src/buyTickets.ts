@@ -1,19 +1,11 @@
 /**
- * Pure buy-tickets math (docs/plan/hexo-referrals ticket 10): what a USDC
- * purchase buys in tonight's draw, why the buy button is disabled and
- * whether the entry shows at all. Kept out of Vault.tsx so the designer's
+ * Pure buy-tickets rules (docs/plan/hexo-referrals ticket 10): why the buy
+ * button is disabled and whether the entry shows at all. The USDC-to-Tickets
+ * rate is the backend's Game config now (ADR 0025), so there is no preview
+ * here until ticket 24 reads it from `/game/config`. Kept out of Vault.tsx so the designer's
  * restyle doesn't touch any of this.
  */
 import { SHUTDOWN_REASON } from "./shutdown.js";
-
-/**
- * `amount × tickets_per_usdc`, mirroring `buy_tickets`' checked multiply.
- * Bought tickets count at full value in the epoch they land (ADR 0020), so
- * this is also the preview of what they add to today's draw: no time factor.
- */
-export function ticketsFromUsdc(amountAtomic: bigint, ticketsPerUsdc: number): bigint {
-  return amountAtomic * BigInt(ticketsPerUsdc);
-}
 
 /** Why the buy-tickets button is disabled, or null when it can be pressed. */
 export function buyDisabledReason(opts: {

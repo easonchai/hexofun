@@ -1,5 +1,5 @@
 /**
- * The six instructions this app sends. Each builds from the IDL by name and
+ * The instructions this app sends. Each builds from the IDL by name and
  * goes through `sendMany` (ticket 08, production-hardening): a compute
  * budget sized from a public-RPC simulation, signed through the wallet
  * adapter or Privy, confirmed with the blockhash strategy at `confirmed`.
@@ -7,10 +7,8 @@
  * message)` — instead of a bare signature or a thrown error, and triggers
  * the chain re-read only on `landed`.
  *
- * `settlePosition` and `processWithdraw` are permissionless (`processWithdraw`
- * wants the owner's signature while the pool is impaired): the
- * program takes no signer for them, so the connected wallet is only the fee
- * payer.
+ * `processWithdraw` is permissionless but wants the owner's signature while
+ * the pool is impaired.
  */
 import { createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
 import {
@@ -30,13 +28,10 @@ import {
 import {
   acceptedAta,
   bn,
-  freeLeavesAddress,
   jackpotVaultAddress,
   method,
   playerAddress,
-  positionAddress,
   principalVaultAddress,
-  roundAddress,
   TOKEN_PROGRAM,
   VENUE_KIND,
   type HexVaultProgram,
@@ -425,8 +420,6 @@ export async function deposit(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
-      weightTree: pool.weightTree,
-      freeLeaves: freeLeavesAddress(pool.address),
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
@@ -448,8 +441,9 @@ export async function deposit(
 }
 
 /**
- * Spends `amount` USDC into the jackpot vault for `amount × ticketsPerUsdc`
- * Tickets (ticket 10). Per Player per day the program caps total spend at
+ * Spends `amount` USDC into the jackpot vault. The program credits nothing
+ * and emits `TicketsBought`; the Tickets come from the backend's ledger
+ * (ADR 0025). Per Player per day the program caps total spend at
  * Principal, checked live: fails with `DailyBuyCapExceeded` over the cap,
  * `HouseCannotBuyTickets` for the House Player.
  */
@@ -468,7 +462,6 @@ export async function buyTickets(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
-      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken: acceptedAta(pool.acceptedMint, o),
       jackpotVault: jackpotVaultAddress(pool.address),
@@ -503,7 +496,6 @@ export async function requestWithdraw(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
-      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
@@ -563,7 +555,6 @@ export async function processWithdraw(
       pool: pool.address,
       player: playerAddress(pool.address, o),
       owner: o,
-      weightTree: pool.weightTree,
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
@@ -613,8 +604,7 @@ export async function shutdownWithdraw(
           owner: o,
           pool: pool.address,
           player: playerAddress(pool.address, o),
-          weightTree: pool.weightTree,
-          acceptedMint: pool.acceptedMint,
+              acceptedMint: pool.acceptedMint,
           ownerToken,
           principalVault: principalVaultAddress(pool.address),
           ...venueAccounts(pool),
@@ -639,8 +629,7 @@ export async function shutdownWithdraw(
         pool: pool.address,
         player: playerAddress(pool.address, o),
         owner: o,
-        weightTree: pool.weightTree,
-        acceptedMint: pool.acceptedMint,
+          acceptedMint: pool.acceptedMint,
         ownerToken,
         principalVault: principalVaultAddress(pool.address),
         ...venueAccounts(pool),
@@ -650,49 +639,3 @@ export async function shutdownWithdraw(
   );
   return sendMany(program, owner, instructions, pool.priorityFeeMicroLamports);
 }
-
-/** Stakes `stakePerTile` Entries on every tile set in `tilesMask`. */
-export async function buyPosition(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  roundId: bigint,
-  tilesMask: bigint,
-  stakePerTile: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const round = roundAddress(pool.address, roundId);
-  const builder = method(program, "buyPosition")(bn(tilesMask), bn(stakePerTile))
-    .accounts({
-      owner: o,
-      pool: pool.address,
-      player: playerAddress(pool.address, o),
-      weightTree: pool.weightTree,
-      round,
-      position: positionAddress(round, o),
-      systemProgram: SystemProgram.programId,
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
-}
-
-/** Credits the round reward as Entries and closes the Position (rent back). */
-export async function settlePosition(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  roundId: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const round = roundAddress(pool.address, roundId);
-  const builder = method(program, "settlePosition")()
-    .accounts({
-      pool: pool.address,
-      weightTree: pool.weightTree,
-      round,
-      player: playerAddress(pool.address, o),
-      owner: o,
-      position: positionAddress(round, o),
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
-}
-

@@ -42,7 +42,7 @@ export function paramsConfirm(
   const effect =
     title === "Set venue params"
       ? "This changes how the pool keeps and moves its idle USDC. Players' balances do not change."
-      : "Players see the new rules from the next Round or epoch that reads them.";
+      : "Players see the new rules from the next epoch that reads them.";
   const lines = changes.map((c) => `${c.label}: ${c.old} to ${c.next}`).join("\n");
   return `${title} on pool ${pool}?\n${lines}\n${effect}`;
 }

@@ -200,12 +200,12 @@ describe("decideAutoRound", () => {
       "remembered stake is zero",
     ],
     [
-      "stake exceeding Entries",
+      "stake exceeding Tickets",
       board,
       5n,
       "mine" as Phase,
       false,
-      "stake exceeds Entries",
+      "stake exceeds Tickets",
     ],
     [
       "Position already placed",
@@ -231,11 +231,11 @@ describe("decideAutoRound", () => {
       false,
       "round is not open for positions",
     ],
-  ])("%s → skip", (_label, remembered, entries, phase, hasPosition, reason) => {
+  ])("%s → skip", (_label, remembered, tickets, phase, hasPosition, reason) => {
     expect(
       decideAutoRound(
         remembered as RememberedBoard | null,
-        entries,
+        tickets,
         phase,
         hasPosition,
       ),

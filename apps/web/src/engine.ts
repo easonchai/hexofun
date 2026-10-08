@@ -28,7 +28,7 @@ export interface RoundLike {
   status: number;
   winningTile: number;
   pot: bigint;
-  /** Entries the House took from the pot at settlement; 0 until then. */
+  /** Tickets the House took from the pot at settlement; 0 until then. */
   houseCut: bigint;
   tileTotals: bigint[];
 }
@@ -123,7 +123,7 @@ export const covers = (mask: bigint, tile: number): boolean =>
   ((mask >> BigInt(tile)) & 1n) === 1n;
 
 /**
- * Round reward in Entries: (pot − House cut) × stake / staked-on-winning-tile,
+ * Round reward in Tickets: (pot − House cut) × stake / staked-on-winning-tile,
  * floored. Only runs on settled rounds, so the stored cut is always present.
  */
 export function expectedReward(
@@ -205,7 +205,7 @@ export type AutoRoundDecision =
  */
 export function decideAutoRound(
   board: RememberedBoard | null,
-  entries: bigint,
+  tickets: bigint,
   phase: Phase,
   hasPosition: boolean,
 ): AutoRoundDecision {
@@ -219,8 +219,8 @@ export function decideAutoRound(
   if (phase !== "mine")
     return { action: "skip", reason: "round is not open for positions" };
   const spend = board.stake * BigInt(board.tiles.length);
-  if (spend > entries)
-    return { action: "skip", reason: "stake exceeds Entries" };
+  if (spend > tickets)
+    return { action: "skip", reason: "stake exceeds Tickets" };
   return { action: "place", tiles: board.tiles, stake: board.stake };
 }
 
@@ -228,7 +228,7 @@ export interface FeedRow {
   key: string;
   /** Short address label; "You" when it is the connected wallet. */
   who: string;
-  /** Orange gain column, e.g. Entries staked or "+reward". */
+  /** Orange gain column, e.g. Tickets staked or "+reward". */
   action: string;
   tileLabel: string;
   /**

@@ -21,12 +21,12 @@ export type StakeBarState = "editing" | "placed" | "closed";
 
 export interface StakeBarModel {
   state: StakeBarState;
-  /** "Entries per Tile", formatted. */
-  entriesPerTile: string;
+  /** "Tickets per Tile", formatted. */
+  ticketsPerTile: string;
   /** Tiles selected (editing/closed) or tiles in the placed Position, formatted. */
   tilesSelected: string;
-  /** Total Entries in, formatted. Matches the panel's own cost computation. */
-  entriesIn: string;
+  /** Total Tickets in, formatted. Matches the panel's own cost computation. */
+  ticketsIn: string;
   /** Button label: the phase copy in the closed state, otherwise a call to action. */
   label: string;
 }
@@ -57,9 +57,9 @@ export function stakeBarModel(
     const stake = parseAtomic(stakeText, decimals) ?? 0n;
     const tiles = Math.max(selected.length, 0);
     return {
-      entriesPerTile: fmt(stake),
+      ticketsPerTile: fmt(stake),
       tilesSelected: fmtCount(tiles),
-      entriesIn: fmt(stake * BigInt(tiles)),
+      ticketsIn: fmt(stake * BigInt(tiles)),
     };
   };
 
@@ -68,9 +68,9 @@ export function stakeBarModel(
   ): Omit<StakeBarModel, "state" | "label"> => {
     const tiles = tileCountOf(active.tiles);
     return {
-      entriesPerTile: fmt(active.stakePerTile),
+      ticketsPerTile: fmt(active.stakePerTile),
       tilesSelected: fmtCount(tiles),
-      entriesIn: fmt(active.stakePerTile * BigInt(tiles)),
+      ticketsIn: fmt(active.stakePerTile * BigInt(tiles)),
     };
   };
 

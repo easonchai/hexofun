@@ -7,7 +7,6 @@ import {
   playerAddress,
   principalVaultAddress,
   PROGRAM_ID,
-  roundAddress,
   epochAddress,
   venueProposalAddress,
   VENUE_KIND,
@@ -24,7 +23,6 @@ import {
   processWithdraw,
   recall,
   rolloverEpoch,
-  voidRound,
   type VenuePool,
 } from "./instructions.js";
 
@@ -39,7 +37,6 @@ const pool: VenuePool = {
   admin: key(),
   acceptedMint: key(),
   treasury: key(),
-  weightTree: key(),
   klendProgram: key(),
   klendMarket: key(),
   klendReserve: key(),
@@ -182,15 +179,10 @@ describe("recovery instructions", () => {
     expect(ix!.keys.some((k) => k.isSigner)).toBe(false);
   });
 
-  it("void_round and rollover_epoch name the stuck item and its randomness account", async () => {
+  it("rollover_epoch names the stuck epoch and its randomness account", async () => {
     const seed = Uint8Array.from({ length: 32 }, (_, i) => i);
-    const round = await voidRound(program, pool, caller, { roundId: 7n, vrfSeed: seed });
     const epoch = await rolloverEpoch(program, pool, caller, { epochId: 3n, vrfSeed: seed });
-    expect(round.keys).toHaveLength(idlAccounts("void_round"));
     expect(epoch.keys).toHaveLength(idlAccounts("rollover_epoch"));
-    expect(keysOf(round)).toContain(roundAddress(pool.address, 7n).toBase58());
     expect(keysOf(epoch)).toContain(epochAddress(pool.address, 3n).toBase58());
-    // Same seed, same randomness account in both.
-    expect(keysOf(round)[3]).toBe(keysOf(epoch)[3]);
   });
 });

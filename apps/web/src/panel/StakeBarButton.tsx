@@ -25,7 +25,7 @@ export function StakeBarButton({
   onOpen,
 }: Props) {
   const model = stakeBarModel(stakeText, selected, position, phase, decimals);
-  const ariaLabel = `Stake bar: ${model.entriesPerTile} tickets per tile, ${model.tilesSelected} tiles selected, ${model.entriesIn} tickets in. ${model.label}.`;
+  const ariaLabel = `Stake bar: ${model.ticketsPerTile} tickets per tile, ${model.tilesSelected} tiles selected, ${model.ticketsIn} tickets in. ${model.label}.`;
 
   return (
     <button
@@ -40,13 +40,13 @@ export function StakeBarButton({
         <span className="stake-bar-stat">
           <span className="stake-bar-stat-label">AMOUNT</span>
           <span className="stake-bar-stat-value" data-testid="stake-bar-per-tile">
-            {model.entriesPerTile}
+            {model.ticketsPerTile}
           </span>
         </span>
         <span className="stake-bar-stat">
           <span className="stake-bar-stat-label">TICKETS IN</span>
-          <span className="stake-bar-stat-value" data-testid="stake-bar-entries-in">
-            {model.entriesIn}
+          <span className="stake-bar-stat-value" data-testid="stake-bar-tickets-in">
+            {model.ticketsIn}
           </span>
         </span>
         <span className="stake-bar-stat">

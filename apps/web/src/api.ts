@@ -11,7 +11,7 @@
  * These types were checked against the landed backend (ticket 08:
  * `apps/backend/src/api/`), not just the spec. Four shapes differ from a plain
  * reading of §3.5, and the backend is right in each case: `/pool` names its
- * fields `currentEpoch` and `openRound` and sends the round as a summary,
+ * fields `currentEpoch` and sends no round summary,
  * `/epochs/current` nests progress under `drawing`, `/leaderboard` sends a
  * subset of the Player row, and `odds` is a percentage string, not a fraction.
  */
@@ -93,20 +93,13 @@ export interface PoolDto {
   mint: string;
   epochSeconds: string;
   epochAnchor: string;
-  roundSeconds: string;
-  /** Seconds before a Round's end that Positions close. */
-  closeBuffer: string;
   minDeposit: string;
-  /** Share of a settled round's pot credited to the House, in basis points. */
-  houseCutBps: number;
   /** The ceiling on the depositor share of yield, in basis points. */
   baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. */
-  ticketsPerUsdc: number;
   paused: boolean;
   /** Venue loss past the tolerance: the balance stops earning and exits take a haircut. */
   impaired: boolean;
-  /** game-jackpot-pause: no new rounds or positions while true. A new pool
+  /** game-jackpot-pause: no new rounds or bets while true. A new pool
    *  starts with it on. */
   gamePaused: boolean;
   /** game-jackpot-pause: no new epoch, ticket purchase or draw close while
@@ -117,10 +110,8 @@ export interface PoolDto {
   previousEpochEndsAt: string;
   totalPrincipal: string;
   updatedSlot: string;
-  /** The Weight tree and the four pinned klend accounts every Player
-   *  instruction that syncs names. Empty strings on a row not yet indexed. */
-  weightTree: string;
-  /** The four pinned venue accounts. The names are klend's, the meaning follows
+  /** The four pinned venue accounts every Player instruction that syncs
+   *  names. Empty strings on a row not yet indexed. The names are klend's, the meaning follows
    *  `venueKind`. klend: program, lending market, reserve, the pool's cToken
    *  account. kVault: the kVault program, the vault state account, the vault's
    *  shares mint, the pool's token account of the shares mint. Stub: this
@@ -144,30 +135,10 @@ export interface EpochDto {
   winner: string | null;
 }
 
-export interface RoundDto {
-  id: string;
-  epochId: string;
-  startsAt: string;
-  endsAt: string;
-  status: StatusValue;
-  pot: string;
-  /** Entries the House took from the pot at settlement; "0" until then. */
-  houseCut: string;
-  /** Null until the round settles. */
-  winningTile: number | null;
-  tileTotals: string[];
-}
-
-/** What `GET /pool` carries for the open round: no tile totals, no winner. */
-export type RoundSummaryDto = Pick<
-  RoundDto,
-  "id" | "epochId" | "startsAt" | "endsAt" | "status" | "pot"
->;
-
 export interface PlayerDto {
   owner: string;
   principal: string;
-  entries: string;
+  tickets: string;
   epochId: string;
   isHouse: boolean;
   /** Requested but unpaid Principal, atomic units. "0" when nothing is pending. */
@@ -179,7 +150,7 @@ export interface PlayerDto {
   pendingDeposit: string;
   pendingDepositEpoch: string;
   /** The Player's active Tickets in the current epoch: what the draw counts.
-   *  Equal to `entries` unless a later epoch has begun since the Player last
+   *  Equal to `tickets` unless a later epoch has begun since the Player last
    *  acted, when the Player holds their whole Principal. */
   weight: string;
   /** `pendingDeposit` while its epoch is current, "0" once it has folded. */
@@ -187,14 +158,14 @@ export interface PlayerDto {
   /** The epoch `pendingTickets` start counting in; null with nothing pending. */
   pendingActivatesEpoch: string | null;
   /** Share of the draw's Tickets as a percentage, two decimals: "12.34".
-   *  Null while the backend cannot read the Weight tree's root. */
+   *  Null while the backend has no total to divide by. */
   odds: string | null;
 }
 
 /** `GET /leaderboard` sends a subset of the Player row, not the whole thing. */
 export type LeaderboardRowDto = Pick<
   PlayerDto,
-  "owner" | "principal" | "entries" | "isHouse" | "weight" | "odds"
+  "owner" | "principal" | "tickets" | "isHouse" | "weight" | "odds"
 >;
 
 /**
@@ -294,7 +265,6 @@ export interface LiveYieldDto {
 export interface PoolSummaryDto {
   pool: PoolDto;
   currentEpoch: EpochDto | null;
-  openRound: RoundSummaryDto | null;
   live: LiveYieldDto;
 }
 
@@ -309,28 +279,17 @@ export type CurrentEpochDto = EpochDto & {
   drawing: DrawingProgressDto | null;
 };
 
-/** The caller's Position in `GET /state`'s tracked Round; see `StateDto.position`. */
-export interface PositionDto {
-  tiles: string;
-  stakePerTile: string;
-}
-
 /**
- * Ticket 07: `GET /state`, the browser's one poll. `openRound` stays filtered
- * to Open/Requested; `round` is whichever Round the `round=` query asked
- * about, any status, so the browser can keep watching the same Round (and
- * `position` inside it) straight through settlement without a chain read of
- * its own.
+ * Ticket 07: `GET /state`, the browser's one poll. Rounds and Positions left
+ * with the custody-only program (ADR 0025); wave 2 brings Rounds back from
+ * the API.
  */
 export interface StateDto {
   pool: PoolDto;
   /** Ticket 05: null before the Pool has ever had an Epoch (deposit-only
    *  launch week) — see `launchAt` for the countdown target that goes with it. */
   currentEpoch: CurrentEpochDto | null;
-  openRound: RoundSummaryDto | null;
-  round: RoundDto | null;
   player: PlayerDto | null;
-  position: PositionDto | null;
   status: StatusDto;
   /** Chain time as the backend last observed it, extrapolated to now (decimal, unix seconds). */
   chainTime: string;
@@ -349,7 +308,7 @@ export interface StateDto {
   launchAt: string | null;
 }
 
-/** The Round or epoch a permissionless crank would accept right now. */
+/** The epoch a permissionless crank would accept right now. */
 export interface StuckItemDto {
   id: string;
   status: number;
@@ -360,13 +319,12 @@ export type TodoCode =
   | "RECALL_DUE"
   | "HARVEST_DUE"
   | "WITHDRAWS_DUE"
-  | "STUCK_ROUND"
   | "STUCK_EPOCH"
   | "DEFICIT_OPEN"
   | "VENUE_LOCK_ELAPSED";
 
 /** One action due on the pool. `due` "now" means a person acts; "bot" means the
- *  Operator does it on its next tick. `amount` is atomic USDC, `id` a Round or
+ *  Operator does it on its next tick. `amount` is atomic USDC, `id` an
  *  epoch id, `owner` a wallet; each is set only where the matching button needs it. */
 export interface TodoItem {
   code: TodoCode;
@@ -429,7 +387,7 @@ export interface OpsSummaryDto extends StatusDto {
   harvestedToTreasury: string;
   harvestedToJackpot: string;
   /** Null when the backend's chain read failed: unknown, not clean. */
-  stuck: { round: StuckItemDto | null; epoch: StuckItemDto | null } | null;
+  stuck: { epoch: StuckItemDto | null } | null;
   /** Actions due on the pool; empty before the pool is indexed. */
   todo: TodoItem[];
   /** `OPS_WALLETS` as base58: the wallets that may use `POST /ops/fast-pause`. Empty when unset. */
@@ -505,20 +463,6 @@ export const fetchEpochs = (
 ): Promise<ApiResult<EpochDto[]>> =>
   get<EpochDto[]>(baseUrl, `/epochs?limit=${limit}`, signal);
 
-export const fetchRounds = (
-  baseUrl: string,
-  limit: number,
-  signal?: AbortSignal,
-): Promise<ApiResult<RoundDto[]>> =>
-  get<RoundDto[]>(baseUrl, `/rounds?limit=${limit}`, signal);
-
-export const fetchRound = (
-  baseUrl: string,
-  roundId: bigint | string,
-  signal?: AbortSignal,
-): Promise<ApiResult<RoundDto>> =>
-  get<RoundDto>(baseUrl, `/rounds/${roundId}`, signal);
-
 export const fetchLeaderboard = (
   baseUrl: string,
   limit: number,
@@ -543,44 +487,13 @@ export const fetchFeed = (
     signal,
   );
 
-/** One key per requested owner, 0 rather than a missing key when they played none. */
-export interface PositionCountsDto {
-  counts: Record<string, number>;
-}
-
-/**
- * How many rounds each of `owners` has played, batched: the dashboard asks for
- * a whole table of winners at once. The backend caps the list at 25.
- */
-export const fetchPositionCounts = (
-  baseUrl: string,
-  owners: readonly string[],
-  signal?: AbortSignal,
-): Promise<ApiResult<PositionCountsDto>> =>
-  get<PositionCountsDto>(
-    baseUrl,
-    `/positions/counts?owners=${owners.join(",")}`,
-    signal,
-  );
-
-/**
- * Ticket 07: the one poll every screen reads from (see `useStatePoll.ts`).
- * `round`, when given, names whichever Round the caller wants the full state
- * of, whatever its status — pass the last Round seen open, so the browser
- * keeps watching it straight through settlement.
- */
+/** Ticket 07: the one poll every screen reads from (see `useStatePoll.ts`). */
 export const fetchState = (
   baseUrl: string,
   owner: string | undefined,
-  round: string | undefined,
   signal?: AbortSignal,
-): Promise<ApiResult<StateDto>> => {
-  const params = new URLSearchParams();
-  if (owner) params.set("owner", owner);
-  if (round) params.set("round", round);
-  const query = params.toString();
-  return get<StateDto>(baseUrl, `/state${query ? `?${query}` : ""}`, signal);
-};
+): Promise<ApiResult<StateDto>> =>
+  get<StateDto>(baseUrl, `/state${owner ? `?owner=${encodeURIComponent(owner)}` : ""}`, signal);
 
 export const fetchHealth = (
   baseUrl: string,

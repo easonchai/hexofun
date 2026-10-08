@@ -14,7 +14,6 @@ export const ALERT_CODES = [
   "RPC_FALLBACK_ACTIVE",
   "INDEXER_STALE",
   "WITHDRAW_SHORTFALL",
-  "ROUND_VOIDED_RECENTLY",
   "EPOCH_ROLLED_OVER_RECENTLY",
   "WITHDRAW_OWNERS_SKIPPED",
   "OPERATOR_SOL_READ_FAILED",
@@ -29,7 +28,6 @@ export const ALERT_CODES = [
   "RESERVE_LIQUIDITY_LOW",
   "POOL_IMPAIRED",
   "DEPLOY_PAUSED",
-  "WEIGHT_TREE_NEARLY_FULL",
   "VENUE_PROPOSED",
   "PARAMS_CHANGED",
 ] as const;
@@ -42,7 +40,6 @@ export type OpsAction =
   | "harvest"
   | "withdraw"
   | "cover"
-  | "void"
   | "rollover"
   | "venueSwitch"
   | "fundJackpot"
@@ -67,7 +64,6 @@ export const OPS_MAP: Record<AlertCode | TodoCode, OpsEntry> = {
   RPC_FALLBACK_ACTIVE: AMBER(),
   INDEXER_STALE: RED(),
   WITHDRAW_SHORTFALL: RED("recall"),
-  ROUND_VOIDED_RECENTLY: AMBER(),
   EPOCH_ROLLED_OVER_RECENTLY: AMBER(),
   WITHDRAW_OWNERS_SKIPPED: AMBER("withdraw"),
   OPERATOR_SOL_READ_FAILED: AMBER(),
@@ -82,14 +78,12 @@ export const OPS_MAP: Record<AlertCode | TodoCode, OpsEntry> = {
   RESERVE_LIQUIDITY_LOW: AMBER("pause-deploy"),
   POOL_IMPAIRED: RED("cover"),
   DEPLOY_PAUSED: AMBER("pause-deploy"),
-  WEIGHT_TREE_NEARLY_FULL: AMBER(),
   VENUE_PROPOSED: AMBER(),
   PARAMS_CHANGED: AMBER(),
   DEPLOY_DUE: AMBER("deploy"),
   RECALL_DUE: AMBER("recall"),
   HARVEST_DUE: AMBER("harvest"),
   WITHDRAWS_DUE: AMBER("withdraw"),
-  STUCK_ROUND: AMBER("void"),
   STUCK_EPOCH: AMBER("rollover"),
   DEFICIT_OPEN: AMBER("cover"),
   VENUE_LOCK_ELAPSED: AMBER("venueSwitch"),

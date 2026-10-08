@@ -4,22 +4,7 @@ import {
   buyDisabledReason,
   buyTicketsVisible,
   pendingDepositNote,
-  ticketsFromUsdc,
 } from "./buyTickets.js";
-
-describe("ticketsFromUsdc", () => {
-  it("multiplies by the pool's tickets-per-USDC rate", () => {
-    expect(ticketsFromUsdc(1_000_000n, 10)).toBe(10_000_000n);
-  });
-
-  it("counts at full value, with no discount for the time left in the epoch", () => {
-    expect(ticketsFromUsdc(86_400n, 1)).toBe(86_400n);
-  });
-
-  it("is zero for a zero amount", () => {
-    expect(ticketsFromUsdc(0n, 10)).toBe(0n);
-  });
-});
 
 describe("buyTicketsVisible", () => {
   it("shows only when neither the Vercel gate nor the on-chain pause says no", () => {

@@ -7,7 +7,6 @@ const ACTION_LABEL: Record<OpsAction, string> = {
   harvest: "Harvest",
   withdraw: "Process withdraw",
   cover: "Cover deficit",
-  void: "Void round",
   rollover: "Roll over epoch",
   venueSwitch: "Venue switch",
   fundJackpot: "Fund jackpot",

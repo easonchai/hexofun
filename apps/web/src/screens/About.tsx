@@ -6,8 +6,8 @@
  * routes to PLAY and EARN.
  *
  * Copy is the Figma's, except the draw cadence and the yield. Epochs are a
- * day long (`epochSeconds` 86_400), and `touch` sets `entries = principal`
- * on every rollover, so both the draw and the ticket reset are daily. The
+ * day long (`epochSeconds` 86_400) and a Player's Tickets reset to their
+ * Principal on every rollover, so both the draw and the ticket reset are daily. The
  * Figma's headline yield rate is gone: depositors earn a floating rate up to
  * a ceiling, the yield above it is the day's Prize, and the one rate figure
  * (FAQ) reads "up to X%" beside the 7-day paid rate off `GET /pool`

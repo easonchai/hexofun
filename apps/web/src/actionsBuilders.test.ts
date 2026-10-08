@@ -16,13 +16,11 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
-  buyPosition,
   buyTickets,
   cancelWithdraw,
   deposit,
   klendRemaining,
   requestWithdraw,
-  settlePosition,
   shutdownWithdraw,
 } from "./actions.js";
 import { PROGRAM_ID, VENUE_KIND } from "./chain.js";
@@ -36,15 +34,11 @@ const key = () => Keypair.generate().publicKey;
 const pool: PoolLike = {
   address: key(),
   acceptedMint: key(),
-  closeBuffer: 15n,
   minDeposit: 1n,
-  houseCutBps: 600,
   paused: false,
   epochSeconds: 86_400n,
   baseRateBps: 800,
-  ticketsPerUsdc: 1,
   priorityFeeMicroLamports: 1_000,
-  weightTree: key(),
   klendProgram: key(),
   klendMarket: key(),
   klendReserve: key(),
@@ -90,27 +84,18 @@ const idlAccounts = (name: string) =>
   idl.instructions.find((ix) => ix.name === name)!.accounts.length;
 
 describe("player instructions against the IDL", () => {
-  it("deposit names the tree and the four klend accounts", async () => {
+  it("deposit names the four klend accounts", async () => {
     const [ix] = await sent((p, o) => deposit(p, o, pool, 5n));
     const keys = ix!.keys.map((k) => k.pubkey.toBase58());
     expect(ix!.keys).toHaveLength(idlAccounts("deposit"));
-    for (const k of [pool.weightTree, pool.klendProgram, pool.klendMarket, pool.klendReserve, pool.klendCtoken]) {
+    for (const k of [pool.klendProgram, pool.klendMarket, pool.klendReserve, pool.klendCtoken]) {
       expect(keys).toContain(k.toBase58());
     }
   });
 
-  it("buy_tickets, buy_position and settle_position name the tree", async () => {
-    const [tickets] = await sent((p, o) => buyTickets(p, o, pool, 5n));
-    const [position] = await sent((p, o) => buyPosition(p, o, pool, 1n, 1n, 1n));
-    const [settle] = await sent((p, o) => settlePosition(p, o, pool, 1n));
-    for (const [ix, name] of [
-      [tickets, "buy_tickets"],
-      [position, "buy_position"],
-      [settle, "settle_position"],
-    ] as const) {
-      expect(ix!.keys).toHaveLength(idlAccounts(name));
-      expect(ix!.keys.map((k) => k.pubkey.toBase58())).toContain(pool.weightTree.toBase58());
-    }
+  it("buy_tickets names the jackpot vault and no tree", async () => {
+    const [ix] = await sent((p, o) => buyTickets(p, o, pool, 5n));
+    expect(ix!.keys).toHaveLength(idlAccounts("buy_tickets"));
   });
 
   it("request_withdraw carries the klend redeem extras in klend.rs order", async () => {
@@ -118,7 +103,6 @@ describe("player instructions against the IDL", () => {
     const named = idlAccounts("request_withdraw");
     expect(ix!.keys).toHaveLength(named + 4);
     const keys = ix!.keys.map((k) => k.pubkey.toBase58());
-    expect(keys).toContain(pool.weightTree.toBase58());
     expect(keys.slice(named)).toEqual(klendRemaining(pool).map((m) => m.pubkey.toBase58()));
   });
 
@@ -138,13 +122,13 @@ describe("player instructions against the IDL", () => {
     );
   });
 
-  it("the shutdown pair names the tree and klend on both instructions", async () => {
+  it("the shutdown pair names klend on both instructions", async () => {
     const [request, process] = await sent((p, o) => shutdownWithdraw(p, o, pool, 5n, 0n));
     expect(request!.keys).toHaveLength(idlAccounts("request_withdraw") + 4);
     expect(process!.keys).toHaveLength(idlAccounts("process_withdraw"));
     for (const ix of [request!, process!]) {
       const keys = ix.keys.map((k) => k.pubkey.toBase58());
-      for (const k of [pool.weightTree, pool.klendProgram, pool.klendMarket, pool.klendReserve, pool.klendCtoken]) {
+      for (const k of [pool.klendProgram, pool.klendMarket, pool.klendReserve, pool.klendCtoken]) {
         expect(keys).toContain(k.toBase58());
       }
     }
@@ -183,28 +167,23 @@ describe("poolFromDto", () => {
   const dto = {
     address: pool.address.toBase58(),
     mint: pool.acceptedMint.toBase58(),
-    closeBuffer: "15",
     minDeposit: "1",
-    houseCutBps: 600,
     paused: false,
     epochSeconds: "86400",
     baseRateBps: 800,
-    ticketsPerUsdc: 1,
-    weightTree: pool.weightTree.toBase58(),
     klendProgram: pool.klendProgram.toBase58(),
     klendMarket: pool.klendMarket.toBase58(),
     klendReserve: pool.klendReserve.toBase58(),
     klendCtoken: pool.klendCtoken.toBase58(),
     venueKind: 0,
-  } as unknown as PoolDto & { closeBuffer: string; minDeposit: string };
+  } as unknown as PoolDto;
 
-  it("carries the tree and klend addresses through", () => {
+  it("carries the klend addresses through", () => {
     const result = poolFromDto(dto, 0, pool.address);
-    expect(result.ok && result.pool.weightTree.equals(pool.weightTree)).toBe(true);
     expect(result.ok && result.pool.klendReserve.equals(pool.klendReserve)).toBe(true);
   });
 
   it("refuses a row indexed before the live-yield layout", () => {
-    expect(poolFromDto({ ...dto, weightTree: "" }, 0, pool.address).ok).toBe(false);
+    expect(poolFromDto({ ...dto, klendProgram: "" }, 0, pool.address).ok).toBe(false);
   });
 });

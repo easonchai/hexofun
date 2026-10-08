@@ -9,10 +9,9 @@
  *
  * Ticket 07: `currentEpoch` and `player` come from App's one `GET /state`
  * poll instead of two duplicate polls of this screen's own. Epoch history,
- * account history and the winners' rounds-played chip stay on their own
- * slower polls — list data, not live state.
+ * and account history stay on their own slower polls — list data, not live state.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import {
@@ -20,7 +19,6 @@ import {
   fetchEpochs,
   fetchFeed,
   fetchPlayer,
-  fetchPositionCounts,
   type CurrentEpochDto,
   type EpochDto,
   type PlayerDto,
@@ -82,7 +80,7 @@ const HISTORY_ROWS_EXPANDED = 50;
 export interface DashboardScreenProps {
   owner: PublicKey | null;
   principal: bigint;
-  entries: bigint;
+  tickets: bigint;
   /** Chain clock seconds, for the draw countdown. */
   now: bigint | null;
   currentEpoch: CurrentEpochDto | null;
@@ -120,7 +118,7 @@ export function Dashboard(props: DashboardScreenProps) {
   const {
     owner,
     principal,
-    entries,
+    tickets,
     now,
     currentEpoch,
     launchAt,
@@ -177,27 +175,6 @@ export function Dashboard(props: DashboardScreenProps) {
     [history.data, historyLimit],
   );
 
-  // Rounds played per winner, for the chip beside each Past Winners row. One
-  // batched call for the whole table, refreshed only when the addresses change.
-  const [roundsPlayed, setRoundsPlayed] = useState<Record<string, number>>({});
-  const winnerKey = winners.map((row) => row.winner).join(",");
-  useEffect(() => {
-    if (winnerKey === "") {
-      setRoundsPlayed({});
-      return;
-    }
-    const controller = new AbortController();
-    void (async () => {
-      const result = await fetchPositionCounts(
-        apiBaseUrl(),
-        winnerKey.split(","),
-        controller.signal,
-      );
-      if (result.ok) setRoundsPlayed(result.data.counts);
-    })();
-    return () => controller.abort();
-  }, [winnerKey]);
-
   const remaining =
     currentEpoch && now !== null ? BigInt(currentEpoch.endsAt) - now : null;
   const drawing = currentEpoch?.drawing !== null && currentEpoch?.drawing !== undefined;
@@ -226,7 +203,7 @@ export function Dashboard(props: DashboardScreenProps) {
   const apy = baseRateBps === null ? null : apyFromBaseRateBps(baseRateBps);
   // Odds need the pool-wide weight denominator, so they only exist once the
   // backend knows this wallet. Before the first deposit the whole strip goes.
-  const showBoost = entries > 0n;
+  const showBoost = tickets > 0n;
 
   const apiError = epochs.error;
 
@@ -382,14 +359,6 @@ export function Dashboard(props: DashboardScreenProps) {
                 </span>
                 <span className="dash-addr">
                   {row.winner === ownerBase58 ? "You" : formatAddress(row.winner)}
-                  {/* The backend answers 0 for a winner who never played a
-                      round; a "Played 0 rounds" chip is noise, so it goes. */}
-                  {(roundsPlayed[row.winner] ?? 0) > 0 ? (
-                    <span className="dash-chip">
-                      Played {roundsPlayed[row.winner]}{" "}
-                      {roundsPlayed[row.winner] === 1 ? "round" : "rounds"}
-                    </span>
-                  ) : null}
                 </span>
                 <span className="dash-lime">{dollars(row.jackpotAmount)}</span>
                 <span className="dash-date">{shortDate(row.endsAt)}</span>

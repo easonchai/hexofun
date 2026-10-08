@@ -19,8 +19,8 @@ export interface ControlPanelProps {
   /** Omitted (desktop) renders every tier stacked. */
   tab?: PanelTab;
   engine: EngineOutput;
-  /** Player.entries, atomic units. */
-  entries: bigint;
+  /** The Player's Tickets, atomic units. */
+  tickets: bigint;
   decimals: number;
   stakeText: string;
   setStakeText: (value: string) => void;
@@ -36,9 +36,6 @@ export interface ControlPanelProps {
   deployedTotal: bigint;
   lastWin: { tile: number; kind: string } | null;
   feed: FeedRow[];
-  rewardHint: string | null;
-  settleBusy: boolean;
-  onSettle: () => void;
   onDeploy: () => void;
 }
 
@@ -46,7 +43,7 @@ export function ControlPanel(props: ControlPanelProps) {
   const {
     tab,
     engine,
-    entries,
+    tickets,
     decimals,
     stakeText,
     setStakeText,
@@ -61,9 +58,6 @@ export function ControlPanel(props: ControlPanelProps) {
     deployedTotal,
     lastWin,
     feed,
-    rewardHint,
-    settleBusy,
-    onSettle,
     onDeploy,
   } = props;
 
@@ -82,7 +76,7 @@ export function ControlPanel(props: ControlPanelProps) {
 
   const setMax = (): void => {
     if (tiles === 0) return;
-    setStakeText(formatAtomic(entries / BigInt(tiles), decimals));
+    setStakeText(formatAtomic(tickets / BigInt(tiles), decimals));
   };
 
   const togglePreset = (kind: "odd" | "even" | "all"): void => {
@@ -175,7 +169,7 @@ export function ControlPanel(props: ControlPanelProps) {
         </div>
 
         <div className="dual-line" style={{ justifyContent: "flex-end" }}>
-          <span data-testid="wallet-entries">Tickets {fmt(entries)}</span>
+          <span data-testid="wallet-tickets">Tickets {fmt(tickets)}</span>
         </div>
 
         <div className="quick-row">
@@ -293,23 +287,6 @@ export function ControlPanel(props: ControlPanelProps) {
             {fmt(deployedTotal)}
           </span>
         </div>
-        {rewardHint ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div className="reward-hint" data-testid="reward-hint">
-              {rewardHint}
-            </div>
-            <button
-              type="button"
-              className="btn-deploy ghost"
-              disabled={settleBusy}
-              data-testid="settle-position"
-              onClick={onSettle}
-            >
-              <span>{settleBusy ? "SIGNING…" : "SETTLE POSITION"}</span>
-            </button>
-          </div>
-        ) : null}
-
         {deployProblems.length > 0 ? (
           <div className="problems" data-testid="deploy-problems">
             {deployProblems.map((problem) => (

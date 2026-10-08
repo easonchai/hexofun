@@ -1,7 +1,7 @@
 /**
  * Ticket 07: the Indexer is the browser's read model now, not a cache in
  * front of an authoritative chain. `GET /state` (see `useStatePoll.ts`) is
- * the only source for Pool, Epoch, Round, Player and Position. The one
+ * the only source for Pool, Epoch and Player. The one
  * surviving direct chain read is the connected wallet's own token balance,
  * below, against the public endpoint on the visitor's own rate-limit
  * budget — nothing else in the browser touches the chain.
@@ -14,31 +14,22 @@ import type { PoolDto } from "./api.js";
 
 /**
  * What `actions.ts` needs to build instructions, and what the screens need to
- * gate the UI. All of it derives from `/state`'s `pool`: `closeBuffer` and
- * `minDeposit` are columns on the mirror (migration
- * 20260914061500_pool_close_buffer_and_min_deposit), so serving this costs
+ * gate the UI. All of it derives from `/state`'s `pool`, so serving this costs
  * no chain read.
  */
 export interface PoolLike {
   address: PublicKey;
   acceptedMint: PublicKey;
-  closeBuffer: bigint;
   minDeposit: bigint;
-  /** Share of a settled round's pot credited to the House, in basis points. */
-  houseCutBps: number;
   paused: boolean;
   /** One epoch's length in seconds. */
   epochSeconds: bigint;
   /** The ceiling on the depositor share of yield, in basis points. */
   baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. */
-  ticketsPerUsdc: number;
   /** Already validated and capped (`safePriorityFee`); the only fee the send
    *  helper (`actions.ts`, ticket 08) ever signs with. */
   priorityFeeMicroLamports: number;
-  /** The Weight tree and the four pinned klend accounts (yield-claimer):
-   *  deposit, withdraw and the game instructions all name them. */
-  weightTree: PublicKey;
+  /** The four pinned venue accounts: deposit and withdraw name them. */
   klendProgram: PublicKey;
   klendMarket: PublicKey;
   klendReserve: PublicKey;
@@ -96,7 +87,7 @@ export type PoolResult =
  *  one signing code needs; refuses a Pool that does not match what this
  *  build is configured for. */
 export function poolFromDto(
-  dto: PoolDto & { closeBuffer: string; minDeposit: string },
+  dto: PoolDto,
   priorityFeeMicroLamports: number,
   expectedAddress: PublicKey,
 ): PoolResult {
@@ -110,7 +101,7 @@ export function poolFromDto(
   const mint = new PublicKey(dto.mint);
   // An indexer row from before the live-yield layout has none of these; no
   // instruction can be built without them.
-  if (!dto.weightTree || !dto.klendProgram || !dto.klendMarket || !dto.klendReserve || !dto.klendCtoken) {
+  if (!dto.klendProgram || !dto.klendMarket || !dto.klendReserve || !dto.klendCtoken) {
     return { ok: false, reason: "The pool is not indexed yet. Try again in a moment." };
   }
   return {
@@ -118,15 +109,11 @@ export function poolFromDto(
     pool: {
       address,
       acceptedMint: mint,
-      closeBuffer: BigInt(dto.closeBuffer),
       minDeposit: BigInt(dto.minDeposit),
-      houseCutBps: dto.houseCutBps,
       paused: dto.paused,
       epochSeconds: BigInt(dto.epochSeconds),
       baseRateBps: dto.baseRateBps,
-      ticketsPerUsdc: dto.ticketsPerUsdc,
       priorityFeeMicroLamports: safePriorityFee(priorityFeeMicroLamports),
-      weightTree: new PublicKey(dto.weightTree),
       klendProgram: new PublicKey(dto.klendProgram),
       klendMarket: new PublicKey(dto.klendMarket),
       klendReserve: new PublicKey(dto.klendReserve),

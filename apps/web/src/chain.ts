@@ -48,8 +48,8 @@ const apiOf = (program: HexVaultProgram): ProgramApi =>
 
 /**
  * Instruction builder by IDL name; fails loudly on a stale IDL copy. The
- * Anchor client camelCases the IDL on construction, so `buy_position` is
- * reached as `buyPosition` and the `Player` account as `player`.
+ * Anchor client camelCases the IDL on construction, so `buy_tickets` is
+ * reached as `buyTickets` and the `Player` account as `player`.
  */
 export const method = (
   program: HexVaultProgram,
@@ -198,19 +198,8 @@ export const poolAddress = (poolId: bigint): PublicKey =>
 export const epochAddress = (pool: PublicKey, epochId: bigint): PublicKey =>
   pda([Buffer.from("epoch"), pool.toBuffer(), le8(epochId)]);
 
-/** Round ids are global to the pool now: no epoch id in the seeds. */
-export const roundAddress = (pool: PublicKey, roundId: bigint): PublicKey =>
-  pda([Buffer.from("round"), pool.toBuffer(), le8(roundId)]);
-
 export const playerAddress = (pool: PublicKey, owner: PublicKey): PublicKey =>
   pda([Buffer.from("player"), pool.toBuffer(), owner.toBuffer()]);
-
-/** Keyed by round, not pool: one position per wallet per round. */
-export const positionAddress = (
-  round: PublicKey,
-  owner: PublicKey,
-): PublicKey =>
-  pda([Buffer.from("position"), round.toBuffer(), owner.toBuffer()]);
 
 export const principalVaultAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("principal"), pool.toBuffer()]);
@@ -223,10 +212,6 @@ export const VENUE_KIND = { klend: 0, stub: 1, kvault: 2 } as const;
  *  and `deploy_to_venue` refuses while it does. */
 export const venueProposalAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("venue_proposal"), pool.toBuffer()]);
-
-/** The pool's stack of released Weight tree leaves; `deposit` pops from it. */
-export const freeLeavesAddress = (pool: PublicKey): PublicKey =>
-  pda([Buffer.from("free_leaves"), pool.toBuffer()]);
 
 export const jackpotVaultAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("jackpot"), pool.toBuffer()]);

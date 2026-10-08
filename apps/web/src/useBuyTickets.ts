@@ -7,7 +7,7 @@ import { useCallback, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import { awaitSendResult, buyTickets, type TxSigner } from "./actions.js";
-import { buyDisabledReason, pendingDepositNote, ticketsFromUsdc } from "./buyTickets.js";
+import { buyDisabledReason, pendingDepositNote } from "./buyTickets.js";
 import type { HexVaultProgram } from "./chain.js";
 import { parseAtomic } from "./lib/money.js";
 import { decodePlayerError, decodeSendFailure } from "./playerErrors.js";
@@ -36,7 +36,6 @@ export interface BuyTicketsState {
   amountText: string;
   setAmountText: (text: string) => void;
   amount: bigint | null;
-  tickets: bigint;
   allowanceLeft: bigint | null;
   /** One line to show beside the allowance, or null. */
   allowanceNote: string | null;
@@ -66,7 +65,6 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
   const [error, setError] = useState<string | null>(null);
 
   const amount = parseAtomic(amountText, DECIMALS);
-  const tickets = amount !== null ? ticketsFromUsdc(amount, pool?.ticketsPerUsdc ?? 0) : 0n;
 
   // `allowanceLeft` lags behind `principal`/`paused`/`shutdown` (its own
   // slower poll), so "loading…" only shows for a depositor who is genuinely
@@ -117,7 +115,6 @@ export function useBuyTickets(options: UseBuyTicketsOptions): BuyTicketsState {
     amountText,
     setAmountText,
     amount,
-    tickets,
     allowanceLeft,
     allowanceNote: pendingDepositNote(pendingDeposit),
     disabledReason,
