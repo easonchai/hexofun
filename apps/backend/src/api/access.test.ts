@@ -95,7 +95,6 @@ const emptyPlayer = (owner: string, poolAddress: string = RETIRED_POOL_ADDRESS):
   poolAddress,
   owner,
   principal: 0n,
-  tickets: 0n,
   epochId: 0n,
   isHouse: false,
   pendingWithdraw: 0n,

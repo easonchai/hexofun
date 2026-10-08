@@ -22,6 +22,9 @@ import { loadIdl } from "../chain/idl";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountingConnection } from "../test-utils/counting-connection";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
+import { checkLedgerIfDue, countLedgerMismatches, LEDGER_CHECK_INTERVAL_S } from "../ledger/ledger-store";
+import { buildSumTree } from "../snapshot/sum-tree";
+import { decodeEventLogs } from "./decode";
 import { IndexerService, type LogBatch } from "./indexer.service";
 
 const DB_AVAILABLE = isDatabaseReachableSync(TEST_DATABASE_URL);
@@ -92,6 +95,10 @@ async function wipe(): Promise<void> {
   // Pool goes last: every pool-scoped table references it, onDelete Restrict.
   await prisma.$transaction([
     prisma.event.deleteMany(),
+    prisma.ticketLedger.deleteMany(),
+    prisma.ticketBalance.deleteMany(),
+    prisma.epochSnapshot.deleteMany(),
+    prisma.ledgerCheck.deleteMany(),
     prisma.cursor.deleteMany(),
     prisma.venueProposal.deleteMany(),
     prisma.player.deleteMany(),
@@ -146,6 +153,12 @@ const poolRecord = (overrides: object = {}) => ({
 const seedActivePool = async (): Promise<void> => {
   await prisma.pool.create({ data: poolRecord() });
 };
+
+/** The Epoch row the account sync mirrors; a cutoff stores its snapshot on it. */
+const seedEpoch = (id: bigint) =>
+  prisma.epoch.create({
+    data: { poolAddress: active(), id, startsAt: 1_000n, endsAt: 2_000n, status: 0, jackpotAmount: 0n, target: "0" },
+  });
 
 const bn = (value: bigint | number): BN => new BN(value.toString());
 const zeros = (length: number): number[] => new Array<number>(length).fill(0);
@@ -246,7 +259,7 @@ describe("account sync", () => {
     expect(epoch.winner).toBeNull();
 
     expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
-      .toMatchObject({ principal: 3_000_000n, tickets: 0n, isHouse: false });
+      .toMatchObject({ principal: 3_000_000n, isHouse: false });
   });
 
   // venue-switch ticket 03
@@ -334,19 +347,21 @@ describe("account sync", () => {
     expect(await prisma.venueProposal.count()).toBe(0);
   });
 
-  it("leaves the Tickets column to the ledger when a sweep re-mirrors a Player", async () => {
-    // The program holds no Tickets any more, so the mirror must not zero what
-    // the ledger (off-chain-tickets ticket 11) keeps in the column.
+  it("leaves the ledger's balance alone when a sweep re-mirrors a Player", async () => {
+    // The program holds no Tickets, so the mirror must not touch what the
+    // Ticket ledger keeps in TicketBalance.
     await put("pool", chain.poolAddress(), poolAccount());
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
     await indexer.syncAccounts();
-    await prisma.player.update({ where: byOwner(OWNER.toBase58()), data: { tickets: 777n } });
+    const owner = OWNER.toBase58();
+    await prisma.ticketBalance.create({ data: { poolAddress: active(), owner, tickets: 777n, epochId: 1n } });
 
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER, { principal: bn(4_000_000) }));
     await indexer.syncAccounts();
 
-    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
-      .toMatchObject({ principal: 4_000_000n, tickets: 777n });
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(owner) })).toMatchObject({ principal: 4_000_000n });
+    expect(await prisma.ticketBalance.findUniqueOrThrow({ where: { poolAddress_owner: { poolAddress: active(), owner } } }))
+      .toMatchObject({ tickets: 777n });
   });
 
   it("does not delete the venue proposal by its absence from an incremental sweep", async () => {
@@ -770,6 +785,7 @@ describe("event ingest", () => {
     const second = batch("sig2", 11n, [epochRolledOver]);
     const third = batch("sig3", 12n, [deposited]);
 
+    await seedEpoch(1n); // EpochBegan(2) snapshots epoch 1
     expect(await indexer.ingestLogs(first)).toBe(2);
     expect(await indexer.ingestLogs(second)).toBe(1);
     // The replay a websocket reconnect or a catch-up overlap produces.
@@ -1389,7 +1405,6 @@ describe("pool-scoped reads", () => {
     poolAddress: active(),
     owner,
     principal: 0n,
-    tickets: 0n,
     epochId: 5n,
     isHouse: false,
     pendingWithdraw: 0n,
@@ -1414,9 +1429,9 @@ describe("pool-scoped reads", () => {
     });
     await prisma.player.createMany({
       data: [
-        player(ALICE, { tickets: 3n }),
+        player(ALICE),
         player(BOB),
-        player(CAROL, { tickets: 9n }),
+        player(CAROL),
         player(DAVE, { epochId: 3n, principal: 2n }),
       ],
     });
@@ -1444,7 +1459,7 @@ describe("pool-scoped reads", () => {
       },
     });
     await prisma.player.create({
-      data: player(Keypair.generate().publicKey.toBase58(), { poolAddress: RETIRED_POOL, tickets: 9n }),
+      data: player(Keypair.generate().publicKey.toBase58(), { poolAddress: RETIRED_POOL }),
     });
 
     expect(await indexer.getEpoch(6n)).toBeNull();
@@ -1487,7 +1502,6 @@ describe("referral qualification", () => {
         poolAddress: active(),
         owner: referee,
         principal: 40_000_000n,
-        tickets: 0n,
         epochId: 1n,
         isHouse: false,
         pendingWithdraw: 0n,
@@ -1718,6 +1732,202 @@ describe("referral qualification", () => {
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
     expect(row.principal).toBe(60_000_000n);
     expect(row.aboveSince).toBe(1_600_000_000n);
+  });
+});
+
+// off-chain-tickets 11: the Ticket ledger applies events in the finalized
+// catch-up's order, snapshots at EpochBegan, and resets every wallet to its
+// Ticket basis in the same transaction.
+describe("ticket ledger", () => {
+  const A = Keypair.generate().publicKey;
+  const B = Keypair.generate().publicKey;
+  const C = Keypair.generate().publicKey;
+  const D = Keypair.generate().publicKey;
+  const ONE = 10n ** 18n;
+  const POINT_ONE = ONE + ONE / 10n; // the pool index after 10% yield
+
+  const money = (name: string, owner: PublicKey, amount: number, principal: number, index = ONE) =>
+    dataLine(name, { owner, amount: bn(amount), principal: bn(principal), yieldIndex: bn(index) });
+  const began = (epochId: number, index = ONE) =>
+    dataLine("EpochBegan", { epochId: bn(epochId), startsAt: bn(1_000), endsAt: bn(2_000), yieldIndex: bn(index) });
+  const key = (owner: PublicKey) => ({ poolAddress_owner: { poolAddress: active(), owner: owner.toBase58() } });
+  const balance = async (owner: PublicKey) => prisma.ticketBalance.findUniqueOrThrow({ where: key(owner) });
+  const rowsOf = async (owner: PublicKey) =>
+    (await prisma.ticketLedger.findMany({ where: { owner: owner.toBase58() }, orderBy: { id: "asc" } })).map(
+      (row) => [row.reason, row.delta, row.epochId] as const,
+    );
+
+  beforeEach(async () => {
+    await seedActivePool();
+    await seedEpoch(1n);
+    await seedEpoch(2n);
+  });
+
+  it("books two epoch boundaries into balances, snapshots and a root the builder reproduces", async () => {
+    await indexer.ingestLogs(batch("s1", 10n, [began(1)]));
+    await indexer.ingestLogs(batch("s2", 11n, [money("Deposited", A, 1_000, 1_000)]));
+    await indexer.ingestLogs(batch("s3", 12n, [money("Deposited", B, 500, 500)]));
+    // The cutoff: nobody held a Ticket in epoch 1, and 10% yield is unsettled.
+    await indexer.ingestLogs(batch("s4", 20n, [began(2, POINT_ONE)]));
+    expect(await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).toMatchObject({
+      snapshotRoot: null,
+      snapshotDepth: 0,
+      leafCount: 0,
+      totalTickets: 0n,
+    });
+    expect([(await balance(A)).tickets, (await balance(B)).tickets]).toEqual([1_100n, 550n]);
+
+    // B is paid out in full; A deposits again and the settle lifts her Principal.
+    await indexer.ingestLogs(batch("s5", 21n, [money("Withdrawn", B, 600, 0, POINT_ONE)]));
+    await indexer.ingestLogs(batch("s6", 22n, [money("Deposited", A, 100, 1_200, POINT_ONE)]));
+    await indexer.ingestLogs(batch("s7", 30n, [began(3, POINT_ONE)]));
+
+    const leaves = [{ wallet: Buffer.from(A.toBytes()), tickets: 1_100n }];
+    const tree = buildSumTree(leaves);
+    expect(await prisma.epoch.findUniqueOrThrow({ where: byId(2n) })).toMatchObject({
+      snapshotRoot: tree.root.toString("hex"),
+      snapshotDepth: tree.depth,
+      leafCount: 1,
+      totalTickets: 1_100n,
+    });
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 2n } })).toMatchObject([
+      { index: 0, owner: A.toBase58(), tickets: 1_100n },
+    ]);
+    expect(await rowsOf(A)).toEqual([["reset", 1_100n, 2n], ["reset", 100n, 3n]]);
+    expect(await rowsOf(B)).toEqual([["reset", 550n, 2n], ["withdraw", -550n, 2n]]);
+    expect(await balance(A)).toMatchObject({ tickets: 1_200n, principal: 1_200n, epochId: 3n });
+    expect(await balance(B)).toMatchObject({ tickets: 0n, principal: 0n });
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ ledgerEpochId: 3n });
+
+    // The nightly check passes, and fails with the count once a balance is edited by hand.
+    expect(await countLedgerMismatches(prisma, active())).toBe(0);
+    await prisma.ticketBalance.update({ where: key(A), data: { tickets: 9_999n } });
+    expect(await countLedgerMismatches(prisma, active())).toBe(1);
+  });
+
+  it("sorts a snapshot by wallet bytes, not by the order the wallets deposited", async () => {
+    const wallets = [A, B, C].sort((x, y) => Buffer.compare(x.toBuffer(), y.toBuffer()));
+    await indexer.ingestLogs(batch("t1", 10n, [began(1)]));
+    // Deposit in reverse byte order.
+    for (const [i, wallet] of [...wallets].reverse().entries()) {
+      await indexer.ingestLogs(batch(`t-dep-${i}`, 11n + BigInt(i), [money("Deposited", wallet, 10, 10)]));
+    }
+    await indexer.ingestLogs(batch("t2", 20n, [began(2)]));
+    await indexer.ingestLogs(batch("t3", 30n, [began(3)]));
+    const rows = await prisma.epochSnapshot.findMany({ where: { epochId: 2n }, orderBy: { index: "asc" } });
+    expect(rows.map((row) => row.owner)).toEqual(wallets.map((wallet) => wallet.toBase58()));
+    expect(await prisma.epoch.findUniqueOrThrow({ where: byId(2n) })).toMatchObject({ leafCount: 3, totalTickets: 30n, snapshotDepth: 2 });
+  });
+
+  it("holds a same-slot deposit out of the ended epoch's snapshot, before or after EpochBegan", async () => {
+    await indexer.ingestLogs(batch("u0", 5n, [began(1)]));
+    await indexer.ingestLogs(batch("u1", 10n, [money("Deposited", C, 100, 100)])); // before the cutoff
+    await indexer.ingestLogs(batch("u2", 10n, [began(2)]));
+    await indexer.ingestLogs(batch("u3", 10n, [money("Deposited", D, 200, 200)])); // after it
+    expect(await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).toMatchObject({ leafCount: 0, totalTickets: 0n });
+    // The earlier one folds into the reset; the later one waits for the next.
+    expect([(await balance(C)).tickets, (await balance(D)).tickets]).toEqual([100n, 0n]);
+    await indexer.ingestLogs(batch("u4", 20n, [began(3)]));
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 2n } })).toMatchObject([
+      { owner: C.toBase58(), tickets: 100n },
+    ]);
+    expect((await balance(D)).tickets).toBe(200n);
+  });
+
+  it("a settle after the reset leaves the basis unchanged, so the next reset adds nothing", async () => {
+    await indexer.ingestLogs(batch("v0", 5n, [began(1)]));
+    await indexer.ingestLogs(batch("v1", 10n, [money("Deposited", A, 1_000, 1_000)]));
+    await indexer.ingestLogs(batch("v2", 20n, [began(2, POINT_ONE)]));
+    expect((await balance(A)).tickets).toBe(1_100n); // 1,000 + 10% unsettled
+    // Her next action settles: Principal rises by exactly the owed 100 and her index catches up.
+    await indexer.ingestLogs(batch("v3", 21n, [money("Deposited", A, 0, 1_100, POINT_ONE)]));
+    await indexer.ingestLogs(batch("v4", 30n, [began(3, POINT_ONE)]));
+    expect(await rowsOf(A)).toEqual([["reset", 1_100n, 2n]]);
+    expect((await balance(A)).tickets).toBe(1_100n);
+  });
+
+  it("resets the House to zero and floors a withdrawal at zero Tickets", async () => {
+    const house = Keypair.generate().publicKey;
+    await prisma.ticketBalance.create({
+      data: { poolAddress: active(), owner: house.toBase58(), tickets: 50n, principal: 0n, epochId: 1n },
+    });
+    await prisma.ticketLedger.create({
+      data: { poolAddress: active(), owner: house.toBase58(), epochId: 1n, delta: 50n, reason: "house_credit", ref: "seed" },
+    });
+    await indexer.ingestLogs(batch("w1", 10n, [money("Deposited", A, 100, 100)]));
+    // 100 Principal and no Tickets yet, a payout of 100 takes nothing below zero.
+    await indexer.ingestLogs(batch("w2", 11n, [money("Withdrawn", A, 100, 0)]));
+    await indexer.ingestLogs(batch("w3", 20n, [began(2)]));
+    expect((await balance(house)).tickets).toBe(0n);
+    expect(await rowsOf(house)).toEqual([["house_credit", 50n, 1n], ["reset", -50n, 2n]]);
+    expect(await rowsOf(A)).toEqual([]);
+    expect(await countLedgerMismatches(prisma, active())).toBe(0);
+  });
+
+  it("books a prize to a non-House winner and nothing for the House", async () => {
+    const prize = (winner: PublicKey, isHouse: boolean, principal: number) =>
+      dataLine("JackpotPaid", {
+        epochId: bn(1), winner, amount: bn(700), isHouse, compounded: !isHouse,
+        principal: bn(principal), yieldIndex: bn(ONE), index: 0, tickets: bn(0),
+      });
+    await indexer.ingestLogs(batch("x1", 10n, [prize(A, false, 700)]));
+    await indexer.ingestLogs(batch("x2", 11n, [prize(B, true, 0)]));
+    expect(await rowsOf(A)).toEqual([["prize", 700n, 0n]]);
+    expect(await balance(A)).toMatchObject({ tickets: 700n, principal: 700n });
+    expect(await rowsOf(B)).toEqual([]);
+  });
+
+  it("applies a transaction once: a replay, a live copy and a restart mid-slot add no rows", async () => {
+    const dep = batch("y1", 10n, [money("Deposited", A, 100, 100)]);
+    const pay = batch("y2", 10n, [money("Withdrawn", A, 40, 60)]);
+    // The live path stores y1 first and books nothing.
+    await indexer["persist"](dep, decodeEventLogs(indexer["parser"], dep.logs), { advanceCursor: false });
+    expect(await prisma.ticketBalance.count()).toBe(0);
+
+    await indexer.ingestLogs(dep);
+    await indexer.ingestLogs(dep); // the same slot twice
+    await prisma.ticketBalance.update({ where: key(A), data: { tickets: 100n } });
+    await prisma.ticketLedger.create({
+      data: { poolAddress: active(), owner: A.toBase58(), epochId: 0n, delta: 100n, reason: "grant_admin", ref: "seed" },
+    });
+    await indexer.ingestLogs(pay);
+    await indexer.ingestLogs(pay);
+    expect(await rowsOf(A)).toEqual([["grant_admin", 100n, 0n], ["withdraw", -40n, 0n]]);
+    expect(await balance(A)).toMatchObject({ tickets: 60n, principal: 60n });
+
+    // A restart between two transactions of one slot resumes after the cursor's signature.
+    connection.signaturesForAddress = [
+      { signature: "y3", slot: 10, err: null, blockTime: 1_700_000_010 },
+      { signature: "y2", slot: 10, err: null, blockTime: 1_700_000_010 },
+      { signature: "y1", slot: 10, err: null, blockTime: 1_700_000_010 },
+    ];
+    connection.setTransaction("y3", batch("y3", 10n, [money("Withdrawn", A, 10, 50)]).logs);
+    await indexer["catchUpEvents"]();
+    await indexer["catchUpEvents"]();
+    expect((await balance(A)).tickets).toBe(50n);
+    expect(await rowsOf(A)).toHaveLength(3);
+  });
+
+  it("holds the cutoff back when the ended epoch is not mirrored yet, then applies it whole", async () => {
+    await prisma.epoch.delete({ where: byId(1n) });
+    await expect(indexer.ingestLogs(batch("z1", 10n, [money("Deposited", A, 100, 100), began(2)]))).rejects.toThrow(/not mirrored/);
+    // The whole transaction rolled back: no event, no balance, no cursor move.
+    expect(await prisma.event.count()).toBe(0);
+    expect(await prisma.ticketBalance.count()).toBe(0);
+    await seedEpoch(1n);
+    await indexer.ingestLogs(batch("z1", 10n, [money("Deposited", A, 100, 100), began(2)]));
+    expect((await balance(A)).tickets).toBe(100n);
+  });
+
+  it("runs the nightly check once a day and stores the count for /alerts", async () => {
+    await indexer.ingestLogs(batch("c1", 10n, [money("Deposited", A, 100, 100)]));
+    await checkLedgerIfDue(prisma, active(), 1_000n);
+    expect(await prisma.ledgerCheck.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ checkedAt: 1_000n, mismatches: 0 });
+    await prisma.ticketBalance.update({ where: key(A), data: { tickets: 5n } });
+    await checkLedgerIfDue(prisma, active(), 1_000n + LEDGER_CHECK_INTERVAL_S - 1n); // too soon
+    expect((await prisma.ledgerCheck.findUniqueOrThrow({ where: { poolAddress: active() } })).mismatches).toBe(0);
+    await checkLedgerIfDue(prisma, active(), 1_000n + LEDGER_CHECK_INTERVAL_S);
+    expect(await prisma.ledgerCheck.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ mismatches: 1 });
   });
 });
 });

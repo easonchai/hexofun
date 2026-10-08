@@ -15,6 +15,9 @@ const parseLimit = (raw: string | undefined, fallback: number): number => {
   return Math.min(value, MAX_LIMIT);
 };
 
+/** Leaves per `GET /epochs/:id/snapshot` page. */
+const SNAPSHOT_PAGE = 10_000;
+
 const MAX_DAYS = 365;
 
 const parseDays = (raw: string | undefined): number => {
@@ -52,6 +55,23 @@ export class ApiController {
   @Get("epochs/current")
   getCurrentEpoch() {
     return this.api.getCurrentEpoch();
+  }
+
+  /** The Epoch snapshot's leaves in tree order plus the sum tree's outputs,
+   *  `SNAPSHOT_PAGE` leaves at a time; pass `after` the `nextIndex` of the last page. */
+  @Get("epochs/:id/snapshot")
+  getEpochSnapshot(
+    @Param("id") id: string,
+    @Query("after") after?: string,
+    @Query("limit") limit?: string,
+  ) {
+    if (!/^\d+$/.test(id) || (after !== undefined && !/^\d+$/.test(after))) {
+      throw new BadRequestException("`id` and `after` must be whole numbers.");
+    }
+    if (limit !== undefined && !/^[1-9]\d*$/.test(limit)) {
+      throw new BadRequestException("`limit` must be a whole number of 1 or more.");
+    }
+    return this.api.getEpochSnapshot(BigInt(id), Number(after ?? 0), Math.min(Number(limit ?? SNAPSHOT_PAGE), SNAPSHOT_PAGE));
   }
 
   @Get("players/:owner")

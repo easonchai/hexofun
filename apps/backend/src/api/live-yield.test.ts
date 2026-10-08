@@ -5,7 +5,6 @@ import {
   INDEX_SCALE,
   dailyPaidRates,
   decodeReserve,
-  effectiveTickets,
   estimatedRateBps,
   freeIdle,
   haircutFactor,
@@ -25,25 +24,16 @@ const DAY = 86_400n;
 const YEAR = 31_536_000n;
 const ONE_PERCENT = INDEX_SCALE / 100n;
 
-describe("effectiveTickets and pendingTickets", () => {
-  // 300 of Principal, 200 of it deposited in epoch 4, so 100 Tickets are active.
-  const player = {
-    principal: 300n,
-    tickets: 100n,
-    epochId: 4n,
-    pendingDeposit: 200n,
-    pendingDepositEpoch: 4n,
-  };
+describe("pendingTickets", () => {
+  // 300 of Principal, 200 of it deposited in epoch 4.
+  const player = { pendingDeposit: 200n, pendingDepositEpoch: 4n };
 
-  it("counts the active Tickets and holds the deposit pending in the epoch it was made", () => {
-    expect(effectiveTickets(player, 4n)).toBe(100n);
+  it("holds the deposit pending in the epoch it was made", () => {
     expect(pendingTickets(player, 4n)).toBe(200n);
   });
 
-  it("folds the pending deposit into Tickets from the next epoch, without a touch", () => {
-    expect(effectiveTickets(player, 5n)).toBe(300n);
+  it("reads zero pending from the next epoch, without a touch", () => {
     expect(pendingTickets(player, 5n)).toBe(0n);
-    expect(effectiveTickets(player, 9n)).toBe(300n);
   });
 
   it("reads zero pending for a Player who never deposited", () => {

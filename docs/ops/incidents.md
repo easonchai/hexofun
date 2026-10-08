@@ -293,6 +293,21 @@ crank is due" below.
    the pause does, so a deliberate pause keeps paging until it is lifted. Idle USDC above the band
    stays idle and earns nothing, which lowers the rate for everyone.
 
+<a id="ticket-ledger-mismatch"></a>
+## Ticket ledger out of step
+
+Starts with `TICKET_LEDGER_MISMATCH`. The indexer's daily check found wallets whose `TicketBalance.tickets`
+differs from the sum of their `TicketLedger.delta` rows. The snapshot and the draw read the balances,
+so a wrong balance can put the wrong count in a leaf.
+
+1. Find the wallets: `SELECT b.owner, b.tickets, COALESCE(SUM(l.delta), 0) AS ledger FROM "TicketBalance" b
+   LEFT JOIN "TicketLedger" l USING ("poolAddress", owner) GROUP BY b.owner, b.tickets
+   HAVING b.tickets <> COALESCE(SUM(l.delta), 0)`.
+2. Do not edit either table. The ledger is append-only, so a fix is a new row. Read the wallet's rows and
+   its `Event` rows in order to see which one the balance missed.
+3. An epoch whose snapshot is already committed on chain keeps that snapshot. Fix the wallet before the next
+   `EpochBegan`, which snapshots and resets every balance.
+
 <a id="weight-tree-nearly-full"></a>
 ## Weight tree filling up
 

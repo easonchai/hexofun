@@ -43,6 +43,7 @@ const HEALTHY: AlertInputs = {
   deployPaused: false,
   venueProposal: null,
   paramsChanged: null,
+  ticketLedgerMismatches: 0,
 };
 
 const PROPOSAL = {
@@ -276,6 +277,13 @@ describe("evaluateAlerts", () => {
     expect(alert?.message).not.toContain("PoolAddr");
   });
 
+  it("TICKET_LEDGER_MISMATCH fires on any wallet whose balance differs from its ledger", () => {
+    expect(evaluateAlerts(HEALTHY, THRESHOLDS)).toEqual([]);
+    const [alert] = evaluateAlerts({ ...HEALTHY, ticketLedgerMismatches: 3 }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "TICKET_LEDGER_MISMATCH" });
+    expect(alert?.message).toContain("3 wallets");
+  });
+
   it("stacks every active condition at once", () => {
     const codes = evaluateAlerts(
       {
@@ -304,6 +312,7 @@ describe("evaluateAlerts", () => {
         deployPaused: true,
         venueProposal: PROPOSAL,
         paramsChanged: { pool: "P", epochSeconds: "86400" },
+        ticketLedgerMismatches: 1,
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -328,6 +337,7 @@ describe("evaluateAlerts", () => {
       "DEPLOY_PAUSED",
       "VENUE_PROPOSED",
       "PARAMS_CHANGED",
+      "TICKET_LEDGER_MISMATCH",
     ]);
   });
 });

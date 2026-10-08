@@ -66,7 +66,6 @@ const emptyPlayer = (owner: string, poolAddress: string = POOL_ADDRESS): Player 
   poolAddress,
   owner,
   principal: 0n,
-  tickets: 0n,
   epochId: 0n,
   isHouse: false,
   pendingWithdraw: 0n,

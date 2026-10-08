@@ -343,7 +343,7 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     await seedActive();
     const wallet = Keypair.generate().publicKey.toBase58();
     const player = {
-      poolAddress: POOL.toBase58(), principal: 0n, tickets: 0n, epochId: 0n, isHouse: false,
+      poolAddress: POOL.toBase58(), principal: 0n, epochId: 0n, isHouse: false,
       pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n,
     };
     await prisma.player.createMany({

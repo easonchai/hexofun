@@ -272,7 +272,6 @@ const emptyPlayer = (owner: string, poolAddress: string = POOL_ADDRESS): Player 
   poolAddress,
   owner,
   principal: 0n,
-  tickets: 0n,
   epochId: CURRENT_EPOCH,
   isHouse: false,
   pendingWithdraw: 0n,
@@ -306,7 +305,7 @@ function assertNoLargeNumbers(value: unknown, path: string): void {
 
 async function truncate(prisma: PrismaService): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE "Pool", "Epoch", "Player", "Event", "Cursor", "FaucetClaim", "OperatorState", "YieldIndexPoint" CASCADE',
+    'TRUNCATE "Pool", "Epoch", "Player", "Event", "Cursor", "FaucetClaim", "OperatorState", "YieldIndexPoint", "TicketBalance", "EpochSnapshot", "LedgerCheck" CASCADE',
   );
 }
 
@@ -686,7 +685,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     await http.get(`/positions/counts?owners=${ALICE}`).expect(404);
   });
 
-  it("GET /players/:owner returns Principal, unsettled yield as of the last sync, and the Tickets the mirror holds", async () => {
+  it("GET /players/:owner returns Principal, unsettled yield as of the last sync, and the Tickets the ledger holds", async () => {
     const { body } = await http.get(`/players/${ALICE}`).expect(200);
     expect(body.owner).toBe(ALICE);
     expect(body.principal).toBe("1000000");
@@ -748,32 +747,37 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
 
   // Ticket 20: a deposit made today is Principal with no Tickets until the
   // next epoch, and the read folds it the way `touch` does, row untouched.
-  it("GET /players/:owner shows a pending deposit as pending Tickets, then folds it from the next epoch", async () => {
-    const seed = (epochId: bigint, tickets: bigint, pendingDepositEpoch: bigint) =>
+  it("GET /players/:owner shows a pending deposit as pending Tickets, then none once the epoch has turned", async () => {
+    const seed = (epochId: bigint, pendingDepositEpoch: bigint) =>
       prisma.player.update({
         where: activePlayer(BOB),
-        data: { principal: 500_000n, tickets, epochId, pendingDeposit: 500_000n, pendingDepositEpoch },
+        data: { principal: 500_000n, epochId, pendingDeposit: 500_000n, pendingDepositEpoch },
       });
     try {
-      await seed(CURRENT_EPOCH, 0n, CURRENT_EPOCH);
+      await seed(CURRENT_EPOCH, CURRENT_EPOCH);
       const today = (await http.get(`/players/${BOB}`).expect(200)).body;
       expect(today.weight).toBe("0");
       expect(today.pendingTickets).toBe("500000");
       expect(today.pendingActivatesEpoch).toBe((CURRENT_EPOCH + 1n).toString());
       expect(today.odds).toBe("0.00");
 
-      // Deposited in epoch 6 and never touched since: Principal is the Tickets.
-      await seed(CURRENT_EPOCH - 1n, 0n, CURRENT_EPOCH - 1n);
+      // Deposited in epoch 6; the reset at the epoch 7 cutoff gave her Principal as Tickets.
+      await seed(CURRENT_EPOCH - 1n, CURRENT_EPOCH - 1n);
+      await prisma.ticketBalance.create({
+        data: { poolAddress: POOL_ADDRESS, owner: BOB, tickets: 500_000n, principal: 500_000n, epochId: CURRENT_EPOCH },
+      });
       const later = (await http.get(`/players/${BOB}`).expect(200)).body;
       expect(later.weight).toBe("500000");
+      expect(later.tickets).toBe("500000");
       expect(later.pendingTickets).toBe("0");
       expect(later.pendingActivatesEpoch).toBeNull();
-      // Her 500,000 over every Ticket the mirror holds (hers and Alice's 1,000,000).
+      // Her 500,000 over every Ticket the ledger holds (hers and Alice's 1,000,000).
       expect(later.odds).toBe("33.33");
     } finally {
+      await prisma.ticketBalance.deleteMany({ where: { poolAddress: POOL_ADDRESS, owner: BOB } });
       await prisma.player.update({
         where: activePlayer(BOB),
-        data: { principal: 0n, tickets: 0n, epochId: CURRENT_EPOCH, pendingDeposit: 0n, pendingDepositEpoch: 0n },
+        data: { principal: 0n, epochId: CURRENT_EPOCH, pendingDeposit: 0n, pendingDepositEpoch: 0n },
       });
     }
   });
@@ -821,8 +825,55 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       HOUSE,
     ]);
     expect(body[0].odds).toBe("100.00");
+    // From the ledger's balance; the retired pool's wallet with 5 Tickets adds nothing.
+    expect(body[0].tickets).toBe(ALICE_WEIGHT.toString());
     expect(body[2].isHouse).toBe(true);
     assertNoLargeNumbers(body, "/leaderboard");
+  });
+
+  describe("GET /epochs/:id/snapshot", () => {
+    const wallets = [ALICE, BOB, HOUSE];
+    it("is 404 until the next epoch has begun and the snapshot was taken", async () => {
+      await http.get(`/epochs/${CURRENT_EPOCH}/snapshot`).expect(404);
+      await http.get("/epochs/99/snapshot").expect(404);
+    });
+
+    it("pages the sorted leaves with the sum tree's outputs", async () => {
+      await prisma.epoch.update({
+        where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: PREVIOUS_EPOCH } },
+        data: { snapshotRoot: "ab".repeat(32), snapshotDepth: 2, leafCount: 3, totalTickets: 60n },
+      });
+      await prisma.epochSnapshot.createMany({
+        data: wallets.map((owner, index) => ({ poolAddress: POOL_ADDRESS, epochId: PREVIOUS_EPOCH, index, owner, tickets: BigInt(10 * (index + 1)) })),
+      });
+      try {
+        const first = (await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot?limit=2`).expect(200)).body;
+        expect(first).toMatchObject({
+          epochId: PREVIOUS_EPOCH.toString(),
+          root: "ab".repeat(32),
+          depth: 2,
+          leafCount: 3,
+          totalTickets: "60",
+          nextIndex: 2,
+        });
+        expect(first.leaves).toEqual([
+          { index: 0, owner: ALICE, tickets: "10" },
+          { index: 1, owner: BOB, tickets: "20" },
+        ]);
+        const last = (await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot?after=2&limit=2`).expect(200)).body;
+        expect(last.leaves).toEqual([{ index: 2, owner: HOUSE, tickets: "30" }]);
+        expect(last.nextIndex).toBeNull();
+        assertNoLargeNumbers(first, "/epochs/:id/snapshot");
+        await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot?limit=0`).expect(400);
+        await http.get(`/epochs/${PREVIOUS_EPOCH}/snapshot?after=-1`).expect(400);
+      } finally {
+        await prisma.epochSnapshot.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+        await prisma.epoch.update({
+          where: { poolAddress_id: { poolAddress: POOL_ADDRESS, id: PREVIOUS_EPOCH } },
+          data: { snapshotRoot: null, snapshotDepth: null, leafCount: null, totalTickets: null },
+        });
+      }
+    });
   });
 
   // fork-run-fixes 01: launch week, the pool bootstrapped and `currentEpochId`
@@ -1108,6 +1159,18 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body).toEqual({
         alerts: [{ code: "WITHDRAW_SHORTFALL", message: expect.any(String) }],
       });
+    });
+
+    it("is 503 with TICKET_LEDGER_MISMATCH once the nightly check finds a wallet out of step", async () => {
+      await prisma.operatorState.update({ where: { poolAddress: POOL_ADDRESS }, data: { withdrawShortfall: 0n } });
+      await prisma.ledgerCheck.create({ data: { poolAddress: POOL_ADDRESS, checkedAt: NOW, mismatches: 2 } });
+      try {
+        const { body } = await http.get("/alerts").expect(503);
+        expect(body.alerts).toEqual([{ code: "TICKET_LEDGER_MISMATCH", message: expect.any(String) }]);
+      } finally {
+        await prisma.ledgerCheck.deleteMany();
+        await prisma.operatorState.update({ where: { poolAddress: POOL_ADDRESS }, data: { withdrawShortfall: 250_000n } });
+      }
     });
 
     it("is 200 with no alerts once the withdraw shortfall clears", async () => {
@@ -1787,7 +1850,6 @@ async function seed(prisma: PrismaService): Promise<void> {
       {
         ...emptyPlayer(ALICE),
         principal: 1_000_000n,
-        tickets: 1_000_000n,
         yieldIndex: ALICE_YIELD_INDEX.toString(),
         boughtEpoch: CURRENT_EPOCH,
         boughtAmount: ALICE_BOUGHT_AMOUNT,
@@ -1796,6 +1858,10 @@ async function seed(prisma: PrismaService): Promise<void> {
       { ...emptyPlayer(BOB), yieldIndex: POOL_YIELD_INDEX.toString() },
       { ...emptyPlayer(HOUSE), isHouse: true },
     ],
+  });
+  // The ledger holds her Tickets; Bob has no balance row.
+  await prisma.ticketBalance.create({
+    data: { poolAddress: POOL_ADDRESS, owner: ALICE, tickets: ALICE_WEIGHT, principal: 1_000_000n, epochId: CURRENT_EPOCH },
   });
 
   await prisma.event.createMany({
@@ -1872,8 +1938,11 @@ async function seedRetiredPool(
     data: [
       { ...emptyPlayer(ALICE, RETIRED_POOL_ADDRESS), principal: 777n },
       // Holds Tickets, so an unscoped scan would hand her a share of the odds.
-      { ...emptyPlayer(CAROL, RETIRED_POOL_ADDRESS), principal: 5n, tickets: 5n },
+      { ...emptyPlayer(CAROL, RETIRED_POOL_ADDRESS), principal: 5n },
     ],
+  });
+  await prisma.ticketBalance.create({
+    data: { poolAddress: RETIRED_POOL_ADDRESS, owner: CAROL, tickets: 5n, principal: 5n, epochId: 9n },
   });
   await prisma.event.createMany({
     data: [

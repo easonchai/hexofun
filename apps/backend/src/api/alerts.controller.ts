@@ -30,7 +30,8 @@ export type AlertCode =
   | "POOL_IMPAIRED"
   | "DEPLOY_PAUSED"
   | "VENUE_PROPOSED"
-  | "PARAMS_CHANGED";
+  | "PARAMS_CHANGED"
+  | "TICKET_LEDGER_MISMATCH";
 
 export interface Alert {
   code: AlertCode;
@@ -130,6 +131,9 @@ export interface AlertInputs {
    *  there is none. Pool and nothing else is left out, so a new field on the
    *  event shows up here without a code change. */
   paramsChanged: Record<string, unknown> | null;
+  /** Wallets whose `TicketBalance` differs from their ledger sum at the last
+   *  nightly check; 0 before the first check. */
+  ticketLedgerMismatches: number;
 }
 
 /** `/status`'s operator block, which both the alerts and the ops todo list read. */
@@ -325,6 +329,12 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: `set_params ran in the last hour with: ${values}.`,
     });
   }
+  if (inputs.ticketLedgerMismatches > 0) {
+    alerts.push({
+      code: "TICKET_LEDGER_MISMATCH",
+      message: `${inputs.ticketLedgerMismatches} wallets hold Tickets that their ledger rows do not sum to.`,
+    });
+  }
   return alerts;
 }
 
@@ -366,11 +376,12 @@ export class AlertsController {
 
   @Get("alerts")
   async getAlerts(): Promise<{ alerts: Alert[] }> {
-    const [status, recent, venueProposal, paramsChanged] = await Promise.all([
+    const [status, recent, venueProposal, paramsChanged, ledgerCheck] = await Promise.all([
       this.api.getStatus(),
       this.recentRollover(),
       this.openVenueProposal(),
       this.recentParamsSet(),
+      this.prisma.ledgerCheck.findUnique({ where: { poolAddress: this.api.poolAddress } }),
     ]);
     const nowSeconds = Math.floor(Date.now() / 1000);
     const secondsToEpochClose =
@@ -409,6 +420,7 @@ export class AlertsController {
         deployPaused: status.deployPaused,
         venueProposal,
         paramsChanged,
+        ticketLedgerMismatches: ledgerCheck?.mismatches ?? 0,
       },
       {
         tickStaleSeconds: this.tickStaleSeconds,

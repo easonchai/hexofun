@@ -107,6 +107,15 @@ model Epoch {
   jackpotAmount     BigInt
   target            Decimal  @db.Decimal(40, 0)
   winner            String?
+  /// The Epoch snapshot's Merkle sum tree, taken by the Ticket ledger at the
+  /// next `EpochBegan` (off-chain-tickets 11). Null until then. `snapshotRoot`
+  /// is hex and stays null for an empty snapshot (leafCount 0, totalTickets 0).
+  snapshotRoot      String?
+  snapshotDepth     Int?
+  leafCount         Int?
+  totalTickets      BigInt?
+  /// The `request_draw` nonce the Operator chose; written by the operator.
+  nonce             BigInt?
 
   // Epoch ids restart at 1 on every pool (ADR 0016).
   @@id([poolAddress, id])
@@ -117,10 +126,6 @@ model Player {
   pool         Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
   owner        String
   principal    BigInt
-  /// Tickets this wallet holds in the current epoch. The program no longer
-  /// holds them, so the mirror leaves the column alone until the Ticket ledger
-  /// (off-chain-tickets ticket 11) maintains it.
-  tickets      BigInt @default(0)
   epochId      BigInt
   isHouse      Boolean
   /// Requested but not yet paid; `process_withdraw` pays it and zeroes it.
@@ -164,6 +169,9 @@ model Event {
   name        String
   data        Json
   blockTime   BigInt?
+  /// True once the Ticket ledger has applied this event. Only the finalized
+  /// catch-up path applies events, in chain order (off-chain-tickets 11).
+  ledgered    Boolean @default(false)
 
   // Not keyed on slot: the live path stamps the slot its notification came
   // in, which a fork (and any RPC that notifies late) reports past the
@@ -200,6 +208,8 @@ model Cursor {
   lastSignature String?
   lastSlot      BigInt?
   updatedAt     BigInt?
+  /// The epoch the Ticket ledger has reached: the newest `EpochBegan` it applied.
+  ledgerEpochId BigInt  @default(0)
 }
 
 // The pool's Yield index over time (yield-claimer ticket 14), one row per pool
@@ -213,6 +223,72 @@ model YieldIndexPoint {
   yieldIndex  Decimal @db.Decimal(40, 0)
 
   @@id([poolAddress, at])
+}
+
+// The Ticket ledger (off-chain-tickets 11, ADR 0025). Append-only: no row is
+// ever updated or deleted. No Pool relation, so the Pool model stays as it is.
+enum TicketReason {
+  reset
+  stake
+  reward
+  refund
+  house_credit
+  prize
+  withdraw
+  buy
+  grant_referral
+  grant_admin
+}
+
+model TicketLedger {
+  id          BigInt       @id @default(autoincrement())
+  poolAddress String
+  owner       String
+  epochId     BigInt
+  delta       BigInt
+  reason      TicketReason
+  /// The event key (`signature:index`), Round id or grant id that caused it.
+  ref         String
+  /// The wallet that signed the request; null for chain-driven rows.
+  signer      String?
+  signature   String?
+  createdAt   DateTime     @default(now())
+
+  @@index([poolAddress, owner])
+}
+
+// One row per wallet, in step with the ledger: `tickets` is the sum of the
+// wallet's ledger deltas. `principal` and `yieldIndex` are the post-state fields
+// of the newest chain event for the wallet.
+model TicketBalance {
+  poolAddress String
+  owner       String
+  tickets     BigInt   @default(0)
+  principal   BigInt   @default(0)
+  yieldIndex  Decimal  @default(0) @db.Decimal(40, 0)
+  epochId     BigInt
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@id([poolAddress, owner])
+}
+
+// Every wallet above zero Tickets at an epoch's cutoff, sorted by wallet
+// bytes. `index` is the leaf's position in the sum tree.
+model EpochSnapshot {
+  poolAddress String
+  epochId     BigInt
+  index       Int
+  owner       String
+  tickets     BigInt
+
+  @@id([poolAddress, epochId, index])
+}
+
+// The newest ledger consistency check, one row per pool.
+model LedgerCheck {
+  poolAddress String @id
+  checkedAt   BigInt
+  mismatches  Int
 }
 
 model FaucetClaim {

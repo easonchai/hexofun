@@ -20,7 +20,6 @@ import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeReserve,
   dailyPaidRates,
-  effectiveTickets,
   estimatedRateBps,
   SECONDS_PER_DAY,
   freeIdle,
@@ -117,9 +116,7 @@ export function oddsPercent(weight: bigint, total: bigint): string {
 
 interface LiveWeight {
   player: Player;
-  /** The Player's Tickets in the current epoch, with the lazy reset and the
-   *  pending fold applied (`effectiveTickets`): exactly what the draw counts
-   *  for them. */
+  /** The wallet's `TicketBalance`: what the next snapshot counts for them. */
   weight: bigint;
   /** Principal that earns no Ticket until the next epoch. */
   pending: bigint;
@@ -381,6 +378,37 @@ export class ApiService {
   }
 
   /**
+   * The Epoch snapshot: leaves in tree order from `after`, and the sum tree's
+   * root, depth, leaf count and total. `nextIndex` is where the next page starts,
+   * null on the last. 404 until the next epoch has begun, which is when the
+   * ledger takes the snapshot; an empty one reads as zero leaves and a null root.
+   */
+  async getEpochSnapshot(id: bigint, after: number, limit: number) {
+    const epoch = await this.prisma.epoch.findUnique({
+      where: { poolAddress_id: { poolAddress: this.poolAddress, id } },
+    });
+    if (epoch === null || epoch.leafCount === null) {
+      throw new NotFoundException("That epoch has no snapshot yet. It is taken when the next epoch begins.");
+    }
+    const leaves = await this.prisma.epochSnapshot.findMany({
+      where: { poolAddress: this.poolAddress, epochId: id, index: { gte: after } },
+      orderBy: { index: "asc" },
+      take: limit,
+      select: { index: true, owner: true, tickets: true },
+    });
+    const next = after + leaves.length;
+    return {
+      epochId: id,
+      root: epoch.snapshotRoot,
+      depth: epoch.snapshotDepth,
+      leafCount: epoch.leafCount,
+      totalTickets: epoch.totalTickets,
+      leaves,
+      nextIndex: next < epoch.leafCount ? next : null,
+    };
+  }
+
+  /**
    * `Epoch.jackpot_amount` is a snapshot the program takes once, at
    * `request_draw`. While the epoch is still open it is 0 on chain no
    * matter what `fund_jackpot` has moved into the vault, so the open epoch
@@ -624,7 +652,7 @@ export class ApiService {
       .map(({ player, weight }) => ({
         owner: player.owner,
         principal: player.principal,
-        tickets: player.tickets,
+        tickets: weight,
         isHouse: player.isHouse,
         weight,
         odds: oddsPercent(weight, total),
@@ -753,13 +781,13 @@ export class ApiService {
   }
 
   /**
-   * `players`' Tickets in the current epoch, from their rows, and the total
-   * every Player holds, which is what a Player's share is taken over. Both
-   * come from the Player mirror until the Ticket ledger (off-chain-tickets
-   * ticket 11) replaces it.
+   * `players`' Tickets from the Ticket ledger's `TicketBalance`, and the total
+   * every wallet holds, which is what a Player's share is taken over. A wallet
+   * with no balance row holds none.
    *
-   * ponytail: the whole Player table per call for the total, three columns
-   * wide. Fine at beta scale; keep a running total once the ledger lands.
+   * ponytail: the whole balance table per call for the total, two columns
+   * wide. Fine at beta scale; keep a running total if the wallet count grows
+   * into the tens of thousands.
    */
   private async weightsFor(
     pool: Pool,
@@ -768,15 +796,16 @@ export class ApiService {
     // Deposit-only launch week: `currentEpochId` 0 means no Epoch yet, so the
     // draw has no Tickets and every share reads zero.
     if (pool.currentEpochId === 0n) {
-      return { weights: weightsFrom(players, pool.currentEpochId), total: 0n };
+      return { weights: weightsFrom(players, new Map(), pool.currentEpochId), total: 0n };
     }
-    const everyone = await this.prisma.player.findMany({
+    const balances = await this.prisma.ticketBalance.findMany({
       where: { poolAddress: this.poolAddress },
-      select: { principal: true, tickets: true, epochId: true },
+      select: { owner: true, tickets: true },
     });
+    const held = new Map(balances.map(({ owner, tickets }) => [owner, tickets]));
     return {
-      weights: weightsFrom(players, pool.currentEpochId),
-      total: everyone.reduce((sum, player) => sum + effectiveTickets(player, pool.currentEpochId), 0n),
+      weights: weightsFrom(players, held, pool.currentEpochId),
+      total: balances.reduce((sum, { tickets }) => sum + tickets, 0n),
     };
   }
 
@@ -1027,21 +1056,27 @@ function statusFrom(
   };
 }
 
-/** Each player's Tickets and pending deposit in the epoch `currentEpochId`. */
-function weightsFrom(players: readonly Player[], currentEpochId: bigint): LiveWeight[] {
+/** Each player's ledger Tickets and pending deposit in the epoch `currentEpochId`. */
+function weightsFrom(
+  players: readonly Player[],
+  held: ReadonlyMap<string, bigint>,
+  currentEpochId: bigint,
+): LiveWeight[] {
   return players.map((player) => ({
     player,
-    weight: effectiveTickets(player, currentEpochId),
+    weight: held.get(player.owner) ?? 0n,
     pending: pendingTickets(player, currentEpochId),
   }));
 }
 
-/** A weighted Player as `/players/:owner` and `/state` return it. `weight` is
- *  the Player's active Tickets, `pendingTickets` the Principal that starts
+/** A weighted Player as `/players/:owner` and `/state` return it. `tickets`
+ *  and `weight` are both the ledger's Tickets (`weight` is the older name the
+ *  web still reads), `pendingTickets` the Principal that starts
  *  earning them in `pendingActivatesEpoch` (null when nothing is pending). */
 function playerDto(entry: LiveWeight, total: bigint) {
   return {
     ...entry.player,
+    tickets: entry.weight,
     weight: entry.weight,
     pendingTickets: entry.pending,
     pendingActivatesEpoch: entry.pending > 0n ? entry.player.pendingDepositEpoch + 1n : null,

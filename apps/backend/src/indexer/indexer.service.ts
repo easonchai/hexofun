@@ -18,6 +18,7 @@ import {
 } from "../api/referral";
 import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
+import { bookBatch, checkLedgerIfDue } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeEventLogs,
@@ -296,6 +297,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       // that walk is what creates the row at all.
       await this.requestSync();
       await this.catchUpEvents();
+      await checkLedgerIfDue(this.prisma, this.activePool, nowSeconds());
       await this.prisma.cursor.upsert({
         where: { poolAddress: this.activePool },
         create: { poolAddress: this.activePool, updatedAt: nowSeconds() },
@@ -947,6 +949,17 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           });
         }
       }
+      if (options.advanceCursor && events.length > 0) {
+        // The Ticket ledger takes events only here, in the finalized catch-up's
+        // chain order (the live path stamps a notification slot and can arrive
+        // out of order). The claim makes a replayed transaction a no-op, even
+        // one the live path already stored.
+        const claimed = await tx.event.updateMany({
+          where: { poolAddress, signature: batch.signature, ledgered: false },
+          data: { ledgered: true },
+        });
+        if (claimed.count > 0) await bookBatch(tx, poolAddress, batch.signature, events);
+      }
       if (options.advanceCursor) {
         const cursor = await tx.cursor.findUnique({ where: { poolAddress } });
         // Only the catch-up poll walks backwards, and it must not drag the
@@ -962,7 +975,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         }
       }
       return created.count;
-    });
+    }, { timeout: 120_000 }); // an EpochBegan snapshots and resets every wallet in this transaction
   }
 
   /**

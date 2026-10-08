@@ -75,19 +75,6 @@ export function positionYield(principal: bigint, unsettled: bigint, basis: bigin
   return earned > 0n ? earned : 0n;
 }
 
-/**
- * The Tickets the draw counts for a Player in the current epoch. Same rule as
- * the program's `touch`: a Player last touched in an earlier epoch holds their
- * whole Principal, pending deposit included, so the pending fold is the same
- * branch as the reset.
- */
-export function effectiveTickets(
-  player: { principal: bigint; tickets: bigint; epochId: bigint },
-  currentEpochId: bigint,
-): bigint {
-  return player.epochId < currentEpochId ? player.principal : player.tickets;
-}
-
 /** The part of Principal that earns no Ticket in the current epoch: the
  *  pending deposit while its epoch is current, 0 once it has folded. */
 export function pendingTickets(

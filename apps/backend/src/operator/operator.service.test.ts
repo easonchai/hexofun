@@ -268,7 +268,6 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
   }) => ({
     poolAddress: POOL_ADDRESS,
     principal: 0n,
-    tickets: 0n,
     epochId: 0n,
     isHouse: false,
     boughtEpoch: 0n,
