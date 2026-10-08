@@ -243,7 +243,7 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
     const bob = await player(1_000n);
     await place(alice, 0, at(10));
     expect(await place(bob, 0, at(20), { round: 2n })).toEqual({ ok: false, code: "RoundAlreadyOpen" });
-    expect(await place(bob, 3, at(20))).toEqual({ ok: false, code: "SeqMismatch" });
+    expect(await place(bob, 3, at(20))).toEqual({ ok: false, code: "SeqMismatch", nextSeq: 0 });
     expect(await prisma.position.count()).toBe(1);
   });
 
@@ -373,7 +373,7 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
 
   describe("/state view", () => {
     it("shows no Round and next id 1 on an idle board", async () => {
-      expect(await readRoundState(prisma, POOL, at(0))).toEqual({ nextRoundId: 1n, openRound: null, lastRound: null });
+      expect(await readRoundState(prisma, POOL, at(0))).toEqual({ nextRoundId: 1n, openRound: null, lastRound: null, positions: [] });
     });
 
     it("shows the open Round, then the closed one beside the new nextRoundId", async () => {
@@ -390,10 +390,41 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
       expect(await readRoundState(prisma, POOL, at(121))).toMatchObject({
         nextRoundId: 2n,
         openRound: null,
-        lastRound: { id: 1n, status: "closed", tile: null },
+        lastRound: { id: 1n, status: "closed", tile: null, seedCommitment: open.openRound?.seedCommitment },
       });
-      // A result older than two minutes drops off.
+      // A Round still waiting on its beacon stays, however long the relays take.
+      expect((await readRoundState(prisma, POOL, at(120 + 3_000))).lastRound).toMatchObject({ id: 1n, status: "closed" });
+    });
+
+    it("drops a settled result after two minutes and a voided one after the void window", async () => {
+      const alice = await player(1_000n);
+      await place(alice, 0, at(10));
+      await rounds.closeDue(at(121));
+      const where = { poolAddress_id: { poolAddress: POOL, id: 1n } };
+      await prisma.round.update({ where, data: { status: "settled", tile: 7 } });
+      expect((await readRoundState(prisma, POOL, at(120 + 119))).lastRound).toMatchObject({ id: 1n, status: "settled", tile: 7 });
       expect((await readRoundState(prisma, POOL, at(120 + 121))).lastRound).toBeNull();
+
+      // Voided 10 minutes after the beacon, so the result window starts then.
+      await prisma.round.update({ where, data: { status: "voided", tile: null } });
+      expect((await readRoundState(prisma, POOL, at(120 + 600 + 60))).lastRound).toMatchObject({ id: 1n, status: "voided" });
+      expect((await readRoundState(prisma, POOL, at(120 + 600 + 121))).lastRound).toBeNull();
+    });
+
+    it("lists the owner's Position in the open and the last Round, and nobody else's", async () => {
+      const alice = await player(1_000n);
+      const bob = await player(1_000n);
+      await place(alice, 0, at(10));
+      await place(bob, 0, at(20));
+      const mask = (1n << 3n) | (1n << 7n) | (1n << 12n);
+      const mine = await readRoundState(prisma, POOL, at(30), alice.wallet);
+      expect(mine.positions).toEqual([{ roundId: 1n, tiles: mask, stakePerTile: 10n }]);
+      expect((await readRoundState(prisma, POOL, at(30))).positions).toEqual([]);
+
+      await rounds.closeDue(at(121));
+      await place(alice, 1, at(130), { round: 2n });
+      const both = await readRoundState(prisma, POOL, at(140), alice.wallet);
+      expect(both.positions.map((p) => p.roundId).sort()).toEqual([1n, 2n]);
     });
 
     it("never carries the unrevealed seed", async () => {
@@ -438,6 +469,8 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
                 : await post(alice, 5);
       expect(response.status).toBe(status);
       expect(response.body.code).toBe(code);
+      // A client that lost count resyncs from the refusal.
+      if (code === "SeqMismatch") expect(response.body.nextSeq).toBe(0);
     });
 
     it("answers 400 to a body that is not a bet", async () => {

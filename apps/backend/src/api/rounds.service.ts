@@ -33,7 +33,8 @@ const CLOSE_SWEEP_MS = 1000;
 
 export type PlaceBetResult =
   | { ok: true; roundId: bigint; positionId: bigint; opened: boolean; closeAt: Date; receivedAt: Date }
-  | { ok: false; code: BetRefusal };
+  /** `nextSeq` rides on a `SeqMismatch`, so a client that lost count can resync. */
+  | { ok: false; code: BetRefusal; nextSeq?: number };
 
 @Injectable()
 export class RoundsService implements OnModuleInit, OnModuleDestroy {
@@ -256,7 +257,9 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
           hasPosition,
         },
       );
-      if (!verdict.ok) return verdict;
+      if (!verdict.ok) {
+        return verdict.code === "SeqMismatch" && session !== null ? { ...verdict, nextSeq: session.nextSeq } : verdict;
+      }
 
       const { bet, wallet, mask, opens } = verdict;
       const stake = BigInt(bet.tiles.length) * bet.stake;

@@ -34,8 +34,8 @@ const REFUSAL_COPY: Record<BetRefusal, string> = {
 };
 
 /** 401 for a dead session, 403 for a bad signature, 422 for a bet the rules refuse, 409 for the game's state. */
-function refusal(code: BetRefusal): Error {
-  const payload = { code, message: REFUSAL_COPY[code] };
+function refusal(code: BetRefusal, nextSeq?: number): Error {
+  const payload = { code, message: REFUSAL_COPY[code], ...(nextSeq === undefined ? {} : { nextSeq }) };
   switch (code) {
     case "SessionInvalid":
       return new UnauthorizedException(payload);
@@ -91,7 +91,7 @@ export class BetsController {
     if (signature.length !== 64) throw new BadRequestException("`signature` must be a 64-byte ed25519 signature.");
 
     const result = await this.rounds.placeBet(raw.message, signature);
-    if (!result.ok) throw refusal(result.code);
+    if (!result.ok) throw refusal(result.code, result.nextSeq);
     return {
       roundId: result.roundId,
       positionId: result.positionId,

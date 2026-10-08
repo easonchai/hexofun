@@ -634,6 +634,7 @@ export class ApiService {
    * balance, rpc health, clock, pool config) run after the transaction closes.
    */
   async getState(owner?: string) {
+    const serverNow = new Date();
     const { pool, epoch, previousEpoch, operator, cursor, player, rounds } =
       await this.prisma.$transaction(
         async (tx) => {
@@ -658,7 +659,7 @@ export class ApiService {
             owner === undefined
               ? Promise.resolve(null)
               : tx.player.findUnique({ where: { poolAddress_owner: { poolAddress, owner } } }),
-            readRoundState(tx, poolAddress, new Date()),
+            readRoundState(tx, poolAddress, serverNow, owner),
           ]);
           return { pool, epoch, previousEpoch, operator, cursor, player, rounds };
         },
@@ -725,6 +726,11 @@ export class ApiService {
       nextRoundId: rounds.nextRoundId,
       openRound: rounds.openRound,
       lastRound: rounds.lastRound,
+      /** Ticket 18: the owner's own Positions in those two Rounds. */
+      positions: rounds.positions,
+      /** Ticket 18: wall-clock seconds, the clock `closeAt` is on. The countdown
+       *  anchors to this, not to `chainTime`, which a local validator skews. */
+      serverTime: BigInt(Math.floor(serverNow.getTime() / 1000)),
     };
   }
 

@@ -1609,7 +1609,9 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         expect(body).not.toHaveProperty(gone);
       }
       // The off-chain game's Rounds ride along (ticket 16); an idle board has none.
-      expect(body).toMatchObject({ nextRoundId: "1", openRound: null, lastRound: null });
+      expect(body).toMatchObject({ nextRoundId: "1", openRound: null, lastRound: null, positions: [] });
+      // Wall-clock seconds, the clock the Round countdown reads (ticket 18).
+      expect(Math.abs(Number(body.serverTime) - Date.now() / 1000)).toBeLessThan(5);
       expect(body.status.operator).toMatchObject({ lastAction: "begin_epoch" });
       expect(body.status.cursor.lastSlot).toBe("15");
       expect(BigInt(body.chainTime)).toBeGreaterThanOrEqual(CHAIN_NOW);
@@ -1648,7 +1650,11 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
           data: { status: "closed" },
         });
         const closed = (await http.get("/state").expect(200)).body;
-        expect(closed).toMatchObject({ nextRoundId: "2", openRound: null, lastRound: { id: "1", status: "closed", tile: null } });
+        expect(closed).toMatchObject({
+          nextRoundId: "2",
+          openRound: null,
+          lastRound: { id: "1", status: "closed", tile: null, seedCommitment: "c".repeat(64) },
+        });
         expect(JSON.stringify(closed)).not.toContain("5".repeat(64));
         assertNoLargeNumbers(closed, "/state (rounds)");
       } finally {
