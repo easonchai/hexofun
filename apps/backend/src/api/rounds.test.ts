@@ -19,7 +19,7 @@ import request from "supertest";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
-import { countLedgerMismatches } from "../ledger/ledger-store";
+import { countLedgerMismatches, lockLedger } from "../ledger/ledger-store";
 import { ensurePoolRow } from "../operator/pool-row.fixture";
 import { PrismaModule } from "../prisma/prisma.module";
 import { PrismaService } from "../prisma/prisma.service";
@@ -369,6 +369,44 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
     expect(results.filter((r) => r.ok)).toHaveLength(1);
     expect(await prisma.position.count()).toBe(1);
     expect(await tickets(alice)).toBe(970n);
+  });
+
+  /** Holds the pool's ledger lock until the returned release is called. */
+  async function holdLedgerLock(): Promise<{ release: () => Promise<void> }> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const taken = new Promise<void>((resolve) => (locked = resolve));
+    const tx = prisma.$transaction(async (t) => {
+      await lockLedger(t, POOL);
+      locked();
+      await held;
+    });
+    await taken;
+    return { release: async () => (release(), await tx) };
+  }
+
+  it("refuses a bet whose session was revoked while it waited on the ledger lock", async () => {
+    const alice = await player(1_000n);
+    const lock = await holdLedgerLock();
+    const pending = place(alice, 0, at(10));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await prisma.session.update({ where: { sessionPubkey: alice.sessionKey.publicKey.toBase58() }, data: { revokedAt: new Date() } });
+    await lock.release();
+    expect(await pending).toEqual({ ok: false, code: "SessionInvalid" });
+    expect(await prisma.position.count()).toBe(0);
+  });
+
+  it("stamps receivedAt once the ledger lock is taken, not when the bet arrived", async () => {
+    const alice = await player(1_000n);
+    const lock = await holdLedgerLock();
+    const { message, signature } = bet(alice, 0);
+    const pending = rounds.placeBet(message, signature);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const released = new Date();
+    await lock.release();
+    const result = await pending;
+    expect(result.ok && result.receivedAt.getTime()).toBeGreaterThanOrEqual(released.getTime());
   });
 
   describe("/state view", () => {

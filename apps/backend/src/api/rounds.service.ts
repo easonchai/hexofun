@@ -213,19 +213,25 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
    * accepted bet into an empty board opens the Round. A refusal writes nothing
    * beyond closing a Round that was already past `closeAt`.
    */
-  async placeBet(message: string, signature: Uint8Array, now: Date = new Date()): Promise<PlaceBetResult> {
-    // A cheap refusal before the lock; checkBet repeats it on the row it reads under the lock.
+  async placeBet(message: string, signature: Uint8Array, at?: Date): Promise<PlaceBetResult> {
+    // A cheap refusal before the lock, so garbage never queues on it; checkBet repeats it under the lock.
     const key = parseBetMessage(message)?.session;
-    const live = key === undefined ? null : await this.sessions.checkSession(key, now);
+    if (key === undefined) return { ok: false, code: "BadSignature" };
+    const live = await this.sessions.checkSession(key, at);
+    if (!live.ok) return live;
     const poolAddress = this.poolAddress;
 
     return this.prisma.$transaction(async (tx): Promise<PlaceBetResult> => {
       await lockLedger(tx, this.poolAddress);
+      // Read after the lock, so `receivedAt` follows the accepted order and a bet that queued past `closeAt` is late.
+      const now = at ?? new Date();
       await this.closeDueIn(tx, now);
       const pool = await tx.pool.findUnique({ where: { address: poolAddress } });
       if (pool === null) throw new NotFoundException("The pool is not indexed yet. Try again in a few seconds.");
 
-      const session = live?.ok ? await tx.session.findUnique({ where: { id: live.session.id } }) : null;
+      // A revoke or expiry that landed while this bet waited on the lock still refuses it.
+      const row = await tx.session.findUnique({ where: { id: live.session.id } });
+      const session = row !== null && row.revokedAt === null && row.expiresAt > now ? row : null;
       const last = await tx.round.findFirst({ where: { poolAddress }, orderBy: { id: "desc" } });
       const open = last?.status === "open" ? last : null;
       const config =

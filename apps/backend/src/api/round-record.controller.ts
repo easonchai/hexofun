@@ -33,7 +33,7 @@ export class RoundRecordController {
 
   @Get("rounds/:id/record")
   async getRecord(@Param("id") id: string) {
-    if (!/^[1-9]\d{0,18}$/.test(id)) throw new BadRequestException("`id` must be a whole number of 1 or more.");
+    if (!/^[1-9]\d{0,17}$/.test(id)) throw new BadRequestException("`id` must be a whole number of 1 or more.");
     const { poolAddress } = this;
     // One snapshot, so a settle landing mid-read cannot show rows from two states.
     const record = await this.prisma.$transaction(
