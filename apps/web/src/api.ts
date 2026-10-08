@@ -149,9 +149,8 @@ export interface PlayerDto {
    *  until the next epoch. Already inside `principal`. */
   pendingDeposit: string;
   pendingDepositEpoch: string;
-  /** The Player's active Tickets in the current epoch: what the draw counts.
-   *  Equal to `tickets` unless a later epoch has begun since the Player last
-   *  acted, when the Player holds their whole Principal. */
+  /** The Player's Tickets from the backend's Ticket ledger: what the next
+   *  snapshot counts. Always equal to `tickets`. */
   weight: string;
   /** `pendingDeposit` while its epoch is current, "0" once it has folded. */
   pendingTickets: string;
