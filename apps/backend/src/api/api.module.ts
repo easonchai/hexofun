@@ -20,6 +20,7 @@ import { RoundsService } from "./rounds.service";
 import { SerializationInterceptor } from "./serialization.interceptor";
 import { SessionsController } from "./sessions.controller";
 import { SessionsService } from "./sessions.service";
+import { SparringService } from "./sparring.service";
 
 /**
  * spec.md §3.5. The interceptor and the guard are registered here rather than
@@ -80,6 +81,7 @@ import { SessionsService } from "./sessions.service";
     ApiService,
     SessionsService,
     RoundsService,
+    SparringService,
     OpsSummaryService,
     { provide: APP_INTERCEPTOR, useClass: SerializationInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
