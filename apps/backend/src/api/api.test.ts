@@ -876,6 +876,37 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     });
   });
 
+  describe("GET /epochs/:id/referral-grants", () => {
+    it("lists the epoch's grants with their inputs, and nothing for an epoch without any", async () => {
+      expect((await http.get(`/epochs/${PREVIOUS_EPOCH}/referral-grants`).expect(200)).body).toEqual({
+        epochId: PREVIOUS_EPOCH.toString(),
+        grants: [],
+      });
+      await prisma.referralGrant.create({
+        data: {
+          poolAddress: POOL_ADDRESS, epochId: PREVIOUS_EPOCH, referrer: ALICE, amount: 9n, uncapped: 9n, qualifiedCount: 3,
+          rateBps: 300, referrerPrincipal: 1_000n, totalPrincipal: 5_000n, bonusCapBps: 500,
+        },
+      });
+      await prisma.referralGrantShare.create({
+        data: { poolAddress: POOL_ADDRESS, epochId: PREVIOUS_EPOCH, referrer: ALICE, referee: BOB, amount: 9n, principal: 300n },
+      });
+      try {
+        const { body } = await http.get(`/epochs/${PREVIOUS_EPOCH}/referral-grants`).expect(200);
+        expect(body.grants).toEqual([
+          {
+            referrer: ALICE, amount: "9", uncapped: "9", tier: 2, rateBps: 300, qualifiedCount: 3, referrerPrincipal: "1000",
+            totalPrincipal: "5000", bonusCapBps: 500, referrals: [{ referee: BOB, principal: "300", share: "9" }],
+          },
+        ]);
+        await http.get("/epochs/abc/referral-grants").expect(400);
+      } finally {
+        await prisma.referralGrantShare.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+        await prisma.referralGrant.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+      }
+    });
+  });
+
   // fork-run-fixes 01: launch week, the pool bootstrapped and `currentEpochId`
   // 0 with no Epoch row. The reads answer with zero odds instead of 404ing.
   describe("before Epoch 1", () => {

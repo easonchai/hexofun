@@ -32,6 +32,7 @@ import {
   type PoolState,
 } from "./chain-state";
 import { OperatorInstructions } from "./instructions";
+import { grantReferralBonuses } from "./referral-grants";
 import {
   EXPECTED_ERRORS,
   msUntilWake,
@@ -80,6 +81,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
   /** Ticket 05: holds step 3's very first `begin_epoch` back until this chain
    *  timestamp; null when `LAUNCH_AT` is unset. */
   private readonly launchAt: bigint | null;
+  private readonly referralQualifySeconds: number;
   /** Logged once, the first tick that sees the pool shut down, so the
    *  epoch loop stopping is announced instead of just
    *  going quiet (ops-and-envs ticket 08). Shutdown is irreversible, so
@@ -91,6 +93,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     config: ConfigService<HexVaultEnv, true>,
   ) {
     const launchAtIso = config.get("LAUNCH_AT", { infer: true });
+    this.referralQualifySeconds = config.get("REFERRAL_QUALIFY_SECONDS", { infer: true });
     this.launchAt =
       typeof launchAtIso === "string" && launchAtIso.length > 0
         ? BigInt(Math.floor(Date.parse(launchAtIso) / 1000))
@@ -217,9 +220,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         }
       }
       if (outcome.action) this.logger.log(`sent ${outcome.action}`);
-      if (outcome.stepError) this.logger.warn(`tick step failed: ${outcome.stepError}`);
+      const stepError = outcome.stepError ?? (await this.grantReferralBonuses());
+      if (stepError) this.logger.warn(`tick step failed: ${stepError}`);
       const waitMs = msUntilWake(ctx.now, outcome.nextWakeAt);
-      await this.writeState(outcome, outcome.stepError ?? null, waitMs);
+      await this.writeState(outcome, stepError ?? null, waitMs);
       return { ...outcome, waitMs };
     } catch (cause) {
       const error =
@@ -244,6 +248,24 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       );
       await this.safeWriteState({ action: null }, error.message, waitMs);
       return { action: null, nextWakeAt, waitMs };
+    }
+  }
+
+  /** Off-chain-tickets 22: the Referral bonus job, a database write with no
+   *  chain transaction, so it runs beside the tick's steps. Returns the error
+   *  text for the tick's `lastError`, or undefined. */
+  private async grantReferralBonuses(): Promise<string | undefined> {
+    try {
+      const granted = await grantReferralBonuses(this.prisma, {
+        poolAddress: this.chain.poolAddress().toBase58(),
+        operator: this.chain.keypair.publicKey.toBase58(),
+        now: BigInt(Math.floor(Date.now() / 1000)),
+        qualifySeconds: this.referralQualifySeconds,
+      });
+      if (granted > 0) this.logger.log(`granted the Referral bonus to ${granted} referrers`);
+      return undefined;
+    } catch (cause) {
+      return `referral bonus job failed: ${errorText(cause)}`;
     }
   }
 
@@ -507,3 +529,5 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     }
   }
 }
+
+const errorText = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause));

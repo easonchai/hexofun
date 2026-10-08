@@ -13,6 +13,9 @@ const SNAPSHOT_CHUNK = 2_000;
 /** The consistency check runs when the last one is this old. */
 export const LEDGER_CHECK_INTERVAL_S = 24n * 60n * 60n;
 
+/** First half of the advisory lock that serializes every writer of a pool's ledger rows. */
+export const LEDGER_LOCK_KEY = 0x4c454447;
+
 /**
  * Applies one transaction's events, in emission order. The caller has claimed
  * the batch (`Event.ledgered`), so this runs once per transaction, and the
@@ -25,6 +28,8 @@ export async function bookBatch(
   events: readonly DecodedEvent[],
   blockTime: bigint,
 ): Promise<void> {
+  // The Referral bonus job writes ledger rows and balances too (ticket 22); both hold this lock.
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK_KEY}::int, hashtext(${poolAddress}))`;
   const cursor = await tx.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
   const reached = cursor?.ledgerEpochId ?? 0n;
   let epochId = reached;

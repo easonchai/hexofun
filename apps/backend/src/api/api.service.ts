@@ -16,6 +16,7 @@ import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { clockUnixTimestamp } from "../operator/chain-state";
+import { referralGrantsForEpoch } from "../operator/referral-grants";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   decodeReserve,
@@ -406,6 +407,11 @@ export class ApiService {
       leaves,
       nextIndex: next < epoch.leafCount ? next : null,
     };
+  }
+
+  /** The epoch's Referral bonus grants and their inputs (ticket 22); the job lives in operator/referral-grants.ts. */
+  getEpochReferralGrants(id: bigint) {
+    return referralGrantsForEpoch(this.prisma, this.poolAddress, id);
   }
 
   /**

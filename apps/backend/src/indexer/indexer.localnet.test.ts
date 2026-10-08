@@ -43,6 +43,7 @@ import { programDataAddress } from "../chain/pda";
 import { decodeEpoch } from "../operator/chain-state";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
+import { grantReferralBonuses } from "../operator/referral-grants";
 import { IndexerService } from "./indexer.service";
 
 // Pinned at pool creation and forwarded to ORAO. The `test-vrf` build never
@@ -470,6 +471,41 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       { owner: owner(), tickets: before + bought },
     ]);
   }, 400_000);
+
+  // off-chain-tickets 22: the Referral bonus the operator's job books in epoch 4
+  // is in the wallet's balance at once and in the snapshot taken when epoch 5 begins.
+  it("books a Referral bonus into the balance and the next snapshot", async () => {
+    const owner = depositor.publicKey.toBase58();
+    const poolAddress = chain.poolAddress().toBase58();
+    const balance = () =>
+      prisma.ticketBalance.findUniqueOrThrow({ where: { poolAddress_owner: { poolAddress, owner } } });
+    // The bought-Tickets test above left the ledger at epoch 4: its reset is booked.
+    expect((await balance()).epochId).toBe(4n);
+    const before = (await balance()).tickets;
+
+    await prisma.gameConfig.create({
+      data: { poolAddress, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps: 500, referralTiers: [], maxTilesPerBet: 36 },
+    });
+    await prisma.referral.create({
+      data: { referee: Keypair.generate().publicKey.toBase58(), referrer: owner, code: "AAAAAA", boundAt: 1n, principal: 100_000_000n, aboveSince: 1n },
+    });
+    expect(
+      await grantReferralBonuses(prisma, { poolAddress, operator: authority.publicKey.toBase58(), now: BigInt(Math.floor(Date.now() / 1000)), qualifySeconds: 0 }),
+    ).toBe(1);
+    // 2% of 100 USDC is 2 USDC; the pool-wide cap, 5% of the pool's 5 USDC, scales it to 0.25 USDC.
+    const bonus = (DEPOSIT * 500n) / 10_000n;
+    expect((await balance()).tickets).toBe(before + bonus);
+
+    await beginEpoch(4n);
+    await waitFor(
+      "the ledger to snapshot epoch 4",
+      settled(async () => (await prisma.epochSnapshot.count({ where: { epochId: 4n } })) > 0),
+      150_000,
+    );
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 4n } })).toMatchObject([
+      { owner, tickets: before + bonus },
+    ]);
+  }, 400_000);
 });
 
 async function wipe(prisma: PrismaService): Promise<void> {
@@ -479,6 +515,8 @@ async function wipe(prisma: PrismaService): Promise<void> {
     prisma.ticketLedger.deleteMany(),
     prisma.ticketBalance.deleteMany(),
     prisma.epochSnapshot.deleteMany(),
+    prisma.referral.deleteMany(),
+    prisma.gameConfig.deleteMany(),
     prisma.ledgerCheck.deleteMany(),
     prisma.cursor.deleteMany(),
     prisma.player.deleteMany(),

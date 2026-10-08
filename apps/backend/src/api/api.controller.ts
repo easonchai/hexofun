@@ -74,6 +74,13 @@ export class ApiController {
     return this.api.getEpochSnapshot(BigInt(id), Number(after ?? 0), Math.min(Number(limit ?? SNAPSHOT_PAGE), SNAPSHOT_PAGE));
   }
 
+  /** The epoch's Referral bonus grants with the inputs behind each; empty when it granted nothing. */
+  @Get("epochs/:id/referral-grants")
+  getEpochReferralGrants(@Param("id") id: string) {
+    if (!/^\d+$/.test(id)) throw new BadRequestException("`id` must be a whole number.");
+    return this.api.getEpochReferralGrants(BigInt(id));
+  }
+
   @Get("players/:owner")
   getPlayer(@Param("owner") owner: string) {
     return this.api.getPlayer(parseOwner(owner));
