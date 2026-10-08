@@ -3,8 +3,9 @@
 HexVault is one Anchor program (`hex_vault`), a NestJS backend that cranks it and mirrors it
 into Postgres, and a Vite/React frontend that only ever reads from the backend. See
 [`GLOSSARY.md`](../GLOSSARY.md) for vocabulary and [`docs/adr/`](adr/) for why things are shaped
-this way. The money design is ADR 0017 (live yield), the draw is ADR 0018 (Fenwick tree) and
-ADR 0020 (Tickets count from the next epoch), the game is ADR 0019.
+this way. The money design is ADR 0017 (live yield), Tickets count from the next epoch (ADR
+0020), and ADR 0025 moves Tickets and the game off the chain: the program keeps custody and the
+epoch draw, the backend keeps the Ticket ledger and the game.
 
 ## Components
 
@@ -32,8 +33,8 @@ flowchart LR
     Indexer -- "mirrors" --> DB
     API -- "reads" --> DB
     Web -- "HTTP" --> API
-    Web -- "wallet txs: deposit, withdraw, play" --> Program
-    Operator -- "cranks: epochs, rounds, venue, payouts" --> Program
+    Web -- "wallet txs: deposit, withdraw, buy tickets" --> Program
+    Operator -- "cranks: epochs, venue, withdrawals, draw" --> Program
     Operator -- "requests randomness" --> ORAO
     ORAO -- "fulfils" --> Program
     Program -- "CPI: refresh, deposit, redeem" --> Klend
@@ -102,9 +103,10 @@ What the picture cannot show:
   venue into the principal vault and pays both out in the same transaction, so nothing rests
   in the vault between the two hops.
 - **A Player's prize compounds.** `payout` moves the jackpot into the principal vault and adds
-  it to the winner's `principal` and Tickets at once. Nothing is sent to the winner's wallet.
+  it to the winner's `principal`. Nothing is sent to the winner's wallet.
 - **Deposit sends nothing back.** Tickets are a number on the `Player`, not a token (ADR 0001).
-- **The game moves no USDC.** Rounds move Tickets between Players and the House only.
+- **The game moves no USDC, and the program does not know it exists.** Rounds and Positions are
+  backend rows that move Tickets between Players and the House.
 
 ### How a venue gain is split
 
@@ -167,7 +169,8 @@ the margin as `solvencyMargin` and alerts when it goes negative.
 
 ## Tickets, deposits and withdrawals
 
-USDC a Player holds at the start of an epoch is their Tickets for that epoch (ADR 0020).
+USDC a Player holds at the start of an epoch is their Tickets for that epoch (ADR 0020). The
+program stores Principal only; the backend's Ticket ledger (ADR 0025) holds the Tickets.
 
 ```mermaid
 sequenceDiagram
@@ -175,47 +178,38 @@ sequenceDiagram
     participant P as hex_vault
     Note over P: Epoch N
     U->>P: deposit 100
-    Note over P: principal +100, pending_deposit +100, Tickets unchanged
+    Note over P: principal +100, pending_deposit +100, no Ticket yet
     U->>P: request_withdraw 30
     P-->>U: 30 USDC now (it never held a Ticket)
     Note over P: begin_epoch, Epoch N+1
-    Note over P: first touch: Tickets = principal = 70, pending_deposit = 0
+    Note over P: Tickets = principal = 70 (the ledger's reset at begin_epoch), pending_deposit folds in
     U->>P: request_withdraw 70
-    Note over P: pending_withdraw = 70. Still in the draw, the game and the yield
+    Note over P: pending_withdraw = 70. Still in the draw and the yield
     Note over P: begin_epoch, Epoch N+2
     P-->>U: process_withdraw pays 70. Yield earned meanwhile stays as Principal
 ```
 
-- **Principal** earns Tickets from the epoch after the deposit. Settled yield, Bought tickets,
-  Granted tickets, round rewards and the Prize credit Tickets at once.
+- **Principal** earns Tickets from the epoch after the deposit. Every event that moves Principal
+  carries the Player's post-state `principal` and `yield_index`, which is how the ledger stays in
+  step with the account.
 - **`request_withdraw(amount)`** is the only exit. The part up to `pending_deposit` refunds in
   the same transaction, redeeming from the venue if free idle is short. The rest queues and
   matures when `current_epoch_id` passes the request's epoch, or after `epoch_seconds` if the
   Operator stops calling `begin_epoch`.
 - **`process_withdraw`** is permissionless and pays to the owner's own token account. It
-  lowers Principal, and Tickets with a floor at zero, so a Player who lost Tickets in the game
-  still gets every unit of Principal.
+  lowers Principal; a Player who lost Tickets in the game still gets every unit of it.
 - **`cancel_withdraw`** is owner-signed and takes back the whole queued amount before it pays.
   It zeroes `pending_withdraw` and lowers `pending_withdrawals`, so free idle rises by the same
   amount. Nothing else moves, because the queued Principal never left.
-- **`touch`** is the lazy reset. The first time anything touches a Player in a later epoch,
-  Tickets are set to Principal. Nothing sweeps Players at the boundary.
-
-### The Weight tree
-
-The draw selects over a Fenwick tree in one zero-copy account (`weight.rs`, `weight_tree.rs`).
-Each Player owns one Leaf, appended on their first deposit, and the depositor pays its rent.
-The House owns Leaf 1. A node is 56 bytes: `principal_sum` plus two epoch-parity slots, each a
-stamp, a base and a Ticket count. A write in epoch `e` uses slot `e % 2`, so the epoch that
-just ended stays readable until `begin_epoch` runs a second time. A Player who never acts needs
-no transaction: a read for epoch `p` takes the slot stamped `p`, else the base of the slot
-stamped `p + 1`, else the live `principal_sum`. The account tops out at 10 MiB,
-about 187,000 Leaves.
+- **`touch`** stamps the epoch and folds the pending deposit into the locked Principal the first
+  time anything touches a Player in a later epoch. Nothing sweeps Players at the boundary.
+- **`buy_tickets(amount)`** moves USDC to the jackpot vault, counts it against the epoch's cap
+  and emits `TicketsBought`. It credits nothing on chain; the backend credits the Tickets.
 
 ## Accounts and PDAs
 
-All seeds are declared in `programs/hex_vault/src/constants.rs`. `pool_id`, `epoch_id` and
-`round_id` are little-endian `u64` bytes.
+All seeds are declared in `programs/hex_vault/src/constants.rs`. `pool_id` and `epoch_id` are
+little-endian `u64` bytes.
 
 | Account | Seeds | Created by |
 | --- | --- | --- |
@@ -223,10 +217,7 @@ All seeds are declared in `programs/hex_vault/src/constants.rs`. `pool_id`, `epo
 | Principal vault (token account) | `["principal", pool]` | `create_pool` |
 | Jackpot vault (token account) | `["jackpot", pool]` | `create_pool` |
 | `Player` (including the House) | `["player", pool, owner]` | `deposit` (`init_if_needed`); the House's own `Player` is created by `create_pool` with `params.operator` as `owner` |
-| `WeightTree` | none, a keypair account | a `system_program::create_account` in the `create_pool` transaction, then grown one node per first deposit |
 | `Epoch` | `["epoch", pool, epoch_id]` | `begin_epoch` |
-| `Round` | `["round", pool, round_id]` | `create_round` |
-| `Position` | `["position", round, owner]` | `buy_position` |
 
 `treasury` and `buyback_reserve` are plain token accounts passed into `create_pool` and changed
 by `set_treasury_accounts`. On mainnet they are the admin multisig's own associated token
@@ -235,8 +226,8 @@ account) are set at `create_pool` and change only through `migrate_venue` (ADR 0
 instruction that syncs checks the accounts it was handed against them. For a kVault pool the
 four hold the kVault program, the vault state, the shares mint and the pool's shares account.
 
-`Pool`, `Player`, `Round` and `Position` are layout version 2 with their own discriminators
-(`HVPool02` and so on), so a version-1 account fails to load instead of being misread. Each
+`Pool` and `Player` are layout version 3 with their own discriminators
+(`HVPool03` and so on), so a version-1 account fails to load instead of being misread. Each
 carries a `version: u8` and a `_reserved` byte array for append-only growth (ADR 0013).
 
 ## Roles
@@ -257,26 +248,18 @@ steer it by being the one who sends the transaction.
 | `accept_admin` | the proposed `pending_admin` | Two-step handover |
 | `deposit` | owner | Refused while paused, shut down or impaired |
 | `request_withdraw` | owner | Allowed while paused and while shut down |
-| `cancel_withdraw` | owner | Allowed while paused, shut down, impaired and with a Position open |
-| `process_withdraw` | anyone, or the owner while impaired | Destination is pinned to `player.owner`. Fails while the Player has a Position open |
+| `cancel_withdraw` | owner | Allowed while paused, shut down and impaired |
+| `process_withdraw` | anyone, or the owner while impaired | Destination is pinned to `player.owner` |
 | `emergency_withdraw` | anyone, or the owner while impaired | Only valid while shut down; destination pinned to `player.owner`; House excluded |
 | `sweep_house` | admin | Only valid while shut down |
-| `buy_tickets` | owner | Capped per epoch at the Player's Principal |
-| `grant_tickets` | admin or operator | Operator path is capped per Player and pool-wide; admin path is not |
+| `buy_tickets` | owner | A USDC sink with an event, capped per epoch at the Player's Principal |
 | `deploy_to_venue`, `recall`, `harvest` | anyone | Bounded by the idle band and the deploy caps |
 | `cover_deficit` | anyone (payer) | Capped at the recorded deficit |
-| `begin_epoch`, `request_draw` | operator | |
+| `begin_epoch`, `request_draw` | operator | `begin_epoch` syncs the venue first, so `EpochBegan` carries the Yield index. `request_draw` commits the snapshot root, total and shape |
 | `fund_jackpot` | anyone (source authority) | Permissionless top-up |
 | `draw` | anyone | Reads the fulfilled ORAO account pinned by the epoch's seed |
-| `payout` | anyone | Winner is checked against the tree, destinations are pinned on the Pool |
+| `payout` | anyone | The winner's proof must reach the committed root, destinations are pinned on the Pool |
 | `rollover_epoch` | anyone | Only after the relevant timeout |
-| `create_round` | operator | |
-| `buy_position` | owner | Refused if the round would end after the epoch ends |
-| `request_round_randomness` | anyone (pays the ORAO fee) | |
-| `settle_round` | anyone | The House credit is pinned to `pool.operator`'s Player |
-| `settle_position` | anyone | Rent returns to the Position's own owner |
-| `void_round` | anyone | Only after `vrf_timeout` |
-| `close_round` | anyone | Rent returns to `pool.operator`; refuses while any Position is open |
 
 ## Epoch lifecycle
 
@@ -285,7 +268,7 @@ stateDiagram-v2
     [*] --> Open
     Open --> Ended: begin_epoch opens the next epoch
     Ended --> Drawing: request_draw
-    Ended --> RolledOver: request_draw, no Tickets or jackpot under min_jackpot
+    Ended --> RolledOver: request_draw, total_tickets is zero or jackpot under min_jackpot
     Ended --> RolledOver: rollover_epoch, nobody sent it to the draw
     Drawing --> Drawn: draw, VRF fulfilled
     Drawing --> RolledOver: rollover_epoch, vrf_timeout elapsed
@@ -295,33 +278,12 @@ stateDiagram-v2
     RolledOver --> [*]
 ```
 
-`request_draw` snapshots two things: the tree's root for the ended epoch, and the jackpot vault
-balance minus `jackpot_reserved`. It then adds the snapshot to `jackpot_reserved`, so the next
+`request_draw` commits the Epoch snapshot's Merkle sum root, total Tickets, depth and leaf count,
+mixes the root into the VRF seed, and snapshots the jackpot vault balance minus
+`jackpot_reserved`. It then adds the snapshot to `jackpot_reserved`, so the next
 epoch cannot promise the same USDC. `payout` and `rollover_epoch` release it. `request_draw` is
 refused after `shutdown`, but `draw` and `payout` are not, so an epoch already Drawing still
 reaches its winner.
-
-## Round lifecycle
-
-```mermaid
-stateDiagram-v2
-    [*] --> Open: create_round
-    Open --> Requested: request_round_randomness
-    Requested --> Settled: settle_round, winning tile covered
-    Requested --> Forfeited: settle_round, winning tile empty
-    Requested --> Voided: void_round, vrf_timeout elapsed
-    Settled --> Closed: close_round, all Positions settled
-    Forfeited --> Closed: close_round
-    Voided --> Closed: close_round
-    Closed --> [*]
-```
-
-A stake leaves the Player's Tickets at `buy_position` and comes back with the reward at
-`settle_position`. Winners split the losers' pot minus `house_cut_bps`, a forfeited pot goes to
-the House, a void refunds. A round always ends inside its epoch. A settle that lands after the
-epoch rolled credits only the winner's share, because the reset already restored the stake.
-`close_round` refuses while `Round.open_positions` is nonzero, then returns the rent to
-`pool.operator`.
 
 ## Backend jobs and the indexer read model
 
@@ -329,39 +291,35 @@ The operator (`apps/backend/src/operator`) is deadline-driven: it sleeps until t
 decision could change, with a 60-second safety tick as a backstop. Each tick runs at most one
 step:
 
-1. Settle a `Round` whose randomness is due.
-2. Sweep unsettled `Position`s on a terminal `Round`.
-3. Close a terminal `Round` once nothing settled on it is still owed (`close_round`).
-4. `begin_epoch`, once the round and sweep steps above are clear.
-5. Grant the daily referral bonus, once per epoch.
-6. `request_draw` for the epoch that just ended, which snapshots the Weight tree and the jackpot
-   vault and asks for randomness (or rolls the epoch over).
-7. Await the draw's randomness, then `draw`.
-8. `payout` the winner, found by reading the Weight tree and the Player accounts.
-9. Venue cranks: `harvest` once per epoch in its last 10 minutes, `recall` when free idle is under
+1. `begin_epoch`, once the previous epoch is Paid or Rolled over. It syncs the venue, so it takes
+   the pinned venue accounts and the sync's remaining accounts.
+2. `request_draw` for the epoch that just ended, which commits the snapshot root and asks for
+   randomness (or rolls the epoch over). Until the Epoch snapshot exists (off-chain-tickets
+   ticket 12) this step sends nothing and reports `snapshot_pending`.
+3. Await the draw's randomness, then `draw`.
+4. `payout` the winner with the proof from the snapshot. Same `snapshot_pending` wait until
+   ticket 12; a Drawn epoch still rolls over past `payout_timeout`.
+5. Venue cranks: `harvest` once per epoch in its last 10 minutes, `recall` when free idle is under
    the floor, `deploy_to_venue` when it is above the target. A failed crank is cooled down for 10
    minutes and never holds anything else up.
-10. Pay out matured withdrawal requests (`process_withdraw`), batched.
-11. Open the next `Round`, if a whole one still fits before the epoch ends.
+6. Pay out matured withdrawal requests (`process_withdraw`), batched.
 
-Steps 4 through 7 and 11 stop once `pool.shutdown` is true, mirroring which instructions the
-program itself refuses (`begin_epoch`, `request_draw`, `create_round`); deploy stops too, while
-recall and harvest keep running. Steps 1 through 3, 8 and 10 keep running: settling, closing and
-sweeping an already-open `Round`, `payout` of an epoch already `Drawn`, and matured withdrawals
-are all still allowed post-shutdown (`docs/ops/funds.md` covers what to do about the ones that
+Steps 1 through 3 stop once `pool.shutdown` is true, mirroring which instructions the program
+itself refuses (`begin_epoch`, `request_draw`, `draw`); deploy stops too, while recall and harvest
+keep running. Step 4 and step 6 keep running: `payout` of an epoch already `Drawn` and matured
+withdrawals are still allowed post-shutdown (`docs/ops/funds.md` covers what to do about the ones that
 were not). Every operator transaction carries a priority fee: the 75th percentile of
 `getRecentPrioritizationFees` over the transaction's writable accounts, capped at
 `PRIORITY_FEE_MAX_MICROLAMPORTS` (default 50,000).
 
-The indexer (`apps/backend/src/indexer`) mirrors `Pool`, `Epoch`, `Round`, `Player` and
-`Position` accounts plus finalized events into Postgres (ADR 0008); it is the only read path the
-browser has; there is no chain fallback. A `Round` row keeps its last mirrored state after
-`close_round` closes the account on chain instead of being deleted. The indexer also tracks
+The indexer (`apps/backend/src/indexer`) mirrors `Pool`, `Epoch`, `Player` and the venue proposal
+accounts plus finalized events into Postgres (ADR 0008); it is the only read path the browser
+has; there is no chain fallback. The `Player` mirror's `tickets` column is the Ticket ledger's
+placeholder until ticket 11. The indexer also tracks
 invite codes and redemptions, referral qualification, faucet claims and its own cursor.
 
 `GET /status` reports the solvency margin, free idle against the band, the impaired and
-deploy-paused switches, the tree's used capacity and the count of pending deposits waiting to
-activate. `GET /healthz` reports the operator's SOL balance and turns `degraded` below
+deploy-paused switches and the count of pending deposits waiting to activate. `GET /healthz` reports the operator's SOL balance and turns `degraded` below
 `OPERATOR_SOL_WARN` (default 0.5 SOL).
 
 See [`docs/ops/deploy.md`](ops/deploy.md), [`docs/ops/funds.md`](ops/funds.md) and
