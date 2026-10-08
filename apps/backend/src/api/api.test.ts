@@ -40,6 +40,7 @@ import { AlertsController } from "./alerts.controller";
 import { ApiModule } from "./api.module";
 import { FaucetController } from "./faucet.controller";
 import {
+  ApiService,
   BALANCES_TTL_MS,
   CHAIN_CLOCK_TTL_MS,
   JACKPOT_BALANCE_TTL_MS,
@@ -1757,6 +1758,11 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     it("GET /state advances the cached chain time by the wall time elapsed since it was observed, with no extra clock read", async () => {
       vi.setSystemTime(Date.now() + CHAIN_CLOCK_TTL_MS + 1);
       const before = clockReads;
+      // The no-backwards clamp outlives each test. An earlier real-time test
+      // that ran a second past its clock read (a loaded machine, as on
+      // pre-push) leaves it at CHAIN_NOW + 1, which this fresh read would
+      // then serve instead of CHAIN_NOW.
+      (app.get(ApiService) as unknown as { lastServedChainTime: bigint }).lastServedChainTime = 0n;
 
       const fresh = await http.get("/state").expect(200);
       expect(clockReads).toBe(before + 1);
