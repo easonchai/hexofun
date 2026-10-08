@@ -148,6 +148,10 @@ const SIGNATURE_PAGE = 1_000;
 /** The Yield index history keeps at most one point a minute (spec "Backend"). */
 const YIELD_INDEX_MIN_GAP_S = 60n;
 
+/** How far `getProgramAccountsV2`'s index can run behind its own
+ *  `context.slot` (measured 2026-09-14 on devnet: 33 to 59 slots). */
+const SWEEP_INDEX_LAG = 60n;
+
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
 // Anchor's `Program` runs the IDL through `convertIdlToCamelCase` before it
@@ -1030,7 +1034,11 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
             !this.behindLogPath(pubkey, slot),
         )
         .map(({ account }) => {
-          const row = playerRow(account, poolAddress, slot);
+          // Mainnet-readiness-fixes 17: the V2 index runs behind `slot`, and
+          // a referral bind uses this slot as its seed, skipping the events
+          // at or before it. Stamping it lower means a lagged event is
+          // applied rather than skipped.
+          const row = playerRow(account, poolAddress, slot > SWEEP_INDEX_LAG ? slot - SWEEP_INDEX_LAG : 0n);
           return this.prisma.player.upsert({
             where: { poolAddress_owner: { poolAddress, owner: row.owner } },
             create: row,

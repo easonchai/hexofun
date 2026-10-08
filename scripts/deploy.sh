@@ -240,10 +240,16 @@ if [ "${#id_hex}" -ne 64 ]; then
   echo "deploy: could not read the 32 byte public key out of $keypair" >&2
   exit 1
 fi
-if ! od -An -v -tx1 "$so_path" | tr -d ' \n' | grep -q "$id_hex"; then
-  echo "deploy: $so_path does not contain program id $keypair_pubkey; it was built for another id" >&2
-  exit 1
-fi
+# Read whole, not piped into grep -q: under pipefail, grep exiting at the match
+# can SIGPIPE od and read as "not found".
+so_hex=$(od -An -v -tx1 "$so_path" | tr -d ' \n')
+case "$so_hex" in
+  *"$id_hex"*) ;;
+  *)
+    echo "deploy: $so_path does not contain program id $keypair_pubkey; it was built for another id" >&2
+    exit 1
+    ;;
+esac
 echo "==> $env_name program id $keypair_pubkey matches the build (IDL and binary)"
 
 # --- --idl: publish the freshly built IDL on chain, no deploy --------------

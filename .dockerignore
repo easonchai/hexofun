@@ -3,10 +3,10 @@
 # below stays out of the context, secrets first.
 .git
 .claude
-.env
-.env.*
-keys
-.surf
+**/.env
+**/.env.*
+**/keys
+**/.surf
 **/node_modules
 **/dist
 target

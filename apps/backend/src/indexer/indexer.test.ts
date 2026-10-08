@@ -1773,6 +1773,25 @@ describe("referral qualification", () => {
     expect((await prisma.referral.findUniqueOrThrow({ where: { referee } })).principal).toBe(30_000_000n);
   });
 
+  it("a sweep stamps the Player row behind its slot, so an event in the index lag is applied (mainnet-readiness-fixes 17)", async () => {
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
+    connection.slot = 120;
+    try {
+      await indexer.syncAccounts();
+    } finally {
+      connection.slot = 100;
+    }
+    const player = await prisma.player.findUniqueOrThrow({ where: byOwner(referee) });
+    expect(player.slot).toBeLessThanOrEqual(60n);
+    await prisma.$transaction((tx) =>
+      bindReferral(tx, active(), referee, STRANGER.toBase58(), "ABCD2345"),
+    );
+    await indexer.ingestLogs(
+      batch("sig-lagged", 100n, [depositedFor(OWNER, 60_000_000, 63_000_000, 63_000_000)]),
+    );
+    expect((await prisma.referral.findUniqueOrThrow({ where: { referee } })).principal).toBe(63_000_000n);
+  });
+
   it("crosses up through 50 USDC on a deposit and stamps aboveSince", async () => {
     await seedReferral();
     await indexer.ingestLogs(
