@@ -55,6 +55,28 @@
   overflow-wrap: anywhere;
 }
 
+/* The snapshot check's verdict: green only on a three-way match, red on any disagreement. */
+.ops-verdict {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--ops-amber);
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ops-verdict[data-verdict="match"] {
+  --ops-ok: #2f8f4e;
+  border-color: var(--ops-ok);
+  color: var(--ops-ok);
+}
+
+.ops-verdict[data-verdict="mismatch"] {
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
 .ops-admin-prepared textarea {
   width: 100%;
   font-family: monospace;

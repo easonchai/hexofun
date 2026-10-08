@@ -462,6 +462,46 @@ export const fetchEpochs = (
 ): Promise<ApiResult<EpochDto[]>> =>
   get<EpochDto[]>(baseUrl, `/epochs?limit=${limit}`, signal);
 
+/** One page of `GET /epochs/:id/snapshot`. 404s until the next epoch has begun. */
+export interface SnapshotPageDto {
+  /** Hex; null for an empty snapshot. */
+  root: string | null;
+  depth: number;
+  leafCount: number;
+  totalTickets: string;
+  /** Wallet-byte order, so the order the tree hashes them in. */
+  leaves: { index: number; owner: string; tickets: string }[];
+  nextIndex: number | null;
+}
+
+export const fetchEpochSnapshot = (
+  baseUrl: string,
+  epochId: string,
+  after: number,
+  signal?: AbortSignal,
+): Promise<ApiResult<SnapshotPageDto>> =>
+  get<SnapshotPageDto>(baseUrl, `/epochs/${epochId}/snapshot?after=${after}`, signal);
+
+/** One `GET /players/:owner/ledger` row; `id`, `epochId` and `delta` are decimal strings. */
+export interface LedgerRowDto {
+  id: string;
+  epochId: string;
+  reason: string;
+  delta: string;
+  ref: string;
+  signer: string | null;
+  signature: string | null;
+  createdAt: string;
+}
+
+export const fetchLedger = (
+  baseUrl: string,
+  owner: string,
+  before: string | null,
+  signal?: AbortSignal,
+): Promise<ApiResult<{ rows: LedgerRowDto[]; nextBefore: string | null }>> =>
+  get(baseUrl, `/players/${owner}/ledger?limit=100${before === null ? "" : `&before=${before}`}`, signal);
+
 export const fetchLeaderboard = (
   baseUrl: string,
   limit: number,

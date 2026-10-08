@@ -9,11 +9,13 @@ import { CranksPanel } from "./CranksPanel.js";
 import { GameConfigPanel } from "./GameConfigPanel.js";
 import { GrantsPanel } from "./GrantsPanel.js";
 import { HeadlinePanel } from "./HeadlinePanel.js";
+import { LedgerPanel } from "./LedgerPanel.js";
 import { PausePanel } from "./PausePanel.js";
 import { PoolPanel } from "./PoolPanel.js";
 import { RateChartPanel } from "./RateChartPanel.js";
 import { RecoveryPanel } from "./RecoveryPanel.js";
 import { ROLE_LABEL, roleOf } from "./role.js";
+import { SnapshotPanel } from "./SnapshotPanel.js";
 import { Section, useStoredFlag } from "./ui.js";
 import { useOps } from "./useOps.js";
 import { VenuePanel } from "./VenuePanel.js";
@@ -82,6 +84,8 @@ export function OpsPage() {
         <AdminPanel />
         <GameConfigPanel />
         <GrantsPanel />
+        <LedgerPanel />
+        <SnapshotPanel />
         <RecoveryPanel />
         <VenueSwitchStepper />
       </Section>

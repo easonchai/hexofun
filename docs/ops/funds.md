@@ -27,6 +27,8 @@ admin fund-jackpot --amount 42069000000   # raw atomic units, 6 decimals
 `request_draw` snapshots whatever the jackpot vault holds into an epoch's prize (an epoch closing
 under `min_jackpot` rolls over instead of paying dust). No daily top-up is needed.
 
+On a `SNAPSHOT_MISMATCH` alert, open the console's Epoch snapshot view first: it hashes the served leaves and shows the root beside the Epoch account's `snapshot_root`, red when they differ.
+
 ## A lost snapshot strands the proof
 
 `payout` needs the winner's leaf and a proof, and the only way to build one is the `EpochSnapshot`
