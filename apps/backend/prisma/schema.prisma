@@ -251,7 +251,8 @@ model TicketLedger {
   ref         String
   /// The wallet that signed the request; null for chain-driven rows.
   signer      String?
-  signature   String?
+  /// Unique, so a signed grant resent inside its window is refused as a replay.
+  signature   String?      @unique
   createdAt   DateTime     @default(now())
 
   @@index([poolAddress, owner])

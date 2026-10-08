@@ -2,7 +2,7 @@
 // start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
 // start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
 // fund-jackpot, set-operator,
-// propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, migrate-venue, create-invite, shutdown, emergency-crank,
+// propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, migrate-venue, create-invite, grant-tickets, shutdown, emergency-crank,
 // sweep-house, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
@@ -42,7 +42,7 @@ import bs58 from "bs58";
 import { generateInviteCode } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
 import { fetchKvaultView, kvaultRemaining } from "../chain/kvault";
-import { venueProposalAddress } from "../chain/pda";
+import { poolAddress, venueProposalAddress } from "../chain/pda";
 import { VENUE_KIND } from "../chain/venue-kind";
 import { rpcStatus, withRpcFallback } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
@@ -60,6 +60,7 @@ import {
   type SetParamsInput,
   type SetVenueParamsInput,
 } from "./args";
+import { grantTickets, loadKeypairFile } from "./grant";
 import {
   checkLedgerAddress,
   ledgerSigner,
@@ -889,6 +890,15 @@ export async function main(): Promise<void> {
     } finally {
       await prisma.$disconnect();
     }
+    return;
+  }
+
+  // Touches no chain either: it signs with a keypair file and asks the backend.
+  if (command.kind === "grant-tickets") {
+    await grantTickets(command, loadKeypairFile(command.keypair), {
+      pool: poolAddress(new PublicKey(env.PROGRAM_ID), BigInt(env.POOL_ID)).toBase58(),
+      backendUrl: command.backend ?? `http://127.0.0.1:${env.PORT}`,
+    });
     return;
   }
 

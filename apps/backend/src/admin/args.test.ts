@@ -46,10 +46,40 @@ describe("parseAdminCommand", () => {
     );
   });
 
-  it("no longer has grant-tickets, void-round or the round and ticket-rate flags", () => {
-    // The program dropped them (off-chain-tickets ticket 10); grants return as
-    // a signed backend request in wave 3.
-    expect(() => parseAdminCommand(["grant-tickets", "--owner", "x", "--amount", "1"])).toThrow(/usage/);
+  it("parses grant-tickets as a signed backend request", () => {
+    const owner = Keypair.generate().publicKey;
+    const flags = ["--owner", owner.toBase58(), "--amount", "500", "--reason", "launch bonus", "--keypair", "team.json"];
+    expect(parseAdminCommand(["grant-tickets", ...flags])).toEqual({
+      kind: "grant-tickets",
+      owner,
+      amount: 500n,
+      reason: "launch bonus",
+      keypair: "team.json",
+    });
+    expect(parseAdminCommand(["grant-tickets", ...flags, "--backend", "http://b"])).toMatchObject({ backend: "http://b" });
+  });
+
+  it("rejects grant-tickets missing a flag, or with a bad amount or reason", () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const flags = ["--owner", owner, "--amount", "5", "--reason", "r", "--keypair", "k.json"];
+    for (const flag of ["owner", "amount", "reason", "keypair"]) {
+      const at = flags.indexOf(`--${flag}`);
+      const without = flags.filter((_, i) => i !== at && i !== at + 1);
+      expect(() => parseAdminCommand(["grant-tickets", ...without])).toThrow(new RegExp(`needs --${flag}`));
+    }
+    const withFlag = (flag: string, value: string) => {
+      const copy = [...flags];
+      copy[copy.indexOf(flag) + 1] = value;
+      return ["grant-tickets", ...copy];
+    };
+    expect(() => parseAdminCommand(withFlag("--amount", "0"))).toThrow(/positive whole number/);
+    expect(() => parseAdminCommand(withFlag("--amount", "9007199254740993"))).toThrow(/at most/);
+    expect(() => parseAdminCommand(withFlag("--reason", "x".repeat(201)))).toThrow(/1 to 200/);
+    expect(() => parseAdminCommand(withFlag("--owner", "nope"))).toThrow(/base58 pubkey/);
+  });
+
+  it("no longer has void-round or the round and ticket-rate flags", () => {
+    // The program dropped them (off-chain-tickets ticket 10).
     expect(() => parseAdminCommand(["void-round", "--round", "1"])).toThrow(/usage/);
     for (const flag of ["--round-seconds", "--close-buffer", "--house-cut-bps", "--tickets-per-usdc", "--bonus-cap-bps"]) {
       expect(() => parseAdminCommand(["set-params", flag, "1"])).toThrow(/usage/);

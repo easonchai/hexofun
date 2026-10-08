@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 
 import { PublicKey } from "@solana/web3.js";
 
+import { GRANT_REASON_MAX } from "../api/grants";
 import { INVITE_CODE_MAX_USES } from "../api/invite-code";
 import { VENUE_KIND } from "../chain/venue-kind";
 import { houseCutBps, isoSeconds, wholeUsdc } from "../bootstrap/params";
@@ -93,6 +94,18 @@ export type AdminCommand =
       readonly owner?: PublicKey;
       readonly count: number;
     }
+  /** Never touches the chain: signs with `keypair` and posts to the backend's
+   *  `POST /ops/grants`, so `main()` handles it before a ChainService is built. */
+  | {
+      readonly kind: "grant-tickets";
+      readonly owner: PublicKey;
+      readonly amount: bigint;
+      readonly reason: string;
+      /** Path to a solana keypair file whose wallet is on `OPS_WALLETS`. */
+      readonly keypair: string;
+      /** Defaults to this machine's backend port. */
+      readonly backend?: string;
+    }
   /** Irreversible; refused unless `confirm` matches the configured pool. */
   | { readonly kind: "shutdown"; readonly confirm: bigint }
   /** Permissionless: any signer may run this. */
@@ -126,7 +139,8 @@ export const USAGE = [
   "  migrate-venue   (permissionless; repins the pool to the proposed venue once the 48 hour lock has elapsed and the old position is down to min-venue-move; no USDC moves; deploys then use the new venue)",
   "  drain-venue --amount N   (admin or operator; brings N raw atomic USDC home from the venue and pauses deploys in the same transaction, so the crank cannot redeploy; start-deploy resumes)",
   `  create-invite [--max-uses N] [--owner PUBKEY] [--count K]   (max-uses defaults to ${INVITE_CODE_MAX_USES})`,
-  "  shutdown --confirm POOL_ID   (irreversible; POOL_ID must match the configured pool)",
+  "  grant-tickets --owner PUBKEY --amount N --reason TEXT --keypair FILE [--backend URL]   (a team wallet signs; the backend books a grant_admin row, uncapped; prints the row id)",
+  "  shutdown --confirm POOL_ID  (irreversible; POOL_ID must match the configured pool)",
   `  emergency-crank [--batch N]   (permissionless; N players per transaction, default ${DEFAULT_EMERGENCY_CRANK_BATCH})`,
   "  sweep-house",
   "  rollover-epoch --epoch N   (permissionless; Ended, Drawing or Drawn epoch past its timeout)",
@@ -479,6 +493,45 @@ export function parseAdminCommand(argv: readonly string[]): AdminCommand {
         maxUses: maxUsesRaw !== undefined ? positiveInt("max-uses", maxUsesRaw) : INVITE_CODE_MAX_USES,
         count: values.count !== undefined ? positiveInt("count", values.count) : 1,
         ...(values.owner !== undefined ? { owner: pubkey("owner", values.owner) } : {}),
+      };
+    }
+
+    case "grant-tickets": {
+      let values: { owner?: string; amount?: string; reason?: string; keypair?: string; backend?: string };
+      try {
+        ({ values } = parseArgs({
+          args: [...rest],
+          options: {
+            owner: { type: "string" },
+            amount: { type: "string" },
+            reason: { type: "string" },
+            keypair: { type: "string" },
+            backend: { type: "string" },
+          },
+          allowPositionals: false,
+        }));
+      } catch (cause) {
+        throw new Error(USAGE, { cause });
+      }
+      for (const flag of ["owner", "amount", "reason", "keypair"] as const) {
+        if (values[flag] === undefined) throw new Error(`grant-tickets needs --${flag}\n${USAGE}`);
+      }
+      const amount = positiveBigInt("amount", values.amount!);
+      // The request carries a JSON number, which is exact only to 2^53.
+      if (amount > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`--amount must be at most ${Number.MAX_SAFE_INTEGER}, got "${values.amount}"`);
+      }
+      const reason = values.reason!;
+      if (reason.trim().length === 0 || reason.length > GRANT_REASON_MAX) {
+        throw new Error(`--reason must be 1 to ${GRANT_REASON_MAX} characters`);
+      }
+      return {
+        kind: "grant-tickets",
+        owner: pubkey("owner", values.owner!),
+        amount,
+        reason,
+        keypair: values.keypair!,
+        ...(values.backend !== undefined ? { backend: values.backend } : {}),
       };
     }
 

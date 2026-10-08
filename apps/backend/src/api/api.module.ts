@@ -11,6 +11,7 @@ import { ErrorReportController } from "./error-report.controller";
 import { FastPauseController } from "./fast-pause.controller";
 import { FaucetController } from "./faucet.controller";
 import { GameConfigController } from "./game-config.controller";
+import { GrantsController } from "./grants.controller";
 import { OpsController } from "./ops.controller";
 import { OpsSummaryService } from "./ops-summary";
 import { ReferralsController } from "./referrals.controller";
@@ -67,6 +68,7 @@ import { SessionsService } from "./sessions.service";
     ReferralsController,
     ErrorReportController,
     GameConfigController,
+    GrantsController,
     SessionsController,
   ],
   providers: [
