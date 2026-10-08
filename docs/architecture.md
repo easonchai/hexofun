@@ -285,6 +285,23 @@ epoch cannot promise the same USDC. `payout` and `rollover_epoch` release it. `r
 refused after `shutdown`, but `draw` and `payout` are not, so an epoch already Drawing still
 reaches its winner.
 
+The snapshot is every wallet's Tickets at the cutoff, one `EpochSnapshot` row per wallet above zero,
+sorted by wallet bytes. The indexer takes it when it books `EpochBegan` for the next epoch and
+stores its root, depth, leaf count and total on the Epoch row (`apps/backend/src/snapshot/`). The
+seed is `sha256("epoch" || pool || epoch_id || nonce || root || total_tickets)`, so once the
+randomness is requested no other snapshot can be swapped in. The Operator picks the nonce, stores it
+on the Epoch row before it sends and reuses it on a retry. `payout(index, tickets, siblings)` takes
+the winner's leaf and its proof and checks that it reaches the committed root and total and that the
+drawn target falls in the leaf's range; the proof is built from the rows, not stored.
+
+`GET /epochs/:id/draw` serves the root, depth, leaf count, total, nonce, seed, randomness account,
+target, winner wallet and index, and the proof. Anyone can recompute the seed from it and send
+`payout`, which is permissionless. The nonce stays out of the response until `request_draw` has
+landed. A depth-18 proof does not fit a legacy transaction with kVault accounts (1,775 bytes against
+1,232), so the Operator sends `payout` as a v0 transaction with the vault's lookup table, as it does
+for every kVault instruction (1,067 bytes in the program test). The rows are the only way to build a proof: a lost database strands the
+proof until the snapshot is restored (`docs/ops/funds.md`).
+
 ## Backend jobs and the indexer read model
 
 The operator (`apps/backend/src/operator`) is deadline-driven: it sleeps until the next moment a
@@ -294,11 +311,13 @@ step:
 1. `begin_epoch`, once the previous epoch is Paid or Rolled over. It syncs the venue, so it takes
    the pinned venue accounts and the sync's remaining accounts.
 2. `request_draw` for the epoch that just ended, which commits the snapshot root and asks for
-   randomness (or rolls the epoch over). Until the Epoch snapshot exists (off-chain-tickets
-   ticket 12) this step sends nothing and reports `snapshot_pending`.
+   randomness (or rolls the epoch over, which an empty snapshot does). It waits, reporting
+   `snapshot_pending`, until the indexer has booked `EpochBegan` and the Epoch row holds a root.
 3. Await the draw's randomness, then `draw`.
-4. `payout` the winner with the proof from the snapshot. Same `snapshot_pending` wait until
-   ticket 12; a Drawn epoch still rolls over past `payout_timeout`.
+4. `payout` the winner: a binary search over the snapshot's prefix sums finds the leaf holding the
+   target, and the proof goes in the instruction. A proof the chain refuses (or rows that cannot
+   rebuild the root) raises `SNAPSHOT_MISMATCH` and stops retrying that epoch. A Drawn epoch still
+   rolls over past `payout_timeout`.
 5. Venue cranks: `harvest` once per epoch in its last 10 minutes, `recall` when free idle is under
    the floor, `deploy_to_venue` when it is above the target. A failed crank is cooled down for 10
    minutes and never holds anything else up.
@@ -314,8 +333,8 @@ were not). Every operator transaction carries a priority fee: the 75th percentil
 
 The indexer (`apps/backend/src/indexer`) mirrors `Pool`, `Epoch`, `Player` and the venue proposal
 accounts plus finalized events into Postgres (ADR 0008); it is the only read path the browser
-has; there is no chain fallback. The `Player` mirror's `tickets` column is the Ticket ledger's
-placeholder until ticket 11. The indexer also tracks
+has; there is no chain fallback. The indexer also keeps the Ticket ledger and takes the Epoch
+snapshot (above). It also tracks
 invite codes and redemptions, referral qualification, faucet claims and its own cursor.
 
 `GET /status` reports the solvency margin, free idle against the band, the impaired and

@@ -27,6 +27,17 @@ admin fund-jackpot --amount 42069000000   # raw atomic units, 6 decimals
 `request_draw` snapshots whatever the jackpot vault holds into an epoch's prize (an epoch closing
 under `min_jackpot` rolls over instead of paying dust). No daily top-up is needed.
 
+## A lost snapshot strands the proof
+
+`payout` needs the winner's leaf and a proof, and the only way to build one is the `EpochSnapshot`
+rows (plus the Epoch row's root) in Postgres. If the database is lost or rolled back past an
+`EpochBegan`, a Drawn epoch cannot be paid until the rows are back. Restore them from the daily
+snapshot export (`runbook.md`, "Epoch snapshot export") or from the published
+`GET /epochs/<id>/snapshot` pages, check that the rebuilt root equals the Epoch account's
+`snapshot_root`, then `payout` (permissionless) with the proof from `GET /epochs/<id>/draw`.
+Past `payout_timeout` the epoch rolls over instead and the prize stays in the jackpot vault for the
+next draw, so a restore that takes longer than that costs the winner this draw, not the money.
+
 ## Operator SOL
 
 The operator's hot key pays every crank transaction's fee. Top it up with a plain transfer:

@@ -95,6 +95,20 @@
 
   Setting the deploy pause from the operator key is pending yield-claimer ticket 10, which adds the instruction.
 
+  Epoch snapshot export (off-chain-tickets ticket 12)
+
+  The draw's proof is built from the EpochSnapshot rows, and nothing else can rebuild it. Run this once a day, next to
+  the database backup, and keep the files with it. Each epoch's rows never change after the cutoff, so the newest
+  export is enough unless a restore is needed:
+
+    psql "$DATABASE_URL" -c "\copy (SELECT * FROM \"EpochSnapshot\" ORDER BY \"poolAddress\", \"epochId\", \"index\") TO 'epoch-snapshot-'$(date +%F)'.csv' CSV HEADER"
+    psql "$DATABASE_URL" -c "\copy (SELECT \"poolAddress\", id, \"snapshotRoot\", \"snapshotDepth\", \"leafCount\", \"totalTickets\", nonce FROM \"Epoch\" WHERE \"snapshotRoot\" IS NOT NULL) TO 'epoch-roots-'$(date +%F)'.csv' CSV HEADER"
+
+  The published copy is GET /epochs/<id>/snapshot (paged, 10,000 leaves a page), which holds the same leaves for any epoch.
+  To restore, \copy the CSV back into EpochSnapshot, then check that buildSumTree over the leaves gives the root
+  stored on the Epoch row and the Epoch account's snapshot_root. If a Drawn epoch refuses its proof (SNAPSHOT_MISMATCH),
+  docs/ops/incidents.md, "Snapshot proof refused", has the steps.
+
   Changing a pool's venue (ADR 0023)
 
   Status: rehearsed on localnet (stub to stub) and on a Surfpool mainnet fork on 2026-10-07 (klend to klend, klend to

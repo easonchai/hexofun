@@ -176,7 +176,10 @@ Starts with `DRAWN_UNPAID`.
 
 1. First check: `GET /epochs/current`'s `winner` and `status`. A human winner must never roll over
    quietly; if `payout` keeps failing, check the backend logs for the send error before
-   `payout_timeout` passes and a real winner loses their prize to a rollover.
+   `payout_timeout` passes and a real winner loses their prize to a rollover. If `SNAPSHOT_MISMATCH`
+   is also firing, follow [Snapshot proof refused](#snapshot-mismatch).
+2. `payout` is permissionless. `GET /epochs/<id>/draw` returns the winner and the proof, so anyone
+   can send it if the operator cannot.
 
 <a id="solvency-negative"></a>
 ## Pool not covering its balances
@@ -307,6 +310,27 @@ so a wrong balance can put the wrong count in a leaf.
    its `Event` rows in order to see which one the balance missed.
 3. An epoch whose snapshot is already committed on chain keeps that snapshot. Fix the wallet before the next
    `EpochBegan`, which snapshots and resets every balance.
+
+<a id="snapshot-mismatch"></a>
+## Snapshot proof refused
+
+Starts with `SNAPSHOT_MISMATCH`. The epoch drew a winner, but the proof the operator built from the stored
+`EpochSnapshot` rows does not reach the root the chain holds (`ProofRootMismatch`, `ProofSumMismatch`,
+`ProofRangeMismatch` or `ProofWrongLength`), or the rows cannot rebuild the root at all. The operator stops
+retrying that epoch. Nobody is paid until the rows are right, and `DRAWN_UNPAID` follows after five minutes.
+
+1. Read the chain's commitment from the Epoch account: `snapshot_root`, `total_tickets`, `snapshot_depth`,
+   `leaf_count`. Compare it with `GET /epochs/<id>/snapshot` (root, depth, leaf count, total) and with
+   `SELECT count(*), sum(tickets) FROM "EpochSnapshot" WHERE "epochId" = <id>`.
+2. Rows missing or different (a restore from an old backup, a hand edit): restore the table from the
+   last daily snapshot export, or from the published `GET /epochs/<id>/snapshot` pages, which are the same
+   leaves. Rebuild the tree with `buildSumTree` over the restored leaves and check its root equals the
+   chain's `snapshot_root` before anything else.
+3. Rows match but the chain refuses: the chain's root was committed over different leaves than the rows
+   hold. Do not edit the rows to fit. Leave the epoch for `rollover_epoch` once `payout_timeout` passes (the
+   prize stays in the vault for the next draw) and find which `EpochBegan` booking diverged.
+4. Once the rows rebuild the chain's root, restart the backend (it forgets the stop) or run `payout` by hand
+   with the proof from `GET /epochs/<id>/draw`. `payout` is permissionless.
 
 <a id="weight-tree-nearly-full"></a>
 ## Weight tree filling up
