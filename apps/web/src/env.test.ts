@@ -23,15 +23,13 @@ describe("validateProdEnv", () => {
 
   it("names every missing value at once, not just the first", () => {
     expect(() => validateProdEnv({})).toThrow(
-      /VITE_CLUSTER.*VITE_PUBLIC_RPC_URL.*VITE_API_URL.*VITE_PRIVY_APP_ID.*VITE_PROGRAM_ID.*VITE_POOL_ID/s,
+      /VITE_CLUSTER.*VITE_API_URL.*VITE_PRIVY_APP_ID.*VITE_PROGRAM_ID.*VITE_POOL_ID/s,
     );
   });
 
-  it("requires the public RPC URL, with a message naming it", () => {
+  it("allows the public RPC URL to be unset", () => {
     const { VITE_PUBLIC_RPC_URL: _drop, ...rest } = FULL_ENV;
-    expect(() => validateProdEnv(rest)).toThrow(
-      /Missing required production environment value\(s\): VITE_PUBLIC_RPC_URL/,
-    );
+    expect(() => validateProdEnv(rest)).not.toThrow();
   });
 
   it("treats a blank value the same as a missing one", () => {
