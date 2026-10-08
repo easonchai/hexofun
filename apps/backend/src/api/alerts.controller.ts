@@ -2,6 +2,7 @@ import { Controller, Get, HttpException, HttpStatus } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
 import type { HexVaultEnv } from "../config/env";
+import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import { PrismaService } from "../prisma/prisma.service";
 import { ApiService, EPOCH_OPEN } from "./api.service";
 
@@ -29,7 +30,9 @@ export type AlertCode =
   | "RESERVE_LIQUIDITY_LOW"
   | "POOL_IMPAIRED"
   | "DEPLOY_PAUSED"
-  | "WEIGHT_TREE_NEARLY_FULL";
+  | "WEIGHT_TREE_NEARLY_FULL"
+  | "VENUE_PROPOSED"
+  | "PARAMS_CHANGED";
 
 export interface Alert {
   code: AlertCode;
@@ -40,6 +43,9 @@ export interface Alert {
  *  `ALERT_TICK_STALE_S` and `ALERT_INDEXER_STALE_S` as thresholds. */
 export const RPC_FALLBACK_RECENT_MS = 10 * 60 * 1000;
 export const VOID_OR_ROLLOVER_RECENT_S = 60 * 60;
+/** mainnet-readiness-fixes 04: how long `PARAMS_CHANGED` stays up after a
+ *  `ParamsSet` event, long enough for a once-a-minute monitor to page. */
+export const PARAMS_CHANGED_RECENT_S = 60 * 60;
 /** Ticket 09: how long the operator's last error may persist, while ticks
  *  keep running, before OPERATOR_FAILING pages someone. Not env-tunable, for
  *  the same reason as the two constants above. */
@@ -48,11 +54,23 @@ export const OPERATOR_FAILING_SECONDS = 5 * 60;
  *  principal-out conditions, straight from spec.md's own wording. */
 export const NEAR_CLOSE_SECONDS = 60 * 60;
 /** Yield-claimer ticket 14: the Weight tree alerts above this share of its
- *  capacity, in basis points (90%). */
-export const TREE_NEARLY_FULL_BPS = 9_000;
+ *  capacity, in basis points (80% since mainnet-readiness-fixes 08, which
+ *  also lets the Operator release empty leaves). */
+export const TREE_NEARLY_FULL_BPS = 8_000;
 /** A negative solvency margin smaller than this is rounding dust from a
  *  redeem, which the program charges to the fee owed (spec "Sync"). */
 export const SOLVENCY_DUST = 10n;
+
+/** The pool's open venue proposal: the pins it would move the pool to. */
+export interface VenueProposalAlert {
+  venueKind: number;
+  klendProgram: string;
+  klendMarket: string;
+  klendReserve: string;
+  klendCtoken: string;
+  /** Chain unix seconds when the migration may run. */
+  unlocksAt: bigint;
+}
 
 /** Everything `evaluateAlerts` needs, already resolved to plain values so it
  *  stays DB- and chain-free and is cheap to seed from a test. */
@@ -115,6 +133,12 @@ export interface AlertInputs {
   deployPaused: boolean;
   /** `/status`'s `treeUsedBps`. */
   treeUsedBps: number;
+  /** The open venue proposal, null when there is none. */
+  venueProposal: VenueProposalAlert | null;
+  /** The newest `ParamsSet` event's values inside the last hour, null when
+   *  there is none. Pool and nothing else is left out, so a new field on the
+   *  event shows up here without a code change. */
+  paramsChanged: Record<string, unknown> | null;
 }
 
 /** `/status`'s operator block, which both the alerts and the ops todo list read. */
@@ -298,7 +322,25 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
   if (inputs.treeUsedBps > TREE_NEARLY_FULL_BPS) {
     alerts.push({
       code: "WEIGHT_TREE_NEARLY_FULL",
-      message: "The Weight tree is over 90% of its capacity.",
+      message: "The Weight tree is over 80% of its capacity.",
+    });
+  }
+  if (inputs.venueProposal !== null) {
+    const p = inputs.venueProposal;
+    // The 48 hour lock is the window to cancel a proposal nobody expected.
+    alerts.push({
+      code: "VENUE_PROPOSED",
+      message: `A venue proposal is open: kind ${p.venueKind}, klend program ${p.klendProgram}, market ${p.klendMarket}, reserve ${p.klendReserve}, cToken ${p.klendCtoken}; the migration unlocks at unix ${p.unlocksAt}.`,
+    });
+  }
+  if (inputs.paramsChanged !== null) {
+    const values = Object.entries(inputs.paramsChanged)
+      .filter(([key]) => key !== "pool")
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(", ");
+    alerts.push({
+      code: "PARAMS_CHANGED",
+      message: `set_params ran in the last hour with: ${values}.`,
     });
   }
   return alerts;
@@ -342,9 +384,11 @@ export class AlertsController {
 
   @Get("alerts")
   async getAlerts(): Promise<{ alerts: Alert[] }> {
-    const [status, recent] = await Promise.all([
+    const [status, recent, venueProposal, paramsChanged] = await Promise.all([
       this.api.getStatus(),
       this.recentVoidOrRollover(),
+      this.openVenueProposal(),
+      this.recentParamsSet(),
     ]);
     const nowSeconds = Math.floor(Date.now() / 1000);
     const secondsToEpochClose =
@@ -383,6 +427,8 @@ export class AlertsController {
         impaired: status.impaired,
         deployPaused: status.deployPaused,
         treeUsedBps: status.treeUsedBps,
+        venueProposal,
+        paramsChanged,
       },
       {
         tickStaleSeconds: this.tickStaleSeconds,
@@ -398,6 +444,38 @@ export class AlertsController {
       throw new HttpException({ alerts }, HttpStatus.SERVICE_UNAVAILABLE);
     }
     return { alerts };
+  }
+
+  /** The `VenueProposal` row the indexer keeps while the account exists:
+   *  `cancel_venue` and the migration delete it, so the alert ends with them. */
+  private async openVenueProposal(): Promise<VenueProposalAlert | null> {
+    const row = await this.prisma.venueProposal.findUnique({
+      where: { poolAddress: this.api.poolAddress },
+    });
+    if (row === null) return null;
+    return {
+      venueKind: row.venueKind,
+      klendProgram: row.klendProgram,
+      klendMarket: row.klendMarket,
+      klendReserve: row.klendReserve,
+      klendCtoken: row.klendCtoken,
+      unlocksAt: row.proposedAt + VENUE_LOCK_SECONDS,
+    };
+  }
+
+  /** The newest `ParamsSet` event inside `PARAMS_CHANGED_RECENT_S`, as the
+   *  decoder stored it (`decode.ts`'s camelCased field names). */
+  private async recentParamsSet(): Promise<Record<string, unknown> | null> {
+    const cutoff = BigInt(Math.floor(Date.now() / 1000) - PARAMS_CHANGED_RECENT_S);
+    const row = await this.prisma.event.findFirst({
+      where: { poolAddress: this.api.poolAddress, name: "ParamsSet", blockTime: { gte: cutoff } },
+      orderBy: { slot: "desc" },
+      select: { data: true },
+    });
+    const data = row?.data;
+    return data !== null && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : null;
   }
 
   /** `RoundVoided`/`EpochRolledOver` are two of `FEED_NAMES` in

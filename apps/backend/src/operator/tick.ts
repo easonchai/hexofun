@@ -18,6 +18,8 @@ import {
   type PoolState,
   type RoundState,
 } from "./chain-state";
+import type { SendHooks } from "../chain/chain.service";
+import { ALREADY_GRANTED_MARKER } from "./grant-reclaim";
 import type { OperatorInstructions } from "./instructions";
 import {
   decideVenue,
@@ -106,6 +108,12 @@ const cannotPayWinner = (cause: unknown): boolean =>
  * when a referrer's row was written.
  */
 const GRANT_CAP_EXCEEDED = ["DailyPlayerGrantCapExceeded", "DailyPoolGrantCapExceeded"];
+
+/** Ticket 07: the Player already got this epoch's grant, so the batch's rows are done. */
+const alreadyGranted = (cause: unknown): boolean =>
+  errorMessage(cause).includes("AlreadyGranted");
+
+type Grant = { referrer: string; amount: bigint };
 
 const capExceeded = (cause: unknown): boolean =>
   GRANT_CAP_EXCEEDED.some((marker) => errorMessage(cause).includes(marker));
@@ -233,11 +241,14 @@ export interface TickContext {
   principalVaultBalance(): Promise<bigint>;
   /**
    * Players from the Read model whose withdrawal request is payable now:
-   * `pendingWithdraw > 0` and `pendingEpoch < currentEpochId`. Oldest
-   * request first, so a long queue still drains in order.
+   * `pendingWithdraw > 0` and one of the program's three routes: the pool
+   * moved past `pendingEpoch`, `now` is past `requestedAt + epochSeconds`, or
+   * the pool is shut down. Oldest request first, so a long queue still drains
+   * in order.
    */
   duePendingWithdrawals(
     currentEpochId: bigint,
+    deadline: { now: bigint; epochSeconds: bigint; shutdown: boolean },
   ): Promise<{ owner: string; amount: bigint }[]>;
   /**
    * Every qualifying referrer's daily bonus for `epochId` not yet sent
@@ -246,12 +257,12 @@ export interface TickContext {
    * granting. Empty once every grant for the epoch is sent or already
    * granted on chain.
    */
-  referralGrantsDue(epochId: bigint): Promise<{ referrer: string; amount: bigint }[]>;
-  /** Records the signature of a batch of grants just sent. */
+  referralGrantsDue(epochId: bigint): Promise<Grant[]>;
+  /** Records the signature of a batch of grants just sent; null clears it. */
   markReferralGrantsSent(
     epochId: bigint,
     referrers: readonly string[],
-    txSig: string,
+    txSig: string | null,
   ): Promise<void>;
   /**
    * Positions still on chain whose Round has reached a terminal status
@@ -261,6 +272,17 @@ export interface TickContext {
   unsettledPositions(): Promise<
     { address: string; owner: string; roundId: bigint }[]
   >;
+  /**
+   * Mainnet-readiness-fixes 08: the owner of one Player that holds a Weight
+   * tree leaf and has been empty for more than one epoch, checked against the
+   * Player account on chain, or null when none is. Never a live Player: the
+   * answer is only as stale as the account read inside it. Absent runs no
+   * release step.
+   */
+  leafToRelease?(): Promise<string | null>;
+  /** Keeps an owner out of later `leafToRelease` answers: its release was
+   *  just sent or just refused. */
+  skipLeaf?(owner: string): void;
   /** Positions a confirmed `settle_position` just closed; keep them out of
    *  later `unsettledPositions` results. */
   forgetPositions(addresses: string[]): Promise<void>;
@@ -274,12 +296,12 @@ export interface TickContext {
    *  `roundsToClose` results until the indexer mirrors `RoundClosed`. */
   forgetRound(id: bigint): void;
   /**
-   * Owner of the Player whose leaf in the Weight tree holds the drawn epoch's
+   * The Player (owner and House flag) whose leaf in the Weight tree holds the drawn epoch's
    * target, read from the tree and the Player accounts on chain (ticket 13: no
    * Read model table holds Weight ranges any more). Null when none does yet.
    */
-  winner(epoch: EpochState): Promise<string | null>;
-  send(instructions: TransactionInstruction[]): Promise<string>;
+  winner(epoch: EpochState): Promise<{ owner: string; isHouse: boolean } | null>;
+  send(instructions: TransactionInstruction[], hooks?: SendHooks): Promise<string>;
   /** Something an operator should read but that is not a failed tick: so far
    *  only a payout that would not land, which step 6 retries. */
   warn(message: string): void;
@@ -412,7 +434,11 @@ export function msUntilWake(now: bigint, deadline: bigint): number {
 
 export async function runTick(ctx: TickContext): Promise<TickOutcome> {
   const decision = await decide(ctx);
-  return { ...decision, nextWakeAt: nextWakeAt(ctx, decision.action !== null) };
+  // A release does not wake the next tick at once: it is housekeeping paced
+  // by the safety interval, so a long backlog never turns into a hot loop
+  // against the RPC budget.
+  const acted = decision.action !== null && decision.action !== "release_leaf";
+  return { ...decision, nextWakeAt: nextWakeAt(ctx, acted) };
 }
 
 async function decide(ctx: TickContext): Promise<Decision> {
@@ -527,7 +553,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // within one Round; one batch, and one Round, per tick, as before. Ticket
   // 06: a failure here (of any kind) is recorded, not thrown, so it never
   // blocks the epoch or round loops below it.
-  const sweep = await ctx.unsettledPositions();
+  // The read is inside the same recorded-failure path (mainnet-readiness-fixes 01).
+  let sweep: Awaited<ReturnType<typeof ctx.unsettledPositions>> = [];
+  try {
+    sweep = await ctx.unsettledPositions();
+  } catch (cause) {
+    stepError = stepError ?? `unsettled_positions read failed: ${errorMessage(cause)}`;
+  }
   const [firstUnsettled] = sweep;
   if (firstUnsettled) {
     const roundId = firstUnsettled.roundId;
@@ -610,37 +642,81 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // shutdown (ops-and-envs ticket 02), so this stops with the rest of the
   // epoch loop. It is refused while the jackpot is paused too
   // (game-jackpot-pause ticket 02); the grants stay due and go out once the
-  // jackpot restarts.
-  if (!pool.shutdown && !pool.jackpotPaused && currentEpoch) {
-    const grants = await ctx.referralGrantsDue(currentEpoch.epochId);
+  // jackpot restarts. The same goes for the global pause (mainnet-readiness-fixes
+  // 02), and any other refusal here is recorded, not thrown, so it never
+  // blocks steps 4 to 7.
+  if (!pool.shutdown && !pool.jackpotPaused && !pool.paused && currentEpoch) {
+    const epochId = currentEpoch.epochId;
+    // The signature is recorded the moment the transaction is on the wire
+    // (ticket 07): a send that times out while the blockhash is live may
+    // still land, and a row without it would be granted a second time.
+    const sendGrants = async (grants: Grant[]): Promise<void> => {
+      const referrers = grants.map((grant) => grant.referrer);
+      await ctx.send(await ctx.ix.grantTickets(pool, grants), {
+        onSent: (signature) => ctx.markReferralGrantsSent(epochId, referrers, signature),
+        onDropped: () => ctx.markReferralGrantsSent(epochId, referrers, null),
+      });
+    };
+    // Mainnet-readiness-fixes 16: the read runs the signature reclaim (RPC and
+    // DB), so its throw is recorded like a send's and steps 4 to 7 still run.
+    let grants: Grant[] = [];
+    try {
+      grants = await ctx.referralGrantsDue(epochId);
+    } catch (cause) {
+      stepError = stepError ?? `referral grants read failed: ${errorMessage(cause)}`;
+    }
     if (grants.length > 0) {
       const batch = grants.slice(0, BATCH_SIZE);
+      const referrers = batch.map((grant) => grant.referrer);
       try {
-        const signature = await ctx.send(await ctx.ix.grantTickets(pool, batch));
-        await ctx.markReferralGrantsSent(
-          currentEpoch.epochId,
-          batch.map((grant) => grant.referrer),
-          signature,
-        );
+        await sendGrants(batch);
         return finish({ action: "grant_tickets" });
       } catch (cause) {
-        if (!capExceeded(cause)) throw cause;
-        // referralGrantsDue re-clamps every grant against the freshest
-        // Player data it has before handing it back, so this should now
-        // only fire on drift the indexer has not caught up with yet (a very
-        // recent withdrawal), not the stale-forever case it used to. The
-        // error itself does not say which referrer in the batch tripped it,
-        // so every one of them is logged with the amount that was tried;
-        // ponytail: still one atomic transaction, so all of them wait for
-        // the next tick's freshly re-clamped retry rather than just the
-        // culprit. Splitting the batch on a repeated failure is the upgrade
-        // path if that ever bites in practice.
-        ctx.warn(
-          `referral bonus grant for epoch ${currentEpoch.epochId} exceeded the on-chain cap ` +
-            `for one of [${batch.map((grant) => `${grant.referrer}:${grant.amount}`).join(", ")}]: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`,
-        );
+        if (alreadyGranted(cause)) {
+          // The program refused a second grant to a referrer this epoch, so
+          // an earlier send landed. There is no signature of ours to record
+          // (the refusal is at simulation), so the rows get a marker.
+          // Mainnet-readiness-fixes 16: simulation names only the first
+          // refused instruction, so a batch of more than one cannot say which
+          // referrer that was. Each is resent alone, and only a referrer
+          // refused on its own gets the marker.
+          if (batch.length === 1) {
+            await ctx.markReferralGrantsSent(epochId, referrers, ALREADY_GRANTED_MARKER);
+          } else {
+            for (const grant of batch) {
+              try {
+                await sendGrants([grant]).catch(async (single: unknown) => {
+                  if (!alreadyGranted(single)) throw single;
+                  await ctx.markReferralGrantsSent(epochId, [grant.referrer], ALREADY_GRANTED_MARKER);
+                });
+              } catch (single) {
+                stepError = stepError ?? `grant_tickets to ${grant.referrer} failed: ${errorMessage(single)}`;
+              }
+            }
+          }
+          return finish({ action: "grant_tickets" });
+        }
+        if (!capExceeded(cause)) {
+          stepError = stepError ?? `grant_tickets failed: ${errorMessage(cause)}`;
+          // Fall through to step 4 and below.
+        } else {
+          // referralGrantsDue re-clamps every grant against the freshest
+          // Player data it has before handing it back, so this should now
+          // only fire on drift the indexer has not caught up with yet (a very
+          // recent withdrawal), not the stale-forever case it used to. The
+          // error itself does not say which referrer in the batch tripped it,
+          // so every one of them is logged with the amount that was tried;
+          // ponytail: still one atomic transaction, so all of them wait for
+          // the next tick's freshly re-clamped retry rather than just the
+          // culprit. Splitting the batch on a repeated failure is the upgrade
+          // path if that ever bites in practice.
+          ctx.warn(
+            `referral bonus grant for epoch ${currentEpoch.epochId} exceeded the on-chain cap ` +
+              `for one of [${batch.map((grant) => `${grant.referrer}:${grant.amount}`).join(", ")}]: ${
+                cause instanceof Error ? cause.message : String(cause)
+              }`,
+          );
+        }
       }
     }
   }
@@ -683,8 +759,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // drawn-unpaid condition has had `DRAWN_UNPAID_ALERT_SECONDS` to page
   // someone, regardless of how short `payout_timeout` is set.
   if (previousEpoch?.status === EPOCH_STATUS.DRAWN) {
-    const winner = await ctx.winner(previousEpoch);
-    const isHouse = winner !== null && winner === pool.house.toBase58();
+    const hit = await ctx.winner(previousEpoch);
+    const winner = hit?.owner ?? null;
+    const isHouse = hit?.isHouse ?? false;
     const alertHasFired = now > previousEpoch.drawnAt + DRAWN_UNPAID_ALERT_SECONDS;
     const timedOut =
       now > previousEpoch.drawnAt + pool.payoutTimeout && (isHouse || alertHasFired);
@@ -796,7 +873,13 @@ async function decide(ctx: TickContext): Promise<Decision> {
   // owner's own signature and the crank sends nothing until the pool recovers.
   const due = pool.impaired
     ? []
-    : (await ctx.duePendingWithdrawals(pool.currentEpochId)).filter(
+    : (
+        await ctx.duePendingWithdrawals(pool.currentEpochId, {
+          now: ctx.now,
+          epochSeconds: pool.epochSeconds,
+          shutdown: pool.shutdown,
+        })
+      ).filter(
         (entry) => !withdrawStateIn.skipped.has(entry.owner),
       );
   let withdrawShortfall = 0n;
@@ -870,6 +953,37 @@ async function decide(ctx: TickContext): Promise<Decision> {
     withdrawStateOut = withdrawStateIn;
   }
 
+  /**
+   * 8. Release one empty Player's Weight tree leaf (mainnet-readiness-fixes
+   * 08). The lowest priority: it only runs on a tick that has nothing else to
+   * send, at most one per tick, so a refunded attacker's leaves come back a
+   * tick at a time without a human and without crowding out a crank. The
+   * program refuses a live Player, and `leafToRelease` has already checked
+   * the account, so a refusal here is a race and is recorded like any step's.
+   */
+  async function releaseOne(decision: Decision): Promise<Decision> {
+    if (pool.shutdown || ctx.leafToRelease === undefined) return finish(decision);
+    let owner: string | null;
+    try {
+      owner = await ctx.leafToRelease();
+    } catch (cause) {
+      // Mainnet-readiness-fixes 16: a read failure must not lose the tick's
+      // shortfall and step errors on the way out.
+      stepError = stepError ?? `leaf release read failed: ${errorMessage(cause)}`;
+      return finish(decision);
+    }
+    if (owner === null) return finish(decision);
+    const sent = await attempt(
+      `release_leaf:${owner}`,
+      async () => {
+        await ctx.send(await ctx.ix.releaseLeaf(pool, owner));
+      },
+      async () => {},
+    );
+    ctx.skipLeaf?.(owner);
+    return sent ? finish({ ...decision, action: "release_leaf" }) : finish(decision);
+  }
+
   // 7. Open the next round, if a whole one still fits in this epoch, and the
   // previous Round's reveal has had time to play: no viewer should see a new
   // countdown while the last Round's laser is still landing.
@@ -899,10 +1013,10 @@ async function decide(ctx: TickContext): Promise<Decision> {
       ctx.lastRoundSkipEpochId !== currentEpoch.epochId
         ? { roundSkip: { epochId: currentEpoch.epochId, endsAt: currentEpoch.endsAt } }
         : {};
-    return finish({ ...NOTHING, withdrawShortfall, ...skip });
+    return releaseOne({ ...NOTHING, withdrawShortfall, ...skip });
   }
 
-  return finish({ ...NOTHING, withdrawShortfall });
+  return releaseOne({ ...NOTHING, withdrawShortfall });
 }
 
 /**
@@ -918,6 +1032,11 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // `RoundClosed` may not have landed yet either, so `roundsToClose` can
   // still hand back an id whose account is already gone on chain.
   "AccountNotInitialized",
+  // `release_leaf` for a Player that deposited or took Tickets between the
+  // tick's read of its account and the release landing (mainnet-readiness-fixes
+  // 08), or whose leaf another release already freed.
+  "LeafInUse",
+  "PlayerHasNoLeaf",
   // `request_draw` resent for an epoch a previous tick already sent to the draw.
   "EpochNotAwaitingDraw",
   "EpochNotDrawing",

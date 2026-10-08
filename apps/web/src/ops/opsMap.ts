@@ -30,6 +30,8 @@ export const ALERT_CODES = [
   "POOL_IMPAIRED",
   "DEPLOY_PAUSED",
   "WEIGHT_TREE_NEARLY_FULL",
+  "VENUE_PROPOSED",
+  "PARAMS_CHANGED",
 ] as const;
 export type AlertCode = (typeof ALERT_CODES)[number];
 
@@ -81,6 +83,8 @@ export const OPS_MAP: Record<AlertCode | TodoCode, OpsEntry> = {
   POOL_IMPAIRED: RED("cover"),
   DEPLOY_PAUSED: AMBER("pause-deploy"),
   WEIGHT_TREE_NEARLY_FULL: AMBER(),
+  VENUE_PROPOSED: AMBER(),
+  PARAMS_CHANGED: AMBER(),
   DEPLOY_DUE: AMBER("deploy"),
   RECALL_DUE: AMBER("recall"),
   HARVEST_DUE: AMBER("harvest"),

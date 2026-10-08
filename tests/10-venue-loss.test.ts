@@ -237,7 +237,7 @@ interface Synced {
 
 describe("venue loss and the haircut", () => {
   it(
-    "treats a fall within the tolerance as dust: only the stored value changes",
+    "books a fall within the tolerance as deficit without impairing the pool",
     async () => {
       const { ctx } = await deployedPool([1_000n * USDC]);
       // 1 bp of 900 USDC is 90,000. The rate falls by exactly that much.
@@ -245,7 +245,8 @@ describe("venue loss and the haircut", () => {
 
       const pool = await fetchPool(ctx);
       expect(pool.impaired).toBe(false);
-      expect(pool.deficit.toString()).toBe("0");
+      // Nothing owed can bear it, so all of it is booked (mainnet-readiness-fixes 05).
+      expect(pool.deficit.toString()).toBe("90000");
       expect(pool.venueValue.toString()).toBe((900n * USDC - 90_000n).toString());
       for (const field of ["feeOwed", "prizeOwed", "yieldOwed", "yieldIndex"] as const) {
         expect(pool[field].toString(), field).toBe("0");
@@ -253,12 +254,12 @@ describe("venue loss and the haircut", () => {
       expect(await findEvent(signature, "impairedSet")).toBeUndefined();
 
       // The tolerance is a share of the stored value, 899.91 now, so a second
-      // fall of 90,000 is past it (89,991) and is a loss. The 90,000 that the
-      // first fall left unbacked is the dust the solvency check is told about.
+      // fall of 90,000 is past it (89,991) and is a loss. It adds to the
+      // 90,000 already booked.
       await reprice(ctx, SCALE - (2n * SCALE) / 10_000n, 90_000n);
       const impaired = await fetchPool(ctx);
       expect(impaired.impaired).toBe(true);
-      expect(big(impaired.deficit)).toBe(90_000n);
+      expect(big(impaired.deficit)).toBe(180_000n);
     },
     TIMEOUT,
   );
@@ -530,9 +531,10 @@ describe("venue loss and the haircut", () => {
       await waitPastLastSync(ctx);
       await deployToVenue(ctx, 900n * USDC);
       // The deploy and every redeem below can leave the pool a unit short
-      // when there is no fee owed to bear it.
+      // when there is no fee owed to bear it. That dust is booked as deficit,
+      // so the solvency identity holds exactly.
       const dust = 8n;
-      await assertSolvent(ctx, dust);
+      await assertSolvent(ctx);
       expect(big(await stubVenueValue(ctx)) < 900n * USDC).toBe(true);
 
       for (const step of [
@@ -543,10 +545,11 @@ describe("venue loss and the haircut", () => {
       ]) {
         await waitPastLastSync(ctx);
         await step();
-        await assertSolvent(ctx, dust);
+        await assertSolvent(ctx);
         const pool = await fetchPool(ctx);
         expect(pool.impaired).toBe(false);
-        expect(pool.deficit.toString()).toBe("0");
+        // The dust is booked as deficit, a few units at most.
+        expect(big(pool.deficit) <= dust).toBe(true);
       }
     },
     TIMEOUT,

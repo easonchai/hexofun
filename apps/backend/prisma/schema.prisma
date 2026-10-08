@@ -185,6 +185,10 @@ model Player {
   /// Tickets an operator grant_tickets call has credited this Player so far
   /// in bonusEpoch.
   bonusGranted       BigInt
+  /// The chain slot the mirror row was read at: the log path's notification
+  /// slot or the sweep's snapshot slot. 0 for a row written before this
+  /// column. `bindReferral` copies it to Referral.seedSlot.
+  slot               BigInt @default(0)
 
   // On chain a Player is one wallet's account in one pool (ADR 0016). The
   // owner index serves the two cross-pool "has this wallet ever deposited"
@@ -335,6 +339,10 @@ model Referral {
   /// indexer applied here. Not the live Player.principal: see referral.ts's
   /// ReferralQualificationState for why this is tracked independently.
   principal  BigInt  @default(0)
+  /// The Player mirror's slot when `principal` was seeded at bind. The indexer
+  /// skips this referee's events at or before it, since the seed already
+  /// holds them. 0 means no seed to protect.
+  seedSlot   BigInt  @default(0)
 
   @@index([referrer])
 }

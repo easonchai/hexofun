@@ -478,7 +478,7 @@
   Frontend RPC endpoint and checking for a leaked key
 
   The browser reads chain data through VITE_PUBLIC_RPC_URL, a public endpoint that Vite inlines into the shipped bundle at build
-  time, defaulting to devnet's public cluster URL when unset. Never set this to a keyed URL: whatever the variable holds ships in
+  time, defaulting to VITE_CLUSTER's public endpoint when unset. Never set this to a keyed URL: whatever the variable holds ships in
   plaintext to every visitor, in the JS bundle and again in the wss:// URL the wallet layer derives from that same string. The
   backend's own RPC endpoint is a separate, server-only variable and never reaches the frontend build. Everything else the browser
   shows comes from the backend API, mostly one poll of GET /state; the wallet's own token balance is the only thing it still reads
@@ -626,6 +626,15 @@
   Eight commands never got a button and stay in the CLI: shutdown, sweep-house, emergency-crank, set-operator,
   propose-admin, accept-admin, set-treasury-accounts and create-invite. The venue switch also starts and cancels in
   the CLI, with propose-venue and cancel-venue. The footer of Advanced's Admin actions panel lists the same eight.
+
+  Withdrawals the crank does not pay
+
+  The operator pays a queued withdrawal on any of the program's three routes: the pool moved past the request's epoch,
+  more than `epoch_seconds` passed since the request, or the pool is shut down. So a frozen epoch (jackpot paused, a
+  stuck draw) no longer strands requests. While the pool is Impaired the program wants the owner's own signature and
+  the operator sends nothing. Those exits stay off the crank, by decision. The owner pays their own withdrawal from
+  their wallet, or Impaired clears first (Cover deficit under Advanced). docs/ops/incidents.md, "Venue loss", has the
+  playbook. Process withdraw under Routine cranks pays the rest by hand.
 
   Launch week
 

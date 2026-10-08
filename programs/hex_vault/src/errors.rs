@@ -262,4 +262,22 @@ pub enum HexVaultError {
     VaultAccountMismatch,
     #[msg("the kVault state account must be passed writable")]
     VaultStateNotWritable,
+
+    // mainnet-readiness-fixes ticket 07. Appended too.
+    #[msg("this player already received a grant in the current epoch")]
+    AlreadyGranted,
+
+    // mainnet-readiness-fixes tickets 04 and 06. Appended too.
+    #[msg("a klend venue must pin the klend program")]
+    KlendProgramMismatch,
+    #[msg("only the program's upgrade authority can create a pool")]
+    NotUpgradeAuthority,
+
+    // release_leaf (mainnet-readiness-fixes ticket 08). Appended too.
+    #[msg("this Player still holds Principal, a queued withdrawal, a Position or Tickets")]
+    LeafInUse,
+    #[msg("the House keeps its leaf")]
+    HouseLeafCannotBeReleased,
+    #[msg("the free-leaves account is malformed")]
+    FreeLeavesInvalid,
 }

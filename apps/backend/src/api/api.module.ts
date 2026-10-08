@@ -22,7 +22,9 @@ import { SerializationInterceptor } from "./serialization.interceptor";
  * route: the frontend polls the read routes every 2 s and /healthz is a
  * container probe. Access is throttled too, same limit: a script trying
  * invite codes against POST /access/redeem is exactly what this guards
- * against (ticket 06). `POST /referrals/apply` shares that limit for the
+ * against (ticket 06). `POST /error-reports` is written to the shared
+ * Postgres by anyone, so it is throttled too, tighter (5 a minute, set on the
+ * handler; mainnet-readiness-fixes 10). `POST /referrals/apply` shares that limit for the
  * same reason (ticket 02); the rest of ReferralsController (the polled GET
  * /referrals/:wallet) stays unthrottled.
  */
@@ -38,6 +40,7 @@ import { SerializationInterceptor } from "./serialization.interceptor";
           if (
             controller === FaucetController ||
             controller === AccessController ||
+            controller === ErrorReportController ||
             controller === FastPauseController
           ) {
             return false;

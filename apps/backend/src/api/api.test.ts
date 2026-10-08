@@ -40,6 +40,7 @@ import { AlertsController } from "./alerts.controller";
 import { ApiModule } from "./api.module";
 import { FaucetController } from "./faucet.controller";
 import {
+  ApiService,
   BALANCES_TTL_MS,
   CHAIN_CLOCK_TTL_MS,
   JACKPOT_BALANCE_TTL_MS,
@@ -326,6 +327,7 @@ const emptyPlayer = (owner: string, poolAddress: string = POOL_ADDRESS): Player 
   boughtAmount: 0n,
   bonusEpoch: 0n,
   bonusGranted: 0n,
+  slot: 0n,
   ...LIVE_PLAYER_DEFAULTS,
 });
 
@@ -1392,6 +1394,58 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         }
       });
 
+      it("fires VENUE_PROPOSED while a proposal row exists, carrying its pins", async () => {
+        await quiet();
+        await prisma.venueProposal.create({
+          data: {
+            poolAddress: POOL_ADDRESS,
+            venueKind: 0,
+            klendProgram: "KlendProgramPin",
+            klendMarket: "KlendMarketPin",
+            klendReserve: "KlendReservePin",
+            klendCtoken: "KlendCtokenPin",
+            proposedAt: 1_800_000_000n,
+            updatedSlot: 1n,
+          },
+        });
+        try {
+          const { body } = await http.get("/alerts").expect(503);
+          expect(body.alerts).toEqual([{ code: "VENUE_PROPOSED", message: expect.any(String) }]);
+          expect(body.alerts[0].message).toContain("KlendProgramPin");
+          // proposedAt plus the 48 hour lock.
+          expect(body.alerts[0].message).toContain("1800172800");
+        } finally {
+          await prisma.venueProposal.deleteMany({ where: { poolAddress: POOL_ADDRESS } });
+          await restore({});
+        }
+      });
+
+      it("fires PARAMS_CHANGED for a ParamsSet in the last hour, not an older one", async () => {
+        await quiet();
+        const row = (signature: string, blockTime: bigint, epochSeconds: string) => ({
+          slot: 950n,
+          signature,
+          index: 0,
+          poolAddress: POOL_ADDRESS,
+          name: "ParamsSet",
+          data: { pool: POOL_ADDRESS, epochSeconds, houseCutBps: 600 },
+          blockTime,
+        });
+        await prisma.event.createMany({ data: [row("sigParamsOld", NOW - 7_200n, "1")] });
+        try {
+          await http.get("/alerts").expect(200);
+          await prisma.event.createMany({ data: [row("sigParamsNew", NOW - 60n, "604800")] });
+          const { body } = await http.get("/alerts").expect(503);
+          expect(body.alerts).toEqual([{ code: "PARAMS_CHANGED", message: expect.any(String) }]);
+          expect(body.alerts[0].message).toContain("epochSeconds=604800");
+        } finally {
+          await prisma.event.deleteMany({
+            where: { signature: { in: ["sigParamsOld", "sigParamsNew"] } },
+          });
+          await restore({});
+        }
+      });
+
       it("fires WEIGHT_TREE_NEARLY_FULL over 90% of the tree's capacity", async () => {
         await quiet();
         await prisma.weightTreeState.update({
@@ -1704,6 +1758,11 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     it("GET /state advances the cached chain time by the wall time elapsed since it was observed, with no extra clock read", async () => {
       vi.setSystemTime(Date.now() + CHAIN_CLOCK_TTL_MS + 1);
       const before = clockReads;
+      // The no-backwards clamp outlives each test. An earlier real-time test
+      // that ran a second past its clock read (a loaded machine, as on
+      // pre-push) leaves it at CHAIN_NOW + 1, which this fresh read would
+      // then serve instead of CHAIN_NOW.
+      (app.get(ApiService) as unknown as { lastServedChainTime: bigint }).lastServedChainTime = 0n;
 
       const fresh = await http.get("/state").expect(200);
       expect(clockReads).toBe(before + 1);
@@ -1858,6 +1917,19 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
 
       // A different forwarded client has its own, untouched budget.
       await http.get(`/access/${wallet}`).set("x-forwarded-for", "203.0.113.12").expect(200);
+    });
+  });
+
+  // mainnet-readiness-fixes 10: anyone can post here and the rows land in the
+  // Postgres the indexer and operator share, so it is throttled per IP.
+  describe("POST /error-reports throttling", () => {
+    it("answers 429 on the 6th post in a minute from one address, not another", async () => {
+      const report = { code: "render_error", message: "boom" };
+      for (let i = 0; i < 5; i += 1) {
+        await http.post("/error-reports").set("x-forwarded-for", "203.0.113.21").send(report).expect(201);
+      }
+      await http.post("/error-reports").set("x-forwarded-for", "203.0.113.21").send(report).expect(429);
+      await http.post("/error-reports").set("x-forwarded-for", "203.0.113.22").send(report).expect(201);
     });
   });
 

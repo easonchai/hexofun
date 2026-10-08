@@ -126,11 +126,15 @@ export const isLocalRpc = (url: string | undefined): boolean => {
 };
 
 /**
- * Gate: explicit env flag AND a local RPC endpoint. There is no cluster
- * variable any more, so the endpoint is what says "this is localnet".
+ * Gate: a dev build (`isDevBuild`, Vite's `import.meta.env.DEV`), the explicit env flag, AND a local RPC endpoint.
+ * There is no cluster variable any more, so the endpoint is what says "this
+ * is localnet". `isDevBuild` is false in every production build, so a missing RPC URL
+ * (which `isLocalRpc` reads as local) cannot switch the burner on there.
  */
 export const burnerEnabled = (
   environment: Record<string, string | undefined>,
+  isDevBuild: boolean,
 ): boolean =>
+  isDevBuild &&
   environment.VITE_BURNER_WALLET?.trim() === "1" &&
   isLocalRpc(environment.VITE_PUBLIC_RPC_URL);

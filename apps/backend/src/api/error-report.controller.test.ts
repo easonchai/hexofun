@@ -6,17 +6,17 @@ const TEST_DATABASE_URL =
   "postgresql://hexvault:hexvault@127.0.0.1:5433/hexvault_error_reports";
 process.env.DATABASE_URL = TEST_DATABASE_URL;
 
-import type { INestApplication } from "@nestjs/common";
+import { type INestApplication, Logger } from "@nestjs/common";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import { FastifyAdapter } from "@nestjs/platform-fastify";
 import { Test } from "@nestjs/testing";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PrismaModule } from "../prisma/prisma.module";
 import { PrismaService } from "../prisma/prisma.service";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
-import { ErrorReportController } from "./error-report.controller";
+import { ErrorReportController, MAX_ROWS } from "./error-report.controller";
 
 const DB_AVAILABLE = isDatabaseReachableSync(TEST_DATABASE_URL);
 
@@ -96,5 +96,31 @@ describe.skipIf(!DB_AVAILABLE)("POST /error-reports", () => {
 
   it("is 400 without a message", async () => {
     await http.post("/error-reports").send({ code: "render_error" }).expect(400);
+  });
+
+  it("logs a message with newlines on one line", async () => {
+    const warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    try {
+      await http
+        .post("/error-reports")
+        .send({ code: "x\ny", message: "first\r\nWARN [Operator] forged line" })
+        .expect(201);
+      const lines = warn.mock.calls.map(([line]) => String(line));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toMatch(/[\r\n]/);
+      expect(lines[0]).toContain("forged line");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps only the newest MAX_ROWS rows", async () => {
+    // Seed MAX_ROWS rows, then one more through the route: the oldest goes.
+    await prisma.errorReport.createMany({
+      data: Array.from({ length: MAX_ROWS }, () => ({ code: "seed", message: "m" })),
+    });
+    await http.post("/error-reports").send({ code: "new", message: "m" }).expect(201);
+    expect(await prisma.errorReport.count()).toBe(MAX_ROWS);
+    expect(await prisma.errorReport.count({ where: { code: "new" } })).toBe(1);
   });
 });

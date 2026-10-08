@@ -13,6 +13,7 @@ pub mod custody;
 pub mod epochs;
 pub mod errors;
 pub mod events;
+pub mod free_leaves;
 pub mod rounds;
 pub mod state;
 pub mod sync;
@@ -34,6 +35,7 @@ use anchor_lang::prelude::*;
 
 use custody::*;
 use epochs::*;
+use free_leaves::*;
 use rounds::*;
 use venue_change::*;
 #[cfg(feature = "test-venue")]
@@ -186,6 +188,12 @@ pub mod hex_vault {
 
     pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
         custody::grant_tickets(ctx, amount)
+    }
+
+    /// Permissionless (mainnet-readiness-fixes ticket 08): an empty Player
+    /// gives its Weight tree leaf back, and the next first deposit reuses it.
+    pub fn release_leaf(ctx: Context<ReleaseLeaf>) -> Result<()> {
+        free_leaves::release_leaf(ctx)
     }
 
     // Rounds (spec §2.3 "Rounds").

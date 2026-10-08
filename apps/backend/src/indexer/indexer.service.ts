@@ -6,7 +6,8 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { EventParser } from "@anchor-lang/core";
-import type { Epoch, Player, Prisma, Round } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { Epoch, Player, Round } from "@prisma/client";
 import { PublicKey, type ConfirmedSignatureInfo } from "@solana/web3.js";
 import bs58 from "bs58";
 
@@ -146,6 +147,10 @@ const SIGNATURE_PAGE = 1_000;
 
 /** The Yield index history keeps at most one point a minute (spec "Backend"). */
 const YIELD_INDEX_MIN_GAP_S = 60n;
+
+/** How far `getProgramAccountsV2`'s index can run behind its own
+ *  `context.slot` (measured 2026-09-14 on devnet: 33 to 59 slots). */
+const SWEEP_INDEX_LAG = 60n;
 
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
@@ -317,22 +322,22 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Positions still on chain whose Round is Settled, Forfeited or Voided,
-   * across every such Round, so still worth a `settle_position`. Position has
-   * no Prisma relation to Round (just its id), so this is two queries.
+   * oldest Round first, so still worth a `settle_position`. One joined
+   * statement with a limit: an `in` list of every terminal Round id passes
+   * Postgres's 32,767 bind-variable cap after about a month of rounds
+   * (mainnet-readiness-fixes 01). One tick settles one Round's batch, so the
+   * limit only has to cover a batch plus the ones the operator skips as just
+   * settled.
    */
   async unsettledPositions(): Promise<{ address: string; owner: string; roundId: bigint }[]> {
-    const terminalRounds = await this.prisma.round.findMany({
-      where: { poolAddress: this.activePool, status: { notIn: LIVE_ROUND_STATUSES } },
-      select: { id: true },
-    });
-    if (terminalRounds.length === 0) return [];
-    return this.prisma.position.findMany({
-      where: {
-        poolAddress: this.activePool,
-        roundId: { in: terminalRounds.map((round) => round.id) },
-      },
-      select: { address: true, owner: true, roundId: true },
-    });
+    return this.prisma.$queryRaw<{ address: string; owner: string; roundId: bigint }[]>`
+      SELECT p."address", p."owner", p."roundId"
+      FROM "Position" p
+      JOIN "Round" r ON r."poolAddress" = p."poolAddress" AND r."id" = p."roundId"
+      WHERE p."poolAddress" = ${this.activePool}
+        AND r."status" NOT IN (${Prisma.join(LIVE_ROUND_STATUSES)})
+      ORDER BY p."roundId" ASC, p."address" ASC
+      LIMIT 200`;
   }
 
   /**
@@ -581,10 +586,18 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     return due;
   }
 
+  async sentReferralGrants(epochId: bigint): Promise<{ referrer: string; txSig: string }[]> {
+    const rows = await this.prisma.referralGrant.findMany({
+      where: { poolAddress: this.activePool, epochId, txSig: { not: null } },
+      select: { referrer: true, txSig: true },
+    });
+    return rows.flatMap((row) => (row.txSig === null ? [] : [{ referrer: row.referrer, txSig: row.txSig }]));
+  }
+
   async markReferralGrantsSent(
     epochId: bigint,
     referrers: readonly string[],
-    txSig: string,
+    txSig: string | null,
   ): Promise<void> {
     await this.prisma.referralGrant.updateMany({
       where: { poolAddress: this.activePool, epochId, referrer: { in: [...referrers] } },
@@ -779,7 +792,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         break;
       }
       case "player": {
-        const row = playerRow(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress);
+        const row = playerRow(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress, slot);
         await this.prisma.player.upsert({
           where: { poolAddress_owner: { poolAddress, owner: row.owner } },
           create: row,
@@ -1021,7 +1034,11 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
             !this.behindLogPath(pubkey, slot),
         )
         .map(({ account }) => {
-          const row = playerRow(account, poolAddress);
+          // Mainnet-readiness-fixes 17: the V2 index runs behind `slot`, and
+          // a referral bind uses this slot as its seed, skipping the events
+          // at or before it. Stamping it lower means a lagged event is
+          // applied rather than skipped.
+          const row = playerRow(account, poolAddress, slot > SWEEP_INDEX_LAG ? slot - SWEEP_INDEX_LAG : 0n);
           return this.prisma.player.upsert({
             where: { poolAddress_owner: { poolAddress, owner: row.owner } },
             create: row,
@@ -1049,10 +1066,17 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       if (referrals.length > 0) {
         // Active pool only: a referee with no Player here yet keeps the
         // Principal their last event left (spec's "Referral job" decision).
-        const referralPlayers = await this.prisma.player.findMany({
-          where: { poolAddress, owner: { in: referrals.map((referral) => referral.referee) } },
-          select: { owner: true, principal: true },
-        });
+        // Chunked: one `in` list past 32,767 ids fails the statement.
+        const referees = referrals.map((referral) => referral.referee);
+        const referralPlayers: { owner: string; principal: bigint }[] = [];
+        for (let i = 0; i < referees.length; i += 10_000) {
+          referralPlayers.push(
+            ...(await this.prisma.player.findMany({
+              where: { poolAddress, owner: { in: referees.slice(i, i + 10_000) } },
+              select: { owner: true, principal: true },
+            })),
+          );
+        }
         const principalByOwner = new Map(
           referralPlayers.map((player) => [player.owner, player.principal]),
         );
@@ -1417,9 +1441,15 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           existing.map((row) => [row.referee, { principal: row.principal, aboveSince: row.aboveSince }]),
         );
         const blockTime = batch.blockTime ?? nowSeconds();
+        const seedSlots = new Map(existing.map((row) => [row.referee, row.seedSlot]));
         for (const { owner, event } of referralEvents) {
           const current = state.get(owner);
           if (current === undefined) continue; // not a referee
+          // The bind seeded principal from a Player mirror read at this slot
+          // or later, so an event at or before it is already in the seed
+          // (mainnet-readiness-fixes 11).
+          const seedSlot = seedSlots.get(owner) ?? 0n;
+          if (seedSlot > 0n && batch.slot <= seedSlot) continue;
           state.set(owner, applyReferralEvent(current, event, blockTime));
         }
         for (const [referee, next] of state) {

@@ -126,8 +126,9 @@ fee, up to `base_rate_bps` as an APR. Whatever the venue pays above the ceiling 
 When the venue pays less than the ceiling the prize share is zero and the jackpot grows only
 from `buy_tickets`, `fund_jackpot` and the 30% a House win leaves behind.
 
-A fall in venue value past `loss_tolerance_bps` (1 bps) is a venue loss. `prize_owed` absorbs it
-first, then `fee_owed`, and what is left becomes `Pool.deficit` with `impaired = true`. While
+A fall in venue value under `loss_tolerance_bps` (1 bps) is rounding dust. `fee_owed` bears it and
+the rest is booked in `Pool.deficit`, but the pool stays unimpaired. A fall past it is a venue loss.
+`prize_owed` absorbs it first, then `fee_owed`, and what is left becomes `Pool.deficit` with `impaired = true`. While
 impaired, deploy, harvest and `deposit` are refused and every exit pays the Haircut,
 `amount x (vault + venue value - owed amounts) / total_principal`. `process_withdraw` and
 `emergency_withdraw` then need the owner's signature, so a stranger or the Operator's crank

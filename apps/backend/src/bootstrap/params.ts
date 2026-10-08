@@ -158,6 +158,27 @@ export function assertMainnetSafe(input: MainnetGuardInput): void {
 }
 
 /**
+ * Mainnet only: the Treasury and Buyback reserve are real token accounts that
+ * receive every fee and House win, so a pasted account owned by someone else
+ * would send them to a stranger. The mint check cannot see that. Names the
+ * owner it found so the operator can see whose account it is.
+ */
+export function assertTokenAccountOwner(
+  genesisHash: string,
+  flag: string,
+  address: PublicKey,
+  owner: PublicKey,
+  admin: PublicKey,
+): void {
+  if (genesisHash !== MAINNET_GENESIS_HASH) return;
+  if (!owner.equals(admin)) {
+    throw new Error(
+      `--${flag} ${address.toBase58()} is owned by ${owner.toBase58()}, not by the admin ${admin.toBase58()}; refusing on mainnet`,
+    );
+  }
+}
+
+/**
  * Whether bootstrap sets the pool's Bought Tickets switch (yield-claimer
  * ticket 11, ADR 0019). On by default on mainnet-beta, off on every other
  * cluster; `BUY_TICKETS_PAUSED=true|false` overrides either way, and the
@@ -287,6 +308,36 @@ export function venuePinsFor(
     );
   }
   return { klendProgram, klendMarket, klendReserve, klendCtoken, kind: VENUE_KIND.klend, ...(ctokenMint ? { ctokenMint } : {}) };
+}
+
+/** Env keys that name a venue. Any of them set, or mainnet, means the env has a venue to compare. */
+const VENUE_ENV_KEYS = [
+  "VENUE_KIND",
+  "KLEND_VENUE",
+  "KLEND_PROGRAM",
+  "KLEND_MARKET",
+  "KLEND_RESERVE",
+  "KLEND_CTOKEN",
+  "KVAULT_ADDRESS",
+  "KVAULT_PROGRAM",
+] as const;
+
+/**
+ * The venue pins the env names, for comparing against an existing Pool
+ * (mainnet-readiness-fixes 06). `venuePinsFor` throws when a non-mainnet env
+ * names nothing, which is right when a pool is about to be created and wrong
+ * here, so an env with no venue key set gives undefined (nothing to compare).
+ * Mainnet always has an answer: the defaults are Kamino's USDC reserve.
+ */
+export function expectedVenuePins(
+  genesisHash: string,
+  env: Readonly<Record<string, string | undefined>>,
+  pool: PublicKey,
+  programId: PublicKey,
+): VenuePins | undefined {
+  const named = VENUE_ENV_KEYS.some((key) => (env[key]?.trim() ?? "") !== "");
+  if (!named && genesisHash !== MAINNET_GENESIS_HASH) return undefined;
+  return venuePinsFor(genesisHash, env, pool, programId);
 }
 
 /** The accepted mint is 6 decimals on every cluster we run on (bootstrap.ts

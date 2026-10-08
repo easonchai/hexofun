@@ -8,6 +8,7 @@ import {
   DEFAULT_POOL_PARAMS,
   MAINNET_GENESIS_HASH,
   assertMainnetSafe,
+  assertTokenAccountOwner,
   buyTicketsPausedFor,
   envInt,
   isoSeconds,
@@ -250,6 +251,30 @@ describe("assertMainnetSafe", () => {
         buybackReserve,
         acceptedMint,
       }),
+    ).not.toThrow();
+  });
+});
+
+describe("assertTokenAccountOwner", () => {
+  const admin = Keypair.generate().publicKey;
+  const stranger = Keypair.generate().publicKey;
+  const account = Keypair.generate().publicKey;
+
+  it("refuses a mainnet account owned by someone else and names the owner", () => {
+    expect(() =>
+      assertTokenAccountOwner(MAINNET_GENESIS_HASH, "treasury", account, stranger, admin),
+    ).toThrow(new RegExp(`--treasury ${account.toBase58()} is owned by ${stranger.toBase58()}`));
+  });
+
+  it("accepts a mainnet account the admin owns", () => {
+    expect(() =>
+      assertTokenAccountOwner(MAINNET_GENESIS_HASH, "buyback-reserve", account, admin, admin),
+    ).not.toThrow();
+  });
+
+  it("does not check other clusters", () => {
+    expect(() =>
+      assertTokenAccountOwner(DEVNET_GENESIS_HASH, "treasury", account, stranger, admin),
     ).not.toThrow();
   });
 });

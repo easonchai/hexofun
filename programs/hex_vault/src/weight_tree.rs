@@ -211,6 +211,20 @@ pub fn leaf_range(nodes: &[Node], leaf: usize, e: u64, clock: &Clock) -> Result<
     ))
 }
 
+/// True when `leaf` holds no Tickets in either readable epoch, so no pending
+/// draw or payout can land on it and its position can change owner
+/// (mainnet-readiness-fixes ticket 08).
+pub fn is_empty(nodes: &[Node], leaf: usize, clock: &Clock) -> Result<bool> {
+    let c = clock.current;
+    for e in core::iter::once(c).chain(c.checked_sub(1)) {
+        let (start, end) = leaf_range(nodes, leaf, e, clock)?;
+        if start != end {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Binary lifting: the leaf whose range in epoch `e` holds `target`.
 pub fn find(nodes: &[Node], mut target: u64, e: u64, clock: &Clock) -> Result<usize> {
     let n = nodes.len();

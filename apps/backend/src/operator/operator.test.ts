@@ -23,7 +23,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { loadIdl } from "../chain/idl";
-import { poolAddress, venueProposalAddress } from "../chain/pda";
+import { playerAddress, poolAddress, venueProposalAddress } from "../chain/pda";
 import {
   EPOCH_STATUS,
   ROUND_STATUS,
@@ -169,13 +169,13 @@ interface Recorder {
   ctx: TickContext;
   sent: TransactionInstruction[][];
   warned: string[];
-  markedSent: { epochId: bigint; referrers: string[]; txSig: string }[];
+  markedSent: { epochId: bigint; referrers: string[]; txSig: string | null }[];
 }
 
 function context(over: Partial<TickContext> = {}): Recorder {
   const sent: TransactionInstruction[][] = [];
   const warned: string[] = [];
-  const markedSent: { epochId: bigint; referrers: string[]; txSig: string }[] = [];
+  const markedSent: { epochId: bigint; referrers: string[]; txSig: string | null }[] = [];
   const ctx: TickContext = {
     now: NOW,
     pool: pool(),
@@ -213,8 +213,9 @@ function context(over: Partial<TickContext> = {}): Recorder {
     markReferralGrantsSent: async (epochId, referrers, txSig) => {
       markedSent.push({ epochId, referrers: [...referrers], txSig });
     },
-    send: async (ixs) => {
+    send: async (ixs, hooks) => {
       sent.push(ixs);
+      await hooks?.onSent("signature");
       return "signature";
     },
     warn: (message) => warned.push(message),
@@ -402,6 +403,20 @@ describe("runTick", () => {
     expect(outcome.stepError).toMatch(/blockhash expired/);
     // Falls through to open the next round instead of aborting the tick.
     expect(outcome.action).toBe("create_round");
+  });
+
+  it("2. (mainnet-readiness-fixes 01) a failing unsettledPositions read is recorded and steps 4 to 7 still run", async () => {
+    const { ctx, sent } = context({
+      pool: pool({ openRoundId: 0n }),
+      openRound: null,
+      unsettledPositions: async () => {
+        throw new Error("too many bind variables in prepared statement");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toMatch(/too many bind variables/);
+    expect(outcome.action).toBe("create_round");
+    expect((sent[0] ?? []).map(label)).toEqual(["create_round"]);
   });
 
   it("2. (ticket 12) an AccountNotInitialized race is treated as already settled", async () => {
@@ -728,6 +743,116 @@ describe("runTick", () => {
     expect(result.action).toBeNull();
   });
 
+  // mainnet-readiness-fixes 02: a global pause refuses grant_tickets, and a
+  // due grant must not hold the withdrawals below it.
+  it("3b. skips grants while the pool is paused and still pays a due withdrawal", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    const owner = Keypair.generate().publicKey.toBase58();
+    const { ctx, sent } = context({
+      pool: pool({ paused: true }),
+      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
+      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.action).toBe("process_withdraw");
+    expect(sent.flat().map(label)).not.toContain("grant_tickets");
+  });
+
+  it("3b. records an unknown grant failure and still reaches the withdrawals", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    const owner = Keypair.generate().publicKey.toBase58();
+    const { ctx } = context({
+      referralGrantsDue: async () => [{ referrer, amount: 1_000_000n }],
+      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
+      send: async (ixs) => {
+        if (ixs.some((ix) => label(ix) === "grant_tickets")) throw new Error("PoolPaused");
+        return "signature";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toMatch(/PoolPaused/);
+    expect(outcome.action).toBe("process_withdraw");
+  });
+
+  // mainnet-readiness-fixes 07: the signature is recorded when the transaction
+  // is sent, so a confirmation that times out does not leave the rows unmarked.
+  it("3b. a grant whose confirmation times out keeps its recorded signature, so the next tick does not resend", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    const rows = new Map<string, string | null>([[referrer, null]]);
+    const recorder = context({
+      referralGrantsDue: async () =>
+        [...rows].filter(([, sig]) => sig === null).map(([r]) => ({ referrer: r, amount: 1n })),
+      markReferralGrantsSent: async (_epochId, referrers, txSig) => {
+        for (const r of referrers) rows.set(r, txSig);
+      },
+      send: async (ixs, hooks) => {
+        recorder.sent.push(ixs);
+        await hooks?.onSent("sig-1");
+        throw new Error("transaction sig-1 still pending after 30000ms");
+      },
+    });
+    const first = await runTick(recorder.ctx);
+    expect(first.stepError).toMatch(/still pending/);
+    expect(rows.get(referrer)).toBe("sig-1");
+
+    await runTick(recorder.ctx);
+    expect(recorder.sent.flat().filter((ix) => label(ix) === "grant_tickets")).toHaveLength(1);
+  });
+
+  it("3b. a batch of one refused with AlreadyGranted marks its row sent without a resend", async () => {
+    const referrer = Keypair.generate().publicKey.toBase58();
+    let calls = 0;
+    const { ctx, markedSent } = context({
+      referralGrantsDue: async () => [{ referrer, amount: 1n }],
+      send: async () => {
+        calls += 1;
+        throw new Error("AlreadyGranted");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(calls).toBe(1);
+    expect(outcome.stepError).toBeUndefined();
+    expect(markedSent).toEqual([{ epochId: 2n, referrers: [referrer], txSig: "already-granted" }]);
+  });
+
+  // mainnet-readiness-fixes 16: simulation names only the first refused
+  // instruction, so a mixed batch is resent one referrer at a time.
+  it("3b. a mixed batch refused with AlreadyGranted marks only the referrer refused alone", async () => {
+    const [granted, fresh] = [Keypair.generate().publicKey.toBase58(), Keypair.generate().publicKey.toBase58()];
+    let calls = 0;
+    const { ctx, markedSent } = context({
+      referralGrantsDue: async () => [granted, fresh].map((referrer) => ({ referrer, amount: 1n })),
+      send: async (_ixs, hooks) => {
+        calls += 1;
+        // 1: the batch, 2: `granted` alone, 3: `fresh` alone.
+        if (calls <= 2) throw new Error("AlreadyGranted");
+        await hooks?.onSent("sig-fresh");
+        return "sig-fresh";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(calls).toBe(3);
+    expect(outcome.stepError).toBeUndefined();
+    expect(markedSent).toEqual([
+      { epochId: 2n, referrers: [granted], txSig: "already-granted" },
+      { epochId: 2n, referrers: [fresh], txSig: "sig-fresh" },
+    ]);
+  });
+
+  it("3b. a throw from referralGrantsDue is recorded and the withdrawals still go out", async () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+    const { ctx, sent } = context({
+      referralGrantsDue: async () => {
+        throw new Error("getSignatureStatuses: too many signatures");
+      },
+      duePendingWithdrawals: async () => [{ owner, amount: 1_000_000n }],
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toMatch(/too many signatures/);
+    expect(outcome.action).toBe("process_withdraw");
+    expect(sent.flat().map(label)).toContain("process_withdraw");
+  });
+
   // --- 4. request_draw: the ended epoch goes to the draw straight away. There
   // is no registration, no indexer wait and no window (ticket 13).
 
@@ -832,7 +957,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 10n,
       }),
-      winner: async (drawn) => (drawn.epochId === 1n && drawn.target === 42n ? winner : null),
+      winner: async (drawn) => (drawn.epochId === 1n && drawn.target === 42n ? { owner: winner, isHouse: false } : null),
     });
     // No winner token account any more (ticket 02): the prize goes into
     // principal_vault instead, so payout is the whole transaction.
@@ -849,7 +974,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 10n,
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
     });
     expect(result.labels).toEqual(["payout"]);
   });
@@ -863,7 +988,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 60n,
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) {
           throw new Error("AccountFrozen");
@@ -892,7 +1017,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 60n,
       }),
-      winner: async () => Keypair.generate().publicKey.toBase58(),
+      winner: async () => ({ owner: Keypair.generate().publicKey.toBase58(), isHouse: false }),
       send: async () => {
         throw new Error("blockhash expired");
       },
@@ -927,7 +1052,7 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n),
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) {
           throw new Error("AccountFrozen");
@@ -955,7 +1080,7 @@ describe("runTick", () => {
         // Past payoutTimeout, but well inside DRAWN_UNPAID_ALERT_SECONDS.
         drawnAt: NOW - 31n,
       }),
-      winner: async () => winner,
+      winner: async () => ({ owner: winner, isHouse: false }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) throw new Error("AccountFrozen");
         throw new Error("must not roll over yet");
@@ -976,7 +1101,8 @@ describe("runTick", () => {
         target: 42n,
         drawnAt: NOW - 31n,
       }),
-      winner: async () => housePool.house.toBase58(),
+      // The House Player's owner is the operator key, never `pool.house`.
+      winner: async () => ({ owner: Keypair.generate().publicKey.toBase58(), isHouse: true }),
       send: async (ixs) => {
         if (ixs.some((ix) => label(ix) === "payout")) throw new Error("AccountFrozen");
         sent.push(ixs);
@@ -1411,6 +1537,114 @@ describe("runTick", () => {
       lastRound: round({ status: ROUND_STATUS.VOIDED, endsAt: NOW }),
     });
     expect(result.labels).toEqual(["create_round"]);
+  });
+
+  // --- 8. Release a leaf (mainnet-readiness-fixes 08): lowest priority, one
+  // per tick, only for the owner `leafToRelease` names.
+
+  describe("8. release_leaf", () => {
+    const owner = Keypair.generate().publicKey.toBase58();
+
+    it("releases the named owner's leaf on an otherwise idle tick", async () => {
+      const { ctx, sent } = context({ leafToRelease: async () => owner });
+      const outcome = await runTick(ctx);
+      expect(outcome.action).toBe("release_leaf");
+      expect(sent.map((ixs) => ixs.map(label))).toEqual([["release_leaf"]]);
+      expect(keysOfIx(sent[0] ?? [])).toContain(
+        playerAddress(PROGRAM_ID, POOL, new PublicKey(owner)).toBase58(),
+      );
+    });
+
+    it("sends one release per tick and paces the next by the safety interval", async () => {
+      const asked: string[] = [];
+      const skipped: string[] = [];
+      const queue = [owner, Keypair.generate().publicKey.toBase58()];
+      const { ctx, sent } = context({
+        leafToRelease: async () => {
+          const next = queue.shift() ?? null;
+          if (next !== null) asked.push(next);
+          return next;
+        },
+        skipLeaf: (o) => skipped.push(o),
+      });
+      const outcome = await runTick(ctx);
+      expect(sent).toHaveLength(1);
+      expect(asked).toEqual([owner]);
+      expect(skipped).toEqual([owner]);
+      // Not "now": a backlog must not become a hot loop.
+      expect(outcome.nextWakeAt).toBeGreaterThan(NOW);
+    });
+
+    it("sends nothing when no leaf is due", async () => {
+      const { ctx, sent } = context({ leafToRelease: async () => null });
+      const outcome = await runTick(ctx);
+      expect(sent).toHaveLength(0);
+      expect(outcome.action).toBeNull();
+    });
+
+    it("yields to every crank: never asks while another step sends", async () => {
+      let asked = 0;
+      const result = await tickLabels({
+        pool: pool({ openRoundId: 0n }),
+        openRound: null,
+        leafToRelease: async () => {
+          asked += 1;
+          return owner;
+        },
+      });
+      expect(result.labels).toEqual(["create_round"]);
+      expect(asked).toBe(0);
+    });
+
+    it("does not run once the pool is shut down", async () => {
+      let asked = 0;
+      const result = await tickLabels({
+        pool: pool({ shutdown: true }),
+        leafToRelease: async () => {
+          asked += 1;
+          return owner;
+        },
+      });
+      expect(result.transactions).toBe(0);
+      expect(asked).toBe(0);
+    });
+
+    it("records a refused release without throwing and skips the owner", async () => {
+      const skipped: string[] = [];
+      const { ctx } = context({
+        leafToRelease: async () => owner,
+        skipLeaf: (o) => skipped.push(o),
+        send: async () => {
+          throw new Error("some unexpected refusal");
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.action).toBeNull();
+      expect(outcome.stepError).toContain(`release_leaf:${owner}`);
+      expect(skipped).toEqual([owner]);
+    });
+
+    // mainnet-readiness-fixes 16: a read failure keeps the tick's shortfall.
+    it("records a leafToRelease throw and still returns the 6b shortfall", async () => {
+      const { ctx, sent } = context({
+        duePendingWithdrawals: async () => pending(1, 4_000_000n),
+        principalVaultBalance: async () => 1_000_000n,
+        leafToRelease: async () => {
+          throw new Error("prisma down");
+        },
+        send: async (ixs) => {
+          if (ixs.some((ix) => label(ix) === "process_withdraw")) {
+            throw new Error("InsufficientVaultLiquidity");
+          }
+          sent.push(ixs);
+          return "signature";
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.withdrawShortfall).toBe(3_000_000n);
+      expect(outcome.stepError).toMatch(/prisma down/);
+      expect(sent).toHaveLength(0);
+    });
   });
 
   // --- Ticket 09: epochNoProgress and drawnUnpaid are computed off the

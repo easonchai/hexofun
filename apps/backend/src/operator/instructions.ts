@@ -17,6 +17,7 @@ import {
 
 import {
   epochAddress,
+  freeLeavesAddress,
   jackpotVaultAddress,
   playerAddress,
   positionAddress,
@@ -478,6 +479,24 @@ export class OperatorInstructions {
           pool: pool.address,
           operator: this.operator,
           round: this.round(pool, roundId),
+        })
+        .instruction(),
+    ];
+  }
+
+  /** mainnet-readiness-fixes 08: gives an empty Player's Weight tree leaf
+   *  back. Permissionless, so the operator key only pays the rent if the free
+   *  stack has to grow. */
+  async releaseLeaf(pool: PoolState, owner: string): Promise<TransactionInstruction[]> {
+    return [
+      await this.method("releaseLeaf")
+        .accountsPartial({
+          payer: this.operator,
+          pool: pool.address,
+          player: playerAddress(this.programId, pool.address, new PublicKey(owner)),
+          weightTree: pool.weightTree,
+          freeLeaves: freeLeavesAddress(this.programId, pool.address),
+          systemProgram: SystemProgram.programId,
         })
         .instruction(),
     ];

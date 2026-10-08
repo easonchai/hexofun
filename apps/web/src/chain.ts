@@ -224,6 +224,10 @@ export const VENUE_KIND = { klend: 0, stub: 1, kvault: 2 } as const;
 export const venueProposalAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("venue_proposal"), pool.toBuffer()]);
 
+/** The pool's stack of released Weight tree leaves; `deposit` pops from it. */
+export const freeLeavesAddress = (pool: PublicKey): PublicKey =>
+  pda([Buffer.from("free_leaves"), pool.toBuffer()]);
+
 export const jackpotVaultAddress = (pool: PublicKey): PublicKey =>
   pda([Buffer.from("jackpot"), pool.toBuffer()]);
 

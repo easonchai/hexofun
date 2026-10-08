@@ -111,6 +111,7 @@ const emptyPlayer = (owner: string, poolAddress: string = RETIRED_POOL_ADDRESS):
   boughtAmount: 0n,
   bonusEpoch: 0n,
   bonusGranted: 0n,
+  slot: 0n,
   ...LIVE_PLAYER_DEFAULTS,
 });
 

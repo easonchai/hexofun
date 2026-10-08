@@ -299,8 +299,33 @@ crank is due" below.
 Starts with `WEIGHT_TREE_NEARLY_FULL`.
 
 1. `GET /status`'s `treeNodeCount` against `treeCapacity` (187,244 Players). Past the capacity
-   deposits from a new wallet fail with `WeightTreeFull`. A second tree is out of scope for the
-   current program, so this needs a design decision well before the last leaf is taken.
+   deposits from a new wallet fail with `WeightTreeFull`. The alert fires at 80% of capacity.
+2. The Operator releases one empty Player's leaf per tick (`release_leaf`, after the Player has been
+   empty for more than one epoch), and `deposit` reuses released leaves before growing the tree.
+   Many wallets that deposited and refunded in one epoch therefore come back on their own. Anyone can
+   also call `release_leaf` for a Player with no Principal, no queued withdrawal and no open Position.
+3. A second tree is out of scope for the current program. If the count still climbs with real
+   Players, that needs a design decision well before the last leaf is taken.
+
+<a id="venue-proposed"></a>
+## A venue proposal is open
+
+Starts with `VENUE_PROPOSED`. The message carries the proposed kind, the klend program, market, reserve
+and cToken accounts, and the unix time the migration unlocks (48 hours after the proposal).
+
+1. Check the accounts against the venue you meant to move to. The only other readers of this alert are
+   the two keys that can propose, so an unexpected one means the Admin key signed something you did not.
+2. If it is wrong, run `admin cancel-venue` before the unlock time. The alert ends when the proposal
+   account closes, by cancel or by the migration.
+
+<a id="params-changed"></a>
+## Pool parameters changed
+
+Starts with `PARAMS_CHANGED`. It stays up for an hour after any `set_params`, with the new values in
+the message.
+
+1. Compare the values with the change you made. If you made none, treat it as an Admin key incident:
+   run the key-compromise steps above, then set the values back with `admin set-params`.
 
 <a id="sparring-sol-low"></a>
 ## Sparring player out of SOL

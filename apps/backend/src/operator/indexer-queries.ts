@@ -33,10 +33,12 @@ export interface IndexerQueries {
    */
   referralGrantsDue(epochId: bigint): Promise<{ referrer: string; amount: bigint }[]>;
   /** Records the signature of a batch of grants just sent, so a later tick
-   *  or a restart does not resend them. */
+   *  or a restart does not resend them. Null clears it (the send never landed). */
   markReferralGrantsSent(
     epochId: bigint,
     referrers: readonly string[],
-    txSig: string,
+    txSig: string | null,
   ): Promise<void>;
+  /** The recorded grant signatures for `epochId`, one entry per referrer. */
+  sentReferralGrants(epochId: bigint): Promise<{ referrer: string; txSig: string }[]>;
 }

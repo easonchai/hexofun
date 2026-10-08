@@ -34,18 +34,23 @@ import { VENUE_KIND } from "./chain/venue-kind";
 
 import {
   assertMainnetSafe,
+  assertTokenAccountOwner,
   buyTicketsPausedFor,
+  expectedVenuePins,
   parsePoolParams,
   venuePinsFor,
   type PoolParams,
   type VenuePins,
 } from "./bootstrap/params";
+import { assertPoolMatchesExpected } from "./boot-guard";
 import { loadIdl } from "./chain/idl";
 import {
+  freeLeavesAddress,
   jackpotVaultAddress,
   playerAddress,
   poolAddress,
   principalVaultAddress,
+  programDataAddress,
 } from "./chain/pda";
 
 /** spec.md §2.5. Pinned on the Pool; the localnet test-vrf build ignores it. */
@@ -71,6 +76,7 @@ interface PoolAccount {
   klendMarket: PublicKey;
   klendReserve: PublicKey;
   klendCtoken: PublicKey;
+  venueKind: number;
   gamePaused: boolean;
   jackpotPaused: boolean;
   buyTicketsPaused: boolean;
@@ -218,6 +224,7 @@ async function ensureExplicitTokenAccount(
   flag: string,
   address: PublicKey,
   mint: PublicKey,
+  ownerCheck: { genesisHash: string; admin: PublicKey },
 ): Promise<PublicKey> {
   const account = await getAccount(connection, address).catch(
     (cause: unknown) => {
@@ -232,6 +239,13 @@ async function ensureExplicitTokenAccount(
       `--${flag} ${address.toBase58()} holds mint ${account.mint.toBase58()}, expected ${mint.toBase58()}`,
     );
   }
+  assertTokenAccountOwner(
+    ownerCheck.genesisHash,
+    flag,
+    address,
+    account.owner,
+    ownerCheck.admin,
+  );
   return address;
 }
 
@@ -281,7 +295,10 @@ async function createPool(
     venueKind: venue.kind,
   })
     .accountsPartial({
+      // create_pool takes only the program's upgrade authority as payer, so
+      // bootstrap runs with the deploy key (mainnet-readiness-fixes 06).
       payer: payer.publicKey,
+      programData: programDataAddress(program.programId),
       pool,
       acceptedMint: mint,
       principalVault: principalVaultAddress(program.programId, pool),
@@ -290,6 +307,7 @@ async function createPool(
       treasury,
       buybackReserve,
       weightTree: weightTree.publicKey,
+      freeLeaves: freeLeavesAddress(program.programId, pool),
       klendProgram: venue.klendProgram,
       klendMarket: venue.klendMarket,
       klendReserve: venue.klendReserve,
@@ -520,13 +538,22 @@ async function main(): Promise<void> {
 
   // An existing pool has already recorded which mint and which token accounts
   // it accepts, so those win over anything this run would otherwise derive.
-  if (
-    existing &&
-    envMint &&
-    !existing.acceptedMint.equals(new PublicKey(envMint))
-  ) {
-    throw new Error(
-      `pool ${pool.toBase58()} accepts ${existing.acceptedMint.toBase58()}, but ACCEPTED_MINT is ${envMint}`,
+  // But anyone can call create_pool on a program that does not yet protect it
+  // (mainnet-readiness-fixes 06), so an existing pool must also match every
+  // admin, treasury, buyback reserve, mint and venue pin this run was given,
+  // or it may be someone else's.
+  if (existing) {
+    assertPoolMatchesExpected(
+      pool,
+      existing,
+      {
+        admin: explicitAdmin,
+        treasury: params.treasury,
+        buybackReserve: params.buybackReserve,
+        acceptedMint: envMint ? new PublicKey(envMint) : undefined,
+        venue: expectedVenuePins(genesisHash, process.env, pool, programId),
+      },
+      "the flags and env",
     );
   }
   // Read before anything is created, like the mainnet guard: a venue the env
@@ -557,7 +584,10 @@ async function main(): Promise<void> {
     ? existing.treasury
     : params.treasury
       ? await step("checking --treasury", () =>
-          ensureExplicitTokenAccount(connection, "treasury", params.treasury!, mint),
+          ensureExplicitTokenAccount(connection, "treasury", params.treasury!, mint, {
+            genesisHash,
+            admin: roles.admin,
+          }),
         )
       : await step("creating the treasury", () =>
           ensureSeededTokenAccount(
@@ -577,6 +607,7 @@ async function main(): Promise<void> {
             "buyback-reserve",
             params.buybackReserve!,
             mint,
+            { genesisHash, admin: roles.admin },
           ),
         )
       : await step("creating the buyback reserve", () =>

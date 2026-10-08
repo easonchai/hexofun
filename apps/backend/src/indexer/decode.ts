@@ -384,7 +384,11 @@ export function roundRow(round: DecodedRound, poolAddress: string): Prisma.Round
   };
 }
 
-export function playerRow(player: DecodedPlayer, poolAddress: string): Prisma.PlayerUncheckedCreateInput {
+export function playerRow(
+  player: DecodedPlayer,
+  poolAddress: string,
+  slot: bigint,
+): Prisma.PlayerUncheckedCreateInput {
   return {
     poolAddress,
     owner: player.owner.toBase58(),
@@ -403,6 +407,7 @@ export function playerRow(player: DecodedPlayer, poolAddress: string): Prisma.Pl
     leafIndex: player.leafIndex,
     pendingDeposit: big(player.pendingDeposit),
     pendingDepositEpoch: big(player.pendingDepositEpoch),
+    slot,
   };
 }
 

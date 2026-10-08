@@ -1,3 +1,5 @@
+use anchor_lang::prelude::*;
+
 /// Hex tiles on a round's board, indexed 0..35.
 pub const TILE_COUNT: u8 = 36;
 pub const TILE_MASK: u64 = (1u64 << TILE_COUNT) - 1;
@@ -19,6 +21,9 @@ pub const LAYOUT_VERSION: u8 = 2;
 
 /// Written to the Weight tree header by `create_pool`.
 pub const WEIGHT_TREE_VERSION: u8 = 1;
+
+/// Written to the FreeLeaves header by `create_pool`.
+pub const FREE_LEAVES_VERSION: u32 = 1;
 
 /// Denominator for `base_rate_bps`, an annual rate: seconds in a 365-day year.
 pub const SECONDS_PER_YEAR: u128 = 31_536_000;
@@ -89,11 +94,25 @@ pub const SEED_PLAYER: &[u8] = b"player";
 pub const SEED_POSITION: &[u8] = b"position";
 /// The open venue proposal of a pool: `[SEED_VENUE_PROPOSAL, pool]`.
 pub const SEED_VENUE_PROPOSAL: &[u8] = b"venue_proposal";
+/// The pool's stack of released Weight tree leaves: `[SEED_FREE_LEAVES, pool]`.
+pub const SEED_FREE_LEAVES: &[u8] = b"free_leaves";
 
 /// How long a venue proposal must stand before `migrate_venue` may execute
 /// it (venue-switch ticket 05 reads this). A constant, not a parameter: the
 /// only way to shorten the depositors' window is a visible program upgrade.
 pub const VENUE_LOCK_SECONDS: i64 = 48 * 60 * 60;
+
+/// The only klend program a klend-kind pool or proposal may pin (mainnet-readiness
+/// ticket 04, ADR 0023). `klend::deposit` CPIs into the pinned program with the
+/// pool PDA signing, so an admin key that could pin any program could name one it
+/// wrote and skip the 48 hour lock. Same id on every build, as for kVault: the
+/// fork rehearsals run klend's mainnet program. No devnet klend is used.
+pub const KLEND_PROGRAM_ID: Pubkey = pubkey!("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+
+/// `epoch_seconds` may not pass 7 days. `process_withdraw` reads it for the
+/// time route, so an unbounded value would close that route and trap
+/// depositors during the venue lock.
+pub const MAX_EPOCH_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 /// `ImpairedCleared::cause`: what took the deficit to zero.
 pub mod impaired_cause {

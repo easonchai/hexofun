@@ -13,6 +13,7 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { bindReferral } from "../api/referral-code";
 import { INVITE_CODE_ALPHABET, INVITE_CODE_LENGTH } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
 import { withRpcFallback } from "../chain/rpc-fallback";
@@ -1640,6 +1641,18 @@ describe("operator queries", () => {
     ]);
   });
 
+  it("finds an unsettled position past 32,767 terminal rounds (mainnet-readiness-fixes 01)", async () => {
+    await prisma.$executeRaw`
+      INSERT INTO "Round" ("poolAddress", "id", "epochId", "startsAt", "endsAt", "status", "pot", "houseCut", "tileTotals")
+      SELECT ${active()}, g, 5, 0, 60, 2, 0, 0, '[]'::jsonb FROM generate_series(1, 40000) AS g`;
+    await prisma.position.create({
+      data: { poolAddress: active(), address: "pos-late", owner: ALICE, roundId: 39_999n, tiles: 1n, stakePerTile: 1n },
+    });
+    expect(await indexer.unsettledPositions()).toEqual([
+      { address: "pos-late", owner: ALICE, roundId: 39_999n },
+    ]);
+  });
+
   it("lists terminal, not-yet-closed rounds with nothing left owed on them", async () => {
     await prisma.round.createMany({
       data: [
@@ -1724,6 +1737,59 @@ describe("referral qualification", () => {
   it("ignores a Principal-changing event for a wallet with no Referral row", async () => {
     expect(await indexer.ingestLogs(batch("sig-noref", 1n, [depositedFor(OWNER, 60_000_000, 60_000_000, 60_000_000)]))).toBe(1);
     expect(await prisma.referral.count()).toBe(0);
+  });
+
+  it("a bind seeds from a mirror ahead of the finalized events and skips the events the seed holds (mainnet-readiness-fixes 11)", async () => {
+    // Mirror at slot 5 already shows the refund (60 -> 40 USDC); the refund's
+    // event finalizes after the bind.
+    await prisma.player.create({
+      data: {
+        poolAddress: active(),
+        owner: referee,
+        principal: 40_000_000n,
+        entries: 0n,
+        epochId: 1n,
+        isHouse: false,
+        pendingWithdraw: 0n,
+        pendingEpoch: 0n,
+        boughtEpoch: 0n,
+        boughtAmount: 0n,
+        bonusEpoch: 0n,
+        bonusGranted: 0n,
+        slot: 5n,
+      },
+    });
+    await prisma.$transaction((tx) =>
+      bindReferral(tx, active(), referee, STRANGER.toBase58(), "ABCD2345"),
+    );
+    await indexer.ingestLogs(
+      batch("sig-seeded", 5n, [withdrawRequestedFor(OWNER, 20_000_000, 20_000_000)]),
+    );
+    expect((await prisma.referral.findUniqueOrThrow({ where: { referee } })).principal).toBe(40_000_000n);
+    // An event after the seed slot still applies.
+    await indexer.ingestLogs(
+      batch("sig-after-seed", 6n, [withdrawRequestedFor(OWNER, 10_000_000, 10_000_000)]),
+    );
+    expect((await prisma.referral.findUniqueOrThrow({ where: { referee } })).principal).toBe(30_000_000n);
+  });
+
+  it("a sweep stamps the Player row behind its slot, so an event in the index lag is applied (mainnet-readiness-fixes 17)", async () => {
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
+    connection.slot = 120;
+    try {
+      await indexer.syncAccounts();
+    } finally {
+      connection.slot = 100;
+    }
+    const player = await prisma.player.findUniqueOrThrow({ where: byOwner(referee) });
+    expect(player.slot).toBeLessThanOrEqual(60n);
+    await prisma.$transaction((tx) =>
+      bindReferral(tx, active(), referee, STRANGER.toBase58(), "ABCD2345"),
+    );
+    await indexer.ingestLogs(
+      batch("sig-lagged", 100n, [depositedFor(OWNER, 60_000_000, 63_000_000, 63_000_000)]),
+    );
+    expect((await prisma.referral.findUniqueOrThrow({ where: { referee } })).principal).toBe(63_000_000n);
   });
 
   it("crosses up through 50 USDC on a deposit and stamps aboveSince", async () => {

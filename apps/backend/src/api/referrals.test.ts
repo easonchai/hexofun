@@ -75,6 +75,7 @@ const emptyPlayer = (owner: string, poolAddress: string = POOL_ADDRESS): Player 
   boughtAmount: 0n,
   bonusEpoch: 0n,
   bonusGranted: 0n,
+  slot: 0n,
   ...LIVE_PLAYER_DEFAULTS,
 });
 

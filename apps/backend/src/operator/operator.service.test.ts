@@ -151,6 +151,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService end-of-tick timestamp", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -218,6 +219,7 @@ describe("OperatorService catch-path state write", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -262,6 +264,7 @@ describe("OperatorService.onModuleDestroy", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -292,11 +295,13 @@ describe("OperatorService.onModuleDestroy", () => {
 // pays a withdrawal a whole epoch early or never pays it at all.
 describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
   const owner = (): string => Keypair.generate().publicKey.toBase58();
+  const LIVE = { now: 1_000n, epochSeconds: 86_400n, shutdown: false };
 
   const player = (over: {
     owner: string;
     pendingWithdraw: bigint;
     pendingEpoch: bigint;
+    requestedAt?: bigint;
   }) => ({
     poolAddress: POOL_ADDRESS,
     principal: 0n,
@@ -309,6 +314,28 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
     bonusGranted: 0n,
     ...over,
   });
+
+  const makeOperator = (prisma: PrismaService) =>
+    new OperatorService(
+      {
+        program,
+        programId: PROGRAM_ID,
+        keypair: Keypair.generate(),
+        connection: new CountingConnection(new Map()),
+        poolAddress: () => POOL,
+      venueProposalAddress: () => PublicKey.default,
+      } as unknown as ChainService,
+      prisma,
+      {
+        unsettledPositions: async () => [],
+        referralGrantsDue: async () => [],
+        markReferralGrantsSent: async () => {},
+        sentReferralGrants: async () => [],
+        roundsToClose: async () => [],
+      },
+      noopSparring,
+      fakeConfig,
+    );
 
   it("returns only the requests the pool has moved past, oldest first", async () => {
     const prisma = new PrismaService();
@@ -341,33 +368,49 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService.duePendingWithdrawals", () => {
       ],
     });
 
-    const operator = new OperatorService(
-      {
-        program,
-        programId: PROGRAM_ID,
-        keypair: Keypair.generate(),
-        connection: new CountingConnection(new Map()),
-        poolAddress: () => POOL,
-      venueProposalAddress: () => PublicKey.default,
-      } as unknown as ChainService,
-      prisma,
-      {
-        unsettledPositions: async () => [],
-        referralGrantsDue: async () => [],
-        markReferralGrantsSent: async () => {},
-        roundsToClose: async () => [],
-      },
-      noopSparring,
-      fakeConfig,
-    );
+    const operator = makeOperator(prisma);
 
     try {
       // Private: the seam this test needs is the query, and reaching it
       // through a whole fabricated tick would assert the batching instead.
-      const due = await operator["duePendingWithdrawals"](5n);
+      const due = await operator["duePendingWithdrawals"](5n, LIVE);
       expect(due.filter((entry) => owners.includes(entry.owner))).toEqual([
         { owner: oldest, amount: 1_000_000n },
         { owner: newer, amount: 2_000_000n },
+      ]);
+    } finally {
+      await prisma.player.deleteMany({ where: { owner: { in: owners } } });
+      await prisma.$disconnect();
+    }
+  });
+
+  // mainnet-readiness-fixes 03: the program also pays past the deadline and
+  // once shut down, which the epoch test alone never selects.
+  it("also returns requests past requestedAt + epochSeconds, and every request once shut down", async () => {
+    const prisma = new PrismaService();
+    await prisma.$connect();
+    const stale = owner();
+    const fresh = owner();
+    const owners = [stale, fresh];
+    await ensurePoolRow(prisma, POOL_ADDRESS, 1n);
+    await prisma.player.deleteMany({ where: { owner: { in: owners } } });
+    // Both requested in the running epoch 5; only `stale` is past the deadline.
+    await prisma.player.createMany({
+      data: [
+        player({ owner: stale, pendingWithdraw: 1_000_000n, pendingEpoch: 5n, requestedAt: 100n }),
+        player({ owner: fresh, pendingWithdraw: 2_000_000n, pendingEpoch: 5n, requestedAt: 900n }),
+      ],
+    });
+    const operator = makeOperator(prisma);
+    try {
+      const mine = (due: { owner: string }[]) => due.filter((entry) => owners.includes(entry.owner));
+      // 100 + 500 < 1_000, but 900 + 500 is not.
+      const frozen = { now: 1_000n, epochSeconds: 500n, shutdown: false };
+      expect(mine(await operator["duePendingWithdrawals"](5n, frozen)).map((entry) => entry.owner)).toEqual([stale]);
+      const shutdown = { ...frozen, shutdown: true };
+      expect(mine(await operator["duePendingWithdrawals"](5n, shutdown)).map((entry) => entry.owner)).toEqual([
+        stale,
+        fresh,
       ]);
     } finally {
       await prisma.player.deleteMany({ where: { owner: { in: owners } } });
@@ -438,6 +481,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService read budget", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -519,6 +563,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService RPC failure recovery", () => {
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -622,6 +667,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService randomness subscription", () => 
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -780,6 +826,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
       unsettledPositions: async () => [],
       referralGrantsDue: async () => [],
       markReferralGrantsSent: async () => {},
+      sentReferralGrants: async () => [],
       roundsToClose: async () => [],
     };
     const operator = new OperatorService(
@@ -846,6 +893,7 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService on a freshly cut-over pool", () 
         unsettledPositions: async () => [],
         referralGrantsDue: async () => [],
         markReferralGrantsSent: async () => {},
+        sentReferralGrants: async () => [],
         roundsToClose: async () => [],
       },
       noopSparring,

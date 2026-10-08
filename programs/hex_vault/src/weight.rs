@@ -8,7 +8,8 @@
 //!
 //! The account is a 48-byte header and then `node_count` nodes of 56 bytes.
 //! The first deposit by a Player grows it by one node ([`append_leaves`]) and
-//! the depositor pays the rent for it. The House takes leaf 1 at `create_pool`.
+//! the depositor pays the rent for it, unless a released leaf is waiting in
+//! `free_leaves.rs` (ticket 08). The House takes leaf 1 at `create_pool`.
 
 use anchor_lang::__private::bytemuck;
 use anchor_lang::prelude::*;
@@ -149,6 +150,21 @@ pub fn check_winner(
     let (start, end) = tree::leaf_range(nodes, winner.leaf_index as usize, epoch_id, &clock(pool))
         .map_err(err)?;
     require!(start <= target && target < end, HexVaultError::NotTheWinner);
+    Ok(())
+}
+
+/// `release_leaf`'s check that `player`'s leaf holds no Tickets in either
+/// readable epoch.
+pub fn check_leaf_empty(
+    tree_account: &AccountLoader<WeightTree>,
+    pool: &Pool,
+    player: &Player,
+) -> Result<()> {
+    let info = tree_account.to_account_info();
+    let data = info.try_borrow_data()?;
+    let nodes = nodes_ref(&data)?;
+    let empty = tree::is_empty(nodes, player.leaf_index as usize, &clock(pool)).map_err(err)?;
+    require!(empty, HexVaultError::LeafInUse);
     Ok(())
 }
 

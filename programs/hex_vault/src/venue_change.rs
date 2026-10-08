@@ -12,6 +12,7 @@ use crate::constants::{
 use crate::errors::HexVaultError;
 use crate::events::{VenueDrained, VenueMigrated, VenueProposalCancelled, VenueProposed};
 use crate::state::{Pool, VenueProposal};
+use crate::sync::absorb_dust;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
 
@@ -49,6 +50,9 @@ pub fn propose_venue<'info>(
             && args.klend_ctoken != Pubkey::default(),
         HexVaultError::InvalidParameter
     );
+
+    // Else a stolen Admin key could pin a program it wrote and skip the lock.
+    venue::check_klend_program(args.venue_kind, &args.klend_program)?;
 
     if args.venue_kind == venue_kind::KVAULT {
         let r = ctx.remaining_accounts;
@@ -161,7 +165,7 @@ pub fn drain_venue<'info>(ctx: Context<'info, DrainVenue<'info>>, amount: u64) -
         // As in `recall`: what the value fell by beyond what arrived is
         // rounding dust and comes off the fee owed, floored at zero.
         pool.venue_value = pool.venue_value.saturating_sub(fall);
-        pool.fee_owed = pool.fee_owed.saturating_sub(fall.saturating_sub(received));
+        absorb_dust(pool, fall.saturating_sub(received))?;
     }
 
     emit!(VenueDrained {

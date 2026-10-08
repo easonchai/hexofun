@@ -35,7 +35,9 @@ import {
   type PoolState,
   type RoundState,
 } from "./chain-state";
+import { type GrantReclaimState, reclaimUnlandedGrants } from "./grant-reclaim";
 import { INDEXER_QUERIES, type IndexerQueries } from "./indexer-queries";
+import { decodeLeafHolder, firstReleasable, RELEASE_CANDIDATES } from "./leaf-release";
 import { OperatorInstructions } from "./instructions";
 import { SparringService } from "./sparring";
 import {
@@ -94,9 +96,14 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    *  (ops-and-envs ticket 08): keeps an immediate next tick from resending
    *  it before the indexer's `RoundClosed` mirror lands. */
   private closingRounds = new Map<bigint, number>();
+  private grantReclaim: GrantReclaimState = { firstSeen: new Map(), confirmed: new Set() };
   /** Epoch id to the owner whose leaf held its target. A target never moves
    *  once drawn, so a retried payout does not re-read the whole tree. */
-  private winners = new Map<bigint, string>();
+  private winners = new Map<bigint, { owner: string; isHouse: boolean }>();
+  /** Mainnet-readiness-fixes 08: owners `leafToRelease` has examined or
+   *  released this epoch, mapped to that epoch, so each tick looks at fresh
+   *  candidates. Emptied of old epochs as it is read. */
+  private skippedLeaves = new Map<string, bigint>();
   /** Ticket 06: withdrawal-cranking state across ticks (see `WithdrawState`). */
   private lastWithdrawState: WithdrawState | null = null;
   /** Ticket 12: expected-error repeat counts across ticks, by `action:target`. */
@@ -370,9 +377,18 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       launchAt: this.launchAt,
       fulfilled: (seed) => this.fulfilled(seed),
       principalVaultBalance: () => this.principalVaultBalance(),
-      duePendingWithdrawals: (currentEpochId) =>
-        this.duePendingWithdrawals(currentEpochId),
-      referralGrantsDue: (epochId) => this.indexer.referralGrantsDue(epochId),
+      duePendingWithdrawals: (currentEpochId, deadline) =>
+        this.duePendingWithdrawals(currentEpochId, deadline),
+      referralGrantsDue: async (epochId) => {
+        await reclaimUnlandedGrants({
+          rows: await this.indexer.sentReferralGrants(epochId),
+          connection: this.chain.connection,
+          clear: (referrers) => this.indexer.markReferralGrantsSent(epochId, referrers, null),
+          state: this.grantReclaim,
+          now: Date.now(),
+        });
+        return this.indexer.referralGrantsDue(epochId);
+      },
       markReferralGrantsSent: (epochId, referrers, txSig) =>
         this.indexer.markReferralGrantsSent(epochId, referrers, txSig),
       unsettledPositions: async () =>
@@ -396,10 +412,14 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         this.closingRounds.set(id, now);
       },
       winner: (epoch) => this.winner(pool, epoch),
-      send: (instructions) =>
-        tables.length === 0
+      leafToRelease: () => this.leafToRelease(pool),
+      skipLeaf: (owner) => {
+        this.skippedLeaves.set(owner, pool.currentEpochId);
+      },
+      send: (instructions, hooks) =>
+        tables.length === 0 && !hooks
           ? this.chain.send(instructions)
-          : this.chain.send(instructions, undefined, tables),
+          : this.chain.send(instructions, undefined, tables, hooks),
       warn: (message) => this.logger.warn(message),
     };
   }
@@ -552,20 +572,70 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    *  so a batch that only covers part of the queue still drains it in order. */
   private async duePendingWithdrawals(
     currentEpochId: bigint,
+    deadline: { now: bigint; epochSeconds: bigint; shutdown: boolean },
   ): Promise<{ owner: string; amount: bigint }[]> {
+    // The same three routes `process_withdraw` accepts (custody.rs): the epoch
+    // moved on, `now > requested_at + epoch_seconds`, or the pool is shut down.
     const players = await this.prisma.player.findMany({
       where: {
         poolAddress: this.chain.poolAddress().toBase58(),
         pendingWithdraw: { gt: 0 },
-        pendingEpoch: { lt: currentEpochId },
+        ...(deadline.shutdown
+          ? {}
+          : {
+              OR: [
+                { pendingEpoch: { lt: currentEpochId } },
+                { requestedAt: { lt: deadline.now - deadline.epochSeconds } },
+              ],
+            }),
       },
-      orderBy: { pendingEpoch: "asc" },
+      orderBy: [{ pendingEpoch: "asc" }, { requestedAt: "asc" }],
       select: { owner: true, pendingWithdraw: true },
     });
     return players.map((player) => ({
       owner: player.owner,
       amount: player.pendingWithdraw,
     }));
+  }
+
+  /**
+   * Mainnet-readiness-fixes 08: one Player whose Weight tree leaf may go back
+   * to the free stack. The Read model nominates the oldest empty Players with
+   * a leaf; each is then read off the chain, and only one that is still empty
+   * there is returned. Every examined owner is skipped for the rest of the
+   * epoch, so a stale mirror row cannot hold the same slot every tick.
+   */
+  private async leafToRelease(pool: PoolState): Promise<string | null> {
+    for (const [owner, epoch] of this.skippedLeaves) {
+      if (epoch !== pool.currentEpochId) this.skippedLeaves.delete(owner);
+    }
+    const rows = await this.prisma.player.findMany({
+      where: {
+        poolAddress: pool.address.toBase58(),
+        leafIndex: { gt: 0 },
+        isHouse: false,
+        principal: 0n,
+        pendingWithdraw: 0n,
+        epochId: { lte: pool.currentEpochId - 2n },
+        owner: { notIn: [...this.skippedLeaves.keys()] },
+      },
+      orderBy: { epochId: "asc" },
+      take: RELEASE_CANDIDATES,
+      select: { owner: true },
+    });
+    if (rows.length === 0) return null;
+    const infos = await this.chain.connection.getMultipleAccountsInfo(
+      rows.map((row) => this.chain.playerAddress(new PublicKey(row.owner))),
+    );
+    const holders = rows.map((row, i) => {
+      const info = infos[i];
+      return info ? decodeLeafHolder(this.chain.program, row.owner, info.data) : null;
+    });
+    const pick = firstReleasable(holders, pool.currentEpochId);
+    for (const row of rows) {
+      if (row.owner !== pick) this.skippedLeaves.set(row.owner, pool.currentEpochId);
+    }
+    return pick;
   }
 
   /**
@@ -580,7 +650,10 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
    * in `winners`. Add a `getProgramAccounts` memcmp filter on `leaf_index` if
    * it ever grows.
    */
-  private async winner(pool: PoolState, epoch: EpochState): Promise<string | null> {
+  private async winner(
+    pool: PoolState,
+    epoch: EpochState,
+  ): Promise<{ owner: string; isHouse: boolean } | null> {
     const cached = this.winners.get(epoch.epochId);
     if (cached !== undefined) return cached;
 
@@ -592,6 +665,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     interface DecodedPlayer {
       owner: PublicKey;
       leafIndex: number;
+      isHouse: boolean;
     }
     // SAFETY: `program.account` is keyed by plain strings in `Program<Idl>`
     // (no generated per-account types), same reason `instructions.ts`'s
@@ -602,16 +676,25 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
     >;
     const playerAccounts = accountNamespace.player;
     if (!playerAccounts) throw new Error("player account namespace is missing from the IDL");
-    const hit = (await playerAccounts.all()).find(
+    const hits = (await playerAccounts.all()).filter(
       ({ publicKey, account }) =>
         account.leafIndex === leaf && publicKey.equals(this.chain.playerAddress(account.owner)),
     );
+    // Leaf reuse (mainnet-readiness-fixes 08) must leave one owner per leaf: a
+    // released Player has leaf_index 0. Two would mean the prize could go to
+    // the wrong wallet, so refuse to pick one.
+    if (hits.length > 1) {
+      throw new Error(`leaf ${leaf} is held by ${hits.length} Players; refusing to pick a winner`);
+    }
+    const hit = hits[0];
     if (!hit) return null;
 
-    const owner = hit.account.owner.toBase58();
-    this.winners.set(epoch.epochId, owner);
+    // The House Player's `owner` is the operator key, not `pool.house` (its
+    // PDA), so the flag is the only reliable test (mainnet-readiness-fixes 09).
+    const winner = { owner: hit.account.owner.toBase58(), isHouse: hit.account.isHouse };
+    this.winners.set(epoch.epochId, winner);
     for (const id of [...this.winners.keys()].slice(0, -WINNER_MEMORY)) this.winners.delete(id);
-    return owner;
+    return winner;
   }
 
   /**

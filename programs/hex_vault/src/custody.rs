@@ -13,12 +13,12 @@ use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, Tran
 
 use crate::constants::{
     impaired_cause, venue_kind, MAX_IDLE_TARGET_BPS, MAX_LOSS_TOLERANCE_BPS, MAX_MIN_VENUE_MOVE,
-    MAX_RESERVE_LIQUIDITY_FLOOR_BPS, MAX_RESERVE_SHARE_CAP_BPS, MAX_YIELD_FEE_BPS,
+    MAX_EPOCH_SECONDS, MAX_RESERVE_LIQUIDITY_FLOOR_BPS, MAX_RESERVE_SHARE_CAP_BPS, MAX_YIELD_FEE_BPS,
     MIN_RESERVE_LIQUIDITY_FLOOR_BPS,
     BPS_DENOMINATOR, DEFAULT_IDLE_FLOOR_BPS, DEFAULT_IDLE_TARGET_BPS, DEFAULT_LOSS_TOLERANCE_BPS,
     DEFAULT_MIN_VENUE_MOVE, DEFAULT_RESERVE_LIQUIDITY_FLOOR_BPS, DEFAULT_RESERVE_SHARE_CAP_BPS,
     DEFAULT_YIELD_FEE_BPS, LAYOUT_VERSION, MIN_PAYOUT_TIMEOUT, MIN_VRF_TIMEOUT,
-    SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
+    SEED_FREE_LEAVES, SEED_JACKPOT, SEED_PLAYER, SEED_POOL, SEED_PRINCIPAL, SEED_VENUE_PROPOSAL,
     WEIGHT_TREE_VERSION,
 };
 use crate::errors::HexVaultError;
@@ -31,8 +31,9 @@ use crate::events::{
     // yield-claimer ticket 10
     DeficitCovered, DeployPauseSet, ImpairedCleared, VenueParamsSet,
 };
-use crate::state::{Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
-use crate::sync::{haircut, realise_loss, settle, settle_before_growth};
+use crate::free_leaves;
+use crate::state::{FreeLeaves, Player, Pool, WeightTree, WEIGHT_TREE_NODE_SIZE};
+use crate::sync::{absorb_dust, haircut, realise_loss, settle, settle_before_growth};
 use crate::touch::touch;
 use crate::utils;
 use crate::venue::{self, Funds, Venue};
@@ -105,7 +106,7 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         HexVaultError::InvalidParameter
     );
     require!(
-        params.epoch_seconds > 0
+        valid_epoch_seconds(params.epoch_seconds)
             && params.epoch_anchor > 0
             && params.round_seconds > 0
             && params.vrf_timeout >= MIN_VRF_TIMEOUT,
@@ -162,6 +163,7 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
             && klend_ctoken != Pubkey::default(),
         HexVaultError::InvalidParameter
     );
+    venue::check_klend_program(params.venue_kind, &klend_program)?;
     // Every deploy sends cTokens here and every redeem draws them back, so
     // an account the pool PDA does not own strands the lot. The mint is
     // still checked against the reserve at the first sync.
@@ -207,6 +209,8 @@ pub fn create_pool(ctx: Context<CreatePool>, params: CreatePoolParams) -> Result
         tree.node_count = 0;
         tree.pool = pool_key;
     }
+
+    free_leaves::init(&ctx.accounts.free_leaves, pool_key)?;
 
     let pool = &mut ctx.accounts.pool;
     pool.pool_id = params.pool_id;
@@ -312,7 +316,7 @@ pub fn set_params(ctx: Context<SetParams>, params: SetParamsArgs) -> Result<()> 
     let pool = &mut ctx.accounts.pool;
 
     if let Some(v) = params.epoch_seconds {
-        require!(v > 0, HexVaultError::InvalidParameter);
+        require!(valid_epoch_seconds(v), HexVaultError::InvalidParameter);
         pool.epoch_seconds = v;
     }
     if let Some(v) = params.epoch_anchor {
@@ -551,17 +555,20 @@ pub fn deposit<'info>(ctx: Context<'info, Deposit<'info>>, amount: u64) -> Resul
         HexVaultError::BelowMinimumDeposit
     );
 
-    // A first deposit appends this Player's leaf and the depositor pays the
-    // rent for it. Refused with `WeightTreeFull` before anything moves if
-    // the account would pass 10 MiB.
+    // A first deposit takes a released leaf if one is waiting (ticket 08),
+    // else appends one and the depositor pays the rent for it. Refused with
+    // `WeightTreeFull` before anything moves if the account would pass 10 MiB.
     if player.leaf_index == 0 {
-        player.leaf_index = weight::append_leaves(
-            &a.weight_tree,
-            pool,
-            &a.owner.to_account_info(),
-            &a.system_program.to_account_info(),
-            1,
-        )?;
+        player.leaf_index = match free_leaves::pop(&a.free_leaves)? {
+            Some(leaf) => leaf,
+            None => weight::append_leaves(
+                &a.weight_tree,
+                pool,
+                &a.owner.to_account_info(),
+                &a.system_program.to_account_info(),
+                1,
+            )?,
+        };
     }
 
     token_interface::transfer_checked(
@@ -698,7 +705,7 @@ pub fn request_withdraw<'info>(
             // What the value fell by beyond what arrived is rounding dust,
             // charged to the fee owed and floored at zero, as in `recall`.
             a.pool.venue_value = a.pool.venue_value.saturating_sub(fall);
-            a.pool.fee_owed = a.pool.fee_owed.saturating_sub(fall.saturating_sub(received));
+            absorb_dust(&mut a.pool, fall.saturating_sub(received))?;
             redeemed = gap;
         }
 
@@ -773,6 +780,37 @@ pub fn request_withdraw<'info>(
     Ok(())
 }
 
+/// Whether `payer` holds the program's upgrade authority. A frozen program
+/// (`None`) has none, so nobody can create a pool on it.
+fn is_upgrade_authority(authority: Option<Pubkey>, payer: &Pubkey) -> bool {
+    authority == Some(*payer)
+}
+
+/// `create_pool` and `set_params` take an `epoch_seconds` in (0, 7 days].
+fn valid_epoch_seconds(v: i64) -> bool {
+    v > 0 && v <= MAX_EPOCH_SECONDS
+}
+
+/// Either the epoch the request was made in has been left behind, or a whole
+/// epoch's worth of seconds has passed since the request. The second can never
+/// come first while the operator is alive, because the epoch the request
+/// landed in ends within `epoch_seconds` of it; it is the escape hatch for an
+/// operator that stopped calling `begin_epoch`, and for a paused jackpot, which
+/// freezes `current_epoch_id`. The wait is capped at `MAX_EPOCH_SECONDS`, so a
+/// huge `epoch_seconds` from before the cap cannot close the route (ticket 04).
+fn withdrawal_due(
+    current_epoch_id: u64,
+    pending_epoch: u64,
+    requested_at: i64,
+    epoch_seconds: i64,
+    now: i64,
+) -> Result<bool> {
+    let deadline = requested_at
+        .checked_add(epoch_seconds.min(MAX_EPOCH_SECONDS))
+        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    Ok(current_epoch_id > pending_epoch || now > deadline)
+}
+
 /// Pays a matured request. Not impaired, no signer at all: the operator pushes
 /// these every epoch, and the depositor (or anyone) can push their own if it
 /// does not. Impaired, the payout is the haircut value, so the Player's owner
@@ -794,20 +832,17 @@ pub fn process_withdraw<'info>(ctx: Context<'info, ProcessWithdraw<'info>>) -> R
 
     let pending = a.player.pending_withdraw;
     require!(pending > 0, HexVaultError::NothingPending);
-    // Either the epoch the request was made in has been left behind, or a
-    // whole epoch's worth of seconds has passed since the request. The
-    // second can never come first while the operator is alive, because the
-    // epoch the request landed in ends within `epoch_seconds` of it; it is
-    // the escape hatch for an operator that stopped calling `begin_epoch`.
-    let deadline = a
-        .player
-        .requested_at
-        .checked_add(a.pool.epoch_seconds)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
     // Shutdown lets a request and its payout land in one transaction: a
     // depositor pulls their own money instead of waiting on the epoch lock.
     require!(
-        a.pool.shutdown || a.pool.current_epoch_id > a.player.pending_epoch || now > deadline,
+        a.pool.shutdown
+            || withdrawal_due(
+                a.pool.current_epoch_id,
+                a.player.pending_epoch,
+                a.player.requested_at,
+                a.pool.epoch_seconds,
+                now,
+            )?,
         HexVaultError::WithdrawalNotDue
     );
     require!(
@@ -1026,7 +1061,7 @@ pub fn deploy_to_venue<'info>(
         .venue_value
         .checked_add(rise)
         .ok_or(HexVaultError::ArithmeticOverflow)?;
-    pool.fee_owed = pool.fee_owed.saturating_sub(dust);
+    absorb_dust(pool, dust)?;
 
     emit!(VenueDeployed {
         pool: pool.key(),
@@ -1118,7 +1153,7 @@ pub fn recall<'info>(ctx: Context<'info, Recall<'info>>, amount: u64) -> Result<
     // fee owed, floored at zero.
     let pool = &mut a.pool;
     pool.venue_value = pool.venue_value.saturating_sub(fall);
-    pool.fee_owed = pool.fee_owed.saturating_sub(fall.saturating_sub(received));
+    absorb_dust(pool, fall.saturating_sub(received))?;
 
     emit!(VenueRecalled {
         pool: pool.key(),
@@ -1185,8 +1220,10 @@ pub fn harvest<'info>(ctx: Context<'info, Harvest<'info>>) -> Result<()> {
 
     // The dust the redeem cost is the fee's to bear: pay that much less, and
     // the vault keeps exactly what the venue lost beyond the redeem.
-    let fee_paid = fee_owed.saturating_sub(dust);
+    // Dust past the fee owed is booked as deficit.
     let pool = &mut a.pool;
+    absorb_dust(pool, dust)?;
+    let fee_paid = pool.fee_owed;
     let pool_id_bytes = pool.pool_id.to_le_bytes();
     let pool_bump = [pool.bump];
     let signer_seeds: &[&[u8]] = &[SEED_POOL, &pool_id_bytes, &pool_bump];
@@ -1693,6 +1730,12 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
 
     if !by_admin {
         require!(!player.is_house, HexVaultError::HouseCannotBeGranted);
+        // One grant per referrer per epoch: a resend after a lost
+        // confirmation must not grant twice.
+        require!(
+            player.bonus_epoch != pool.current_epoch_id || player.bonus_granted == 0,
+            HexVaultError::AlreadyGranted
+        );
 
         let player_bonus = bonus_after(
             player.bonus_epoch,
@@ -1738,9 +1781,21 @@ pub fn grant_tickets(ctx: Context<GrantTickets>, amount: u64) -> Result<()> {
 #[derive(Accounts)]
 #[instruction(params: CreatePoolParams)]
 pub struct CreatePool<'info> {
-    /// Pays rent only. The admin and operator come in through `params`.
+    /// Pays rent, and must be the program's upgrade authority, so nobody else
+    /// can create a pool under our operator key (mainnet-readiness ticket 06).
+    /// The admin and operator come in through `params`.
     #[account(mut)]
     pub payer: Signer<'info>,
+
+    pub program: Program<'info, crate::program::HexVault>,
+
+    #[account(
+        constraint = program.programdata_address()? == Some(program_data.key())
+            @ HexVaultError::NotUpgradeAuthority,
+        constraint = is_upgrade_authority(program_data.upgrade_authority_address, &payer.key())
+            @ HexVaultError::NotUpgradeAuthority,
+    )]
+    pub program_data: Account<'info, ProgramData>,
 
     #[account(
         init,
@@ -1793,6 +1848,17 @@ pub struct CreatePool<'info> {
             @ HexVaultError::InvalidParameter,
     )]
     pub weight_tree: AccountLoader<'info, WeightTree>,
+
+    /// The stack of released leaves (ticket 08), a header-only PDA that
+    /// `release_leaf` grows.
+    #[account(
+        init,
+        payer = payer,
+        seeds = [SEED_FREE_LEAVES, pool.key().as_ref()],
+        bump,
+        space = 8 + core::mem::size_of::<FreeLeaves>(),
+    )]
+    pub free_leaves: AccountLoader<'info, FreeLeaves>,
 
     // Only the mint is checked. On mainnet these are the multisig's own
     // accounts, which nothing in this instruction signs for.
@@ -2176,9 +2242,13 @@ pub struct Deposit<'info> {
     )]
     pub player: Box<Account<'info, Player>>,
 
-    /// Grows by one node at this Player's first deposit, `owner` paying.
+    /// Grows by one node at this Player's first deposit, `owner` paying,
+    /// unless a released leaf is waiting in `free_leaves`.
     #[account(mut)]
     pub weight_tree: AccountLoader<'info, WeightTree>,
+
+    #[account(mut, seeds = [SEED_FREE_LEAVES, pool.key().as_ref()], bump)]
+    pub free_leaves: AccountLoader<'info, FreeLeaves>,
 
     #[account(address = pool.accepted_mint @ HexVaultError::MintMismatch)]
     pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
@@ -2530,6 +2600,37 @@ pub struct GrantTickets<'info> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_upgrade_authority_may_create_a_pool() {
+        let authority = Pubkey::new_unique();
+        assert!(is_upgrade_authority(Some(authority), &authority));
+        assert!(!is_upgrade_authority(Some(authority), &Pubkey::new_unique()));
+        assert!(!is_upgrade_authority(None, &authority));
+    }
+
+    #[test]
+    fn epoch_seconds_above_seven_days_are_refused() {
+        assert!(valid_epoch_seconds(MAX_EPOCH_SECONDS));
+        assert!(!valid_epoch_seconds(MAX_EPOCH_SECONDS + 1));
+        assert!(!valid_epoch_seconds(0));
+    }
+
+    #[test]
+    fn a_request_matures_on_the_deadline_while_the_epoch_id_is_frozen() {
+        // Jackpot paused: current_epoch_id stays at the request's epoch.
+        assert!(!withdrawal_due(5, 5, 1_000, 86_400, 1_000 + 86_400).unwrap());
+        assert!(withdrawal_due(5, 5, 1_000, 86_400, 1_000 + 86_400 + 1).unwrap());
+        // A boundary crossed matures it at once.
+        assert!(withdrawal_due(6, 5, 1_000, 86_400, 1_001).unwrap());
+    }
+
+    #[test]
+    fn a_huge_epoch_seconds_cannot_push_the_deadline_past_seven_days() {
+        let at = 1_000;
+        assert!(!withdrawal_due(5, 5, at, i64::MAX / 2, at + MAX_EPOCH_SECONDS).unwrap());
+        assert!(withdrawal_due(5, 5, at, i64::MAX / 2, at + MAX_EPOCH_SECONDS + 1).unwrap());
+    }
 
     #[test]
     fn a_purchase_landing_exactly_on_the_cap_succeeds() {

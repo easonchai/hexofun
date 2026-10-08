@@ -58,6 +58,17 @@ impl Venue<'_, '_> {
     }
 }
 
+/// A klend-kind venue must pin the real klend program, in `create_pool` and
+/// `propose_venue` (mainnet-readiness ticket 04). Other kinds are checked by
+/// their own backing.
+pub fn check_klend_program(kind: u8, program: &Pubkey) -> Result<()> {
+    require!(
+        kind != venue_kind::KLEND || *program == crate::constants::KLEND_PROGRAM_ID,
+        HexVaultError::KlendProgramMismatch
+    );
+    Ok(())
+}
+
 #[path = "klend.rs"]
 mod klend;
 #[path = "kvault.rs"]
@@ -155,7 +166,9 @@ pub fn sync<'info>(
             deficit_repaid: outcome.deficit_repaid,
         });
     }
-    if outcome.deficit_added > 0 {
+    // Dust under the tolerance books a deficit without impairing the pool,
+    // and is no ImpairedSet.
+    if outcome.deficit_added > 0 && pool.impaired {
         emit!(ImpairedSet {
             pool: pool.key(),
             loss: outcome.loss,
@@ -232,6 +245,17 @@ mod tests {
         supply: 1_000_000,
         available: 300_000,
     };
+
+    #[test]
+    fn a_klend_kind_pins_only_the_klend_program() {
+        let foreign = Pubkey::new_unique();
+        assert!(check_klend_program(venue_kind::KLEND, &crate::constants::KLEND_PROGRAM_ID).is_ok());
+        assert!(check_klend_program(venue_kind::KLEND, &foreign).is_err());
+        assert!(check_klend_program(venue_kind::KLEND, &Pubkey::default()).is_err());
+        // Other kinds answer to their own backing.
+        assert!(check_klend_program(venue_kind::KVAULT, &foreign).is_ok());
+        assert!(check_klend_program(venue_kind::STUB, &foreign).is_ok());
+    }
 
     #[test]
     fn klend_is_zero_and_the_stub_needs_its_feature() {

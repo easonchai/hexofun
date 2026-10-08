@@ -44,6 +44,17 @@ const HEALTHY: AlertInputs = {
   impaired: false,
   deployPaused: false,
   treeUsedBps: 100,
+  venueProposal: null,
+  paramsChanged: null,
+};
+
+const PROPOSAL = {
+  venueKind: 0,
+  klendProgram: "KLendProgram111",
+  klendMarket: "Market111",
+  klendReserve: "Reserve111",
+  klendCtoken: "Ctoken111",
+  unlocksAt: 1_800_172_800n,
 };
 
 describe("evaluateAlerts", () => {
@@ -239,7 +250,7 @@ describe("evaluateAlerts", () => {
     ]);
   });
 
-  it("WEIGHT_TREE_NEARLY_FULL fires over 90% of capacity", () => {
+  it("WEIGHT_TREE_NEARLY_FULL fires over 80% of capacity", () => {
     expect(evaluateAlerts({ ...HEALTHY, treeUsedBps: TREE_NEARLY_FULL_BPS + 1 }, THRESHOLDS)).toEqual([
       { code: "WEIGHT_TREE_NEARLY_FULL", message: expect.any(String) },
     ]);
@@ -266,6 +277,25 @@ describe("evaluateAlerts", () => {
         THRESHOLDS,
       ),
     ).toEqual([]);
+  });
+
+  it("VENUE_PROPOSED names the proposed accounts and the unlock time", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, venueProposal: PROPOSAL }, THRESHOLDS);
+    expect(alert?.code).toBe("VENUE_PROPOSED");
+    expect(alert?.message).toContain("KLendProgram111");
+    expect(alert?.message).toContain("Reserve111");
+    expect(alert?.message).toContain("1800172800");
+  });
+
+  it("PARAMS_CHANGED carries the new values and leaves the pool address out", () => {
+    const [alert] = evaluateAlerts(
+      { ...HEALTHY, paramsChanged: { pool: "PoolAddr", epochSeconds: "604800", houseCutBps: 600 } },
+      THRESHOLDS,
+    );
+    expect(alert?.code).toBe("PARAMS_CHANGED");
+    expect(alert?.message).toContain("epochSeconds=604800");
+    expect(alert?.message).toContain("houseCutBps=600");
+    expect(alert?.message).not.toContain("PoolAddr");
   });
 
   it("stacks every active condition at once", () => {
@@ -296,6 +326,8 @@ describe("evaluateAlerts", () => {
         impaired: true,
         deployPaused: true,
         treeUsedBps: 9_500,
+        venueProposal: PROPOSAL,
+        paramsChanged: { pool: "P", epochSeconds: "86400" },
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -320,6 +352,8 @@ describe("evaluateAlerts", () => {
       "POOL_IMPAIRED",
       "DEPLOY_PAUSED",
       "WEIGHT_TREE_NEARLY_FULL",
+      "VENUE_PROPOSED",
+      "PARAMS_CHANGED",
     ]);
   });
 });
