@@ -7,6 +7,7 @@ import { AdminPanel } from "./AdminPanel.js";
 import { AlertsBanner } from "./AlertsBanner.js";
 import { CranksPanel } from "./CranksPanel.js";
 import { GameConfigPanel } from "./GameConfigPanel.js";
+import { GrantsPanel } from "./GrantsPanel.js";
 import { HeadlinePanel } from "./HeadlinePanel.js";
 import { PausePanel } from "./PausePanel.js";
 import { PoolPanel } from "./PoolPanel.js";
@@ -80,6 +81,7 @@ export function OpsPage() {
       <Section id="advanced" title="Advanced">
         <AdminPanel />
         <GameConfigPanel />
+        <GrantsPanel />
         <RecoveryPanel />
         <VenueSwitchStepper />
       </Section>
