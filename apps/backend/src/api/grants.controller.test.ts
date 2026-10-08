@@ -21,6 +21,7 @@ import { grantTickets } from "../admin/grant";
 import { ChainService } from "../chain/chain.service";
 import { poolAddress } from "../chain/pda";
 import { PrismaService } from "../prisma/prisma.service";
+import { lockLedger } from "../ledger/ledger-store";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
 import { grantMessage } from "./grants";
 import { GrantsController } from "./grants.controller";
@@ -118,6 +119,30 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("Manual grant route
     const balance = await prisma.ticketBalance.findUniqueOrThrow({ where: { poolAddress_owner: { poolAddress: POOL, owner: TARGET } } });
     expect(balance.tickets).toBe(525n);
     expect(await prisma.ticketLedger.count()).toBe(2);
+  });
+
+  it("waits for the indexer's ledger lock, so a balance it is rewriting keeps the grant", async () => {
+    const http = await boot(team());
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((resolve) => (locked = resolve));
+    // Stands in for bookBatch: read the balance under the lock, write it back absolute.
+    const indexer = prisma.$transaction(async (tx) => {
+      await lockLedger(tx, POOL);
+      locked();
+      await held;
+      await tx.ticketBalance.create({ data: { poolAddress: POOL, owner: TARGET, tickets: 7n, epochId: 0n } });
+    });
+    await lockTaken;
+    const grant = http.post("/ops/grants").send(body()).then((res) => res.status);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await prisma.ticketLedger.count()).toBe(0);
+    release();
+    await indexer;
+    expect(await grant).toBe(201);
+    const balance = await prisma.ticketBalance.findUniqueOrThrow({ where: { poolAddress_owner: { poolAddress: POOL, owner: TARGET } } });
+    expect(balance.tickets).toBe(507n);
   });
 
   it("refuses the same signed request resent as a replay and moves nothing", async () => {

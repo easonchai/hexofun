@@ -15,6 +15,7 @@ import bs58 from "bs58";
 
 import { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
+import { lockLedger } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
 import { verifyGrant, type GrantRefusal } from "./grants";
 
@@ -104,6 +105,7 @@ export class GrantsController {
     try {
       // One transaction: a replay fails on the unique signature and moves nothing.
       const row = await this.prisma.$transaction(async (tx) => {
+        await lockLedger(tx, poolAddress);
         const cursor = await tx.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
         const epochId = cursor?.ledgerEpochId ?? 0n;
         const booked = await tx.ticketLedger.create({

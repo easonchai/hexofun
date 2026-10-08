@@ -15,7 +15,7 @@ import {
   type ShareWeight,
 } from "../api/referral-bonus";
 import { isQualified } from "../api/referral";
-import { LEDGER_LOCK_KEY } from "../ledger/ledger-store";
+import { lockLedger } from "../ledger/ledger-store";
 
 /** A cutoff batch holds the lock for as long as the reset runs (120 s in ticket 11). */
 const JOB_TRANSACTION_MS = 150_000;
@@ -39,7 +39,7 @@ export async function grantReferralBonuses(
   const { poolAddress, operator, now, qualifySeconds } = input;
   return prisma.$transaction(
     async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${LEDGER_LOCK_KEY}::int, hashtext(${poolAddress}))`;
+      await lockLedger(tx, poolAddress);
       const cursor = await tx.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
       const epochId = cursor?.ledgerEpochId ?? 0n;
       if (epochId < 1n) return 0;
