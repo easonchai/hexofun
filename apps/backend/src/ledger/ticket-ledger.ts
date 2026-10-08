@@ -55,11 +55,11 @@ const isHouseWin = (event: DecodedEvent): boolean =>
  *
  * Every event that runs `touch` on chain carries the Player's Principal and the
  * Yield index after the instruction, so the balance sets them rather than
- * adding to them. Tickets move only on `Withdrawn` and `JackpotPaid` here.
- * `TicketsBought` books nothing until wave 3: the Game config rate is not
- * known yet and the buy-tickets pause stays on.
+ * adding to them. Tickets move on `Withdrawn`, `JackpotPaid` and
+ * `TicketsBought`, the last at `ticketsPerUsdc`, the Game config rate in force
+ * at the event's block time, which the caller looks up.
  */
-export function bookEvent(previous: BalanceState | undefined, event: DecodedEvent): Booking | null {
+export function bookEvent(previous: BalanceState | undefined, event: DecodedEvent, ticketsPerUsdc?: number): Booking | null {
   if (walletOf(event) === null) return null;
   const before = previous ?? EMPTY;
   const next: BalanceState = {
@@ -77,6 +77,11 @@ export function bookEvent(previous: BalanceState | undefined, event: DecodedEven
     // The House's share is USDC and books nothing; the winner's prize compounds into Principal.
     const prize = BigInt(eventString(event, "amount"));
     return { next: { ...next, tickets: before.tickets + prize }, row: prize === 0n ? null : { delta: prize, reason: "prize" } };
+  }
+  if (event.name === "TicketsBought") {
+    if (ticketsPerUsdc === undefined) throw new Error("TicketsBought needs the Game config's ticketsPerUsdc");
+    const bought = BigInt(eventString(event, "usdc")) * BigInt(ticketsPerUsdc);
+    return { next: { ...next, tickets: before.tickets + bought }, row: bought === 0n ? null : { delta: bought, reason: "buy" } };
   }
   return { next, row: null };
 }

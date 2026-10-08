@@ -68,7 +68,9 @@ type Instruction =
   | "testVenueInit"
   | "setFeaturePause"
   | "beginEpoch"
-  | "deposit";
+  | "deposit"
+  | "setBuyTicketsPause"
+  | "buyTickets";
 type Methods = { [K in Instruction]: (...args: unknown[]) => MethodBuilder };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -99,6 +101,8 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
   const poolId = BigInt(Date.now());
 
   let startedAt = 0;
+  let usdcMint: PublicKey;
+  let depositorToken: PublicKey;
 
   async function airdrop(to: PublicKey, sol: number): Promise<void> {
     const signature = await connection.requestAirdrop(to, sol * LAMPORTS_PER_SOL);
@@ -243,6 +247,8 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       depositor.publicKey,
     );
     await mintTo(connection, authority, mint, ata.address, authority, 10_000_000n);
+    usdcMint = mint;
+    depositorToken = ata.address;
 
     const depositSignature = await methods
       .deposit(new BN(DEPOSIT.toString()))
@@ -339,41 +345,41 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
   // off-chain-tickets 11: a deposit in epoch 1 holds no Ticket in epoch 1. The
   // reset at epoch 2 gives it Tickets, and the snapshot taken when epoch 3
   // begins lists the wallet with that same count.
-  it("books the deposit as Tickets from the next epoch and snapshots the wallet after it", async () => {
-    const owner = depositor.publicKey.toBase58();
-    const pool = chain.poolAddress();
-    const epochEnds = async (id: bigint): Promise<number> => {
-      const info = await connection.getAccountInfo(chain.epochAddress(id));
-      if (!info) throw new Error(`epoch ${id} is not on chain`);
-      return Number(decodeEpoch(chain.program, info.data).endsAt);
-    };
-    // The validator's clock runs at or ahead of wall time, so wall time plus a margin is past the end.
-    const beginEpoch = async (ended: bigint): Promise<void> => {
-      const waitMs = (await epochEnds(ended)) * 1_000 + 3_000 - Date.now();
-      if (waitMs > 0) await sleep(waitMs);
-      await methods
-        .beginEpoch()
-        .accountsPartial({
-          operator: authority.publicKey,
-          pool,
-          currentEpoch: chain.epochAddress(ended),
-          epochTwoBehind: chain.epochAddress(ended > 1n ? ended - 1n : 0n),
-          newEpoch: chain.epochAddress(ended + 1n),
-          ...venue,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-    };
-    const balance = () =>
-      prisma.ticketBalance.findUnique({
-        where: { poolAddress_owner: { poolAddress: pool.toBase58(), owner } },
-      });
-    /** Event rows land through the finalized catch-up, which this drives instead of waiting a minute. */
-    const settled = (check: () => Promise<boolean>) => async () => {
-      await indexer.tick();
-      return check();
-    };
+  const owner = (): string => depositor.publicKey.toBase58();
+  const epochEnds = async (id: bigint): Promise<number> => {
+    const info = await connection.getAccountInfo(chain.epochAddress(id));
+    if (!info) throw new Error(`epoch ${id} is not on chain`);
+    return Number(decodeEpoch(chain.program, info.data).endsAt);
+  };
+  // The validator's clock runs at or ahead of wall time, so wall time plus a margin is past the end.
+  const beginEpoch = async (ended: bigint): Promise<void> => {
+    const waitMs = (await epochEnds(ended)) * 1_000 + 3_000 - Date.now();
+    if (waitMs > 0) await sleep(waitMs);
+    await methods
+      .beginEpoch()
+      .accountsPartial({
+        operator: authority.publicKey,
+        pool: chain.poolAddress(),
+        currentEpoch: chain.epochAddress(ended),
+        epochTwoBehind: chain.epochAddress(ended > 1n ? ended - 1n : 0n),
+        newEpoch: chain.epochAddress(ended + 1n),
+        ...venue,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+  };
+  const balance = () =>
+    prisma.ticketBalance.findUnique({
+      where: { poolAddress_owner: { poolAddress: chain.poolAddress().toBase58(), owner: owner() } },
+    });
+  /** Event rows land through the finalized catch-up, which this drives instead of waiting a minute. */
+  const settled = (check: () => Promise<boolean>) => async () => {
+    await indexer.tick();
+    return check();
+  };
 
+  it("books the deposit as Tickets from the next epoch and snapshots the wallet after it", async () => {
+    const pool = chain.poolAddress();
     await beginEpoch(1n);
     await waitFor(
       "the ledger to book the epoch 2 reset",
@@ -399,10 +405,70 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       150_000,
     );
     expect(await prisma.epochSnapshot.findMany({ where: { epochId: 2n } })).toMatchObject([
-      { index: 0, owner, tickets: expected },
+      { index: 0, owner: owner(), tickets: expected },
     ]);
     expect(await prisma.epoch.findUniqueOrThrow({ where: { poolAddress_id: { poolAddress: pool.toBase58(), id: 2n } } }))
       .toMatchObject({ leafCount: 1, totalTickets: expected });
+  }, 400_000);
+
+  // off-chain-tickets 24: with the buy pause lifted, USDC paid through
+  // `buy_tickets` lands as Tickets at the Game config rate, and the next
+  // snapshot lists them. The API's `/players/:owner` reads this same balance.
+  it("books a bought Ticket at the Game config rate and snapshots it", async () => {
+    const pool = chain.poolAddress();
+    const BUY = 1_000_000n;
+    const RATE = 7;
+    // The controller seeds this row at boot; the indexer alone does not.
+    await prisma.gameConfig.create({
+      data: {
+        poolAddress: pool.toBase58(),
+        roundSeconds: 60,
+        houseCutBps: 600,
+        ticketsPerUsdc: RATE,
+        bonusCapBps: 500,
+        referralTiers: [],
+        maxTilesPerBet: 36,
+        createdAt: new Date(0),
+      },
+    });
+    const before = (await balance())?.tickets ?? 0n;
+    await methods
+      .setBuyTicketsPause(false)
+      .accountsPartial({ admin: authority.publicKey, pool })
+      .rpc();
+    await methods
+      .buyTickets(new BN(BUY.toString()))
+      .accountsPartial({
+        owner: depositor.publicKey,
+        pool,
+        player: chain.playerAddress(depositor.publicKey),
+        acceptedMint: usdcMint,
+        ownerToken: depositorToken,
+        jackpotVault: chain.jackpotVaultAddress(),
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([depositor])
+      .rpc();
+    await waitFor(
+      "the ledger to book the buy",
+      settled(async () => ((await balance())?.tickets ?? 0n) > before),
+      150_000,
+    );
+    const bought = BUY * BigInt(RATE);
+    expect((await balance())?.tickets).toBe(before + bought);
+    expect(await prisma.ticketLedger.findMany({ where: { owner: owner(), reason: "buy" } })).toMatchObject([
+      { delta: bought },
+    ]);
+
+    await beginEpoch(3n);
+    await waitFor(
+      "the ledger to snapshot epoch 3",
+      settled(async () => (await prisma.epochSnapshot.count({ where: { epochId: 3n } })) > 0),
+      150_000,
+    );
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 3n } })).toMatchObject([
+      { owner: owner(), tickets: before + bought },
+    ]);
   }, 400_000);
 });
 
@@ -417,6 +483,7 @@ async function wipe(prisma: PrismaService): Promise<void> {
     prisma.cursor.deleteMany(),
     prisma.player.deleteMany(),
     prisma.epoch.deleteMany(),
+    prisma.gameConfig.deleteMany(),
     prisma.referralGrantShare.deleteMany(),
     prisma.referralGrant.deleteMany(),
     prisma.operatorState.deleteMany(),

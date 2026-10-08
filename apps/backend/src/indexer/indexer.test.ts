@@ -99,6 +99,7 @@ async function wipe(): Promise<void> {
     prisma.ticketBalance.deleteMany(),
     prisma.epochSnapshot.deleteMany(),
     prisma.ledgerCheck.deleteMany(),
+    prisma.gameConfig.deleteMany(),
     prisma.cursor.deleteMany(),
     prisma.venueProposal.deleteMany(),
     prisma.player.deleteMany(),
@@ -158,6 +159,21 @@ const seedActivePool = async (): Promise<void> => {
 const seedEpoch = (id: bigint) =>
   prisma.epoch.create({
     data: { poolAddress: active(), id, startsAt: 1_000n, endsAt: 2_000n, status: 0, jackpotAmount: 0n, target: "0" },
+  });
+
+/** A Game config row; the ledger prices a `TicketsBought` from the row in force at its block time. */
+const seedGameConfig = (ticketsPerUsdc: number, createdAt: bigint) =>
+  prisma.gameConfig.create({
+    data: {
+      poolAddress: active(),
+      roundSeconds: 60,
+      houseCutBps: 600,
+      ticketsPerUsdc,
+      bonusCapBps: 500,
+      referralTiers: [],
+      maxTilesPerBet: 36,
+      createdAt: new Date(Number(createdAt) * 1000),
+    },
   });
 
 const bn = (value: bigint | number): BN => new BN(value.toString());
@@ -1321,6 +1337,7 @@ describe("live yield mirror", () => {
       }),
     ];
     await seedActivePool();
+    await seedGameConfig(10, 1_000n);
 
     expect(await indexer.ingestLogs(batch("sig-live", 40n, lines))).toBe(lines.length);
 
@@ -1906,6 +1923,49 @@ describe("ticket ledger", () => {
     await indexer["catchUpEvents"]();
     expect((await balance(A)).tickets).toBe(50n);
     expect(await rowsOf(A)).toHaveLength(3);
+  });
+
+  // off-chain-tickets 24: a bought Ticket is booked at the Game config rate in
+  // force at the event's block time, once, in the epoch the chain order says.
+  describe("bought Tickets", () => {
+    const buy = (owner: PublicKey, usdc: number, principal: number) =>
+      dataLine("TicketsBought", { owner, epochId: bn(1), usdc: bn(usdc), principal: bn(principal), yieldIndex: bn(ONE) });
+    const at = (signature: string, slot: bigint, blockTime: bigint, lines: string[]) => ({
+      ...batch(signature, slot, lines),
+      blockTime,
+    });
+    const config = seedGameConfig;
+
+    it("prices a buy at the row in force at its block time, and a later change leaves it alone", async () => {
+      await config(10, 1_000n);
+      await config(20, 2_000n);
+      await indexer.ingestLogs(at("b1", 10n, 1_500n, [buy(A, 100, 1_000)]));
+      await config(99, 3_000n); // a change after the fact
+      await indexer.ingestLogs(at("b2", 11n, 2_500n, [buy(A, 100, 1_000)]));
+      await indexer.ingestLogs(at("b3", 12n, 500n, [buy(B, 1, 10)])); // older than every row: the first one
+      expect(await rowsOf(A)).toEqual([["buy", 1_000n, 0n], ["buy", 2_000n, 0n]]);
+      expect(await rowsOf(B)).toEqual([["buy", 10n, 0n]]);
+      expect(await balance(A)).toMatchObject({ tickets: 3_000n, principal: 1_000n });
+      expect(await countLedgerMismatches(prisma, active())).toBe(0);
+    });
+
+    it("books a replayed buy once and lands a same-slot buy in the epoch the chain order says", async () => {
+      await config(10, 1_000n);
+      const before = at("c1", 10n, 1_500n, [buy(A, 100, 5_000)]);
+      const cutoff = at("c2", 10n, 1_500n, [began(2)]);
+      const after = at("c3", 10n, 1_500n, [buy(C, 50, 100)]);
+      await indexer.ingestLogs(at("c0", 5n, 1_500n, [began(1)]));
+      for (const replayed of [before, cutoff, after, before, cutoff, after]) await indexer.ingestLogs(replayed);
+      expect(await rowsOf(A)).toEqual([["buy", 1_000n, 1n], ["reset", 4_000n, 2n]]);
+      expect(await rowsOf(C)).toEqual([["buy", 500n, 2n]]);
+      // The buy before EpochBegan is in epoch 1's snapshot, the one after waits for epoch 2's.
+      expect(await prisma.epochSnapshot.findMany({ where: { epochId: 1n } })).toMatchObject([
+        { owner: A.toBase58(), tickets: 1_000n },
+      ]);
+      await indexer.ingestLogs(at("c4", 20n, 1_600n, [began(3)]));
+      expect(await prisma.epochSnapshot.findMany({ where: { epochId: 2n }, orderBy: { owner: "asc" } })).toHaveLength(2);
+      expect(await countLedgerMismatches(prisma, active())).toBe(0);
+    });
   });
 
   it("holds the cutoff back when the ended epoch is not mirrored yet, then applies it whole", async () => {

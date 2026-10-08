@@ -23,6 +23,7 @@ export async function bookBatch(
   poolAddress: string,
   signature: string,
   events: readonly DecodedEvent[],
+  blockTime: bigint,
 ): Promise<void> {
   const cursor = await tx.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
   const reached = cursor?.ledgerEpochId ?? 0n;
@@ -42,6 +43,7 @@ export async function bookBatch(
     const booking = bookEvent(
       row === null ? undefined : { tickets: row.tickets, principal: row.principal, yieldIndex: BigInt(row.yieldIndex.toFixed()) },
       event,
+      event.name === "TicketsBought" ? await ticketsPerUsdcAt(tx, poolAddress, blockTime) : undefined,
     );
     if (booking === null) continue;
     const state = { tickets: booking.next.tickets, principal: booking.next.principal, yieldIndex: booking.next.yieldIndex.toString(), epochId };
@@ -57,6 +59,25 @@ export async function bookBatch(
       update: { ledgerEpochId: epochId },
     });
   }
+}
+
+/**
+ * `ticketsPerUsdc` of the Game config row in force at `blockTime`: the newest
+ * row created at or before it. Rows only append, so a later change never
+ * reprices a buy already booked. An event older than the first row (a fresh
+ * database catching up on history) takes the first row.
+ */
+async function ticketsPerUsdcAt(tx: Prisma.TransactionClient, poolAddress: string, blockTime: bigint): Promise<number> {
+  const select = { ticketsPerUsdc: true };
+  const row =
+    (await tx.gameConfig.findFirst({
+      where: { poolAddress, createdAt: { lte: new Date(Number(blockTime) * 1000) } },
+      orderBy: { id: "desc" },
+      select,
+    })) ?? (await tx.gameConfig.findFirst({ where: { poolAddress }, orderBy: { id: "asc" }, select }));
+  // Thrown inside the indexer's transaction, so the batch rolls back and the next tick retries.
+  if (row === null) throw new Error(`no Game config row for ${poolAddress}, so a TicketsBought cannot be priced`);
+  return row.ticketsPerUsdc;
 }
 
 /**

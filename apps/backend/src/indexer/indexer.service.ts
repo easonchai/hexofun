@@ -958,7 +958,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           where: { poolAddress, signature: batch.signature, ledgered: false },
           data: { ledgered: true },
         });
-        if (claimed.count > 0) await bookBatch(tx, poolAddress, batch.signature, events);
+        if (claimed.count > 0) await bookBatch(tx, poolAddress, batch.signature, events, batch.blockTime ?? nowSeconds());
       }
       if (options.advanceCursor) {
         const cursor = await tx.cursor.findUnique({ where: { poolAddress } });

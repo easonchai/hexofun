@@ -9,13 +9,24 @@ const event = (name: string, data: Record<string, string | boolean>): DecodedEve
 const moved = { principal: "700", yieldIndex: "1000000000000000000" };
 
 describe("bookEvent", () => {
-  it.each(["Deposited", "WithdrawRequested", "WithdrawCancelled", "TicketsBought", "EmergencyWithdrawn"])(
+  it.each(["Deposited", "WithdrawRequested", "WithdrawCancelled", "EmergencyWithdrawn"])(
     "%s sets Principal and the Yield index and books no Tickets",
     (name) => {
       const booking = bookEvent(held(40n, 100n), event(name, { owner: OWNER, ...moved }));
       expect(booking).toEqual({ next: { tickets: 40n, principal: 700n, yieldIndex: 10n ** 18n }, row: null });
     },
   );
+
+  it("TicketsBought books usdc times the rate it is given as a buy row", () => {
+    const bought = event("TicketsBought", { owner: OWNER, usdc: "250", ...moved });
+    expect(bookEvent(held(40n, 100n), bought, 10)).toEqual({
+      next: { tickets: 2_540n, principal: 700n, yieldIndex: 10n ** 18n },
+      row: { delta: 2_500n, reason: "buy" },
+    });
+    // The same event at another rate: the rate is an input, never remembered.
+    expect(bookEvent(held(40n), bought, 4)).toMatchObject({ row: { delta: 1_000n, reason: "buy" } });
+    expect(() => bookEvent(held(0n), bought)).toThrow(/ticketsPerUsdc/);
+  });
 
   it("starts an unseen wallet at zero Tickets", () => {
     expect(bookEvent(undefined, event("Deposited", { owner: OWNER, ...moved }))?.next.tickets).toBe(0n);
