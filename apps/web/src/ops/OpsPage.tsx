@@ -6,6 +6,7 @@ import { POOL_ID } from "../chain.js";
 import { AdminPanel } from "./AdminPanel.js";
 import { AlertsBanner } from "./AlertsBanner.js";
 import { CranksPanel } from "./CranksPanel.js";
+import { GameConfigPanel } from "./GameConfigPanel.js";
 import { HeadlinePanel } from "./HeadlinePanel.js";
 import { PausePanel } from "./PausePanel.js";
 import { PoolPanel } from "./PoolPanel.js";
@@ -78,6 +79,7 @@ export function OpsPage() {
       </Section>
       <Section id="advanced" title="Advanced">
         <AdminPanel />
+        <GameConfigPanel />
         <RecoveryPanel />
         <VenueSwitchStepper />
       </Section>
