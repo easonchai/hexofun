@@ -376,3 +376,26 @@ model ErrorReport {
   page      String?
   createdAt DateTime @default(now())
 }
+
+// off-chain-tickets ticket 14: the game's parameters, append-only per pool.
+// The newest row (highest id) is in force. A row with a null signer is the
+// seed written on first run; every later row carries the team wallet's
+// signed message. `signature` is unique so a signed change cannot be replayed
+// after a newer one has landed.
+model GameConfig {
+  id             Int      @id @default(autoincrement())
+  poolAddress    String
+  roundSeconds   Int
+  houseCutBps    Int
+  ticketsPerUsdc Int
+  bonusCapBps    Int
+  /// [{ tier, min, max, rateBps }], highest tier first.
+  referralTiers  Json
+  maxTilesPerBet Int
+  signer         String?
+  signature      String?  @unique
+  message        String?
+  createdAt      DateTime @default(now())
+
+  @@index([poolAddress, id])
+}

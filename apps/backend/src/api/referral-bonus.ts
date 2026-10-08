@@ -12,7 +12,7 @@
  *  3-5 -> 3%, 6-10 -> 4%, 11+ -> 5%. Checked highest `min` first so the
  *  first match wins. `max: null` at the top tier (11+, tier 4), which has no
  *  upper bound. */
-const RATE_TIERS: readonly { tier: number; min: number; max: number | null; rateBps: number }[] = [
+export const RATE_TIERS: readonly { tier: number; min: number; max: number | null; rateBps: number }[] = [
   { tier: 4, min: 11, max: null, rateBps: 500 },
   { tier: 3, min: 6, max: 10, rateBps: 400 },
   { tier: 2, min: 3, max: 5, rateBps: 300 },

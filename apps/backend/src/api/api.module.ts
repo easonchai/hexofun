@@ -10,6 +10,7 @@ import { ApiService } from "./api.service";
 import { ErrorReportController } from "./error-report.controller";
 import { FastPauseController } from "./fast-pause.controller";
 import { FaucetController } from "./faucet.controller";
+import { GameConfigController } from "./game-config.controller";
 import { OpsController } from "./ops.controller";
 import { OpsSummaryService } from "./ops-summary";
 import { ReferralsController } from "./referrals.controller";
@@ -62,6 +63,7 @@ import { SerializationInterceptor } from "./serialization.interceptor";
     FastPauseController,
     ReferralsController,
     ErrorReportController,
+    GameConfigController,
   ],
   providers: [
     ApiService,
