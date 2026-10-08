@@ -3,9 +3,11 @@
 // "Epochs").
 //
 // The program holds no Tickets (ADR 0025): the Operator hands request_draw the
-// epoch's Ticket total, and payout is Operator-signed until ticket 09 makes it
-// verify the winner's proof. So a test that draws keeps its own list of who
-// holds what and lands the target with `randomnessLanding`.
+// root, total and shape of a Merkle sum tree over the epoch's Tickets, and
+// payout verifies the winner's proof against them. So a test that draws keeps
+// its own list of who holds what, lands the target with `randomnessLanding`,
+// and builds the proof from the same list. The commitment and proof checks
+// themselves are in 20-snapshot-draw.
 //
 // Epochs here run a handful of seconds (via the `epochSeconds` override) so
 // tests sleep through them instead of a day. Each test airdrops, mints, and
@@ -33,6 +35,7 @@ import {
   setVenueRate,
   sleep,
   sleepUntilOnChain,
+  snapshotOf,
   testNonce,
   vrfSeed,
   waitPastLastSync,
@@ -186,19 +189,22 @@ async function buyTickets(pool: PoolCtx, owner: Wallet, amount: bigint) {
     .rpc();
 }
 
+/** One holder with `tickets`, the snapshot of a draw `winner` can be paid in. */
+const solo = (winner: PublicKey, tickets = 1n): Holding[] => [{ owner: winner, tickets }];
+
 /**
- * `totalTickets` is the epoch's Ticket total, which the Operator supplies
- * (nothing checks it until ticket 09). `nonce` is mixed into the seed
+ * `draw` is the epoch's holders, or a bare Ticket total nobody can be paid
+ * against. `nonce` is mixed into the seed with the snapshot's root and total
  * (beta-launch-fixes ticket 02); the program checks the randomness account
  * against it itself (production-hardening ticket 02).
  */
 async function requestDraw(
   pool: PoolCtx,
   epochId: bigint,
-  totalTickets = 1n,
+  draw: bigint | Holding[] = 1n,
   nonce: Uint8Array = testNonce(),
 ) {
-  return requestDrawMethod(pool, epochId, totalTickets, nonce).rpc();
+  return requestDrawMethod(pool, epochId, draw, nonce).rpc();
 }
 
 /** Requests the draw over `held` and draws it with randomness that lands the
@@ -209,8 +215,8 @@ async function requestAndDrawFor(
   held: Holding[],
   winner: PublicKey,
 ) {
-  const { total, randomness } = randomnessLanding(held, winner);
-  await requestDraw(pool, epochId, total);
+  const { randomness } = randomnessLanding(held, winner);
+  await requestDraw(pool, epochId, held);
   const drawing = await fetchEpoch(pool, epochId);
   await draw(pool, epochId, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed), randomness));
   return fetchEpoch(pool, epochId);
@@ -236,10 +242,11 @@ async function draw(
     .rpc();
 }
 
-/** Operator-signed until ticket 09. A non-House winner needs no token account
- *  of their own: the prize compounds into `principal_vault`. */
-async function payout(pool: PoolCtx, epochId: bigint, winner: PublicKey) {
-  return payoutMethod(pool, epochId, winner).rpc();
+/** Pays `winner` with the proof for the snapshot `held` that was committed.
+ *  A non-House winner needs no token account of their own: the prize
+ *  compounds into `principal_vault`. */
+async function payout(pool: PoolCtx, epochId: bigint, winner: PublicKey, held: Holding[]) {
+  return payoutMethod(pool, epochId, winner, held).rpc();
 }
 
 /**
@@ -343,7 +350,7 @@ describe("epochs", () => {
       const event = await findEvent<{ epochId: BN; jackpotAmount: BN }>(sig, "epochRolledOver");
       expect(event?.epochId.toString()).toBe("1");
       // Tickets were not the reason: the Operator reported some.
-      expect(epoch1.registeredWeight.toString()).toBe("1");
+      expect(epoch1.totalTickets.toString()).toBe("1");
 
       // The prize stayed put, so one more unit clears the floor next epoch.
       await fundJackpot(pool, funder, 1n);
@@ -371,11 +378,12 @@ describe("epochs", () => {
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
       // `a` holds all of the epoch's 4M Tickets.
-      await requestDraw(pool, 1n, 4_000_000n);
+      const held = solo(a.keypair.publicKey, 4_000_000n);
+      await requestDraw(pool, 1n, held);
 
       const epochAfterClose = await fetchEpoch(pool, 1n);
       expect(epochAfterClose.status).toBe(epoch_status.DRAWING);
-      expect(epochAfterClose.registeredWeight.toString()).toBe("4000000");
+      expect(epochAfterClose.totalTickets.toString()).toBe("4000000");
 
       const randomness = await fulfillRandomness(Uint8Array.from(epochAfterClose.vrfSeed));
       await draw(pool, 1n, randomness);
@@ -389,7 +397,7 @@ describe("epochs", () => {
       const playerBefore = await fetchPlayer(pool, a.keypair.publicKey);
       const poolBefore = await program.account.pool.fetch(pool.pool);
 
-      const sig = await payout(pool, 1n, a.keypair.publicKey);
+      const sig = await payout(pool, 1n, a.keypair.publicKey, held);
 
       const principalVaultAfter = await program.provider.connection.getTokenAccountBalance(
         pool.principalVault,
@@ -413,10 +421,15 @@ describe("epochs", () => {
         amount: BN;
         principal: BN;
         yieldIndex: BN;
+        index: number;
+        tickets: BN;
       }>(sig, "jackpotPaid");
       expect(event?.isHouse).toBe(false);
       expect(event?.compounded).toBe(true);
       expect(event?.amount.toString()).toBe("2000000");
+      // The winner's leaf, so the indexer can book the prize's Tickets.
+      expect(event?.index).toBe(0);
+      expect(event?.tickets.toString()).toBe("4000000");
       // The winner's post-state, as the Player account reads after the payout.
       expect(event?.principal.toString()).toBe(playerAfter.principal.toString());
       expect(event?.yieldIndex.toString()).toBe(playerAfter.yieldIndex.toString());
@@ -452,7 +465,8 @@ describe("epochs", () => {
       await retryUntilOk(() => beginEpoch(pool, 1n));
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
-      await requestDraw(pool, 1n, big);
+      const held = solo(a.keypair.publicKey, big);
+      await requestDraw(pool, 1n, held);
       const drawing = await fetchEpoch(pool, 1n);
       await draw(pool, 1n, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed)));
 
@@ -463,7 +477,7 @@ describe("epochs", () => {
       await setVenueRate(pool, BigInt(reserve.rate.toString()) + 2n * 10n ** 10n).rpc();
       await waitPastLastSync(pool);
       const before = await fetchPlayer(pool, a.keypair.publicKey);
-      const sig = await payout(pool, 1n, a.keypair.publicKey);
+      const sig = await payout(pool, 1n, a.keypair.publicKey, held);
       const after = await fetchPlayer(pool, a.keypair.publicKey);
 
       const yieldSettled = 16_200n;
@@ -491,14 +505,15 @@ describe("epochs", () => {
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 1_000_000n);
       const house = pool.operator.publicKey;
-      const closed = await requestAndDrawFor(pool, 1n, [{ owner: house, tickets: 6_000_000n }], house);
+      const held = solo(house, 6_000_000n);
+      const closed = await requestAndDrawFor(pool, 1n, held, house);
       expect(closed.status).toBe(epoch_status.DRAWN);
 
       const buybackBefore = await program.provider.connection.getTokenAccountBalance(pool.buybackReserve);
       const treasuryBefore = await program.provider.connection.getTokenAccountBalance(pool.treasury);
       const vaultBefore = await program.provider.connection.getTokenAccountBalance(pool.jackpotVault);
 
-      const sig = await payout(pool, 1n, pool.operator.publicKey);
+      const sig = await payout(pool, 1n, pool.operator.publicKey, held);
 
       const buybackAfter = await program.provider.connection.getTokenAccountBalance(pool.buybackReserve);
       const treasuryAfter = await program.provider.connection.getTokenAccountBalance(pool.treasury);
@@ -587,15 +602,11 @@ describe("epochs", () => {
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
       const [ha, hb] = [a.keypair.publicKey, b.keypair.publicKey];
-      const closed1 = await requestAndDrawFor(
-        pool,
-        1n,
-        [
-          { owner: ha, tickets: 3_000_000n },
-          { owner: hb, tickets: 3_000_000n },
-        ],
-        ha,
-      );
+      const held1 = [
+        { owner: ha, tickets: 3_000_000n },
+        { owner: hb, tickets: 3_000_000n },
+      ];
+      const closed1 = await requestAndDrawFor(pool, 1n, held1, ha);
       expect(closed1.jackpotAmount.toString()).toBe("3000000");
       expect((await program.account.pool.fetch(pool.pool)).jackpotReserved.toString()).toBe(
         "3000000",
@@ -608,7 +619,7 @@ describe("epochs", () => {
       const principalBeforeFirst = await program.provider.connection.getTokenAccountBalance(
         pool.principalVault,
       );
-      await payout(pool, 1n, a.keypair.publicKey);
+      await payout(pool, 1n, a.keypair.publicKey, held1);
       const principalAfterFirst = await program.provider.connection.getTokenAccountBalance(
         pool.principalVault,
       );
@@ -621,18 +632,14 @@ describe("epochs", () => {
       await fundJackpot(pool, funder, 2_000_000n);
       await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3
       // Epoch 2: a holds 3M plus the 3M prize, b holds 3M.
-      const closed2 = await requestAndDrawFor(
-        pool,
-        2n,
-        [
-          { owner: ha, tickets: 6_000_000n },
-          { owner: hb, tickets: 3_000_000n },
-        ],
-        hb,
-      );
+      const held2 = [
+        { owner: ha, tickets: 6_000_000n },
+        { owner: hb, tickets: 3_000_000n },
+      ];
+      const closed2 = await requestAndDrawFor(pool, 2n, held2, hb);
       expect(closed2.jackpotAmount.toString()).toBe("2000000");
 
-      await payout(pool, 2n, b.keypair.publicKey);
+      await payout(pool, 2n, b.keypair.publicKey, held2);
       expect((await fetchPlayer(pool, b.keypair.publicKey)).principal.toString()).toBe("5000000");
 
       const drained = await program.provider.connection.getTokenAccountBalance(pool.jackpotVault);
@@ -742,7 +749,7 @@ describe("epochs", () => {
       await fundJackpot(pool, funder, 3_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2 open, epoch 1 Ended
-      await requestDraw(pool, 1n); // epoch 1: Drawing
+      await requestDraw(pool, 1n, solo(a.keypair.publicKey)); // epoch 1: Drawing
 
       expect((await fetchEpoch(pool, 1n)).status).toBe(epoch_status.DRAWING);
 
@@ -756,7 +763,7 @@ describe("epochs", () => {
       await draw(pool, 1n, await fulfillRandomness(Uint8Array.from(drawing.vrfSeed)));
       await expect(beginEpoch(pool, 2n)).rejects.toThrow(/PreviousEpochStillDrawing/); // still Drawn, unpaid
 
-      await payout(pool, 1n, a.keypair.publicKey);
+      await payout(pool, 1n, a.keypair.publicKey, solo(a.keypair.publicKey));
       await retryUntilOk(() => beginEpoch(pool, 2n)); // now accepted
       expect((await fetchEpoch(pool, 3n)).status).toBe(epoch_status.OPEN);
     },
@@ -779,7 +786,8 @@ describe("epochs", () => {
       // production-hardening ticket 02: request_draw checks the
       // randomness account against its own computed seed.
       const wrongNonce = testNonce(9);
-      const wrongSeed = vrfSeed(pool.pool, 2n, wrongNonce); // another epoch's seed
+      const draw1 = snapshotOf([{ owner: Keypair.generate().publicKey, tickets: 1n }]);
+      const wrongSeed = vrfSeed(pool.pool, 2n, wrongNonce, draw1.root, draw1.total); // another epoch's seed
       await expect(
         requestDrawMethod(pool, 1n, 1n, testNonce(), randomnessPda(wrongSeed)).rpc(),
       ).rejects.toThrow(/InvalidRandomnessAccount/);
@@ -962,13 +970,9 @@ describe("epochs", () => {
 
       // Epoch 1, skipped past and not orphaned, still runs its own draw and
       // pays out while epoch 2 is current.
-      await requestAndDrawFor(
-        pool,
-        1n,
-        [{ owner: a.keypair.publicKey, tickets: 4_000_000n }],
-        a.keypair.publicKey,
-      );
-      await payout(pool, 1n, a.keypair.publicKey);
+      const held = solo(a.keypair.publicKey, 4_000_000n);
+      await requestAndDrawFor(pool, 1n, held, a.keypair.publicKey);
+      await payout(pool, 1n, a.keypair.publicKey, held);
       expect((await fetchEpoch(pool, 1n)).status).toBe(epoch_status.PAID);
     },
     TIMEOUT,
@@ -1332,7 +1336,7 @@ describe("epochs", () => {
 
       const funder = await pool.fundedWallet(10_000_000n);
       await fundJackpot(pool, funder, 2_000_000n);
-      await requestDraw(pool, 1n); // -> Drawing, while still unpaused
+      await requestDraw(pool, 1n, solo(a.keypair.publicKey)); // -> Drawing, while still unpaused
 
       const epochAfterClose = await fetchEpoch(pool, 1n);
       expect(epochAfterClose.status).toBe(epoch_status.DRAWING);
@@ -1346,7 +1350,7 @@ describe("epochs", () => {
       expect(drawn.status).toBe(epoch_status.DRAWN);
 
       const playerBefore = await fetchPlayer(pool, a.keypair.publicKey);
-      await payout(pool, 1n, a.keypair.publicKey); // not gated either
+      await payout(pool, 1n, a.keypair.publicKey, solo(a.keypair.publicKey)); // not gated either
       const playerAfter = await fetchPlayer(pool, a.keypair.publicKey);
       expect(
         BigInt(playerAfter.principal.toString()) - BigInt(playerBefore.principal.toString()),

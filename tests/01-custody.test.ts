@@ -22,6 +22,7 @@ import {
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
   epochPda,
+  FILLER,
   findEvent,
   jackpotVaultPda,
   nextPoolId,
@@ -34,6 +35,7 @@ import {
   retryUntilOk,
   setupPool,
   sleepUntilOnChain,
+  snapshotOf,
   testNonce,
   venueAccountsFor,
   vrfSeed,
@@ -507,14 +509,16 @@ async function rolePool(): Promise<PoolCtx> {
 /**
  * Every operator-gated instruction, built with `signer` in the operator slot.
  *
- * `draw` and `rollover_epoch` are deliberately absent (production-hardening
- * ticket 01): they take any `caller`, so an operator that stops cranking
- * cannot withhold a fulfilled result or leave a timed-out request stuck.
- * Their permissionless behavior is covered by tests/03-epochs.test.ts.
+ * `draw`, `payout` and `rollover_epoch` are deliberately absent
+ * (production-hardening ticket 01, off-chain-tickets ticket 09): they take any
+ * `caller`, so an operator that stops cranking cannot withhold a fulfilled
+ * result, a prize or a timed-out request. Their permissionless behavior is
+ * covered by tests/03-epochs.test.ts.
  */
 function operatorGated(pool: PoolCtx, signer: PublicKey) {
   const epoch = epochPda(pool.pool, 1n);
   const m = program.methods;
+  const snapshot = snapshotOf([{ owner: FILLER, tickets: 1n }]);
   return {
     beginEpoch: m.beginEpoch().accountsPartial({
       operator: signer,
@@ -527,33 +531,27 @@ function operatorGated(pool: PoolCtx, signer: PublicKey) {
     }),
     // `request_draw` replaced `close_registration` (ticket 08): operator-only,
     // since the signer also pays ORAO's fee.
-    requestDraw: m.requestDraw(Array.from(testNonce()), new BN(1)).accountsPartial({
-      operator: signer,
-      pool: pool.pool,
-      epoch,
-      jackpotVault: pool.jackpotVault,
-      randomness: randomnessPda(vrfSeed(pool.pool, 1n, testNonce())),
-      vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-      vrfTreasury: DEVNET_VRF_TREASURY,
-      vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
-      systemProgram: SystemProgram.programId,
-    }),
-    // Operator-signed until ticket 09 verifies the winner's proof: nothing on
-    // chain says who holds the drawn target, so a stranger cannot be trusted
-    // with the winner.
-    payout: m.payout().accountsPartial({
-      operator: signer,
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      epoch,
-      winner: pool.house,
-      jackpotVault: pool.jackpotVault,
-      principalVault: pool.principalVault,
-      treasury: pool.treasury,
-      buybackReserve: pool.buybackReserve,
-      ...pool.venue,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    }),
+    requestDraw: m
+      .requestDraw(
+        Array.from(testNonce()),
+        Array.from(snapshot.root),
+        new BN(snapshot.total.toString()),
+        snapshot.depth,
+        snapshot.leafCount,
+      )
+      .accountsPartial({
+        operator: signer,
+        pool: pool.pool,
+        epoch,
+        jackpotVault: pool.jackpotVault,
+        randomness: randomnessPda(
+          vrfSeed(pool.pool, 1n, testNonce(), snapshot.root, snapshot.total),
+        ),
+        vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
+        vrfTreasury: DEVNET_VRF_TREASURY,
+        vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
+        systemProgram: SystemProgram.programId,
+      }),
   };
 }
 

@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
+  type AccountMeta,
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
@@ -22,6 +23,7 @@ import {
 } from "@solana/spl-token";
 import { AnchorProvider, BN, EventParser, Program, Wallet } from "@anchor-lang/core";
 import idl from "../../target/idl/hex_vault.json";
+import { buildSumTree, type SumTree } from "../../apps/backend/src/snapshot/sum-tree.js";
 
 const secret = Uint8Array.from(
   JSON.parse(readFileSync(process.env.ANCHOR_WALLET as string, "utf8")),
@@ -162,9 +164,8 @@ export function randomnessPda(seed: Uint8Array): PublicKey {
  * Fabricates a fulfilled randomness account for `seed` and returns its
  * address, which `draw` expects to be handed.
  *
- * Read the seed off the Epoch (`epoch.vrfSeed`) rather than recomputing the
- * keccak here: the program is the authority on it, and tests then need no
- * hash library.
+ * Read the seed off the Epoch (`epoch.vrfSeed`) rather than recomputing it
+ * here: the program is the authority on it.
  */
 export async function fulfillRandomness(
   seed: Uint8Array | number[],
@@ -231,97 +232,29 @@ export function randomnessForTarget(total: bigint, lo: bigint, hi: bigint): Uint
   throw new Error(`no randomness found for a target in [${lo}, ${hi})`);
 }
 
-// --- vrf_seed(domain, pool, id, nonce) --------------------------------------
+// --- epoch_seed(pool, epoch, nonce, root, total) ------------------------------
 //
-// `request_draw` (beta-launch-fixes ticket 02) mixes a 32-byte nonce into the
-// seed, so a test has to derive the
-// same seed client-side to know which randomness account to pass -- the
-// address is unknowable from public inputs alone any more. No dependency in
-// this workspace carries Solana's pre-standard Keccak (differs from SHA3-256
-// only in the padding byte), so it is duplicated here from
-// `apps/backend/src/operator/vrf.ts`'s own copy, for the same reason that
-// file gives: it runs once or twice per test on 48-80 bytes, so speed is
-// irrelevant and a real dependency is not worth adding for it.
+// `request_draw` mixes the nonce, the snapshot root and the Ticket total into the
+// seed (ADR 0025), so a test derives the same seed client-side to know which
+// randomness account to pass.
 
-function u64le64(n: bigint | number): Buffer {
-  const buf = Buffer.alloc(8);
-  buf.writeBigUInt64LE(BigInt(n));
-  return buf;
-}
-
-const KECCAK_RATE = 136;
-const KECCAK_ROUNDS = 24;
-
-const KECCAK_ROUND_CONSTANTS = new BigUint64Array([
-  0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
-  0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
-  0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
-  0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
-  0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
-  0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n,
-]);
-
-const KECCAK_ROTATIONS = new BigUint64Array([
-  0n, 1n, 62n, 28n, 27n, 36n, 44n, 6n, 55n, 20n, 3n, 10n, 43n, 25n, 39n, 41n, 45n, 15n,
-  21n, 8n, 18n, 2n, 61n, 56n, 14n,
-]);
-
-const rotl = (x: bigint, n: bigint): bigint => (n === 0n ? x : (x << n) | (x >> (64n - n)));
-
-function keccakPermute(lanes: BigUint64Array): void {
-  const c = new BigUint64Array(5);
-  const b = new BigUint64Array(25);
-  for (let round = 0; round < KECCAK_ROUNDS; round += 1) {
-    for (let x = 0; x < 5; x += 1) {
-      c[x] = (lanes[x] as bigint) ^ (lanes[x + 5] as bigint) ^ (lanes[x + 10] as bigint) ^
-        (lanes[x + 15] as bigint) ^ (lanes[x + 20] as bigint);
-    }
-    for (let x = 0; x < 5; x += 1) {
-      const d = (c[(x + 4) % 5] as bigint) ^ rotl(c[(x + 1) % 5] as bigint, 1n);
-      for (let y = 0; y < 25; y += 5) lanes[x + y] = (lanes[x + y] as bigint) ^ d;
-    }
-    for (let x = 0; x < 5; x += 1) {
-      for (let y = 0; y < 5; y += 1) {
-        b[y + 5 * ((2 * x + 3 * y) % 5)] = rotl(
-          lanes[x + 5 * y] as bigint,
-          KECCAK_ROTATIONS[x + 5 * y] as bigint,
-        );
-      }
-    }
-    for (let y = 0; y < 25; y += 5) {
-      for (let x = 0; x < 5; x += 1) {
-        lanes[x + y] = (b[x + y] as bigint) ^ (~(b[((x + 1) % 5) + y] as bigint) & (b[((x + 2) % 5) + y] as bigint));
-      }
-    }
-    lanes[0] = (lanes[0] as bigint) ^ (KECCAK_ROUND_CONSTANTS[round] as bigint);
-  }
-}
-
-function keccak256(input: Uint8Array): Uint8Array {
-  const padded = new Uint8Array((Math.floor(input.length / KECCAK_RATE) + 1) * KECCAK_RATE);
-  padded.set(input);
-  padded[input.length] = 0x01;
-  padded[padded.length - 1] = (padded[padded.length - 1] ?? 0) | 0x80;
-
-  const lanes = new BigUint64Array(25);
-  const view = new DataView(padded.buffer, padded.byteOffset, padded.byteLength);
-  for (let offset = 0; offset < padded.length; offset += KECCAK_RATE) {
-    for (let lane = 0; lane < KECCAK_RATE / 8; lane += 1) {
-      lanes[lane] = (lanes[lane] as bigint) ^ view.getBigUint64(offset + lane * 8, true);
-    }
-    keccakPermute(lanes);
-  }
-
-  const digest = new Uint8Array(32);
-  const out = new DataView(digest.buffer);
-  for (let lane = 0; lane < 4; lane += 1) out.setBigUint64(lane * 8, lanes[lane] as bigint, true);
-  return digest;
-}
-
-/** `utils::vrf_seed`: keccak256(domain || pool || id_le || nonce). */
-export function vrfSeed(pool: PublicKey, id: bigint, nonce: Uint8Array): Uint8Array {
-  return keccak256(
-    Buffer.concat([Buffer.from("epoch"), pool.toBuffer(), u64le64(id), Buffer.from(nonce)]),
+/** `utils::epoch_seed`: sha256("epoch" || pool || epoch_id_le || nonce || root || total_le). */
+export function vrfSeed(
+  pool: PublicKey,
+  id: bigint,
+  nonce: Uint8Array,
+  root: Uint8Array,
+  total: bigint,
+): Uint8Array {
+  return sha256(
+    Buffer.concat([
+      Buffer.from("epoch"),
+      pool.toBuffer(),
+      u64le(id),
+      Buffer.from(nonce),
+      Buffer.from(root),
+      u64le(total),
+    ]),
   );
 }
 
@@ -874,19 +807,45 @@ export function setTreasuryAccountsMethod(
     .signers([admin]);
 }
 
-// --- The epoch draw (off-chain-tickets ticket 08) -------------------------------
+// --- The epoch draw (off-chain-tickets tickets 08 and 09) -----------------------
 //
 // Tickets live in the backend, so a test that draws keeps its own list of who
-// holds what and hands the program the total.
+// holds what, builds the Merkle sum tree the backend would (the same builder),
+// and hands `request_draw` its root, total and shape and `payout` a proof.
 
 export interface Holding {
   owner: PublicKey;
   tickets: bigint;
 }
 
+/** What `request_draw` commits, with the tree behind it. */
+export interface Snapshot {
+  /** The holders sorted by wallet bytes, so a leaf's index is its position here. */
+  held: Holding[];
+  tree: SumTree | undefined;
+  root: Buffer;
+  total: bigint;
+  depth: number;
+  leafCount: number;
+}
+
+/** A wallet that is no Player: holds the Tickets of a draw nobody is paid for. */
+export const FILLER = new PublicKey(Buffer.alloc(32, 0xfe));
+
+/** The snapshot the backend would build over `held`. No holders commit zeros,
+ *  which `request_draw` rolls over. */
+export function snapshotOf(held: Holding[]): Snapshot {
+  const sorted = [...held].sort((a, b) => Buffer.compare(a.owner.toBuffer(), b.owner.toBuffer()));
+  if (sorted.length === 0) {
+    return { held: sorted, tree: undefined, root: Buffer.alloc(32), total: 0n, depth: 0, leafCount: 0 };
+  }
+  const tree = buildSumTree(sorted.map((h) => ({ wallet: h.owner.toBuffer(), tickets: h.tickets })));
+  return { held: sorted, tree, root: tree.root, total: tree.total, depth: tree.depth, leafCount: tree.leafCount };
+}
+
 /**
  * The Ticket total of `held` and 64 randomness bytes whose draw target falls in
- * `winner`'s range, with the holders laid out in the order given.
+ * `winner`'s range, with the holders laid out in leaf order (by wallet bytes).
  */
 export function randomnessLanding(
   held: Holding[],
@@ -894,7 +853,7 @@ export function randomnessLanding(
 ): { total: bigint; randomness: Uint8Array } {
   let lo = 0n;
   let range: [bigint, bigint] | undefined;
-  for (const { owner, tickets } of held) {
+  for (const { owner, tickets } of snapshotOf(held).held) {
     if (owner.equals(winner)) range = [lo, lo + tickets];
     lo += tickets;
   }
@@ -902,19 +861,32 @@ export function randomnessLanding(
   return { total: lo, randomness: randomnessForTarget(lo, range[0], range[1]) };
 }
 
-/** Builder for `request_draw`. `totalTickets` is the epoch's Ticket total, which
- *  the Operator supplies; `nonce` is mixed into the seed, which is read back
+export interface DrawArgs {
+  nonce: Uint8Array;
+  root: Uint8Array;
+  total: bigint;
+  depth: number;
+  leafCount: number;
+}
+
+/** Builder for `request_draw` with every argument spelled out, so a test can
+ *  commit a bad shape. The seed (and so the randomness address) is read back
  *  off the Epoch account once this succeeds. */
-export function requestDrawMethod(
+export function requestDrawRaw(
   ctx: PoolCtx,
   epochId: bigint,
-  totalTickets: bigint,
-  nonce: Uint8Array = testNonce(),
+  a: DrawArgs,
   randomness?: PublicKey,
 ) {
-  const seed = vrfSeed(ctx.pool, epochId, nonce);
+  const seed = vrfSeed(ctx.pool, epochId, a.nonce, a.root, a.total);
   return program.methods
-    .requestDraw(Array.from(nonce), new BN(totalTickets.toString()))
+    .requestDraw(
+      Array.from(a.nonce),
+      Array.from(a.root),
+      new BN(a.total.toString()),
+      a.depth,
+      a.leafCount,
+    )
     .accountsPartial({
       operator: ctx.operator.publicKey,
       pool: ctx.pool,
@@ -929,13 +901,51 @@ export function requestDrawMethod(
     .signers([ctx.operator]);
 }
 
-/** Builder for `payout`, signed by the Operator until ticket 09 (the winner's
- *  proof) makes it permissionless again. */
-export function payoutMethod(ctx: PoolCtx, epochId: bigint, winner: PublicKey) {
+/** Builder for `request_draw` over `draw`: the holders, or a bare Ticket total
+ *  held by a `FILLER` wallet for a draw nobody is paid in. 0n rolls over. */
+export function requestDrawMethod(
+  ctx: PoolCtx,
+  epochId: bigint,
+  draw: bigint | Holding[],
+  nonce: Uint8Array = testNonce(),
+  randomness?: PublicKey,
+) {
+  const held = typeof draw === "bigint" ? (draw > 0n ? [{ owner: FILLER, tickets: draw }] : []) : draw;
+  const s = snapshotOf(held);
+  return requestDrawRaw(ctx, epochId, { nonce, ...s }, randomness);
+}
+
+export interface PayoutProof {
+  index: number;
+  tickets: bigint;
+  siblings: { hash: Uint8Array; sum: bigint }[];
+}
+
+/** The proof the API would serve for `owner`'s leaf. */
+export function proofFor(s: Snapshot, owner: PublicKey): PayoutProof {
+  const index = s.held.findIndex((h) => h.owner.equals(owner));
+  if (index < 0 || !s.tree) throw new Error(`${owner.toBase58()} holds nothing in this snapshot`);
+  return { index, tickets: (s.held[index] as Holding).tickets, siblings: s.tree.proof(index) };
+}
+
+/** Builder for `payout` with the proof spelled out, so a test can break it.
+ *  Permissionless: `caller` only pays the fee (the Operator unless told). */
+export function payoutRaw(
+  ctx: PoolCtx,
+  epochId: bigint,
+  winner: PublicKey,
+  proof: PayoutProof,
+  caller: Keypair = ctx.operator,
+  remaining: AccountMeta[] = [],
+) {
   return program.methods
-    .payout()
+    .payout(
+      proof.index,
+      new BN(proof.tickets.toString()),
+      proof.siblings.map((s) => ({ hash: Array.from(s.hash), sum: new BN(s.sum.toString()) })),
+    )
     .accountsPartial({
-      operator: ctx.operator.publicKey,
+      caller: caller.publicKey,
       pool: ctx.pool,
       acceptedMint: ctx.mint,
       epoch: epochPda(ctx.pool, epochId),
@@ -947,7 +957,19 @@ export function payoutMethod(ctx: PoolCtx, epochId: bigint, winner: PublicKey) {
       ...ctx.venue,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
-    .signers([ctx.operator]);
+    .remainingAccounts(remaining)
+    .signers([caller]);
+}
+
+/** Builder for `payout` of the draw `request_draw` committed over `held`. */
+export function payoutMethod(
+  ctx: PoolCtx,
+  epochId: bigint,
+  winner: PublicKey,
+  held: Holding[],
+  caller: Keypair = ctx.operator,
+) {
+  return payoutRaw(ctx, epochId, winner, proofFor(snapshotOf(held), winner), caller);
 }
 
 /** On-chain unix time and compute units of one confirmed transaction. */

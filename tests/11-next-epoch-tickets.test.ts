@@ -158,9 +158,10 @@ describe("the pending deposit", () => {
       await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
       await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3: epoch 2 can be drawn
       // `a` never acted after depositing in epoch 1, and holds all of epoch 2.
-      await requestDrawMethod(pool, 2n, 3_000_000n).rpc();
+      const held = [{ owner, tickets: 3_000_000n }];
+      await requestDrawMethod(pool, 2n, held).rpc();
       const drawing = await fetchEpoch(pool, 2n);
-      expect(big(drawing.registeredWeight)).toBe(3_000_000n);
+      expect(big(drawing.totalTickets)).toBe(3_000_000n);
 
       await program.methods
         .draw()
@@ -180,7 +181,7 @@ describe("the pending deposit", () => {
       const prize = big(drawing.jackpotAmount);
       expect(prize).toBe(2_000_000n);
 
-      await payoutMethod(pool, 2n, owner).rpc();
+      await payoutMethod(pool, 2n, owner, held).rpc();
 
       const after = await fetchPlayer(pool, owner);
       expect(big(after.principal)).toBe(big(before.principal) + prize);

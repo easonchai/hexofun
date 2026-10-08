@@ -20,6 +20,7 @@ import {
   retryUntilOk,
   setupPool,
   testNonce,
+  type Holding,
   type PoolCtx,
 } from "./helpers/hx.js";
 
@@ -152,11 +153,14 @@ async function buyTickets(pool: PoolCtx, owner: Wallet, amount: bigint) {
 async function requestDraw(
   pool: PoolCtx,
   epochId: bigint,
-  totalTickets = 1n,
+  draw: bigint | Holding[] = 1n,
   nonce: Uint8Array = testNonce(),
 ) {
-  return requestDrawMethod(pool, epochId, totalTickets, nonce).rpc();
+  return requestDrawMethod(pool, epochId, draw, nonce).rpc();
 }
+
+/** One holder with a single Ticket: the snapshot `winner` can be paid in. */
+const solo = (winner: PublicKey): Holding[] => [{ owner: winner, tickets: 1n }];
 
 /** Permissionless (production-hardening ticket 01): first account is
  *  `caller`, not `operator`. */
@@ -179,7 +183,7 @@ async function draw(
 }
 
 async function payout(pool: PoolCtx, epochId: bigint, winner: PublicKey) {
-  return payoutMethod(pool, epochId, winner).rpc();
+  return payoutMethod(pool, epochId, winner, solo(winner)).rpc();
 }
 
 async function fetchPlayer(pool: PoolCtx, owner: PublicKey) {
@@ -293,7 +297,7 @@ describe("shutdown", () => {
       await fundJackpot(pool, funder, 2_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await requestDraw(pool, 1n);
+      await requestDraw(pool, 1n, solo(a.keypair.publicKey));
 
       const closed = await fetchEpoch(pool, 1n);
       const randomness = await fulfillRandomness(Uint8Array.from(closed.vrfSeed));
@@ -329,7 +333,7 @@ describe("shutdown", () => {
       await fundJackpot(pool, funder, 2_000_000n);
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await requestDraw(pool, 1n); // status: Drawing
+      await requestDraw(pool, 1n, solo(a.keypair.publicKey)); // status: Drawing
 
       const drawing = await fetchEpoch(pool, 1n);
       expect(drawing.status).toBe(2); // Drawing
@@ -554,7 +558,7 @@ describe("sweep_house", () => {
       await fundJackpot(pool, funder, 2_000_000n); // becomes the reserved prize
 
       await retryUntilOk(() => beginEpoch(pool, 1n));
-      await requestDraw(pool, 1n); // snapshots jackpot_amount = 2M, reserves it
+      await requestDraw(pool, 1n, solo(a.keypair.publicKey)); // snapshots jackpot_amount = 2M, reserves it
 
       const closed = await fetchEpoch(pool, 1n);
       const randomness = await fulfillRandomness(Uint8Array.from(closed.vrfSeed));

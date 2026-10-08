@@ -684,7 +684,8 @@ describe("deposits while impaired", () => {
       await beginEpoch(1n); // epoch 2: Alice's 1,000 are Tickets
       await beginEpoch(2n); // epoch 3: epoch 2 can be drawn
       // Alice holds all of epoch 2's Tickets, so any target is hers.
-      await requestDrawMethod(ctx, 2n, 1_000n * USDC).rpc();
+      const held = [{ owner: key, tickets: 1_000n * USDC }];
+      await requestDrawMethod(ctx, 2n, held).rpc();
       const drawing = await program.account.epoch.fetch(epochPda(ctx.pool, 2n));
       await program.methods
         .draw()
@@ -701,7 +702,7 @@ describe("deposits while impaired", () => {
       expect((await fetchPool(ctx)).impaired).toBe(true);
       const before = await fetchPlayer(ctx, alice);
 
-      await payoutMethod(ctx, 2n, key).rpc();
+      await payoutMethod(ctx, 2n, key, held).rpc();
       await assertSolvent(ctx);
       const after = await fetchPlayer(ctx, alice);
       expect(big(after.principal)).toBe(big(before.principal) + 2n * USDC);
