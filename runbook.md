@@ -672,3 +672,26 @@
   Depositors' yield accrues second by second from what the venue pays, with or without an Epoch, so a deposit-only week
   earns it. The prize share reaches the jackpot vault at the operator's pre-end harvest, which only runs while an Epoch is
   running. Nothing needs funding by hand.
+
+  Beacon missing
+
+  A Round that has closed reveals its tile from a drand quicknet beacon. While the backend has no beacon with a valid
+  signature, the Round stays `closed` and the backend asks both relays again every second (`Round N: no usable beacon`
+  warnings in the backend log name the relay and the reason). Ten minutes after the beacon's emission time
+  (`VOID_AFTER_MS` in apps/backend/src/api/drand.ts) it voids the Round and refunds every stake as a `refund` row, with
+  no House cut. Voids need no action. To check one:
+
+    1. Take the Round's `closeAt` and work out r = floor((closeAt - 1692803367) / 3) + 1 + 2, with closeAt in unix seconds.
+       The Round's `drandRound` is null for a void, so the number is not stored.
+    2. Ask both relays for it:
+
+         curl -s https://api.drand.sh/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/<r>
+         curl -s https://drand.cloudflare.com/52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971/public/<r>
+
+    3. Neither answers: drand is down. Leave the Round alone. Its players get their stakes back at the ten-minute mark.
+    4. A relay answers and the Round is `voided`, or is still `closed` ten minutes on: that is a fault in the engine, not an
+       outage. A halted chain catches up and serves the old round later, so the void is provably wrong. Report it with the
+       Round id and the beacon, and do not edit ledger rows by hand.
+
+  A Round that stays `closed` with a good beacon in hand and an error in the log (`has no House player`, `does not match
+  its Positions`) is stuck on that error; it retries every second until the cause is fixed.
