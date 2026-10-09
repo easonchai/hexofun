@@ -91,10 +91,24 @@ export interface OpsSummaryExtras {
   /** Wallets whose ledger Principal differs from their Player's: the total and the first few by
    *  wallet, with both figures (audit-2026-10-09 07). */
   ledgerDrift: { count: number; wallets: PrincipalDrift[] };
+  /** The ledger epoch's `grant_admin` rows, newest first, so a leaked ops key shows up here. */
+  adminGrants: AdminGrantSummary[];
 }
 
 /** How many drifting wallets the summary lists. */
 export const LEDGER_DRIFT_LISTED = 5;
+
+export interface AdminGrantSummary {
+  id: bigint;
+  signer: string | null;
+  wallet: string;
+  amount: bigint;
+  reason: string;
+  createdAt: Date;
+}
+
+/** The most grants the summary lists; the ledger has the rest. */
+const ADMIN_GRANTS_LISTED = 50;
 
 export type OpsSummary = Awaited<ReturnType<ApiService["getStatus"]>> & OpsSummaryExtras;
 
@@ -165,11 +179,12 @@ export class OpsSummaryService {
     // Cached for BALANCES_TTL_MS and already warm from getStatus, so this is
     // the same reserve read, not a second RPC call.
     const reserve = (await this.api.chainBalances(pool?.klendReserve)).reserve;
-    const [harvested, view, proposal, ledgerDrift] = await Promise.all([
+    const [harvested, view, proposal, ledgerDrift, adminGrants] = await Promise.all([
       this.harvestedTotals(),
       this.chainView(pool !== null),
       this.prisma.venueProposal.findUnique({ where: { poolAddress } }),
       principalDrift(this.prisma, poolAddress, LEDGER_DRIFT_LISTED),
+      this.adminGrants(pool?.currentEpochId ?? 0n),
     ]);
     const stuck = view === null ? null : view.stuck;
     const todo =
@@ -228,7 +243,29 @@ export class OpsSummaryService {
       todo,
       fastPauseWallets: this.fastPauseWallets,
       ledgerDrift,
+      adminGrants,
     };
+  }
+
+  /** `grant_admin` rows booked into the ledger epoch, which is the Cursor's when the indexer has one
+   *  and the Pool's current epoch otherwise (the route books into the Cursor's). */
+  private async adminGrants(poolEpochId: bigint): Promise<AdminGrantSummary[]> {
+    const poolAddress = this.api.poolAddress;
+    const cursor = await this.prisma.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
+    const epochId = cursor !== null && cursor.ledgerEpochId > 0n ? cursor.ledgerEpochId : poolEpochId;
+    const rows = await this.prisma.ticketLedger.findMany({
+      where: { poolAddress, reason: "grant_admin", epochId },
+      orderBy: { id: "desc" },
+      take: ADMIN_GRANTS_LISTED,
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      signer: row.signer,
+      wallet: row.owner,
+      amount: row.delta,
+      reason: row.ref,
+      createdAt: row.createdAt,
+    }));
   }
 
   /** The todo list with `due` set. The two DB reads are the Operator's own queries, mirrored. */

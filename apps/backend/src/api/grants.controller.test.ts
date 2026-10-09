@@ -1,7 +1,7 @@
 // off-chain-tickets ticket 23, the database half: a signed grant books one
 // `grant_admin` row and moves the balance, a resend is a replay, and the route
-// is 404 with OPS_WALLETS empty. Shares hexvault_ops with game-config.controller.test.ts.
-const TEST_DATABASE_URL = "postgresql://hexvault:hexvault@127.0.0.1:5433/hexvault_ops";
+// is 404 with OPS_WALLETS empty. Own database, so its row counts and the Game config rows it seeds are not shared.
+const TEST_DATABASE_URL = "postgresql://hexvault:hexvault@127.0.0.1:5433/hexvault_grants";
 process.env.DATABASE_URL = TEST_DATABASE_URL;
 
 import { createPrivateKey, sign as signEd25519 } from "node:crypto";
@@ -23,6 +23,7 @@ import { poolAddress } from "../chain/pda";
 import { PrismaService } from "../prisma/prisma.service";
 import { lockLedger } from "../ledger/ledger-store";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
+import { DEFAULT_GAME_CONFIG } from "./game-config";
 import { grantMessage } from "./grants";
 import { GrantsController } from "./grants.controller";
 import { SerializationInterceptor } from "./serialization.interceptor";
@@ -73,6 +74,7 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("Manual grant route
   beforeEach(async () => {
     await prisma.ticketLedger.deleteMany();
     await prisma.ticketBalance.deleteMany();
+    await prisma.gameConfig.deleteMany();
   });
   afterEach(async () => {
     await app?.close();
@@ -172,6 +174,19 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("Manual grant route
     }
     expect(await prisma.ticketLedger.count()).toBe(0);
     expect(await prisma.ticketBalance.count()).toBe(0);
+  });
+
+  it("caps a grant at the Game config's maxAdminGrant, 10,000 with no row, and books nothing above it", async () => {
+    const http = await boot(team());
+    await http.post("/ops/grants").send(body({ amount: 10_000 })).expect(201);
+    const over = await http.post("/ops/grants").send(body({ amount: 10_001 })).expect(400);
+    expect(over.body.code).toBe("AmountOutOfRange");
+
+    await prisma.gameConfig.create({ data: { poolAddress: POOL, ...DEFAULT_GAME_CONFIG, maxAdminGrant: 1_000 } });
+    await http.post("/ops/grants").send(body({ amount: 1_000 })).expect(201);
+    const capped = await http.post("/ops/grants").send(body({ amount: 1_001 })).expect(400);
+    expect(capped.body.code).toBe("AmountOutOfRange");
+    expect(await prisma.ticketLedger.count()).toBe(2);
   });
 
   it("is 400 for a malformed body", async () => {

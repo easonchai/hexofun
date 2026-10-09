@@ -48,6 +48,7 @@ const HEALTHY: AlertInputs = {
   ticketLedgerMismatches: 0,
   ticketHolders: 12,
   truncatedLogSignatures: [],
+  roundSettleFailed: [],
 };
 
 const PROPOSAL = {
@@ -306,6 +307,12 @@ describe("evaluateAlerts", () => {
     expect(alert).toMatchObject({ code: "SNAPSHOT_MISMATCH" });
   });
 
+  it("ROUND_SETTLE_FAILED names each Round the sweep could not settle", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, roundSettleFailed: [4n, 9n] }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "ROUND_SETTLE_FAILED" });
+    expect(alert?.message).toContain("Round 4, 9");
+  });
+
   it("stacks every active condition at once", () => {
     const codes = evaluateAlerts(
       {
@@ -338,6 +345,7 @@ describe("evaluateAlerts", () => {
         ticketLedgerMismatches: 1,
         ticketHolders: SNAPSHOT_LEAF_CAP,
         truncatedLogSignatures: ["sig1"],
+        roundSettleFailed: [4n],
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -364,6 +372,7 @@ describe("evaluateAlerts", () => {
       "VENUE_PROPOSED",
       "PARAMS_CHANGED",
       "TICKET_LEDGER_MISMATCH",
+      "ROUND_SETTLE_FAILED",
       "SNAPSHOT_NEAR_CAP",
       "EVENT_LOG_TRUNCATED",
     ]);

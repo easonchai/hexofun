@@ -35,12 +35,15 @@ export function verifyGrant(input: {
   time: number;
   signature: Uint8Array;
   nowSeconds: number;
+  /** The Game config's `maxAdminGrant`. */
+  maxAmount: number;
 }): GrantVerdict {
   if (!input.allowed.has(input.signer.toBase58())) return { ok: false, code: "WalletNotListed" };
   if (Math.abs(input.nowSeconds - input.time) > GRANT_WINDOW_SECONDS) return { ok: false, code: "RequestStale" };
   const { amount, reason } = input;
   // Tickets are whole numbers; a JSON number past 2^53 would already have lost digits.
-  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 1) {
+  // Above the Game config's per-grant cap is out of range too, and is refused before the signature check.
+  if (typeof amount !== "number" || !Number.isSafeInteger(amount) || amount < 1 || amount > input.maxAmount) {
     return { ok: false, code: "AmountOutOfRange" };
   }
   if (typeof reason !== "string" || reason.trim().length === 0 || reason.length > GRANT_REASON_MAX) {

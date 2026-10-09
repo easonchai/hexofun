@@ -334,6 +334,28 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect((await ops.getOpsSummary()).ledgerDrift).toEqual({ count: 2, wallets: expect.any(Array) });
   });
 
+  it("lists the open epoch's admin grants with their signer, and nothing else from the ledger (audit-2026-10-09 08)", async () => {
+    await seedActive();
+    const pool = POOL.toBase58();
+    const wallet = Keypair.generate().publicKey.toBase58();
+    const signer = Keypair.generate().publicKey.toBase58();
+    const row = (epochId: bigint, reason: "grant_admin" | "reward", ref: string, delta = 500n) =>
+      ({ poolAddress: pool, owner: wallet, epochId, delta, reason, ref, ...(reason === "grant_admin" && { signer }) });
+    try {
+      await prisma.ticketLedger.createMany({
+        data: [row(7n, "grant_admin", "launch bonus"), row(6n, "grant_admin", "last epoch"), row(7n, "reward", "1", 9n)],
+      });
+
+      const { adminGrants } = await ops.getOpsSummary();
+
+      expect(adminGrants).toEqual([
+        { id: expect.any(BigInt), signer, wallet, amount: 500n, reason: "launch bonus", createdAt: expect.any(Date) },
+      ]);
+    } finally {
+      await prisma.ticketLedger.deleteMany({ where: { poolAddress: pool } });
+    }
+  });
+
   it("reports the open venue proposal with its unlock time, and null when none is open", async () => {
     await seedActive();
     const none = await ops.getOpsSummary();

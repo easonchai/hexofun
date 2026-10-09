@@ -44,6 +44,9 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
   private readonly programId: string;
   private timer: ReturnType<typeof setInterval> | undefined;
   private revealing = false;
+  /** Closed Rounds whose last settle threw, with the error; the alerts name them. In memory: a restart
+   *  forgets them until the next sweep fails again, which is a second away. */
+  private readonly settleFailures = new Map<bigint, string>();
   /** The beacon relays, in the order they are tried; tests swap in stubs. */
   relays: ChainClient[] = defaultRelays();
 
@@ -70,6 +73,11 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     if (this.timer) clearInterval(this.timer);
+  }
+
+  /** Ids of closed Rounds the last sweep could not settle, oldest first. */
+  settleFailed(): bigint[] {
+    return [...this.settleFailures.keys()].sort((a, b) => (a < b ? -1 : 1));
   }
 
   /** Closes the pool's open Round when `closeAt` has passed. Idempotent. */
@@ -162,7 +170,8 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
    * The relays are asked outside the transaction. A Round whose beacon is not
    * out yet ends the pass (later Rounds emit later); one whose beacon no relay
    * gave a valid signature for stays `closed` for the next pass, unless the
-   * beacon is `VOID_AFTER_MS` overdue, then it is voided and refunded.
+   * beacon is `VOID_AFTER_MS` overdue, then it is voided and refunded. A Round
+   * whose settle throws is recorded in `settleFailed()` and skipped; the rest still settle.
    */
   async revealDue(now: Date = new Date()): Promise<void> {
     if (this.revealing) return;
@@ -174,6 +183,9 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
         orderBy: { id: "asc" },
         select: { id: true, closeAt: true },
       });
+      // A Round settled or voided some other way is no longer failing.
+      const stillClosed = new Set(closed.map((row) => row.id));
+      for (const id of this.settleFailures.keys()) if (!stillClosed.has(id)) this.settleFailures.delete(id);
       for (const { id, closeAt } of closed) {
         const round = beaconRoundFor(closeAt);
         const emittedAt = beaconTime(round).getTime();
@@ -183,13 +195,22 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
         );
         const overdue = now.getTime() >= emittedAt + VOID_AFTER_MS;
         if (beacon === null && !overdue) continue;
-        await this.prisma.$transaction(
-          async (tx) => {
-            await lockLedger(tx, poolAddress);
-            await this.settleIn(tx, id, beacon);
-          },
-          LEDGER_TRANSACTION,
-        );
+        // One bad Round must not hold back the ones after it: skip it for this sweep, retry on the next.
+        try {
+          await this.prisma.$transaction(
+            async (tx) => {
+              await lockLedger(tx, poolAddress);
+              await this.settleIn(tx, id, beacon);
+            },
+            LEDGER_TRANSACTION,
+          );
+          this.settleFailures.delete(id);
+        } catch (cause) {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          // The sweep retries every second; log a failure when it is new or its cause changed.
+          if (this.settleFailures.get(id) !== message) this.logger.error(`Round ${id} failed to settle: ${message}`);
+          this.settleFailures.set(id, message);
+        }
       }
     } finally {
       this.revealing = false;

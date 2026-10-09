@@ -1596,6 +1596,19 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         }
       });
 
+      it("fires ROUND_SETTLE_FAILED naming the Round the reveal sweep could not settle", async () => {
+        await quiet();
+        const failed = vi.spyOn(app.get(RoundsService), "settleFailed").mockReturnValue([7n]);
+        try {
+          const { body } = await http.get("/alerts").expect(503);
+          expect(body.alerts).toEqual([{ code: "ROUND_SETTLE_FAILED", message: expect.stringContaining("Round 7") }]);
+          failed.mockReturnValue([]);
+          await http.get("/alerts").expect(200);
+        } finally {
+          failed.mockRestore();
+        }
+      });
+
       it("fires VENUE_PROPOSED while a proposal row exists, carrying its pins", async () => {
         await quiet();
         await prisma.venueProposal.create({

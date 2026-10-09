@@ -41,6 +41,7 @@ describe("grantTickets", () => {
       time: sent.time,
       signature: bs58.decode(sent.signature),
       nowSeconds: 1_800_000_000,
+      maxAmount: 10_000,
     });
     expect(verdict.ok).toBe(true);
     expect(stdout.mock.calls.map(([text]) => text)).toEqual(["42\n"]);

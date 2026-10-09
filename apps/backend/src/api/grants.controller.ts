@@ -17,12 +17,13 @@ import { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
 import { LEDGER_TRANSACTION, lockLedger } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
+import { DEFAULT_MAX_ADMIN_GRANT } from "./game-config";
 import { verifyGrant, type GrantRefusal } from "./grants";
 
 const REFUSAL_COPY: Record<GrantRefusal, string> = {
   WalletNotListed: "That wallet may not grant Tickets.",
   RequestStale: "That request is too old or too far ahead. Sign it again.",
-  AmountOutOfRange: "`amount` must be a whole number of Tickets, at least 1.",
+  AmountOutOfRange: "`amount` must be a whole number of Tickets, at least 1 and at most the Game config's maxAdminGrant.",
   ReasonInvalid: "`reason` must be 1 to 200 characters.",
   BadSignature: "The signature does not match this pool, wallet, amount, reason and time.",
 };
@@ -63,7 +64,8 @@ function parseBody(body: unknown) {
 /**
  * Manual grants (off-chain-tickets ticket 23): a listed team wallet signs one
  * grant and the backend books a `grant_admin` ledger row with the signer and
- * signature on it, then moves the balance. Uncapped, House included. Answers
+ * signature on it, then moves the balance. Capped per grant by the Game
+ * config's `maxAdminGrant`; House included. Answers
  * 404 when `OPS_WALLETS` is empty, as Fast pause does.
  */
 @Controller("ops")
@@ -85,7 +87,13 @@ export class GrantsController {
     const { wallet, signer, time, signature, amount, reason } = parseBody(body);
     const poolAddress = this.chain.poolAddress().toBase58();
     const owner = wallet.toBase58();
+    const inForce = await this.prisma.gameConfig.findFirst({
+      where: { poolAddress },
+      orderBy: { id: "desc" },
+      select: { maxAdminGrant: true },
+    });
     const verdict = verifyGrant({
+      maxAmount: inForce?.maxAdminGrant ?? DEFAULT_MAX_ADMIN_GRANT,
       allowed: this.allowed,
       signer,
       pool: poolAddress,

@@ -7,11 +7,12 @@ process.env.DATABASE_URL = TEST_DATABASE_URL;
 
 import { createPrivateKey, sign as signEd25519 } from "node:crypto";
 
+import { Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Test } from "@nestjs/testing";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import type { ChainClient } from "drand-client";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
 import { countLedgerMismatches } from "../ledger/ledger-store";
@@ -169,6 +170,10 @@ describe.skipIf(!DB_AVAILABLE)("reveal and settle", () => {
       },
     });
     rounds.relays = [goodRelay()];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   async function player(tickets: bigint): Promise<Player> {
@@ -426,6 +431,36 @@ describe.skipIf(!DB_AVAILABLE)("reveal and settle", () => {
       [2n, "settled", 32883614n],
       [3n, "settled", 32883654n],
     ]);
+    expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
+  });
+
+  it("skips a Round that cannot settle, settles the ones after it, and retries it once repaired (audit-2026-10-09 08)", async () => {
+    const alice = await player(1_000n);
+    await bet(alice, [1, 2], 10n, 0, 1n, 0);
+    await bet(alice, [3], 10n, 91, 2n, 1);
+    await rounds.closeDue(at(331));
+    // Round 1's pot no longer matches its Positions (20).
+    await prisma.round.update({ where: { poolAddress_id: { poolAddress: POOL, id: 1n } }, data: { pot: 999n } });
+    const calls: number[] = [];
+    rounds.relays = [goodRelay(calls)];
+    const error = vi.spyOn(Logger.prototype, "error").mockImplementation(() => undefined);
+
+    await rounds.revealDue(beaconTime(32883614));
+    expect((await prisma.round.findMany({ orderBy: { id: "asc" } })).map((r) => [r.id, r.status])).toEqual([
+      [1n, "closed"],
+      [2n, "settled"],
+    ]);
+    expect(rounds.settleFailed()).toEqual([1n]);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Round 1 failed to settle"));
+
+    // Every later sweep fails the same way and logs it once.
+    await rounds.revealDue(beaconTime(32883614));
+    expect(error).toHaveBeenCalledTimes(1);
+
+    await prisma.round.update({ where: { poolAddress_id: { poolAddress: POOL, id: 1n } }, data: { pot: 20n } });
+    await rounds.revealDue(beaconTime(32883614));
+    expect((await roundOf(1n)).status).toBe("settled");
+    expect(rounds.settleFailed()).toEqual([]);
     expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
   });
 

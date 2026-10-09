@@ -6,6 +6,7 @@ import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import { PrismaService } from "../prisma/prisma.service";
 import { MAX_SNAPSHOT_DEPTH } from "../snapshot/sum-tree";
 import { ApiService, EPOCH_OPEN } from "./api.service";
+import { RoundsService } from "./rounds.service";
 
 /** production-hardening ticket 05's codes, kept identical to
  *  docs/ops/incidents.md's playbook headers. */
@@ -35,7 +36,8 @@ export type AlertCode =
   | "TICKET_LEDGER_MISMATCH"
   | "SNAPSHOT_MISMATCH"
   | "SNAPSHOT_NEAR_CAP"
-  | "EVENT_LOG_TRUNCATED";
+  | "EVENT_LOG_TRUNCATED"
+  | "ROUND_SETTLE_FAILED";
 
 export interface Alert {
   code: AlertCode;
@@ -155,6 +157,8 @@ export interface AlertInputs {
   /** Signatures of transactions whose log Solana cut off, recorded inside the
    *  last `TRUNCATED_LOG_RECENT_S`; newest first. */
   truncatedLogSignatures: string[];
+  /** Closed Rounds the reveal sweep could not settle (audit-2026-10-09 08). */
+  roundSettleFailed: readonly bigint[];
 }
 
 /** `/status`'s operator block, which both the alerts and the ops todo list read. */
@@ -362,6 +366,12 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: `${inputs.ticketLedgerMismatches} wallets differ from their ledger rows or from their Player's Principal.`,
     });
   }
+  if (inputs.roundSettleFailed.length > 0) {
+    alerts.push({
+      code: "ROUND_SETTLE_FAILED",
+      message: `Round ${inputs.roundSettleFailed.join(", ")} could not settle and its stakes stay locked; the sweep retries every second.`,
+    });
+  }
   if (inputs.ticketHolders >= SNAPSHOT_LEAF_CAP * SNAPSHOT_NEAR_CAP_SHARE) {
     alerts.push({
       code: "SNAPSHOT_NEAR_CAP",
@@ -406,6 +416,7 @@ export class AlertsController {
     private readonly api: ApiService,
     private readonly prisma: PrismaService,
     config: ConfigService<HexVaultEnv, true>,
+    private readonly rounds: RoundsService,
   ) {
     this.tickStaleSeconds = config.get("ALERT_TICK_STALE_S", { infer: true });
     this.indexerStaleSeconds = config.get("ALERT_INDEXER_STALE_S", { infer: true });
@@ -469,6 +480,7 @@ export class AlertsController {
         ticketLedgerMismatches: ledgerCheck?.mismatches ?? 0,
         ticketHolders,
         truncatedLogSignatures: truncatedLogs.map((row) => row.signature),
+        roundSettleFailed: this.rounds.settleFailed(),
       },
       {
         tickStaleSeconds: this.tickStaleSeconds,

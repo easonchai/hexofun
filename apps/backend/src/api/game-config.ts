@@ -24,7 +24,14 @@ export interface GameConfigFields {
   bonusCapBps: number;
   referralTiers: ReferralTier[];
   maxTilesPerBet: number;
+  /** Per-grant cap in Tickets on `grant_admin`. Optional on the wire: a signed
+   *  change that leaves it out is byte for byte what the web signs today, and the
+   *  new row takes the column default. When present it is the last key signed. */
+  maxAdminGrant?: number;
 }
+
+/** Tickets one `grant_admin` may give; the column default is the same number. */
+export const DEFAULT_MAX_ADMIN_GRANT = 10_000;
 
 /**
  * The seed row: the values the last deployments bootstrapped with (the old
@@ -39,6 +46,7 @@ export const DEFAULT_GAME_CONFIG: GameConfigFields = {
   bonusCapBps: 500,
   referralTiers: RATE_TIERS.map((t) => ({ ...t })),
   maxTilesPerBet: 36,
+  maxAdminGrant: DEFAULT_MAX_ADMIN_GRANT,
 };
 
 const MAX_BPS = 10_000;
@@ -80,6 +88,8 @@ export function parseGameConfigFields(raw: unknown): GameConfigFields | null {
   const r = raw as Partial<Record<keyof GameConfigFields, unknown>> | null;
   if (r === null || typeof r !== "object") return null;
   const referralTiers = parseTiers(r.referralTiers);
+  const maxAdminGrant = r.maxAdminGrant;
+  if (maxAdminGrant !== undefined && !isInt(maxAdminGrant, 1, MAX_INT32)) return null;
   if (
     !isInt(r.roundSeconds, 60, MAX_INT32) ||
     !isInt(r.houseCutBps, 0, MAX_BPS) ||
@@ -97,6 +107,7 @@ export function parseGameConfigFields(raw: unknown): GameConfigFields | null {
     bonusCapBps: r.bonusCapBps,
     referralTiers,
     maxTilesPerBet: r.maxTilesPerBet,
+    ...(maxAdminGrant !== undefined && { maxAdminGrant }),
   };
 }
 

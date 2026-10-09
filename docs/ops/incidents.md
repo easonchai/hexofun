@@ -368,6 +368,25 @@ retrying that epoch. Nobody is paid until the rows are right, and `DRAWN_UNPAID`
 4. Once the rows rebuild the chain's root, restart the backend (it forgets the stop) or run `payout` by hand
    with the proof from `GET /epochs/<id>/draw`. `payout` is permissionless.
 
+<a id="round-settle-failed"></a>
+## A Round cannot settle
+
+Starts with `ROUND_SETTLE_FAILED`, naming the Round ids. The reveal sweep tried to settle or void a
+closed Round and its transaction threw. The stakes in that Round stay locked. Later Rounds are not
+held back: the sweep skips the failing one and settles the rest. It retries the failing Round every
+second, and the alert clears on the first sweep that settles it.
+
+1. The backend logs `Round <id> failed to settle: <error>` once per new error. Read it first.
+2. `pot ... does not match its Positions` means `Round.pot` differs from the sum of its Positions'
+   tiles times stake. Compare them: `SELECT r.pot, COALESCE(SUM(bit_count(p.tiles::bit(36))::bigint * p."stakePerTile"), 0)
+   FROM "Round" r LEFT JOIN "Position" p ON p."poolAddress" = r."poolAddress" AND p."roundId" = r.id
+   WHERE r.id = <id> GROUP BY r.pot`. Find which side a hand edit or a failed write left wrong. The void path
+   runs the same check, so a beacon that never comes does not get around it.
+3. `has no House player` means the indexer has not mirrored the Pool's House Player. Check
+   `SELECT owner FROM "Player" WHERE "isHouse"` and `INDEXER_STALE`; the Round settles once the row exists.
+4. Anything else is a bug or a database fault. Do not edit the ledger tables to push a Round through.
+   Keep the log line and the Round's rows, and fix the cause; the next sweep settles it.
+
 <a id="venue-proposed"></a>
 ## A venue proposal is open
 

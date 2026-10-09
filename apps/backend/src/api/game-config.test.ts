@@ -58,12 +58,15 @@ function attempt(over: {
 
 describe("gameConfigMessage", () => {
   it("pins the wire format the web helper must match", () => {
-    expect(gameConfigMessage("POOLADDR", 1700000000, DEFAULT_GAME_CONFIG)).toBe(
+    // Without `maxAdminGrant` the text is what the web signs today (it does not know the field yet).
+    const { maxAdminGrant, ...legacy } = DEFAULT_GAME_CONFIG;
+    const text =
       'HexVault game-config POOLADDR 1700000000 {"roundSeconds":60,"houseCutBps":600,"ticketsPerUsdc":10,' +
-        '"bonusCapBps":500,"referralTiers":[{"tier":4,"min":11,"max":null,"rateBps":500},' +
-        '{"tier":3,"min":6,"max":10,"rateBps":400},{"tier":2,"min":3,"max":5,"rateBps":300},' +
-        '{"tier":1,"min":1,"max":2,"rateBps":200}],"maxTilesPerBet":36}',
-    );
+      '"bonusCapBps":500,"referralTiers":[{"tier":4,"min":11,"max":null,"rateBps":500},' +
+      '{"tier":3,"min":6,"max":10,"rateBps":400},{"tier":2,"min":3,"max":5,"rateBps":300},' +
+      '{"tier":1,"min":1,"max":2,"rateBps":200}],"maxTilesPerBet":36';
+    expect(gameConfigMessage("POOLADDR", 1700000000, legacy)).toBe(`${text}}`);
+    expect(gameConfigMessage("POOLADDR", 1700000000, DEFAULT_GAME_CONFIG)).toBe(`${text},"maxAdminGrant":${maxAdminGrant}}`);
     expect(gameConfigMessage("P", 1, fields)).not.toBe(fastPauseMessage("game", "P", 1));
   });
 });
@@ -124,6 +127,15 @@ describe("parseGameConfigFields", () => {
     expect(parseGameConfigFields(DEFAULT_GAME_CONFIG)).toEqual(DEFAULT_GAME_CONFIG);
     const edge = { ...DEFAULT_GAME_CONFIG, houseCutBps: 10_000, bonusCapBps: 0, roundSeconds: 60, maxTilesPerBet: 1 };
     expect(parseGameConfigFields(edge)).toEqual(edge);
+  });
+
+  it("takes maxAdminGrant as an optional whole number from 1, last in the key order", () => {
+    const { maxAdminGrant: _drop, ...legacy } = DEFAULT_GAME_CONFIG;
+    expect(parseGameConfigFields(legacy)).toEqual(legacy);
+    expect(Object.keys(parseGameConfigFields({ ...legacy, maxAdminGrant: 5 })!).at(-1)).toBe("maxAdminGrant");
+    for (const bad of [0, -1, 1.5, "5", null, 2_147_483_648]) {
+      expect(parseGameConfigFields({ ...legacy, maxAdminGrant: bad })).toBeNull();
+    }
   });
 
   it("puts keys in canonical order whatever order they arrive in", () => {

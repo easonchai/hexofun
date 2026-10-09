@@ -27,7 +27,9 @@ function signWith(keypair: Keypair, message: string): Uint8Array {
   return new Uint8Array(signEd25519(null, Buffer.from(message, "utf8"), key));
 }
 
-function attempt(over: { keypair?: Keypair; time?: number; amount?: unknown; reason?: unknown; signed?: string } = {}) {
+function attempt(
+  over: { keypair?: Keypair; time?: number; amount?: unknown; reason?: unknown; signed?: string; maxAmount?: number } = {},
+) {
   const keypair = over.keypair ?? TEAM;
   const time = over.time ?? NOW;
   const amount = "amount" in over ? over.amount : 500;
@@ -43,6 +45,7 @@ function attempt(over: { keypair?: Keypair; time?: number; amount?: unknown; rea
     time,
     signature: signWith(keypair, message),
     nowSeconds: NOW,
+    maxAmount: over.maxAmount ?? 10_000,
   });
 }
 
@@ -91,6 +94,13 @@ describe("verifyGrant", () => {
     ["missing", undefined],
   ])("refuses an amount that is %s", (_name, amount) => {
     expect(attempt({ amount })).toEqual({ ok: false, code: "AmountOutOfRange" });
+  });
+
+  it("takes an amount at the Game config's cap and refuses one above it, before the signature check", () => {
+    expect(attempt({ amount: 10_000 }).ok).toBe(true);
+    expect(attempt({ amount: 10_001 })).toEqual({ ok: false, code: "AmountOutOfRange" });
+    expect(attempt({ amount: 10_001, signed: "not what was sent" })).toEqual({ ok: false, code: "AmountOutOfRange" });
+    expect(attempt({ amount: 20_000, maxAmount: 20_000 }).ok).toBe(true);
   });
 
   it("takes a reason of exactly 200 characters and refuses 201, blank or non-text", () => {
