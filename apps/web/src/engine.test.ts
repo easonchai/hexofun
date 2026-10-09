@@ -159,11 +159,23 @@ describe("boardResult: what the board says beside the countdown", () => {
     expect(boardResult("locked", open(), null)).toBe("DRAWING");
   });
 
-  it("keeps the countdown for a new open Round beside a closed one", () => {
-    // Phase follows the open Round; the closed Round's result lands by itself.
+  // The engine keeps the next Round open, so /state right after a close has both.
+  const boardWith = (last: ResultRound) => {
     const next = open({ roundId: 4n });
-    expect(phaseFor(next, NOON + 10n)).toBe("mine");
-    expect(boardResult("mine", next, result({ status: "closed" }))).toBeNull();
+    const phase = phaseFor(next, NOON + 10n, last);
+    return { phase, result: boardResult(phase, next, last) };
+  };
+
+  it("shows DRAWING beside a next open Round while the closed one waits on its tile", () => {
+    expect(boardWith(result({ status: "closed" }))).toEqual({ phase: "locked", result: "DRAWING" });
+  });
+
+  it("brings the next Round's countdown back once the tile has landed", () => {
+    expect(boardWith(result({ status: "revealed", tile: 5 }))).toEqual({ phase: "mine", result: null });
+  });
+
+  it("shows nothing and keeps the countdown when the closed Round voided", () => {
+    expect(boardWith(result({ status: "voided" }))).toEqual({ phase: "mine", result: null });
   });
 
   it("shows nothing for a voided or a settled Round", () => {

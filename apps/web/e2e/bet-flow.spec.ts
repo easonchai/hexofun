@@ -102,7 +102,9 @@ function stateFor(script: Script) {
     serverTime: String(now),
     priorityFeeMicroLamports: 0,
     launchAt: null,
-    nextRoundId: open ? "2" : finished ? "2" : "1",
+    nextRoundId: open ? "2" : finished ? "3" : "1",
+    // The backend keeps a Round open: right after a close, Round 2 is already open and empty
+    // while Round 1 sits in lastRound.
     openRound: open
       ? {
           id: "1",
@@ -112,7 +114,16 @@ function stateFor(script: Script) {
           tileTotals: Array.from({ length: 36 }, (_, tile) => (tiles.includes(tile) ? "1000000" : "0")),
           seedCommitment: COMMITMENT,
         }
-      : null,
+      : finished
+        ? {
+            id: "2",
+            openAt: new Date().toISOString(),
+            closeAt: new Date(Math.floor(Date.now() / 60_000) * 60_000 + 120_000).toISOString(),
+            status: "open",
+            tileTotals: Array<string>(36).fill("0"),
+            seedCommitment: COMMITMENT,
+          }
+        : null,
     lastRound: finished
       ? {
           id: "1",
@@ -188,16 +199,20 @@ test("a first bet opens a Round, the board counts down, then DRAWING, the tile a
   await expect(page.getByTestId("round-timer")).toHaveText(/^0[01]:\d\d$/);
   await expect(page.getByTestId("deploy")).toContainText("DEPLOYED");
 
-  // Closed, beacon not out: DRAWING and no countdown, on the board and the deploy button.
+  // Closed, beacon not out: the next Round is already open, yet the board says DRAWING
+  // (no countdown) and the deploy button is shut.
   script.stage = "closed";
   await expect(page.getByTestId("round-timer")).toHaveText("DRAWING");
+  await expect(page.getByTestId("deploy")).toContainText("DRAWING…");
+  await expect(page.getByTestId("deploy")).toBeDisabled();
   await expect(page.getByTestId("seed-commitment")).toHaveCount(0);
 
-  // No beacon for ten minutes: the Round voids and the stake is back.
+  // No beacon for ten minutes: the Round voids and the stake is back. The board shows
+  // nothing of it; the next Round's countdown returns and the button is DEPLOY again.
   script.stage = "voided";
   script.tickets = TICKETS;
-  // A voided Round shows nothing on the board; the positions just clear.
-  await expect(page.getByTestId("round-timer")).toHaveCount(0);
+  await expect(page.getByTestId("round-timer")).toHaveText(/^\d\d:\d\d$/);
+  await expect(page.getByTestId("deploy")).not.toContainText("DRAWING");
   await expect(page.getByTestId("board-idle-label")).toHaveCount(0);
   await expect(page.getByTestId("topbar-tickets")).toContainText("7.50");
 });

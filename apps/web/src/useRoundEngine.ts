@@ -151,7 +151,7 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
 
   // --- Derived phase ----------------------------------------------------------
   const now = clockNow ?? 0n;
-  const phase = phaseFor(open, now);
+  const phase = phaseFor(open, now, last);
   const activeSecondsLeft = secondsLeft(open, now);
   const result = boardResult(phase, open, last);
 

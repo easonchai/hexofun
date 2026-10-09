@@ -8,7 +8,7 @@ export type Phase =
   | /** no Round is open (paused, epoch tail, or just restarted) */ "idle"
   /** a Round is open: countdown to its close */
   | "mine"
-  /** past the close, before the server has closed the Round: bets are shut, no countdown */
+  /** bets are shut, no countdown: past the close before the server closes the Round, or an earlier Round still waits on its beacon */
   | "locked";
 
 /** The open Round, with its close as unix seconds on the server's clock. */
@@ -60,9 +60,14 @@ export function positionsFrom(dtos: readonly PositionDto[]): Map<string, Positio
 /** Identity for a round; round ids are unique per pool. */
 export const roundKey = (roundId: bigint): string => roundId.toString();
 
-/** The betting phase follows the open Round, never a finished one. */
-export function phaseFor(open: OpenRound | null, now: bigint): Phase {
+/**
+ * The betting phase follows the open Round's clock. Pass `last` for the board:
+ * the engine keeps the next Round open, so a just-closed Round that has no tile
+ * yet is "locked" even though the open Round's countdown has not ended.
+ */
+export function phaseFor(open: OpenRound | null, now: bigint, last: ResultRound | null = null): Phase {
   if (!open) return "idle";
+  if (last?.status === "closed") return "locked";
   return now < open.closeAt ? "mine" : "locked";
 }
 
@@ -71,9 +76,8 @@ export type BoardResult = "DRAWING" | null;
 
 /**
  * "DRAWING" from the moment betting shuts until the tile lands. A voided Round
- * shows nothing: its positions just clear. An open Round's countdown wins over
- * a result still pending behind it: the result animates when it lands, but the
- * board keeps counting to the new close.
+ * shows nothing: its positions just clear. Callers pass `phaseFor(open, now, last)`,
+ * so a next Round's countdown returns once the closed Round's tile has landed.
  */
 export function boardResult(
   phase: Phase,

@@ -111,11 +111,11 @@ export function ControlPanel(props: ControlPanelProps) {
       ]);
   };
 
-  const ready = canDeploy && tiles > 0 && stake > 0n && !locked && !deployBusy;
+  // Betting is shut and a Round waits on its beacon; the button can't be pressed either way.
+  const settling = engine.phase === "locked" && !deployBusy;
+  const ready = canDeploy && tiles > 0 && stake > 0n && !locked && !deployBusy && !settling;
   const showScan = ready && !locked;
   const showLocked = locked && !deployBusy;
-  // Betting is shut and the Round waits on its beacon; the button can't be pressed either way.
-  const settling = engine.phase === "locked" && !deployBusy;
 
   /** Prototype deploy burst: six symbols radiating out for 0.65s. */
   const [burst, setBurst] = useState(false);

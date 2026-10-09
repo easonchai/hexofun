@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { formatAtomic2, parseAtomic } from "../lib/money.js";
-import type { PositionLike } from "../engine.js";
+import { phaseFor, type OpenRound, type PositionLike, type ResultRound } from "../engine.js";
 import { stakeBarModel } from "./stakeBar.js";
 
 const DECIMALS = 6;
@@ -84,6 +84,14 @@ describe("stakeBarModel — placed state", () => {
 describe("stakeBarModel — closed state (locked)", () => {
   it("shows the drawing copy once the Round is past its close", () => {
     const model = stakeBarModel("1", [1, 2], null, "locked", DECIMALS);
+    expect(model.state).toBe("closed");
+    expect(model.label).toBe("DRAWING…");
+  });
+
+  it("reads DRAWING… beside a next open Round while the closed one waits on its tile", () => {
+    const next: OpenRound = { roundId: 4n, closeAt: 1_000n, tileTotals: [] };
+    const last: ResultRound = { roundId: 3n, status: "closed", tile: null };
+    const model = stakeBarModel("1", [1], null, phaseFor(next, 10n, last), DECIMALS);
     expect(model.state).toBe("closed");
     expect(model.label).toBe("DRAWING…");
   });
