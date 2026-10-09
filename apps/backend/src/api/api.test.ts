@@ -41,6 +41,7 @@ import { LIVE_PLAYER_DEFAULTS, LIVE_POOL_DEFAULTS } from "../test-utils/live-yie
 import { AlertsController } from "./alerts.controller";
 import { ApiModule } from "./api.module";
 import { FaucetController } from "./faucet.controller";
+import { RoundsService } from "./rounds.service";
 import {
   ApiService,
   BALANCES_TTL_MS,
@@ -457,6 +458,8 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     await seed(prisma);
 
     await app.init();
+    // The engine would open real Rounds on the wall clock under the state tests' seeded ones.
+    app.get(RoundsService).onModuleDestroy();
     await app.getHttpAdapter().getInstance().ready();
     http = request(app.getHttpServer());
   });
@@ -1680,6 +1683,8 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
         seedSecret: "5".repeat(64),
         tileTotals: Array<string>(36).fill("0"),
         configId: 1,
+        // A played Round: an empty one is never the result.
+        pot: 10n,
       };
       await prisma.round.create({ data: { ...round, id: 1n } });
       try {

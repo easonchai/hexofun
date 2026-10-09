@@ -1,5 +1,6 @@
 // The Sparring player (off-chain-tickets ticket 20, ADR 0019): a backend-owned
-// wallet that bets all 36 tiles in every open Round, so a lone human is never
+// wallet that bets all 36 tiles in every open Round a human holds a Position
+// in (ADR 0026), so a lone human is never
 // the whole pot. It deposits once on chain (`sparring-setup`) to hold Tickets,
 // delegates to a session key it generates, and bets through the same
 // `RoundsService.placeBet` a human's POST /game/bets reaches, so its bets
@@ -160,6 +161,8 @@ export class SparringService implements OnModuleInit, OnModuleDestroy {
       this.doneRound = open.id;
       return;
     }
+    // Wait for a human: alone in an empty Round it would only pay the House cut on its own losing tiles (ADR 0026).
+    if ((await this.prisma.position.count({ where: { poolAddress, roundId: open.id, owner: { not: owner } } })) === 0) return;
 
     const message = betMessage({
       cluster: this.cluster,

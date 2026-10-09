@@ -266,6 +266,17 @@ describe.skipIf(!DB_AVAILABLE)("reveal and settle", () => {
     expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
   });
 
+  it("closes and reveals an empty Round with no ledger rows", async () => {
+    await rounds.openDue(at(40));
+    expect((await roundOf(1n)).closeAt).toEqual(CLOSE1);
+    await rounds.closeDue(CLOSE1);
+    await rounds.revealDue(beaconTime(32883574));
+
+    expect(await roundOf(1n)).toMatchObject({ status: "settled", pot: 0n, houseCut: 0n });
+    expect(await prisma.ticketLedger.count({ where: { poolAddress: POOL, reason: { in: ["reward", "refund", "house_credit"] } } })).toBe(0);
+    expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
+  });
+
   it("is idempotent: a second pass over a settled Round books nothing", async () => {
     await playRound1();
     await rounds.closeDue(CLOSE1);

@@ -21,7 +21,7 @@ export interface RoundStateView {
     seedCommitment: string;
   } | null;
   /**
-   * The newest Round that is not open. A Round still waiting on its beacon
+   * The newest played (non-empty) Round that is not open. A Round still waiting on its beacon
    * stays until it settles or voids, and a voided one shows for the same
    * window after the void as a settled one does after the reveal, so the board
    * can say "REVEALING" and then "ROUND VOIDED" however long the relays took.
@@ -43,6 +43,8 @@ export async function readRoundState(
     db.round.findFirst({
       where: {
         poolAddress,
+        // The engine opens a Round every minute, most of them empty; an empty one is never the result (ADR 0026).
+        pot: { gt: 0n },
         OR: [
           { status: "closed" },
           { status: { in: ["revealed", "settled"] }, closeAt: { gte: since(LAST_ROUND_WINDOW_S) } },

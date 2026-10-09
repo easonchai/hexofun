@@ -411,6 +411,65 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
     expect(result.ok && result.receivedAt.getTime()).toBeGreaterThanOrEqual(released.getTime());
   });
 
+  describe("always-open Round (openDue)", () => {
+    const newest = () => prisma.round.findFirstOrThrow({ orderBy: { id: "desc" } });
+
+    it("opens a Round on an idle board, closing on the next minute mark, and only one", async () => {
+      await Promise.all([rounds.openDue(at(10)), rounds.openDue(at(10)), rounds.openDue(at(11))]);
+      expect(await prisma.round.count()).toBe(1);
+      expect(await newest()).toMatchObject({ id: 1n, status: "open", openAt: at(10), closeAt: at(60), epochId: EPOCH, pot: 0n });
+      expect((await newest()).seedCommitment).toHaveLength(64);
+      await rounds.openDue(at(20));
+      expect(await prisma.round.count()).toBe(1);
+    });
+
+    it("opens the next Round on the grid right after a close, and takes a bet into it", async () => {
+      await rounds.openDue(at(10));
+      await rounds.closeDue(at(60));
+      await rounds.openDue(new Date(at(60).getTime() + 300));
+      expect(await newest()).toMatchObject({ id: 2n, status: "open", closeAt: at(120) });
+      expect((await prisma.round.findUniqueOrThrow({ where: { poolAddress_id: { poolAddress: POOL, id: 1n } } })).status).toBe("closed");
+
+      const alice = await player(1_000n);
+      expect(await place(alice, 0, at(70), { round: 2n })).toMatchObject({ ok: true, roundId: 2n, opened: false, closeAt: at(120) });
+      expect(await place(alice, 1, at(71), { round: 3n })).toEqual({ ok: false, code: "RoundAlreadyOpen" });
+    });
+
+    it.each([["gamePaused"], ["paused"], ["shutdown"]])("opens nothing while %s is set", async (flag) => {
+      await prisma.pool.update({ where: { address: POOL }, data: { [flag]: true } });
+      await rounds.openDue(at(10));
+      expect(await prisma.round.count()).toBe(0);
+      await prisma.pool.update({ where: { address: POOL }, data: { [flag]: false } });
+      await rounds.openDue(at(10));
+      expect(await prisma.round.count()).toBe(1);
+    });
+
+    it("opens nothing when the Round would close after the epoch ends, and nothing before the first epoch", async () => {
+      await prisma.pool.update({ where: { address: POOL }, data: { currentEpochEndsAt: BigInt(at(59).getTime() / 1000) } });
+      await rounds.openDue(at(10));
+      expect(await prisma.round.count()).toBe(0);
+      await prisma.pool.update({ where: { address: POOL }, data: { currentEpochEndsAt: BigInt(at(60).getTime() / 1000) } });
+      await rounds.openDue(at(10));
+      expect(await prisma.round.count()).toBe(1);
+
+      await prisma.round.deleteMany();
+      await prisma.pool.update({ where: { address: POOL }, data: { currentEpochId: 0n } });
+      await rounds.openDue(at(10));
+      expect(await prisma.round.count()).toBe(0);
+    });
+
+    it("still lets a bet open a Round when the engine has not", async () => {
+      const alice = await player(1_000n);
+      expect(await place(alice, 0, at(10))).toMatchObject({ ok: true, roundId: 1n, opened: true });
+    });
+
+    it("closes an empty Round with an empty bet list hash", async () => {
+      await rounds.openDue(at(10));
+      await rounds.closeDue(at(60));
+      expect(await newest()).toMatchObject({ status: "closed", betListHash: betListHash([]) });
+    });
+  });
+
   describe("/state view", () => {
     it("shows no Round and next id 1 on an idle board", async () => {
       expect(await readRoundState(prisma, POOL, at(0))).toEqual({ nextRoundId: 1n, openRound: null, lastRound: null, positions: [] });
@@ -449,6 +508,20 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
       await prisma.round.update({ where, data: { status: "voided", tile: null } });
       expect((await readRoundState(prisma, POOL, at(120 + 600 + 60))).lastRound).toMatchObject({ id: 1n, status: "voided" });
       expect((await readRoundState(prisma, POOL, at(120 + 600 + 121))).lastRound).toBeNull();
+    });
+
+    it("shows the newest played Round as the result, never an empty one after it", async () => {
+      const alice = await player(1_000n);
+      await place(alice, 0, at(10));
+      await rounds.closeDue(at(121));
+      await prisma.round.update({ where: { poolAddress_id: { poolAddress: POOL, id: 1n } }, data: { status: "settled", tile: 7 } });
+      await rounds.openDue(at(121));
+      await rounds.closeDue(at(180));
+      await prisma.round.update({ where: { poolAddress_id: { poolAddress: POOL, id: 2n } }, data: { status: "settled", tile: 9 } });
+      await rounds.openDue(at(181));
+      const view = await readRoundState(prisma, POOL, at(185));
+      expect(view.openRound).toMatchObject({ id: 3n });
+      expect(view.lastRound).toMatchObject({ id: 1n, status: "settled", tile: 7 });
     });
 
     it("lists the owner's Position in the open and the last Round, and nobody else's", async () => {

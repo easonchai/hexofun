@@ -1,7 +1,7 @@
-// The off-chain game engine (off-chain-tickets tickets 16 and 17): accept a
-// signed bet, open a Round on the first one, close it on the minute, then
-// reveal its tile from a drand beacon and settle it as ledger rows, or void it
-// when the beacon never comes. Every write runs in one transaction under the
+// The off-chain game engine (off-chain-tickets tickets 16, 17 and 29): accept a
+// signed bet, keep one Round open whenever the game can take bets, close it on
+// the minute, then reveal its tile from a drand beacon and settle it as ledger
+// rows, or void it when the beacon never comes. Every write runs in one transaction under the
 // pool's Postgres advisory lock, so two bets cannot both open a Round, take the
 // same seq or spend the same Tickets, and a settle cannot interleave with the
 // indexer's reset.
@@ -61,6 +61,7 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
   onModuleInit(): void {
     this.timer = setInterval(() => {
       this.closeDue()
+        .then(() => this.openDue())
         .then(() => this.revealDue())
         .catch((cause: unknown) => this.logger.error(`closing or revealing Rounds failed: ${String(cause)}`));
     }, CLOSE_SWEEP_MS);
@@ -82,6 +83,62 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
       await lockLedger(tx, this.poolAddress);
       await this.closeDueIn(tx, now);
     }, LEDGER_TRANSACTION);
+  }
+
+  /**
+   * Opens the next Round when none is open and the game can take bets: not
+   * paused or shut down, and the Round's close inside the epoch (ADR 0026).
+   * Its `closeAt` is the next minute mark, so Rounds run back to back on the
+   * grid. Idempotent: a Round already open, found under the lock, ends it.
+   */
+  async openDue(now: Date = new Date()): Promise<void> {
+    const newest = await this.prisma.round.findFirst({
+      where: { poolAddress: this.poolAddress },
+      orderBy: { id: "desc" },
+      select: { status: true },
+    });
+    if (newest?.status === "open") return;
+    await this.prisma.$transaction(async (tx) => {
+      await lockLedger(tx, this.poolAddress);
+      const poolAddress = this.poolAddress;
+      const last = await tx.round.findFirst({ where: { poolAddress }, orderBy: { id: "desc" } });
+      if (last?.status === "open") return;
+      const pool = await tx.pool.findUnique({ where: { address: poolAddress } });
+      if (pool === null || pool.gamePaused || pool.paused || pool.shutdown || pool.currentEpochId === 0n) return;
+      const config = await tx.gameConfig.findFirst({ where: { poolAddress }, orderBy: { id: "desc" } });
+      if (config === null) return;
+      const step = config.roundSeconds * 1000;
+      const closeAt = new Date((Math.floor(now.getTime() / step) + 1) * step);
+      if (closeAt.getTime() > Number(pool.currentEpochEndsAt) * 1000) return;
+      await this.createRound(tx, {
+        id: (last?.id ?? 0n) + 1n,
+        epochId: pool.currentEpochId,
+        configId: config.id,
+        openAt: now,
+        closeAt,
+      });
+    }, LEDGER_TRANSACTION);
+  }
+
+  /** Writes a fresh Round with its seed commitment. Caller holds the lock. */
+  private createRound(
+    tx: Prisma.TransactionClient,
+    r: { id: bigint; epochId: bigint; configId: number; openAt: Date; closeAt: Date },
+  ) {
+    const seed = randomBytes(32);
+    return tx.round.create({
+      data: {
+        poolAddress: this.poolAddress,
+        id: r.id,
+        epochId: r.epochId,
+        openAt: r.openAt,
+        closeAt: r.closeAt,
+        seedCommitment: seedCommitment(seed),
+        seedSecret: seed.toString("hex"),
+        tileTotals: Array<string>(TILE_COUNT).fill("0"),
+        configId: r.configId,
+      },
+    });
   }
 
   /** Writes `betListHash` and sets `closed` on a Round past its `closeAt`. Caller holds the lock. */
@@ -210,7 +267,7 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
   /**
    * Runs the spec's checks and, on a pass, writes the Position and the `stake`
    * ledger row and bumps the session's `nextSeq` in one transaction. The first
-   * accepted bet into an empty board opens the Round. A refusal writes nothing
+   * accepted bet with no Round open opens one (the engine normally has). A refusal writes nothing
    * beyond closing a Round that was already past `closeAt`.
    */
   async placeBet(message: string, signature: Uint8Array, at?: Date): Promise<PlaceBetResult> {
@@ -271,19 +328,12 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
       const stake = BigInt(bet.tiles.length) * bet.stake;
       let round = open;
       if (opens !== null) {
-        const seed = randomBytes(32);
-        round = await tx.round.create({
-          data: {
-            poolAddress,
-            id: bet.round,
-            epochId: pool.currentEpochId,
-            openAt: now,
-            closeAt: opens.closeAt,
-            seedCommitment: seedCommitment(seed),
-            seedSecret: seed.toString("hex"),
-            tileTotals: Array<string>(TILE_COUNT).fill("0"),
-            configId: config.id,
-          },
+        round = await this.createRound(tx, {
+          id: bet.round,
+          epochId: pool.currentEpochId,
+          configId: config.id,
+          openAt: now,
+          closeAt: opens.closeAt,
         });
       }
       if (round === null) throw new Error("unreachable: a passed bet has a Round");

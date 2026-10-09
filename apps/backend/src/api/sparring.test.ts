@@ -122,7 +122,7 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
   }
 
   /** A human opens the next Round with a one-tile bet; Round `id` is open until `closeAt`. */
-  async function openRoundByHuman(id: bigint, now: Date): Promise<void> {
+  async function openRoundByHuman(id: bigint, now: Date, opens = true): Promise<void> {
     const wallet = Keypair.generate().publicKey.toBase58();
     const key = Keypair.generate();
     await fund(wallet, 100n);
@@ -147,7 +147,7 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
       tiles: [0],
       stake: 1n,
     });
-    expect(await rounds.placeBet(message, signWith(key, message), now)).toMatchObject({ ok: true, opened: true });
+    expect(await rounds.placeBet(message, signWith(key, message), now)).toMatchObject({ ok: true, opened: opens });
   }
 
   const sparringPositions = (): Promise<number> =>
@@ -175,6 +175,24 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     expect(session).toMatchObject({ wallet: sparringWalletKey, nextSeq: 1 });
     expect(session.expiresAt.getTime() - session.issuedAt.getTime()).toBe(24 * 3600 * 1000);
     expect(session.sessionPubkey).not.toBe(sparringWalletKey);
+  });
+
+  it("skips an open Round no human holds a Position in, and bets once one does", async () => {
+    await fund(sparringWalletKey, 100n * STAKE_PER_TILE);
+    const service = sparring();
+    await rounds.openDue(at(10));
+    const placeBet = vi.spyOn(rounds, "placeBet");
+
+    await service.tick(at(11));
+    await service.tick(at(12));
+    expect(placeBet).not.toHaveBeenCalled();
+
+    await openRoundByHuman(1n, at(13), false);
+    placeBet.mockClear();
+    await service.tick(at(14));
+    await service.tick(at(15));
+    expect(placeBet).toHaveBeenCalledTimes(1);
+    expect(await sparringPositions()).toBe(1);
   });
 
   it("posts nothing while no Round is open, and never opens one", async () => {
