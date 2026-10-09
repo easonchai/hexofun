@@ -149,12 +149,6 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
     [],
   );
 
-  // --- Derived phase ----------------------------------------------------------
-  const now = clockNow ?? 0n;
-  const phase = phaseFor(open, now, last);
-  const activeSecondsLeft = secondsLeft(open, now);
-  const result = boardResult(phase, open, last);
-
   // --- Round reveal choreography --------------------------------------------
   // `last` moves on to the next finished Round, so the first settled sighting
   // of each id is kept here, independent of whatever `last` currently is —
@@ -166,6 +160,21 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
   const seenAnyRoundRef = useRef(false);
   const revealBusyRef = useRef(false);
   const ticketsBeforeRef = useRef(tickets);
+
+  // --- Derived phase ----------------------------------------------------------
+  // The next countdown waits for the result to be shown: through the reveal up
+  // to its 4600 ms clear, and for the render between a settled poll and the
+  // effect below starting that reveal (a page opened late never animates it).
+  const now = clockNow ?? 0n;
+  const settledUnplayed =
+    last?.status === "settled" &&
+    last.tile !== null && // the effect below skips a tileless one, so it never plays
+    seenAnyRoundRef.current &&
+    !playedRef.current.has(roundKey(last.roundId));
+  const revealing = (reveal !== null && !reveal.clearing) || settledUnplayed;
+  const phase = phaseFor(open, now, last, revealing);
+  const activeSecondsLeft = phase === "mine" ? secondsLeft(open, now) : 0n;
+  const result = boardResult(phase, open, last, revealing);
 
   const runReveal = useCallback(
     ({ round: target, position: own, reward }: Remembered, key: string, onDone: () => void) => {

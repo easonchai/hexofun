@@ -170,8 +170,19 @@ describe("boardResult: what the board says beside the countdown", () => {
     expect(boardWith(result({ status: "closed" }))).toEqual({ phase: "locked", result: "DRAWING" });
   });
 
-  it("brings the next Round's countdown back once the tile has landed", () => {
-    expect(boardWith(result({ status: "revealed", tile: 5 }))).toEqual({ phase: "mine", result: null });
+  it("keeps the next Round locked while the revealed Round waits to settle", () => {
+    expect(boardWith(result({ status: "revealed", tile: 5 }))).toEqual({ phase: "locked", result: "DRAWING" });
+  });
+
+  it("holds the countdown with a blank timer while the result is being shown", () => {
+    const next = open({ roundId: 4n });
+    const last = result({ status: "settled", tile: 5 });
+    const phase = phaseFor(next, NOON + 10n, last, true);
+    expect({ phase, result: boardResult(phase, next, last, true) }).toEqual({ phase: "locked", result: null });
+  });
+
+  it("brings the next Round's countdown back once the reveal is over", () => {
+    expect(boardWith(result({ status: "settled", tile: 5 }))).toEqual({ phase: "mine", result: null });
   });
 
   it("shows nothing and keeps the countdown when the closed Round voided", () => {

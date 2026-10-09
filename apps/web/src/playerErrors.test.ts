@@ -12,9 +12,13 @@ import {
 beforeEach(() => {
   // Every path under test logs the raw error; keep it out of the test output.
   vi.spyOn(console, "error").mockImplementation(() => {});
+  // decodeSendFailure posts an error report to VITE_API_URL, which in a
+  // checkout is a live local backend; keep test failures out of its table.
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("decodeErrorCode", () => {

@@ -61,13 +61,20 @@ export function positionsFrom(dtos: readonly PositionDto[]): Map<string, Positio
 export const roundKey = (roundId: bigint): string => roundId.toString();
 
 /**
- * The betting phase follows the open Round's clock. Pass `last` for the board:
- * the engine keeps the next Round open, so a just-closed Round that has no tile
- * yet is "locked" even though the open Round's countdown has not ended.
+ * The betting phase follows the open Round's clock. Pass `last` and
+ * `revealing` for the board: the engine keeps the next Round open, so it stays
+ * "locked" from the previous Round's close until its result has been shown.
+ * That covers a closed or revealed Round (the reveal fires only once it
+ * settles) and the reveal animation itself; the next countdown starts after.
  */
-export function phaseFor(open: OpenRound | null, now: bigint, last: ResultRound | null = null): Phase {
+export function phaseFor(
+  open: OpenRound | null,
+  now: bigint,
+  last: ResultRound | null = null,
+  revealing = false,
+): Phase {
   if (!open) return "idle";
-  if (last?.status === "closed") return "locked";
+  if (revealing || last?.status === "closed" || last?.status === "revealed") return "locked";
   return now < open.closeAt ? "mine" : "locked";
 }
 
@@ -75,16 +82,19 @@ export function phaseFor(open: OpenRound | null, now: bigint, last: ResultRound 
 export type BoardResult = "DRAWING" | null;
 
 /**
- * "DRAWING" from the moment betting shuts until the tile lands. A voided Round
- * shows nothing: its positions just clear. Callers pass `phaseFor(open, now, last)`,
- * so a next Round's countdown returns once the closed Round's tile has landed.
+ * "DRAWING" from the moment betting shuts until the reveal starts. A voided
+ * Round shows nothing: its positions just clear. While `revealing` the timer
+ * spot is blank, since the board's banner names the winning tile. Callers pass
+ * `phaseFor(open, now, last, revealing)`, so a next Round's countdown returns
+ * once the reveal is over.
  */
 export function boardResult(
   phase: Phase,
   open: OpenRound | null,
   last: ResultRound | null,
+  revealing = false,
 ): BoardResult {
-  if (phase === "mine") return null;
+  if (phase === "mine" || revealing) return null;
   if (open || last?.status === "closed" || last?.status === "revealed") return "DRAWING";
   return null;
 }
