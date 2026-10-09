@@ -1,6 +1,6 @@
 # A Round opens with its first bet and closes on the minute
 
-Superseded by ADR 0025 (2026-10-08): Rounds leave the chain, so there is no Round account to open lazily. The close-on-the-minute rule survives in the backend game engine (`docs/plan/off-chain-tickets/spec.md`). Never built; the text below is as accepted on `feature/lazy-rounds`.
+Superseded by ADR 0025 (2026-10-08): Rounds leave the chain, so there is no Round account to open lazily. The close-on-the-minute rule survives in the backend game engine (`docs/plan/off-chain-tickets/spec.md`). The first-bet rule, which the engine briefly kept, is superseded by ADR 0026 (2026-10-09): the engine keeps a Round open. Never built on chain; the text below is as accepted on `feature/lazy-rounds`.
 
 Status: accepted (2026-10-08). The spec is `docs/plan/lazy-rounds/spec.md`. It supersedes the
 empty-round-skip plan (`docs/plan/empty-round-skip/spec.md`), which was never built.

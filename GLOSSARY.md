@@ -176,7 +176,7 @@ _Avoid_: Expiry, unclaimed prize
 ### Game
 
 **Round**:
-One game on the 36-tile hex board, run by the backend. It opens with its first bet, closes on the first minute mark at least a full minute later, and its winning tile comes from a seed the backend committed at open mixed with a Beacon that did not exist at close. The round pot goes to the Positions on the winning tile. Everything about it is published as its Round record.
+One game on the 36-tile hex board, run by the backend. The engine keeps one open whenever the game can take bets, and each closes on a minute mark. It can end with no Position at all. Its its winning tile comes from a seed the backend committed at open mixed with a Beacon that did not exist at close. The round pot goes to the Positions on the winning tile. Everything about it is published as its Round record.
 _Avoid_: Game, match, session (a Session key's lifetime)
 
 **Tile**:
@@ -252,7 +252,7 @@ The hot keypair on the VPS that the Operator service signs with, and `Pool.opera
 _Avoid_: Authority keypair, pool authority, admin key, hot wallet
 
 **Operator**:
-The backend service that advances the protocol: opens epochs, builds and commits the Epoch snapshot, requests the draw's randomness, pays the winner with its proof, runs the game's Rounds from first bet to settle, grants the Referral bonus, deploys to and recalls from the venue to keep the Idle band, runs Harvest once per epoch, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
+The backend service that advances the protocol: opens epochs, builds and commits the Epoch snapshot, requests the draw's randomness, pays the winner with its proof, runs the game's Rounds from open to settle, grants the Referral bonus, deploys to and recalls from the venue to keep the Idle band, runs Harvest once per epoch, and pushes each Pending withdrawal once its epoch has ended. Deadline-driven: it sleeps until the next moment a decision could change rather than running on a fixed schedule, with a slow safety tick as its backstop. Signs with the Operator key and the Sparring player's keypair; never holds a human depositor's funds.
 _Avoid_: Bot, cron, CLI, admin (a separate role), authority (the removed program role)
 
 **Ops console**:
@@ -264,7 +264,7 @@ A request from the Ops console that has the Operator set one of the four switche
 _Avoid_: Kill switch, emergency stop, Shutdown (permanent, Admin only)
 
 **Sparring player**:
-A backend-owned Player that deposits once and takes one Position in every open Round, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. It bets through a Session key like any wallet, so its bets verify in the Round record, and it never opens a Round. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House. It runs only when its backend environment flag is set, and no production env file sets it.
+A backend-owned Player that deposits once and takes one Position in every open Round a human already holds a Position in, on all 36 Tiles at one Ticket per tile, so a lone human always has someone to play against on whichever tile wins. It bets through a Session key like any wallet, so its bets verify in the Round record, and it never opens a Round. On screen it is indistinguishable from any other wallet, and it competes in the draw like any Player. It is not the House. It runs only when its backend environment flag is set, and no production env file sets it.
 _Avoid_: Bot, house player, NPC, dummy user
 
 **Read model**:

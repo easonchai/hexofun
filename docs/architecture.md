@@ -317,9 +317,12 @@ stateDiagram-v2
     Voided --> [*]
 ```
 
-- **Open.** No Round exists until a bet is accepted. The first bet writes the Round with
-  `sha256(seed)` as `seedCommitment` and a `closeAt` on a whole-minute mark at least `roundSeconds`
-  away. Each bet is signed by a session key the wallet delegated, and writes a Position and a
+- **Open.** The engine keeps one Round open whenever the game can take bets, writing it with
+  `sha256(seed)` as `seedCommitment` and a `closeAt` on the next whole-minute mark, so Rounds run
+  back to back. It opens none while the game is paused or shut down, or when the close would fall
+  past the epoch end. A bet that finds no Round open (the backend just restarted, or the epoch
+  tail) opens one with a `closeAt` at least `roundSeconds` away. A Round nobody bets in closes and
+  reveals with no ledger rows, and `GET /state` never shows it as `lastRound`. Each bet is signed by a session key the wallet delegated, and writes a Position and a
   `stake` ledger row in one transaction.
 - **Closed.** At `closeAt` the engine stops taking bets and stores `betListHash`, the sha256 of the
   accepted signatures in order. The next Round may open while this one waits for its beacon.
