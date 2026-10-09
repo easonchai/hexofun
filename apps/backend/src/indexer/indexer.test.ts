@@ -441,7 +441,8 @@ describe("account sync", () => {
     expect(connection.callsTo("getProgramAccountsV2")).toBe(1);
     // SAFETY: the fake only ever receives [programId, config] from the indexer.
     const [, config] = connection.lastParams("getProgramAccountsV2") as [string, { changedSinceSlot?: number }];
-    expect(config.changedSinceSlot).toBe(Number(syncedSlot));
+    // The V2 index runs up to 60 slots behind its context slot (audit-2026-10-09 05).
+    expect(config.changedSinceSlot).toBe(Number(syncedSlot) - 60);
 
     expect((await prisma.pool.findUniqueOrThrow({ where: { address: chain.poolAddress().toBase58() } })).totalPrincipal)
       .toBe(999n);
@@ -1171,6 +1172,21 @@ describe("live account refresh", () => {
     expect(stored.target.toString()).toBe("17");
   });
 
+  it("keeps a log-path write inside the index lag window from being overwritten by a sweep", async () => {
+    const epoch = chain.epochAddress(1n);
+    await put("pool", chain.poolAddress(), poolAccount());
+    await put("epoch", epoch, epochAccount({ status: 0 }));
+    await indexer.syncAccounts();
+
+    await put("epoch", epoch, epochAccount({ status: 3, target: bn(17) }));
+    await fire([], 70); // the fake's sweeps run at slot 100: 30 slots behind, inside the 60 slot lag
+
+    await put("epoch", epoch, epochAccount({ status: 0, target: bn(0) }));
+    await indexer.syncAccounts();
+
+    expect((await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).status).toBe(3);
+  });
+
   it("lets a sweep that has caught up write again", async () => {
     const epoch = chain.epochAddress(1n);
     await put("pool", chain.poolAddress(), poolAccount());
@@ -1178,7 +1194,7 @@ describe("live account refresh", () => {
     await indexer.syncAccounts();
 
     await put("epoch", epoch, epochAccount({ status: 3, target: bn(17) }));
-    await fire([], 50); // behind the fake's own sweep slot of 100
+    await fire([], 30); // behind the fake's own sweep slot of 100 less the 60 slot lag
 
     await put("epoch", epoch, epochAccount({ status: 0, target: bn(0) }));
     await indexer.syncAccounts();
@@ -1977,6 +1993,24 @@ describe("ticket ledger", () => {
     await seedEpoch(1n);
     await indexer.ingestLogs(batch("z1", 10n, [money("Deposited", A, 100, 100), began(2)]));
     expect((await balance(A)).tickets).toBe(100n);
+  });
+
+  // audit-2026-10-09 05: a skipped EpochBegan would mean no snapshot and no reset, silently.
+  it("refuses an EpochBegan that skips an epoch, writes nothing, and leaves the cursor where it was", async () => {
+    await seedEpoch(3n);
+    for (const [i, id] of [1, 2, 3].entries()) await indexer.ingestLogs(batch(`q${i}`, 10n + BigInt(i), [began(id)]));
+    const events = await prisma.event.count();
+    await expect(indexer.ingestLogs(batch("q-skip", 20n, [began(5)]))).rejects.toThrow(/EpochBegan 5.*epoch 3/);
+    expect(await prisma.event.count()).toBe(events);
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ ledgerEpochId: 3n });
+    await indexer.ingestLogs(batch("q-next", 21n, [began(4)]));
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ ledgerEpochId: 4n });
+  });
+
+  it("books the first EpochBegan on an empty ledger whatever its id", async () => {
+    await seedEpoch(6n);
+    await indexer.ingestLogs(batch("r1", 10n, [began(7)]));
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ ledgerEpochId: 7n });
   });
 
   it("runs the nightly check once a day and stores the count for /alerts", async () => {

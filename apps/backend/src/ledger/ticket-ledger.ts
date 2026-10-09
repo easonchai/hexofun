@@ -18,6 +18,9 @@ export interface Booking {
   row: { delta: bigint; reason: TicketReason } | null;
 }
 
+/** The program's `INDEX_SCALE`. */
+const INDEX_SCALE = 10n ** 18n;
+
 const EMPTY: BalanceState = { tickets: 0n, principal: 0n, yieldIndex: 0n };
 
 /** `jsonify` renders every pubkey and u64 or u128 as a string. */
@@ -49,13 +52,26 @@ const isHouseWin = (event: DecodedEvent): boolean =>
   typeof event.data === "object" && event.data !== null && !Array.isArray(event.data) && event.data.isHouse === true;
 
 /**
+ * The Principal a withdrawal took off the Player: what it held once the
+ * instruction's `settle` had folded in the yield owed since `before`, less what
+ * it holds after. Without the settle term a Player with unsettled yield would
+ * show a drop short by that yield.
+ */
+function principalRemoved(before: BalanceState, after: BalanceState): bigint {
+  const rise = after.yieldIndex - before.yieldIndex;
+  const owed = rise > 0n ? (before.principal * rise) / INDEX_SCALE : 0n;
+  const removed = before.principal + owed - after.principal;
+  return removed > 0n ? removed : 0n;
+}
+
+/**
  * What one chain event does to its wallet's balance, or null for an event the
  * ledger ignores. `previous` is the balance before the event, undefined for a
  * wallet the ledger has not seen.
  *
  * Every event that runs `touch` on chain carries the Player's Principal and the
  * Yield index after the instruction, so the balance sets them rather than
- * adding to them. Tickets move on `Withdrawn`, `JackpotPaid` and
+ * adding to them. Tickets move on `Withdrawn`, `EmergencyWithdrawn`, `JackpotPaid` and
  * `TicketsBought`, the last at `ticketsPerUsdc`, the Game config rate in force
  * at the event's block time, which the caller looks up.
  */
@@ -67,10 +83,11 @@ export function bookEvent(previous: BalanceState | undefined, event: DecodedEven
     principal: BigInt(eventString(event, "principal")),
     yieldIndex: BigInt(eventString(event, "yieldIndex")),
   };
-  if (event.name === "Withdrawn") {
-    // As `process_withdraw` did on chain: Tickets fall by the amount paid, never below zero.
-    const paid = BigInt(eventString(event, "amount"));
-    const delta = -(paid < before.tickets ? paid : before.tickets);
+  if (event.name === "Withdrawn" || event.name === "EmergencyWithdrawn") {
+    // Tickets fall by the Principal the chain removed, never below zero. A haircut
+    // withdrawal pays less than it removes, so the paid `amount` would leave Tickets behind.
+    const removed = principalRemoved(before, next);
+    const delta = -(removed < before.tickets ? removed : before.tickets);
     return { next: { ...next, tickets: before.tickets + delta }, row: delta === 0n ? null : { delta, reason: "withdraw" } };
   }
   if (event.name === "JackpotPaid" && !isHouseWin(event)) {

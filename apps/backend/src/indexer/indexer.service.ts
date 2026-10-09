@@ -131,6 +131,7 @@ const YIELD_INDEX_MIN_GAP_S = 60n;
 /** How far `getProgramAccountsV2`'s index can run behind its own
  *  `context.slot` (measured 2026-09-14 on devnet: 33 to 59 slots). */
 const SWEEP_INDEX_LAG = 60n;
+const lagged = (slot: bigint): bigint => (slot > SWEEP_INDEX_LAG ? slot - SWEEP_INDEX_LAG : 0n);
 
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
@@ -474,7 +475,8 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** True when the log path already wrote this address from a slot the
-   *  sweep's snapshot predates, so the sweep's row is a step backwards. */
+   *  sweep's snapshot predates, so the sweep's row is a step backwards.
+   *  `sweepSlot` is the snapshot slot less the index lag (audit-2026-10-09 05). */
   private behindLogPath(pubkey: PublicKey, sweepSlot: bigint): boolean {
     const written = this.freshWrites.get(pubkey.toBase58());
     return written !== undefined && written > sweepSlot;
@@ -517,7 +519,11 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       this.lastSyncedSlot === undefined ||
       this.v2Unsupported ||
       Date.now() - this.lastFullWalkAt >= FULL_WALK_INTERVAL_MS;
-    const { slot, accounts } = await this.fetchAll(fullWalk ? undefined : this.lastSyncedSlot);
+    // The V2 index runs behind its own `context.slot`, so an account that changed
+    // inside the lag window is not in this walk's result. Asking from the lagged
+    // slot picks it up on the next sweep.
+    const { slot, accounts } = await this.fetchAll(fullWalk || this.lastSyncedSlot === undefined ? undefined : lagged(this.lastSyncedSlot));
+    const sweepSlot = lagged(slot);
 
     const poolsSeen = accounts.get<DecodedPool>(ACCOUNT.pool).filter(({ pubkey }) => pubkey.equals(pool));
     // An incremental walk legitimately reports nothing when the Pool has not
@@ -528,7 +534,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // Every write below skips an account the log path has already written
     // from a newer slot than this walk's snapshot: the V2 index runs behind
     // the chain, so without this a sweep would undo the live path's work.
-    const pools = poolsSeen.filter(({ pubkey }) => !this.behindLogPath(pubkey, slot));
+    const pools = poolsSeen.filter(({ pubkey }) => !this.behindLogPath(pubkey, sweepSlot));
     await this.prisma.$transaction(
       pools
         .map(({ pubkey, account }) => {
@@ -548,7 +554,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // deletes the row; an incremental walk
     // cannot tell absent from unchanged and only upserts.
     const proposalAddress = this.chain.venueProposalAddress();
-    if (!this.behindLogPath(proposalAddress, slot)) {
+    if (!this.behindLogPath(proposalAddress, sweepSlot)) {
       const proposal = accounts
         .get<DecodedVenueProposal>(ACCOUNT.venueProposal)
         .find(({ pubkey }) => pubkey.equals(proposalAddress));
@@ -566,7 +572,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         .filter(
           ({ pubkey, account }) =>
             pubkey.equals(this.chain.epochAddress(BigInt(account.epochId.toString()), pool)) &&
-            !this.behindLogPath(pubkey, slot),
+            !this.behindLogPath(pubkey, sweepSlot),
         )
         .map(({ account }) => {
           const row = epochRow(account, poolAddress);
@@ -584,14 +590,14 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         .filter(
           ({ pubkey, account }) =>
             pubkey.equals(this.chain.playerAddress(account.owner, pool)) &&
-            !this.behindLogPath(pubkey, slot),
+            !this.behindLogPath(pubkey, sweepSlot),
         )
         .map(({ account }) => {
           // Mainnet-readiness-fixes 17: the V2 index runs behind `slot`, and
           // a referral bind uses this slot as its seed, skipping the events
           // at or before it. Stamping it lower means a lagged event is
           // applied rather than skipped.
-          const row = playerRow(account, poolAddress, slot > SWEEP_INDEX_LAG ? slot - SWEEP_INDEX_LAG : 0n);
+          const row = playerRow(account, poolAddress, sweepSlot);
           return this.prisma.player.upsert({
             where: { poolAddress_owner: { poolAddress, owner: row.owner } },
             create: row,
@@ -665,7 +671,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // The sweep has caught up to everything written at or before its
     // snapshot, so those entries have nothing left to protect.
     for (const [address, written] of this.freshWrites) {
-      if (written <= slot) this.freshWrites.delete(address);
+      if (written <= sweepSlot) this.freshWrites.delete(address);
     }
   }
 

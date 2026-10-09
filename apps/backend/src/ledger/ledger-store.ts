@@ -52,7 +52,13 @@ export async function bookBatch(
   for (const [index, event] of events.entries()) {
     const ref = `${signature}:${index}`;
     if (event.name === "EpochBegan") {
-      epochId = BigInt(eventString(event, "epochId"));
+      const began = BigInt(eventString(event, "epochId"));
+      // A skipped EpochBegan means no snapshot and no reset. Throwing stops the catch-up on
+      // this signature so INDEXER_STALE pages; a ledger that has reached no epoch takes any id.
+      if (epochId !== 0n && began !== epochId + 1n) {
+        throw new Error(`EpochBegan ${began} in ${signature} does not follow the ledger's epoch ${epochId}`);
+      }
+      epochId = began;
       await takeSnapshot(tx, poolAddress, epochId - 1n);
       await resetTickets(tx, poolAddress, epochId, eventString(event, "yieldIndex"), ref);
       continue;
