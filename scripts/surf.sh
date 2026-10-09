@@ -22,11 +22,15 @@ set -eu
 # local relay in front of it, tests/fork/relay.mjs),
 # SURF_VENUE (up only: kvault, the default, or klend). The kVault is the one
 # tests/fork/kvault.pool.fork.ts uses; the klend reserve earns too little for a
-# prize of min_jackpot a day on about 12k USDC, so every epoch would roll over.
-# Use klend for venue-switch rehearsals. BASE_RATE_BPS (read by bootstrap only)
-# sets the Base yield ceiling: 400 on the kVault, mainnet's 488 on klend. The vault
-# paid about 5.2% on 2026-10-09, so even 400 leaves a prize under 1 USDC a day on
-# 12k USDC (it needs roughly 7.8%); set BASE_RATE_BPS lower, or fund_jackpot by hand.
+# prize of min_jackpot on a fork with a few thousand USDC. Use klend for
+# venue-switch rehearsals. BASE_RATE_BPS (read by bootstrap only) sets the Base
+# yield ceiling: 400 on the kVault, mainnet's 488 on klend. The vault paid about
+# 5.2% on 2026-10-09, so the prize is about 0.0068 x deposits x years held. `up`
+# funds player-a and player-b with 150,000 USDC each. Deposit 300k before
+# start-jackpot (Tickets start the epoch after a deposit, so a deposit made after
+# start-jackpot leaves epoch 1 with no Tickets and it rolls over). Held 9.8 hours
+# (deposited 06:08 UTC, epoch boundary 16:00 UTC), 300k gained 17.4 USDC and the
+# prize was 2.30 USDC. Deposit later in the day and the prize shrinks.
 # On a live fork use `admin set-params --base-rate-bps`.
 # SURF_PORT (default 9499, websocket +1, studio +2, relay +3), HEXVAULT_SKIP_BUILD=1,
 # HEXVAULT_FORK_OFFLINE=1 (up --resume only: no datasource, so a hung remote
@@ -259,8 +263,8 @@ up_fresh() {
   fund "$(solana-keygen pubkey "$wallet")" 1000000 0
   fund "$admin" 1000000 100
   fund "$operator" 0 100
-  fund "$player_a" 10000 10
-  fund "$player_b" 10000 10
+  fund "$player_a" 150000 10
+  fund "$player_b" 150000 10
   for ta in treasury-ta buyback-ta; do
     spl-token create-account "$usdc" "$keys/$ta.json" --owner "$admin" \
       --fee-payer "$wallet" --url "$rpc" >/dev/null
@@ -329,7 +333,7 @@ Logs: .surf/surfpool.log, .surf/vrf.log, .surf/relay.log. Keys: keys/surf/.
 
 Backend:  docker compose -p hexvault-surf --env-file .env.surf -f docker-compose.dev.yml up -d --build
 Web:      scripts/surf.sh web
-Launch:   scripts/surf.sh admin start-jackpot && scripts/surf.sh admin start-game
+Launch:   deposit first (player-a and player-b hold 150000 USDC), then scripts/surf.sh admin start-jackpot && scripts/surf.sh admin start-game
 Logs:     scripts/surf.sh logs fork|simnet|vrf|relay|backend
 EOF
   wait "$surfpool_pid"
