@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BET_REFUSALS } from "./bet.js";
+import { idl } from "./idl.js";
 import {
   decodeBetRefusal,
   decodeErrorCode,
@@ -25,35 +26,40 @@ describe("decodeErrorCode", () => {
   it.each([
     [6001, "The pool is paused right now. Try again once it reopens."], // PoolPaused
     [6003, "Enter an amount greater than zero."], // ZeroAmount
-    [6005, "You don't have enough Tickets for that."], // InsufficientEntries
-    [6012, "This round is closed to new plays. Wait for the next one."], // RoundClosed
-    [6088, "This round is closed to new plays. Wait for the next one."], // RoundEpochNotCurrent
-    [6085, "This round would end after the day does. Wait for the new day's first round."], // RoundStraddlesEpoch
     [
-      6036,
+      6017,
       "The vault is being topped up. Try the payout again in a few minutes.",
     ], // InsufficientVaultLiquidity
     [NOTHING_PENDING_CODE, "Already paid out. Refreshing your balance."], // NothingPending
-    [6051, "This pool is closed. Withdrawals still work; nothing else does."], // PoolShutDown
+    [6026, "This pool is closed. Withdrawals still work; nothing else does."], // PoolShutDown
     [
-      6058,
-      "The game is paused right now. Try again once it restarts.",
-    ], // GamePaused
-    [
-      6059,
+      6032,
       "The daily draw is paused, so Tickets can't be bought right now.",
     ], // JackpotPaused
     [
-      6063,
+      6034,
       "The pool is short on cash and can't refund that deposit yet. Nothing changed on your account. Try again later.",
     ], // VenueIlliquid
   ])("has player copy for code %i", (code, copy) => {
     expect(decodeErrorCode(code)).toBe(copy);
   });
 
+  it("keeps each hand-written code on the variant its comment names", () => {
+    const nameOf = (code: number) => idl.errors?.find((e) => e.code === code)?.name;
+    expect(nameOf(6001)).toBe("PoolPaused");
+    expect(nameOf(6003)).toBe("ZeroAmount");
+    expect(nameOf(6017)).toBe("InsufficientVaultLiquidity");
+    expect(nameOf(NOTHING_PENDING_CODE)).toBe("NothingPending");
+    expect(nameOf(6026)).toBe("PoolShutDown");
+    expect(nameOf(6032)).toBe("JackpotPaused");
+    expect(nameOf(6034)).toBe("VenueIlliquid");
+    expect(nameOf(6041)).toBe("VenueShortReturn");
+    expect(nameOf(6045)).toBe("ReserveStale");
+  });
+
   it("falls back to the IDL's own message for a code with no hand-written copy", () => {
-    // Unauthorized (6034): a real program code, never hand-written.
-    expect(decodeErrorCode(6034)).toBe(
+    // Unauthorized (6015): a real program code, never hand-written.
+    expect(decodeErrorCode(6015)).toBe(
       "signer is not authorized for this instruction",
     );
   });
@@ -77,7 +83,7 @@ describe("decodePlayerError", () => {
 
   it("decodes a simulation result's '\"Custom\":N' shape", () => {
     const error = new Error(
-      '{"err":{"InstructionError":[0,{"Custom":6036}]}}',
+      '{"err":{"InstructionError":[0,{"Custom":6017}]}}',
     );
     expect(decodePlayerError(error)).toBe(
       "The vault is being topped up. Try the payout again in a few minutes.",
@@ -85,34 +91,27 @@ describe("decodePlayerError", () => {
   });
 
   it("decodes a bare 'custom program error: 0x...' hex code", () => {
-    // 6012 (RoundClosed) in hex.
+    // 6019 (NothingPending) in hex.
     const error = new Error(
-      "failed to send transaction: custom program error: 0x177c",
+      "failed to send transaction: custom program error: 0x1783",
     );
-    expect(decodePlayerError(error)).toBe(
-      "This round is closed to new plays. Wait for the next one.",
-    );
+    expect(decodePlayerError(error)).toBe("Already paid out. Refreshing your balance.");
   });
 
   it("falls back to the exact error name when no code number is present", () => {
-    const error = new Error("simulation failed: RoundClosed");
-    expect(decodePlayerError(error)).toBe(
-      "This round is closed to new plays. Wait for the next one.",
-    );
+    const error = new Error("simulation failed: NothingPending");
+    expect(decodePlayerError(error)).toBe("Already paid out. Refreshing your balance.");
   });
 
   it("does not let a name match a longer name it's a prefix of", () => {
-    // InsufficientVault (6054) must not steal InsufficientVaultLiquidity's (6036) text.
+    // InsufficientVault (6029) must not steal InsufficientVaultLiquidity's (6017) text.
     const error = new Error("custom error: InsufficientVaultLiquidity");
     expect(decodePlayerError(error)).toBe(
       "The vault is being topped up. Try the payout again in a few minutes.",
     );
   });
 
-  it("decodes the two feature-pause errors by name", () => {
-    expect(decodePlayerError(new Error("simulation failed: GamePaused"))).toBe(
-      "The game is paused right now. Try again once it restarts.",
-    );
+  it("decodes the jackpot-pause error by name", () => {
     expect(decodePlayerError(new Error("simulation failed: JackpotPaused"))).toBe(
       "The daily draw is paused, so Tickets can't be bought right now.",
     );
@@ -121,16 +120,16 @@ describe("decodePlayerError", () => {
   it("tells the player the refund failed and to try later, with no raw error", () => {
     const sent = decodeSendFailure({
       kind: "failed",
-      code: 6063,
-      message: '{"InstructionError":[2,{"Custom":6063}]}',
+      code: 6034,
+      message: '{"InstructionError":[2,{"Custom":6034}]}',
     });
     const thrown = decodePlayerError(
-      new Error("AnchorError. Error Code: VenueIlliquid. Error Number: 6063. Error Message: x"),
+      new Error("AnchorError. Error Code: VenueIlliquid. Error Number: 6034. Error Message: x"),
     );
     for (const text of [sent, thrown]) {
       expect(text).toMatch(/refund that deposit/);
       expect(text).toMatch(/Try again later/);
-      expect(text).not.toMatch(/6063|Custom|VenueIlliquid|Instruction/);
+      expect(text).not.toMatch(/6034|Custom|VenueIlliquid|Instruction/);
     }
   });
 

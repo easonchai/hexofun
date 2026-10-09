@@ -773,6 +773,87 @@ describe("roles", () => {
   );
 
   it(
+    "set_operator refuses the default key and a Player that is not the Pool's House",
+    async () => {
+      const pool = await setupPool();
+      const other = await setupPool();
+      const setOperator = (key: PublicKey, house: PublicKey) =>
+        program.methods
+          .setOperator(key)
+          .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool, house })
+          .signers([pool.admin])
+          .rpc();
+
+      await expect(setOperator(PublicKey.default, pool.house)).rejects.toThrow(/InvalidParameter/);
+      // The other pool's House is a real Player, but not this Pool's pin.
+      await expect(setOperator(Keypair.generate().publicKey, other.house)).rejects.toThrow(
+        /ConstraintHasOne/,
+      );
+
+      const state = await program.account.pool.fetch(pool.pool);
+      expect(state.operator.toBase58()).toBe(pool.operator.publicKey.toBase58());
+      const house = await program.account.player.fetch(pool.house);
+      expect(house.owner.toBase58()).toBe(pool.operator.publicKey.toBase58());
+    },
+    60_000,
+  );
+
+  it(
+    "set_operator hands the House to the new Operator, who can sign for it, and the old key cannot",
+    async () => {
+      const pool = await setupPool();
+      const next = await fundedKey();
+      const nextToken = await createAccount(
+        program.provider.connection,
+        pool.operator,
+        pool.mint,
+        next.publicKey,
+        Keypair.generate(),
+      );
+
+      await program.methods
+        .setOperator(next.publicKey)
+        .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool, house: pool.house })
+        .signers([pool.admin])
+        .rpc();
+
+      // The pin and the address stay; only the stored owner moves.
+      expect((await program.account.pool.fetch(pool.pool)).house.toBase58()).toBe(
+        pool.house.toBase58(),
+      );
+      const house = await program.account.player.fetch(pool.house);
+      expect(house.owner.toBase58()).toBe(next.publicKey.toBase58());
+      expect(house.isHouse).toBe(true);
+
+      const requestOnHouse = (signer: Keypair, ownerToken: PublicKey) =>
+        program.methods
+          .requestWithdraw(new BN(1))
+          .accountsPartial({
+            owner: signer.publicKey,
+            pool: pool.pool,
+            player: pool.house,
+            ...pool.venue,
+            ...refundAccounts(pool, { tokenAccount: ownerToken }),
+          })
+          .signers([signer])
+          .rpc();
+      // The House holds no Principal, so the new Operator gets past the account
+      // checks and stops at the amount; the old key stops at the owner check.
+      await expect(requestOnHouse(next, nextToken)).rejects.toThrow(/InsufficientPrincipal/);
+      const oldToken = await createAccount(
+        program.provider.connection,
+        pool.operator,
+        pool.mint,
+        pool.operator.publicKey,
+        Keypair.generate(),
+      );
+      await expect(requestOnHouse(pool.operator, oldToken)).rejects.toThrow(/Unauthorized/);
+      await assertSolvent(pool);
+    },
+    60_000,
+  );
+
+  it(
     "propose_admin then accept_admin hands the role over in two steps",
     async () => {
       const pool = await setupPool();

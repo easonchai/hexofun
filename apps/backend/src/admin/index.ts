@@ -735,8 +735,13 @@ export async function run(
     case "fund-jackpot":
       return fundJackpot(chain, command.amount);
     case "set-operator": {
+      const pool = await readPool(chain);
       const ix = await method(chain, "setOperator", command.key)
-        .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
+        .accountsPartial({
+          admin: mode.signer,
+          pool: chain.poolAddress(),
+          house: pool.house,
+        })
         .instruction();
       return submit(
         chain,

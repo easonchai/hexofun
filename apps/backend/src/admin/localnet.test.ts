@@ -254,6 +254,17 @@ describe.skipIf(!RPC_URL)("admin CLI on localnet", () => {
       expect((await bought()).spent).toBe(BUY);
       const vault = await connection.getTokenAccountBalance(chain.jackpotVaultAddress());
       expect(BigInt(vault.value.amount)).toBe(BUY);
+
+      // audit-2026-10-09 ticket 02: set-operator names the House, and the
+      // program hands it to the new Operator.
+      const next = Keypair.generate().publicKey;
+      await run({ kind: "set-operator", key: next }, chain, admin);
+      const houseInfo = await connection.getAccountInfo(chain.playerAddress(authority.publicKey));
+      const house = chain.program.coder.accounts.decode<{ owner: PublicKey }>(
+        "player",
+        houseInfo?.data ?? Buffer.alloc(0),
+      );
+      expect(house.owner.toBase58()).toBe(next.toBase58());
     },
     120_000,
   );

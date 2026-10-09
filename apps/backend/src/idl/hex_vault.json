@@ -2403,30 +2403,11 @@
         },
         {
           "name": "player",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  108,
-                  97,
-                  121,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "owner"
-              }
-            ]
-          }
+          "docs": [
+            "Seeded from the owner, except the House: `set_operator` rewrites its",
+            "`owner` but its address keeps the first Operator's seed."
+          ],
+          "writable": true
         },
         {
           "name": "accepted_mint"
@@ -2767,6 +2748,13 @@
               }
             ]
           }
+        },
+        {
+          "name": "house",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
         }
       ],
       "args": [
@@ -3671,546 +3659,346 @@
     },
     {
       "code": 6005,
-      "name": "InsufficientEntries",
-      "msg": "entries are lower than the requested amount"
-    },
-    {
-      "code": 6006,
       "name": "MintMismatch",
       "msg": "token account has the wrong mint"
     },
     {
-      "code": 6007,
-      "name": "NotAuthorityOwned",
-      "msg": "token account is not owned by the pool authority"
-    },
-    {
-      "code": 6008,
+      "code": 6006,
       "name": "InvalidParameter",
       "msg": "parameter is outside its allowed range"
     },
     {
-      "code": 6009,
+      "code": 6007,
       "name": "HouseCannotDeposit",
       "msg": "the House cannot hold Principal"
     },
     {
-      "code": 6010,
-      "name": "RoundAlreadyOpen",
-      "msg": "a round is already open for this pool"
-    },
-    {
-      "code": 6011,
-      "name": "RoundNotOpen",
-      "msg": "round is not open"
-    },
-    {
-      "code": 6012,
-      "name": "RoundClosed",
-      "msg": "round is closed to new positions"
-    },
-    {
-      "code": 6013,
-      "name": "RoundNotEnded",
-      "msg": "round has not ended yet"
-    },
-    {
-      "code": 6014,
-      "name": "RoundNotRequested",
-      "msg": "round randomness has not been requested"
-    },
-    {
-      "code": 6015,
-      "name": "RoundNotSettled",
-      "msg": "round is not settled"
-    },
-    {
-      "code": 6016,
-      "name": "RoundOutsideEpoch",
-      "msg": "round would end after the current epoch"
-    },
-    {
-      "code": 6017,
-      "name": "InvalidRoundLength",
-      "msg": "round length does not match the pool's round_seconds"
-    },
-    {
-      "code": 6018,
-      "name": "InvalidTileSelection",
-      "msg": "tile selection must be a non-empty mask over tiles 0..35"
-    },
-    {
-      "code": 6019,
-      "name": "InvalidStake",
-      "msg": "stake per tile must be at least one entry"
-    },
-    {
-      "code": 6020,
+      "code": 6008,
       "name": "EpochNotEnded",
       "msg": "the current epoch has not ended yet"
     },
     {
-      "code": 6021,
-      "name": "EpochNotRegistering",
-      "msg": "epoch is not accepting registrations"
-    },
-    {
-      "code": 6022,
+      "code": 6009,
       "name": "EpochNotDrawing",
       "msg": "epoch is not drawing"
     },
     {
-      "code": 6023,
+      "code": 6010,
       "name": "EpochNotDrawn",
       "msg": "epoch has not been drawn"
     },
     {
-      "code": 6024,
-      "name": "NotPreviousEpoch",
-      "msg": "only the epoch immediately before the current one may be registered"
-    },
-    {
-      "code": 6025,
-      "name": "AlreadyRegistered",
-      "msg": "player is already registered for this epoch"
-    },
-    {
-      "code": 6026,
-      "name": "FrozenEpochMismatch",
-      "msg": "player's frozen weight belongs to a different epoch"
-    },
-    {
-      "code": 6027,
-      "name": "NotRegistered",
-      "msg": "player is not registered for this epoch"
-    },
-    {
-      "code": 6028,
-      "name": "NotTheWinner",
-      "msg": "the drawn target is outside this player's registered interval"
-    },
-    {
-      "code": 6029,
-      "name": "NothingRegistered",
-      "msg": "no weight was registered for this epoch"
-    },
-    {
-      "code": 6030,
+      "code": 6011,
       "name": "InvalidRandomnessAccount",
       "msg": "randomness account does not match the request seed"
     },
     {
-      "code": 6031,
+      "code": 6012,
       "name": "RandomnessNotFulfilled",
       "msg": "randomness is not yet fulfilled"
     },
     {
-      "code": 6032,
+      "code": 6013,
       "name": "RandomnessRejection",
       "msg": "randomness sample fell in the rejected tail"
     },
     {
-      "code": 6033,
+      "code": 6014,
       "name": "VrfTimeoutNotElapsed",
       "msg": "the randomness timeout has not elapsed"
     },
     {
-      "code": 6034,
+      "code": 6015,
       "name": "Unauthorized",
       "msg": "signer is not authorized for this instruction"
     },
     {
-      "code": 6035,
+      "code": 6016,
       "name": "NoPendingAdmin",
       "msg": "no admin handover is pending"
     },
     {
-      "code": 6036,
+      "code": 6017,
       "name": "InsufficientVaultLiquidity",
       "msg": "the principal vault cannot cover this payout yet"
     },
     {
-      "code": 6037,
+      "code": 6018,
       "name": "WithdrawalNotDue",
       "msg": "the withdrawal's epoch has not ended yet"
     },
     {
-      "code": 6038,
+      "code": 6019,
       "name": "NothingPending",
       "msg": "no withdrawal is pending for this player"
     },
     {
-      "code": 6039,
+      "code": 6020,
       "name": "BelowPendingWithdrawals",
       "msg": "the pull would leave the vault below its pending withdrawals"
     },
     {
-      "code": 6040,
-      "name": "InvalidAdminTokenAccount",
-      "msg": "destination is not the admin's associated token account"
-    },
-    {
-      "code": 6041,
+      "code": 6021,
       "name": "RandomnessAlreadyFulfilled",
       "msg": "randomness for this request has already been fulfilled"
     },
     {
-      "code": 6042,
-      "name": "RegistrationWindowOpen",
-      "msg": "the registration window has not closed yet"
-    },
-    {
-      "code": 6043,
-      "name": "HouseCannotPlay",
-      "msg": "the House cannot buy a position"
-    },
-    {
-      "code": 6044,
+      "code": 6022,
       "name": "UnsupportedMint",
       "msg": "the accepted mint is not owned by the SPL Token program"
     },
     {
-      "code": 6045,
+      "code": 6023,
       "name": "PayoutTimeoutNotElapsed",
       "msg": "the payout timeout has not elapsed"
     },
     {
-      "code": 6046,
+      "code": 6024,
       "name": "HouseCannotBuyTickets",
       "msg": "the House cannot buy tickets"
     },
     {
-      "code": 6047,
+      "code": 6025,
       "name": "DailyBuyCapExceeded",
       "msg": "this purchase would exceed today's cap of principal"
     },
     {
-      "code": 6048,
-      "name": "HouseCannotBeGranted",
-      "msg": "the House cannot receive an operator grant"
-    },
-    {
-      "code": 6049,
-      "name": "DailyPlayerGrantCapExceeded",
-      "msg": "this grant would exceed the player's daily cap of principal"
-    },
-    {
-      "code": 6050,
-      "name": "DailyPoolGrantCapExceeded",
-      "msg": "this grant would exceed the pool's daily bonus cap"
-    },
-    {
-      "code": 6051,
+      "code": 6026,
       "name": "PoolShutDown",
       "msg": "the pool is shut down"
     },
     {
-      "code": 6052,
+      "code": 6027,
       "name": "PoolNotShutDown",
       "msg": "the pool is not shut down"
     },
     {
-      "code": 6053,
+      "code": 6028,
       "name": "HouseCannotEmergencyWithdraw",
       "msg": "the House exits through sweep_house, not emergency_withdraw"
     },
     {
-      "code": 6054,
+      "code": 6029,
       "name": "InsufficientVault",
       "msg": "the principal vault cannot cover this payout"
     },
     {
-      "code": 6055,
-      "name": "RoundHasOpenPositions",
-      "msg": "the round still has unsettled positions"
-    },
-    {
-      "code": 6056,
+      "code": 6030,
       "name": "PreviousEpochStillDrawing",
       "msg": "an earlier epoch has not finished drawing yet"
     },
     {
-      "code": 6057,
+      "code": 6031,
       "name": "NoEpochYet",
       "msg": "no epoch exists yet"
     },
     {
-      "code": 6058,
-      "name": "GamePaused",
-      "msg": "the game is paused"
-    },
-    {
-      "code": 6059,
+      "code": 6032,
       "name": "JackpotPaused",
       "msg": "the jackpot is paused"
     },
     {
-      "code": 6060,
-      "name": "DrawPendingWeightTree",
-      "msg": "payout is disabled until the Weight tree draw lands (yield-claimer ticket 08)"
-    },
-    {
-      "code": 6061,
+      "code": 6033,
       "name": "VenueMismatch",
       "msg": "a venue account does not match the address pinned on the pool"
     },
     {
-      "code": 6062,
-      "name": "VenueUnavailable",
-      "msg": "no yield venue is built into this program yet"
-    },
-    {
-      "code": 6063,
+      "code": 6034,
       "name": "VenueIlliquid",
       "msg": "the venue cannot return that much right now"
     },
     {
-      "code": 6064,
+      "code": 6035,
       "name": "VenueMoveTooSmall",
       "msg": "the amount is below the pool's minimum venue move"
     },
     {
-      "code": 6065,
+      "code": 6036,
       "name": "DeployExceedsIdle",
       "msg": "the amount is more than the idle USDC above the idle target"
     },
     {
-      "code": 6066,
+      "code": 6037,
       "name": "DeployPaused",
       "msg": "deploying to the venue is paused"
     },
     {
-      "code": 6067,
+      "code": 6038,
       "name": "PoolImpaired",
       "msg": "the pool is impaired by a venue loss"
     },
     {
-      "code": 6068,
+      "code": 6039,
       "name": "RecallNotNeeded",
       "msg": "free idle USDC is already at or above the idle target"
     },
     {
-      "code": 6069,
+      "code": 6040,
       "name": "RecallExceedsTarget",
       "msg": "the amount would lift free idle USDC above the idle target"
     },
     {
-      "code": 6070,
+      "code": 6041,
       "name": "VenueShortReturn",
       "msg": "the venue returned less USDC than was asked for"
     },
     {
-      "code": 6071,
+      "code": 6042,
       "name": "NothingToHarvest",
       "msg": "no yield fee or prize share is owed"
     },
     {
-      "code": 6072,
-      "name": "WeightTreeFull",
-      "msg": "the Weight tree is full: a new Player would push its account past 10 MiB"
-    },
-    {
-      "code": 6073,
-      "name": "WeightTreeInvalid",
-      "msg": "the Weight tree account is malformed"
-    },
-    {
-      "code": 6074,
-      "name": "PlayerHasNoLeaf",
-      "msg": "this Player has no leaf in the Weight tree"
-    },
-    {
-      "code": 6075,
+      "code": 6043,
       "name": "EpochNotReadable",
       "msg": "the epoch is not readable in the Weight tree any more"
     },
     {
-      "code": 6076,
+      "code": 6044,
       "name": "EpochNotAwaitingDraw",
       "msg": "the epoch has not ended, or its draw was already requested"
     },
     {
-      "code": 6077,
+      "code": 6045,
       "name": "ReserveStale",
       "msg": "the klend reserve is still stale after the refresh"
     },
     {
-      "code": 6078,
+      "code": 6046,
       "name": "ReserveUnreadable",
       "msg": "the reserve account is not a klend Reserve this program can read"
     },
     {
-      "code": 6079,
+      "code": 6047,
       "name": "KlendAccountMismatch",
       "msg": "a klend account does not match the reserve it belongs to"
     },
     {
-      "code": 6080,
-      "name": "InsufficientTickets",
-      "msg": "the player holds fewer Tickets than this withdrawal; use request_withdraw"
-    },
-    {
-      "code": 6081,
+      "code": 6048,
       "name": "BuyTicketsPaused",
       "msg": "buying Tickets is paused"
     },
     {
-      "code": 6082,
+      "code": 6049,
       "name": "ReserveShareCapExceeded",
       "msg": "this deploy would take the pool past its share of the reserve's supply"
     },
     {
-      "code": 6083,
+      "code": 6050,
       "name": "ReserveLiquidityTooLow",
       "msg": "this deploy would leave the reserve under its minimum free liquidity"
     },
     {
-      "code": 6084,
+      "code": 6051,
       "name": "NoDeficit",
       "msg": "the pool has no venue deficit to cover"
     },
     {
-      "code": 6085,
-      "name": "RoundStraddlesEpoch",
-      "msg": "the round would end after the current epoch ends"
-    },
-    {
-      "code": 6086,
-      "name": "OpenPositions",
-      "msg": "the player has a Position open; settle it, then process the withdrawal"
-    },
-    {
-      "code": 6087,
+      "code": 6052,
       "name": "OwnerSignatureRequired",
       "msg": "the pool is impaired; the player's owner must sign this exit"
     },
     {
-      "code": 6088,
-      "name": "RoundEpochNotCurrent",
-      "msg": "the round belongs to an earlier epoch and takes no new positions"
-    },
-    {
-      "code": 6089,
+      "code": 6053,
       "name": "UnsupportedVenueKind",
       "msg": "this build does not support that venue kind"
     },
     {
-      "code": 6090,
+      "code": 6054,
       "name": "VenueProposalOpen",
       "msg": "a venue change is proposed; deploys wait until it is cancelled or executed"
     },
     {
-      "code": 6091,
+      "code": 6055,
       "name": "VenueLockNotElapsed",
       "msg": "the venue proposal's lock has not elapsed"
     },
     {
-      "code": 6092,
+      "code": 6056,
       "name": "VenuePositionNotEmpty",
       "msg": "the old venue still holds more than the minimum venue move; drain it first"
     },
     {
-      "code": 6093,
+      "code": 6057,
       "name": "VaultStateUnreadable",
       "msg": "the kVault state account is not a VaultState this program can read"
     },
     {
-      "code": 6094,
+      "code": 6058,
       "name": "VaultPinMismatch",
       "msg": "a kVault pin does not match the vault state"
     },
     {
-      "code": 6095,
+      "code": 6059,
       "name": "VaultMintMismatch",
       "msg": "the kVault does not hold the pool's accepted mint"
     },
     {
-      "code": 6096,
+      "code": 6060,
       "name": "VaultAccountMismatch",
       "msg": "a kVault account does not match the vault state"
     },
     {
-      "code": 6097,
+      "code": 6061,
       "name": "VaultStateNotWritable",
       "msg": "the kVault state account must be passed writable"
     },
     {
-      "code": 6098,
-      "name": "AlreadyGranted",
-      "msg": "this player already received a grant in the current epoch"
-    },
-    {
-      "code": 6099,
+      "code": 6062,
       "name": "KlendProgramMismatch",
       "msg": "a klend venue must pin the klend program"
     },
     {
-      "code": 6100,
+      "code": 6063,
       "name": "NotUpgradeAuthority",
       "msg": "only the program's upgrade authority can create a pool"
     },
     {
-      "code": 6101,
-      "name": "LeafInUse",
-      "msg": "this Player still holds Principal, a queued withdrawal, a Position or Tickets"
-    },
-    {
-      "code": 6102,
-      "name": "HouseLeafCannotBeReleased",
-      "msg": "the House keeps its leaf"
-    },
-    {
-      "code": 6103,
-      "name": "FreeLeavesInvalid",
-      "msg": "the free-leaves account is malformed"
-    },
-    {
-      "code": 6104,
+      "code": 6064,
       "name": "SnapshotDepthTooLarge",
       "msg": "the snapshot is deeper than the program allows"
     },
     {
-      "code": 6105,
+      "code": 6065,
       "name": "SnapshotLeafCountInvalid",
       "msg": "the snapshot's leaf count is zero or more than 2^depth"
     },
     {
-      "code": 6106,
+      "code": 6066,
       "name": "SnapshotRootZero",
       "msg": "the snapshot root is all zeros"
     },
     {
-      "code": 6107,
+      "code": 6067,
       "name": "ZeroTicketLeaf",
       "msg": "a leaf with no Tickets cannot win"
     },
     {
-      "code": 6108,
+      "code": 6068,
       "name": "ProofWrongLength",
       "msg": "the proof does not have one sibling per level"
     },
     {
-      "code": 6109,
+      "code": 6069,
       "name": "ProofIndexOutOfRange",
       "msg": "the leaf index is past the snapshot's leaf count"
     },
     {
-      "code": 6110,
+      "code": 6070,
       "name": "ProofRootMismatch",
       "msg": "the proof does not reach the committed root"
     },
     {
-      "code": 6111,
+      "code": 6071,
       "name": "ProofSumMismatch",
       "msg": "the proof's sums do not reach the committed Ticket total"
     },
     {
-      "code": 6112,
+      "code": 6072,
       "name": "ProofRangeMismatch",
       "msg": "the drawn target is outside the leaf's range"
     },
     {
-      "code": 6113,
+      "code": 6073,
       "name": "HarvestBelowMinimum",
       "msg": "the harvest needs a venue redeem under the pool's minimum venue move"
     }

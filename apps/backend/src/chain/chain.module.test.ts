@@ -50,11 +50,11 @@ describe("ChainModule", () => {
   it("names an Anchor error from its program logs", () => {
     const fakeSendFailure = {
       logs: [
-        "Program log: AnchorError thrown in lib.rs:100. Error Code: InvalidTileSelection. Error Number: 6000. Error Message: Invalid tile selection.",
+        "Program log: AnchorError thrown in lib.rs:100. Error Code: PoolPaused. Error Number: 6001. Error Message: the pool is paused.",
       ],
     };
     expect(chain.mapSendError(fakeSendFailure).message).toBe(
-      "InvalidTileSelection",
+      "PoolPaused",
     );
   });
 });
@@ -244,7 +244,7 @@ describe("ChainService.send", () => {
     // wire (seen as a daily NothingToHarvest warning in the operator log).
     it("throws the program's named error when simulation fails inside the program", async () => {
       const connection = new CountingConnection();
-      connection.simulateError = { InstructionError: [1, { Custom: 6071 }] };
+      connection.simulateError = { InstructionError: [1, { Custom: 6042 }] };
       const chain = chainWith(connection);
 
       await expect(chain.send(noop)).rejects.toThrow("NothingToHarvest");

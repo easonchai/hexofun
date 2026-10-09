@@ -460,6 +460,19 @@ describe("admin run", () => {
     expect(sent[1]?.[0]?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
   });
 
+  it("set-operator names the Pool's House so the program can hand it to the new Operator", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+    const key = Keypair.generate().publicKey;
+
+    await capture(() => run({ kind: "set-operator", key }, chain, mode));
+
+    const ix = sent[0]?.[0];
+    expect(decodeInstruction(ix?.data)?.name).toBe("set_operator");
+    const keys = ix?.keys.map((k) => k.pubkey.toBase58());
+    expect(keys).toContain(poolFields.house.toBase58());
+  });
+
   it("propose-venue and cancel-venue in multisig mode print one transaction signed by the vault", async () => {
     const { chain, sent } = await harness();
     const vault = Keypair.generate().publicKey;

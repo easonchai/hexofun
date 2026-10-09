@@ -13,12 +13,12 @@ import { idl } from "./idl.js";
 const GENERIC = "Something went wrong. Try again in a moment.";
 
 /** `NothingPending`: the operator's crank already paid this withdrawal. */
-export const NOTHING_PENDING_CODE = 6038;
+export const NOTHING_PENDING_CODE = 6019;
 
 /** `VenueIlliquid`: a refund needs USDC from the lending venue and it cannot pay yet. */
-const VENUE_ILLIQUID_CODE = 6063;
+const VENUE_ILLIQUID_CODE = 6034;
 /** `VenueShortReturn`: the redeem came back short. Same answer for the player. */
-const VENUE_SHORT_RETURN_CODE = 6070;
+const VENUE_SHORT_RETURN_CODE = 6041;
 
 const REFUND_COPY =
   "The pool is short on cash and can't refund that deposit yet. Nothing changed on your account. Try again later.";
@@ -27,16 +27,11 @@ const REFUND_COPY =
 const HAND_WRITTEN: Record<number, string> = {
   6001: "The pool is paused right now. Try again once it reopens.", // PoolPaused
   6003: "Enter an amount greater than zero.", // ZeroAmount
-  6005: "You don't have enough Tickets for that.", // InsufficientEntries
-  6012: "This round is closed to new plays. Wait for the next one.", // RoundClosed
-  6088: "This round is closed to new plays. Wait for the next one.", // RoundEpochNotCurrent
-  6085: "This round would end after the day does. Wait for the new day's first round.", // RoundStraddlesEpoch
-  6036: "The vault is being topped up. Try the payout again in a few minutes.", // InsufficientVaultLiquidity
+  6017: "The vault is being topped up. Try the payout again in a few minutes.", // InsufficientVaultLiquidity
   [NOTHING_PENDING_CODE]: "Already paid out. Refreshing your balance.", // NothingPending
-  6051: "This pool is closed. Withdrawals still work; nothing else does.", // PoolShutDown
-  6058: "The game is paused right now. Try again once it restarts.", // GamePaused
-  6059: "The daily draw is paused, so Tickets can't be bought right now.", // JackpotPaused
-  6077: "The pool's lending rate is a moment out of date. Try again.", // ReserveStale
+  6026: "This pool is closed. Withdrawals still work; nothing else does.", // PoolShutDown
+  6032: "The daily draw is paused, so Tickets can't be bought right now.", // JackpotPaused
+  6045: "The pool's lending rate is a moment out of date. Try again.", // ReserveStale
   // The refund part of a withdraw request needs the venue when free idle is short.
   [VENUE_ILLIQUID_CODE]: REFUND_COPY, // VenueIlliquid
   [VENUE_SHORT_RETURN_CODE]: REFUND_COPY, // VenueShortReturn

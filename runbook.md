@@ -542,10 +542,9 @@
 
       pnpm --filter @hexvault/backend admin cover-deficit --amount 5000000
 
-  One gotcha that lives here because it is not really about signing: set-operator rotates `Pool.operator` but leaves the House
-  Player's own `owner` on the retired key, so a Prize the House wins still pays into that key's USDC associated token account. Keep
-  the old operator's ATA open after every rotation; close it and a House win is unpayable until `payout_timeout` lets the epoch roll
-  over.
+  set-operator also rewrites the House Player's `owner` to the new operator, so a Prize the House wins pays into the new key's USDC
+  associated token account. Create that ATA before you rotate. The House keeps its original address, and the Pool's `house` pin does
+  not change. The command refuses the all-zero key.
 
   The Ops console
 

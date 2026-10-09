@@ -368,7 +368,15 @@ pub fn shutdown(ctx: Context<Shutdown>) -> Result<()> {
     Ok(())
 }
 
+/// Also hands the House Player to the new Operator, so the old key cannot sign
+/// its exit and the new one can. The House keeps its PDA, seeded from the
+/// Operator it was created for; only the stored `owner` changes.
 pub fn set_operator(ctx: Context<SetOperator>, new_operator: Pubkey) -> Result<()> {
+    require!(
+        new_operator != Pubkey::default(),
+        HexVaultError::InvalidParameter
+    );
+    ctx.accounts.house.owner = new_operator;
     let pool = &mut ctx.accounts.pool;
     let previous = pool.operator;
     pool.operator = new_operator;
@@ -1918,8 +1926,12 @@ pub struct SetOperator<'info> {
         seeds = [SEED_POOL, &pool.pool_id.to_le_bytes()],
         bump = pool.bump,
         has_one = admin,
+        has_one = house,
     )]
     pub pool: Account<'info, Pool>,
+
+    #[account(mut)]
+    pub house: Account<'info, Player>,
 }
 
 #[derive(Accounts)]
@@ -2022,10 +2034,11 @@ pub struct RequestWithdraw<'info> {
     )]
     pub pool: Box<Account<'info, Pool>>,
 
+    /// Seeded from the owner, except the House: `set_operator` rewrites its
+    /// `owner` but its address keeps the first Operator's seed.
     #[account(
         mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
-        bump = player.bump,
+        constraint = is_players_account(&pool, &player, owner.key()) @ HexVaultError::Unauthorized,
     )]
     pub player: Box<Account<'info, Player>>,
 
@@ -2062,6 +2075,17 @@ pub struct RequestWithdraw<'info> {
     pub klend_ctoken: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
+}
+
+/// True when `player` is `owner`'s account in `pool`: the PDA seeded from
+/// `owner`, or the Pool's House when `owner` is its current owner.
+fn is_players_account(pool: &Account<Pool>, player: &Account<Player>, owner: Pubkey) -> bool {
+    if player.key() == pool.house {
+        return player.owner == owner;
+    }
+    let pool_key = pool.key();
+    let seeds: &[&[u8]] = &[SEED_PLAYER, pool_key.as_ref(), owner.as_ref(), &[player.bump]];
+    Pubkey::create_program_address(seeds, &crate::ID).map_or(false, |key| key == player.key())
 }
 
 /// Signed by the Player's owner; touches nothing but the Player and the Pool.
