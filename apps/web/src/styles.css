@@ -3447,11 +3447,18 @@ input::placeholder {
   margin: 0;
 }
 
-/* PRINCIPAL and EARNINGS side by side, the second column at the frame's +264. */
+/* PRINCIPAL and EARNINGS side by side, EARNINGS at the frame's +264 (240 + the
+   24px gap). A wider principal pushes it right; one the card can't hold beside
+   it wraps EARNINGS onto its own line instead of overflowing the card. */
 .dash-balance {
   margin: 16px 0 0;
-  display: grid;
-  grid-template-columns: 264px minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+}
+
+.dash-balance > div:first-child {
+  min-width: 240px;
 }
 
 .dash-balance dt {
@@ -3926,8 +3933,12 @@ input::placeholder {
 
   /* Scaled down like the rest of the card so both figures fit a phone. */
   .dash-balance {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 12px;
+    justify-content: space-between;
+    gap: 4px 12px;
+  }
+
+  .dash-balance > div:first-child {
+    min-width: 0;
   }
 
   .dash-balance dt {
