@@ -101,6 +101,12 @@
   Status: rehearsed on localnet (stub to stub) and on a Surfpool mainnet fork on 2026-10-07 (klend to klend, klend to
   kVault, emergency park; tests/fork/venue-switch.fork.ts). Not yet run on mainnet.
 
+  On the hand-driven fork, `scripts/surf.sh up` pins Pool 1 to the Kamino Earn vault `DWSXb18x...M7KaP`, because the klend
+  reserve yields too little for a prize of `min_jackpot` a day on about 12k USDC. To rehearse a switch away from klend,
+  start with `SURF_VENUE=klend scripts/surf.sh up`. On the kVault the fork bootstraps with a Base yield ceiling of 400 bps
+  instead of 488 (fork only; `BASE_RATE_BPS=<n>` overrides it, `scripts/surf.sh admin set-params --base-rate-bps <n>` does
+  it on a live fork). The vault paid about 5.2% on 2026-10-09, so a 12k USDC fork still makes under 1 USDC of prize a day.
+
   A pool holds one venue, a klend reserve or a Kamino Earn vault. Moving it takes a proposal, a 48 hour lock the
   program enforces, a drain and a migration. Every command is the admin CLI, `pnpm --filter @hexvault/backend admin
   <command>`, run with the target environment's env exported as in "Admin actions through Squads" below. On mainnet,

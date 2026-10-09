@@ -2,7 +2,8 @@
 set -eu
 
 # Long-running Surfpool mainnet fork you poke at by hand. Deploys the plain
-# (mainnet-shaped) build, bootstraps Pool 1 on Kamino's real USDC reserve,
+# (mainnet-shaped) build, bootstraps Pool 1 on a Kamino Earn vault (kVault,
+# default) or Kamino's USDC reserve (SURF_VENUE=klend),
 # funds the roles with forked USDC and SOL, writes .env.surf (backend compose)
 # and apps/web/.env.surf, then stays in the foreground until Ctrl-C.
 # tests/fork/surf.ts fakes ORAO fulfilment so rounds and draws settle.
@@ -19,6 +20,14 @@ set -eu
 #
 # Env: HEXVAULT_FORK_DATASOURCE (keyed mainnet RPC; Surfpool only sees the
 # local relay in front of it, tests/fork/relay.mjs),
+# SURF_VENUE (up only: kvault, the default, or klend). The kVault is the one
+# tests/fork/kvault.pool.fork.ts uses; the klend reserve earns too little for a
+# prize of min_jackpot a day on about 12k USDC, so every epoch would roll over.
+# Use klend for venue-switch rehearsals. BASE_RATE_BPS (read by bootstrap only)
+# sets the Base yield ceiling: 400 on the kVault, mainnet's 488 on klend. The vault
+# paid about 5.2% on 2026-10-09, so even 400 leaves a prize under 1 USDC a day on
+# 12k USDC (it needs roughly 7.8%); set BASE_RATE_BPS lower, or fund_jackpot by hand.
+# On a live fork use `admin set-params --base-rate-bps`.
 # SURF_PORT (default 9499, websocket +1, studio +2, relay +3), HEXVAULT_SKIP_BUILD=1,
 # HEXVAULT_FORK_OFFLINE=1 (up --resume only: no datasource, so a hung remote
 # fetch can never freeze the fork for its 30s timeout),
@@ -40,6 +49,13 @@ web_env="$root/apps/web/.env.surf"
 idl="$surf_dir/hex_vault.json"
 usdc=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
 token_program=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+venue="${SURF_VENUE:-kvault}"
+case "$venue" in kvault | klend) ;; *) echo "surf: SURF_VENUE must be kvault or klend, got $venue" >&2; exit 1 ;; esac
+# The Kamino Earn vault the fork tests use (tests/fork/kvault.pool.fork.ts). The
+# shares mint is a PDA of it, so bootstrap needs only the vault.
+kvault_address=DWSXb18xZApz29vnQpgR2m6MynCT7PznaXt7Ut7M7KaP
+# Fork-only: a lower Base yield ceiling leaves more of the venue's yield as prize.
+if [ "$venue" = kvault ]; then base_rate_bps=400; else base_rate_bps=488; fi
 # Kamino main market USDC reserve, its liquidity supply and cToken mint
 # (tests/fork/klend.fork.ts). Reset together so the fork holds one snapshot.
 klend_accounts="D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59 Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6 B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D"
@@ -182,6 +198,8 @@ RPC_URL=http://host.docker.internal:$port
 PROGRAM_ID=$program_id
 POOL_ID=1
 ACCEPTED_MINT=$usdc
+VENUE_KIND=$venue
+KVAULT_ADDRESS=$kvault_address
 KLEND_PROGRAM=$(value KLEND_PROGRAM)
 KLEND_MARKET=$(value KLEND_MARKET)
 KLEND_RESERVE=$(value KLEND_RESERVE)
@@ -257,15 +275,23 @@ up_fresh() {
 
   # Admin signs (the mainnet guard wants admin != operator); no --start, so the
   # pool comes up jackpot- and game-paused with buy_tickets paused.
+  # KVAULT_ADDRESS is set for klend too, where bootstrap ignores it. The empty
+  # KLEND_* keys stop a shell's own pins from overriding the mainnet defaults.
   (cd "$root/apps/backend" && \
     OPERATOR_KEYPAIR=$(base58_secret "$keys/admin.json") RPC_URL="$rpc" \
     PROGRAM_ID="$program_id" POOL_ID=1 ACCEPTED_MINT="$usdc" HEXVAULT_IDL_PATH="$idl" \
+    VENUE_KIND="$venue" KVAULT_ADDRESS="$kvault_address" BASE_RATE_BPS="${BASE_RATE_BPS:-$base_rate_bps}" \
+    KLEND_PROGRAM= KLEND_MARKET= KLEND_RESERVE= KLEND_CTOKEN= \
     pnpm exec tsx src/bootstrap.ts --admin "$admin" --operator "$operator" \
       --treasury "$treasury" --buyback-reserve "$buyback") >"$surf_dir/bootstrap.out"
 
-  for account in $klend_accounts; do
-    rpc_call surfnet_resetAccount "[\"$account\"]"
-  done
+  if [ "$venue" = kvault ]; then
+    surf_ts reset-kvault "$kvault_address"
+  else
+    for account in $klend_accounts; do
+      rpc_call surfnet_resetAccount "[\"$account\"]"
+    done
+  fi
 
   write_env
   echo

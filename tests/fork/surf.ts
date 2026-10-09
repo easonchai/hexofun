@@ -4,6 +4,7 @@
 //   tsx tests/fork/surf.ts warp <seconds>      jump the fork clock forward
 //   tsx tests/fork/surf.ts warp-epoch <min>    jump to <min> minutes before the epoch ends
 //   tsx tests/fork/surf.ts restore-clock       jump back to the chain time the last run reached
+//   tsx tests/fork/surf.ts reset-kvault <vault>   refetch the vault and the reserves it allocates to
 //
 // Env: SURF_RPC (the fork), SURF_DIR (the .surf state dir), HEXVAULT_IDL_PATH.
 //
@@ -24,6 +25,7 @@ import { join } from "node:path";
 import { Connection, Keypair, PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
 import { AnchorProvider, Program, Wallet, utils, type Idl } from "@anchor-lang/core";
 import type { HexVault } from "../../target/types/hex_vault.js";
+import { fetchKvaultView } from "../../apps/backend/src/chain/kvault.js";
 
 const ORAO_VRF = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 const SEED_ORAO_REQUEST = Buffer.from("orao-vrf-randomness-request");
@@ -140,6 +142,22 @@ async function currentEpochEnd(): Promise<number> {
   return Number(epoch.account.endsAt);
 }
 
+/**
+ * Refetches every account of a kVault position back to back, so the fork holds
+ * one coherent snapshot (the same set tests/fork/kvault.pool.fork.ts resets).
+ */
+async function resetKvault(vault: PublicKey): Promise<void> {
+  const view = await fetchKvaultView(connection, vault);
+  const keys = [
+    vault,
+    view.tokenVault,
+    view.sharesMint,
+    ...view.allocations.flatMap((a) => [a.reserve, a.ctokenVault, a.liquiditySupply, a.collateralMint]),
+  ];
+  await Promise.all(keys.map((key) => surf("surfnet_resetAccount", [key.toBase58()])));
+  console.log(`reset ${keys.length} kVault accounts`);
+}
+
 const [command, arg] = process.argv.slice(2);
 if (command === "vrf") {
   await vrfLoop();
@@ -155,6 +173,9 @@ if (command === "vrf") {
   const saved = existsSync(clockFile) ? Number(readFileSync(clockFile, "utf8")) : 0;
   if (saved > (await chainNow())) await warpTo(saved);
   else console.log("clock already at or past the last run's chain time");
+} else if (command === "reset-kvault") {
+  if (!arg) throw new Error("usage: reset-kvault <vault>");
+  await resetKvault(new PublicKey(arg));
 } else {
-  throw new Error(`unknown command "${command}"; vrf | warp <s> | warp-epoch [min] | restore-clock`);
+  throw new Error(`unknown command "${command}"; vrf | warp <s> | warp-epoch [min] | restore-clock | reset-kvault <vault>`);
 }
