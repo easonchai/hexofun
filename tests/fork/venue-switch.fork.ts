@@ -96,6 +96,7 @@ import {
   type VenueState,
 } from "../../apps/backend/src/operator/venue";
 import {
+  deployKeypair,
   playerPda,
   program,
   provider,
@@ -294,7 +295,8 @@ function cliEnv(f: { poolId: bigint; operator: Keypair; admin: Keypair }, as: "m
 
 async function bootstrapPool(): Promise<Fork> {
   const poolId = BigInt(Date.now()) * 1_000n;
-  const admin = Keypair.generate();
+  // Bootstrap signs create_pool, which only the upgrade authority may send.
+  const admin = deployKeypair;
   const operator = Keypair.generate();
   await airdrop(admin.publicKey, 20);
   await airdrop(operator.publicKey, 10);
@@ -539,9 +541,12 @@ async function tick(f: Fork, memory: TickMemory): Promise<TickResult> {
       return info ? decodeReserve(info.data).available : null;
     },
     lastExpectedErrors: memory.expectedErrors,
+    snapshotMismatchEpoch: null,
     lastRoundSkipEpochId: null,
     launchAt: null,
     fulfilled: async () => false,
+    drawRequest: async () => null,
+    payoutProof: async () => null,
     principalVaultBalance: () => tokenBalance(f.principalVault),
     duePendingWithdrawals: async (currentEpochId) => {
       const due: { owner: string; amount: bigint }[] = [];

@@ -30,7 +30,10 @@ const secret = Uint8Array.from(
 );
 export const connection = new Connection(process.env.ANCHOR_PROVIDER_URL as string, "confirmed");
 
-export const provider = new AnchorProvider(connection, new Wallet(Keypair.fromSecretKey(secret)), {
+/** The deploy key: pays the provider's transactions and is the program's upgrade authority, so only it can `create_pool`. */
+export const deployKeypair = Keypair.fromSecretKey(secret);
+
+export const provider = new AnchorProvider(connection, new Wallet(deployKeypair), {
   commitment: "confirmed",
 });
 

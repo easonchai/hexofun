@@ -34,6 +34,7 @@ cleanup() {
   # Surfpool ignores SIGTERM.
   kill -9 "${surfpool_pid:-}" 2>/dev/null || true
   wait "${surfpool_pid:-}" 2>/dev/null || true
+  kill "${relay_pid:-}" 2>/dev/null || true
   if [ "${HEXVAULT_SKIP_BUILD:-}" != "1" ]; then
     rm -rf target/idl target/types
     if [ -d "$target_backup/idl" ]; then mv "$target_backup/idl" target/idl; fi
@@ -62,12 +63,24 @@ if strings target/deploy/hex_vault.so | grep -q test-venue; then
   exit 1
 fi
 
+# Surfpool reaches the datasource through tests/fork/relay.mjs, which never
+# reuses a connection the network may have dropped (the 30s freeze that fails a
+# transaction with "Failed to fetch accounts from remote", surfpool#847).
+relay_port=$((port + 3))
+HEXVAULT_FORK_DATASOURCE="$datasource" node tests/fork/relay.mjs "$relay_port" \
+  >"$workdir/relay.log" 2>&1 &
+relay_pid=$!
+until curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$relay_port"; do
+  kill -0 "$relay_pid" 2>/dev/null || { echo "run-fork: relay exited" >&2; exit 1; }
+  sleep 0.2
+done
+
 # Surfpool writes a .surfpool directory into its working directory, so run it
 # from the scratch one.
 (
   cd "$workdir"
   # The datasource goes in by environment so a keyed URL never shows in `ps`.
-  SURFPOOL_DATASOURCE_RPC_URL="$datasource" exec surfpool start \
+  SURFPOOL_DATASOURCE_RPC_URL="http://127.0.0.1:$relay_port" exec surfpool start \
     --port "$port" --ws-port $((port + 1)) --studio-port $((port + 2)) \
     --no-tui --no-deploy --no-studio -y
 ) >"$workdir/surfpool.log" 2>&1 &

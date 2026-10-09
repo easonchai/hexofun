@@ -57,6 +57,7 @@ import {
 import { decodePool, type PoolState } from "../../apps/backend/src/operator/chain-state";
 import { OperatorInstructions } from "../../apps/backend/src/operator/instructions";
 import {
+  deployKeypair,
   DEVNET_VRF_NETWORK_STATE,
   nextPoolId,
   playerPda,
@@ -272,7 +273,8 @@ async function fundedWallet(usdc: bigint): Promise<Wallet> {
 /** Bootstraps through the real script: VENUE_KIND=kvault, the vault the only input. */
 async function bootstrapPool(): Promise<ForkPool> {
   const poolId = nextPoolId();
-  const admin = Keypair.generate();
+  // Bootstrap signs create_pool, which only the upgrade authority may send.
+  const admin = deployKeypair;
   const operator = Keypair.generate();
   await airdrop(admin.publicKey, 20);
   await airdrop(operator.publicKey, 5);
@@ -545,7 +547,10 @@ describe("kVault backing on a mainnet fork", () => {
     expect(big(pool.venueValue) > big(before.venueValue)).toBe(true);
     const gain = big(pool.venueValue) - big(before.venueValue);
     const owed = (p: typeof pool) => big(p.feeOwed) + big(p.yieldOwed) + big(p.prizeOwed);
-    expect(owed(pool) - owed(before)).toBe(gain);
+    // A sync repays the deficit a deploy's share rounding recorded before it
+    // splits the rest (the DEPLOY line above logs the shortfall).
+    const repaid = big(before.deficit) - big(pool.deficit);
+    expect(owed(pool) - owed(before)).toBe(gain - repaid);
     console.log(`GAIN 6h booked=${gain} on ${before.venueValue}`);
     await solvent();
   }, TIMEOUT);

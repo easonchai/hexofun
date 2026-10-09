@@ -370,8 +370,11 @@ describe("klend backing on a mainnet fork", () => {
     expect(big(pool.lastSyncAt) - big(before.lastSyncAt) >= 6n * 3_600n).toBe(true);
     expect(big(pool.venueValue) > big(before.venueValue)).toBe(true);
     expect(within(big(pool.venueValue), await reserveValue(await tokenBalance(ctoken)))).toBe(true);
+    // A sync repays any recorded deficit (a cToken rounding loss of a micro-USDC
+    // from an earlier test) before it splits the rest.
     const gain = big(pool.venueValue) - big(before.venueValue);
-    expect(big(pool.feeOwed) + big(pool.yieldOwed) + big(pool.prizeOwed)).toBe(gain);
+    const repaid = big(before.deficit) - big(pool.deficit);
+    expect(big(pool.feeOwed) + big(pool.yieldOwed) + big(pool.prizeOwed)).toBe(gain - repaid);
   }, TIMEOUT);
 
   it("recalls into the vault at the reserve's exchange rate", async () => {
@@ -474,7 +477,18 @@ describe("klend backing on a mainnet fork", () => {
       fake.toBase58(),
       { lamports: real.lamports, data: real.data.toString("hex"), owner: NOOP.toBase58(), executable: false },
     ]);
-    const g = await createForkPool({ klendProgram: NOOP, klendReserve: fake });
+    // create_pool refuses any klend program but the real one, so the no-op
+    // is pinned afterwards by rewriting the Pool account on the fork.
+    const created = await createForkPool();
+    const info = (await connection.getAccountInfo(created.pool, "confirmed"))!;
+    const state = program.coder.accounts.decode("pool", info.data);
+    const data = Buffer.alloc(info.data.length);
+    (await program.coder.accounts.encode("pool", { ...state, klendProgram: NOOP, klendReserve: fake })).copy(data);
+    await surf("surfnet_setAccount", [
+      created.pool.toBase58(),
+      { lamports: info.lamports, data: data.toString("hex"), owner: info.owner.toBase58(), executable: false },
+    ]);
+    const g = { ...created, venue: { ...created.venue, klendProgram: NOOP, klendReserve: fake } };
     const dave = await fundedWallet(1_000n);
     await sleep(1_500);
     const { text } = await failure(depositMethod(g, dave, 10n * USDC_UNIT).rpc());
