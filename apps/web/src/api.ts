@@ -175,8 +175,9 @@ export type LeaderboardRowDto = Pick<
 export type PlayerExtrasDto = PlayerDto & {
   /** Yield earned since the last settle, as of the pool's last sync. */
   unsettledYield: string;
-  /** Yield the open position has earned, settled or not; "0" before any. */
-  positionYield: string;
+  /** Yield the open position has earned, settled or not; "0" before any.
+   *  Null while the backend's events lag the Player row. */
+  positionYield: string | null;
   /** Chain unix seconds of that sync. */
   syncedAt: string;
   /** USDC still spendable in `buy_tickets` today, capped at Principal. */

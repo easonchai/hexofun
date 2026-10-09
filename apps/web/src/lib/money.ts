@@ -100,6 +100,14 @@ export function unsettledYieldLine(atomic: string | undefined, decimals: number)
 }
 
 /**
+ * The balance card's EARNINGS line. Null is the backend saying its events lag
+ * the Player row, so any figure would be wrong: a dash, never "+$0.00".
+ */
+export function earningsLine(atomic: string | null, decimals: number): string {
+  return atomic === null ? "—" : `+$${formatMoney2(BigInt(atomic), decimals)}`;
+}
+
+/**
  * The part of Principal that earns no Ticket yet: the deposit made in
  * `depositEpoch` while that epoch is still current, nothing once a later one
  * has begun.

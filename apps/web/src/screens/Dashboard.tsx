@@ -28,7 +28,7 @@ import { dhmsParts } from "../engine.js";
 import { dollars, toHistoryList } from "../historyRows.js";
 import { InfoGlyph } from "../InfoTip.js";
 import { launchCountdown, launchCountdownLabel, prizeCardState } from "../launch.js";
-import { formatAddress, formatMoney2 } from "../lib/money.js";
+import { earningsLine, formatAddress, formatMoney2 } from "../lib/money.js";
 import { useApiPoll } from "../useApiPoll.js";
 import { Star, wholeDollars } from "./Home.js";
 import { apyFromBaseRateBps } from "./Vault.js";
@@ -198,8 +198,9 @@ export function Dashboard(props: DashboardScreenProps) {
       : null;
 
   // What the open position has earned, settled into Principal or not; zero
-  // until the backend knows the wallet.
-  const earnings = BigInt(playerExtras.data?.positionYield ?? "0");
+  // until the backend knows the wallet. Null while its events lag the Player
+  // row (a deposit just landed), shown as a dash.
+  const earnings = playerExtras.data ? playerExtras.data.positionYield : "0";
   // Settled yield already sits in Principal; add the unsettled part so the
   // card shows everything earned either way.
   const balance = principal + BigInt(playerExtras.data?.unsettledYield ?? "0");
@@ -225,7 +226,7 @@ export function Dashboard(props: DashboardScreenProps) {
             <div>
               <dt>EARNINGS</dt>
               <dd className="dash-earnings" data-testid="dash-earnings">
-                +${fmt2(earnings)}
+                {earningsLine(earnings, DECIMALS)}
               </dd>
             </div>
           </dl>

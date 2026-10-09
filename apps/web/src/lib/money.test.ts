@@ -15,6 +15,7 @@ import {
   pendingWithdrawal,
   splitWithdraw,
   unsettledYieldLine,
+  earningsLine,
 } from "./money.js";
 
 describe("vault widget math", () => {
@@ -158,6 +159,17 @@ describe("unsettledYieldLine", () => {
   it("has no line at 0 or while the read is unknown", () => {
     expect(unsettledYieldLine("0", 6)).toBeNull();
     expect(unsettledYieldLine(undefined, 6)).toBeNull();
+  });
+});
+
+describe("earningsLine", () => {
+  it("is a dash while the backend's events lag the Player row, never +$0.00", () => {
+    expect(earningsLine(null, 6)).toBe("—");
+  });
+
+  it("shows a known figure with a plus sign, zero included", () => {
+    expect(earningsLine("0", 6)).toBe("+$0.00");
+    expect(earningsLine("1234560000", 6)).toBe("+$1,234.56");
   });
 });
 

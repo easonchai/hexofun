@@ -744,6 +744,43 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     }
   });
 
+  // The Player row lands from the confirmed log path before the finalized
+  // `Deposited` row does; counting the new Principal against a basis that lacks
+  // it showed the whole deposit as earnings (fork run 2026-10-09).
+  it("GET /players/:owner reports positionYield null while the Player row is newer than the newest stored event", async () => {
+    const deposit = (slot: bigint, amount: string) => ({
+      slot,
+      signature: `sigLag${slot}`,
+      index: 0,
+      poolAddress: POOL_ADDRESS,
+      name: "Deposited",
+      data: { owner: BOB, amount },
+      blockTime: NOW,
+    });
+    const setPlayer = (principal: bigint, slot: bigint) =>
+      prisma.player.update({
+        where: activePlayer(BOB),
+        data: { principal, slot },
+      });
+    const positionYield = async () => (await http.get(`/players/${BOB}`).expect(200)).body.positionYield;
+    try {
+      // First deposit: the row is at slot 500, no event that new yet.
+      await setPlayer(6_900n, 500n);
+      expect(await positionYield()).toBeNull();
+      await prisma.event.createMany({ data: [deposit(500n, "6900")] });
+      expect(await positionYield()).toBe("0");
+
+      // Top-up: 1,100 more at slot 600, not in Event yet.
+      await setPlayer(8_000n, 600n);
+      expect(await positionYield()).toBeNull();
+      await prisma.event.createMany({ data: [deposit(600n, "1100")] });
+      expect(await positionYield()).toBe("0");
+    } finally {
+      await prisma.event.deleteMany({ where: { signature: { in: ["sigLag500", "sigLag600"] } } });
+      await prisma.player.update({ where: activePlayer(BOB), data: { principal: 0n, slot: 0n } });
+    }
+  });
+
   it("GET /players/:owner gives zero odds to a player with no Tickets", async () => {
     const { body } = await http.get(`/players/${BOB}`).expect(200);
     expect(body.weight).toBe("0");

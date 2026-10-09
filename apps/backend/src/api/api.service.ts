@@ -575,7 +575,9 @@ export class ApiService {
    * sync (`unsettledYield`, `syncedAt`), the Tickets the Player holds in the
    * current epoch, `pendingMaturesAt`, when the queued
    * withdrawal pays (null with nothing queued), and `positionYield`, what the
-   * open position has earned, settled or not (`positionBasis`).
+   * open position has earned, settled or not (`positionBasis`). That one is
+   * null while the Player row is newer than the newest stored event, because
+   * the basis then lacks the change that moved Principal.
    */
   async getPlayer(owner: string) {
     const [pool, player] = await Promise.all([
@@ -591,14 +593,23 @@ export class ApiService {
     }
     const { weights, total } = await this.weightsFor(pool, [player]);
     const mine = weights[0] as LiveWeight;
-    const [queuedEpoch, ownerEvents] = await Promise.all([
+    const [queuedEpoch, ownerEvents, newestEvent] = await Promise.all([
       player.pendingWithdraw > 0n
         ? this.prisma.epoch.findUnique({
             where: { poolAddress_id: { poolAddress: this.poolAddress, id: player.pendingEpoch } },
           })
         : null,
       this.principalEvents(owner),
+      // The Player row comes from the confirmed log path or a sweep, the Event
+      // rows from the finalized live path or catch-up, so they land apart.
+      // Not `Cursor.lastSlot`: the live path stores events without moving it,
+      // and catch-up moves it only once a minute.
+      this.prisma.event.aggregate({
+        where: { poolAddress: this.poolAddress },
+        _max: { slot: true },
+      }),
     ]);
+    const eventsCurrent = player.slot <= (newestEvent._max.slot ?? 0n);
     const unsettled = unsettledYield(player.principal, toBigInt(pool.yieldIndex), toBigInt(player.yieldIndex));
     return {
       ...playerDto(mine, total),
@@ -608,7 +619,9 @@ export class ApiService {
           ? withdrawMaturity(queuedEpoch?.endsAt ?? null, player.requestedAt, pool.epochSeconds)
           : null,
       unsettledYield: unsettled,
-      positionYield: positionYield(player.principal, unsettled, positionBasis(ownerEvents)),
+      positionYield: eventsCurrent
+        ? positionYield(player.principal, unsettled, positionBasis(ownerEvents))
+        : null,
       syncedAt: pool.lastSyncAt,
     };
   }
