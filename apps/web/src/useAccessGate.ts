@@ -227,7 +227,9 @@ export function useAccessGate(options: AccessGateOptions): AccessGateState {
       } catch (err) {
         // Most often the wallet declining the signature request.
         track("invite_failed", { reason: "sign_failed" });
-        setError(err instanceof Error ? err.message : String(err));
+        // Some wallets throw a plain `{ code, message }` object, not an Error.
+        const message = (err as { message?: unknown } | null)?.message;
+        setError(typeof message === "string" && message ? message : "Signature request failed. Try again.");
       } finally {
         setBusy(false);
       }
