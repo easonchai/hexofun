@@ -51,6 +51,44 @@ solana transfer <operator-pubkey> 1 --url <cluster>
 `GET /healthz` reports `operatorSol` and turns `degraded` below `OPERATOR_SOL_WARN` (default
 0.5 SOL); alert on that field rather than waiting for cranks to start failing.
 
+## SOL costs
+
+Measured 2026-10-09 on a surf fork at `20ba7f1` (program 830,696 B, `opt-level = "s"`). The fork
+charges the old 6,960 lamports/byte rent, so rent here is rescaled to mainnet's 5,080 (×0.7299).
+Priority fees are not included; the fork charges none.
+
+```
+# Deployment
+  Deploy program      4.225 SOL  (4.221 is a refundable deposit, ~0.004 in tx fees)
+                      need ~8.5 SOL in the wallet during the deploy
+  Create pool         0.009 SOL
+  Upgrade (same size) 0.009 SOL  (needs 4.22 SOL on hand, returned after; scaled, not measured)
+  Bigger program      +0.05 SOL per extra 10 KB
+  Close program       returns 4.221 SOL
+
+# Game
+  Per round   0 SOL
+    Rounds run in the backend and bets are signed off-chain by the session key (ADR 0025).
+    Randomness comes from drand, not ORAO.
+
+# Jackpot  (1 draw/day)
+  Per draw    0.0036 SOL
+    VRF         0.0018462  (0.0005 ORAO fee + 0.0013462 locked forever)
+    Epoch acct  0.00174    (never refunded)
+    Tx fees     0.000025   (5 txs: begin_epoch, request_draw, draw, payout, harvest)
+  Empty epoch 0.00175 SOL  (no Tickets: request_draw rolls it over without VRF)
+  Per 30 days 0.11 SOL
+
+# Players  (paid by the player)
+  First deposit     0.00154 SOL  (Player account, never refunded)
+  Bet               0 SOL
+  Deposit/withdraw  0.000005 SOL tx fee
+```
+
+To re-measure, run a fork (`scripts/surf.sh up`), drive it, then group the rows of
+`.surf/state.sqlite` table `transactions` by their `Program log: Instruction:` lines and read the
+fee payer's balance change. Rescale rent by 5,080 / 6,960.
+
 ## Shutdown and the emergency exits
 
 `shutdown` is admin-only and irreversible: it stops every inflow, the game and the draw, and lets
