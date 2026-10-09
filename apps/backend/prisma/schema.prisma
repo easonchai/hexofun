@@ -180,6 +180,8 @@ model Event {
   // transaction's own, so a slot in the key stored one event twice.
   @@id([signature, index])
   @@index([poolAddress, slot])
+  // Also in the database, not expressible here: expression indexes on
+  // (data->>'owner') and (data->>'winner'), migration 20261010200000.
 }
 
 // The pool's open venue proposal (venue-switch ticket 03), one row per pool

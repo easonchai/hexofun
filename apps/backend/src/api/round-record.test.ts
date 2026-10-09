@@ -21,7 +21,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import type { ChainClient } from "drand-client";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
 import { ensurePoolRow } from "../operator/pool-row.fixture";
@@ -269,7 +269,14 @@ describe.skipIf(!DB_AVAILABLE)("Round record", () => {
     });
     await bet(bob, [T], 30n, 5);
     await bet(carol, [(T + 2) % 36], 50n, 10);
-    await new SparringService(prisma, sessions, rounds, app.get(ChainService), config as never).tick(at(12));
+    // The Sparring player's bet is stamped by the engine's own clock, so move the clock to the tick.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at(12));
+    try {
+      await new SparringService(prisma, sessions, rounds, app.get(ChainService), config as never).tick(at(12));
+    } finally {
+      vi.useRealTimers();
+    }
     await rounds.closeDue(CLOSE1);
     return { alice, bob };
   }

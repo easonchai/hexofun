@@ -53,7 +53,8 @@ function context(live: string[] = [NONCE], over: Partial<DelegationContext> = {}
   const store = new Set(live);
   return {
     now: NOW,
-    allowedOrigins: [ORIGIN],
+    allowedOrigins: [ORIGIN, "http://localhost:5173"],
+    origin: ORIGIN,
     chainId: "mainnet-beta",
     programId: PROGRAM_ID,
     consumeNonce: async (nonce) => store.delete(nonce),
@@ -104,6 +105,13 @@ describe("verifyDelegation", () => {
     const other = Keypair.generate();
     const result = await verifyDelegation(signed(delegationMessage(fields()), other), context());
     expect(result).toEqual({ ok: false, code: "BadSignature" });
+  });
+
+  it("refuses a delegation whose signed URI is not the request's Origin, or when there is none", async () => {
+    const request = signed(delegationMessage(fields()));
+    const refused = { ok: false, code: "BadMessage" };
+    expect(await verifyDelegation(request, context([NONCE], { origin: "http://localhost:5173" }))).toEqual(refused);
+    expect(await verifyDelegation(request, context([NONCE], { origin: undefined }))).toEqual(refused);
   });
 
   it("refuses a reused nonce", async () => {

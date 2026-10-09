@@ -110,9 +110,20 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     await prisma.gameConfig.create({ data: { poolAddress: POOL, ...DEFAULT_GAME_CONFIG } });
   });
 
+  // The engine reads the wall clock for a bet, so the test moves the clock instead of passing a time in.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
+  const tickAt = (service: SparringService, time: Date): Promise<void> => {
+    vi.setSystemTime(time);
+    return service.tick(time);
+  };
 
   async function fund(owner: string, tickets: bigint): Promise<void> {
     await prisma.ticketBalance.create({ data: { poolAddress: POOL, owner, tickets, epochId: EPOCH } });
@@ -159,8 +170,8 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     await openRoundByHuman(1n, at(10));
     const placeBet = vi.spyOn(rounds, "placeBet");
 
-    await service.tick(at(11));
-    await service.tick(at(12));
+    await tickAt(service, at(11));
+    await tickAt(service, at(12));
 
     expect(placeBet).toHaveBeenCalledTimes(1);
     const position = await prisma.position.findFirstOrThrow({ where: { owner: sparringWalletKey } });
@@ -183,23 +194,39 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     await rounds.openDue(at(10));
     const placeBet = vi.spyOn(rounds, "placeBet");
 
-    await service.tick(at(11));
-    await service.tick(at(12));
+    await tickAt(service, at(11));
+    await tickAt(service, at(12));
     expect(placeBet).not.toHaveBeenCalled();
 
     await openRoundByHuman(1n, at(13), false);
     placeBet.mockClear();
-    await service.tick(at(14));
-    await service.tick(at(15));
+    await tickAt(service, at(14));
+    await tickAt(service, at(15));
     expect(placeBet).toHaveBeenCalledTimes(1);
     expect(await sparringPositions()).toBe(1);
+  });
+
+  it("refuses a bet whose awaits crossed the Round's close, by the clock at placement", async () => {
+    await fund(sparringWalletKey, 100n * STAKE_PER_TILE);
+    vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
+    await openRoundByHuman(1n, at(10)); // closes at at(120)
+    const placeBet = rounds.placeBet.bind(rounds);
+    vi.spyOn(rounds, "placeBet").mockImplementation((message, signature, placedAt) => {
+      vi.setSystemTime(at(121)); // the tick began at at(11); the bet lands after the close
+      return placeBet(message, signature, placedAt);
+    });
+
+    await tickAt(sparring(), at(11));
+
+    expect(await sparringPositions()).toBe(0);
+    expect((await prisma.round.findUniqueOrThrow({ where: { poolAddress_id: { poolAddress: POOL, id: 1n } } })).status).toBe("closed");
   });
 
   it("posts nothing while no Round is open, and never opens one", async () => {
     await fund(sparringWalletKey, 100n * STAKE_PER_TILE);
     const placeBet = vi.spyOn(rounds, "placeBet");
 
-    await sparring().tick(at(10));
+    await tickAt(sparring(), at(10));
 
     expect(placeBet).not.toHaveBeenCalled();
     expect(await prisma.round.count()).toBe(0);
@@ -213,9 +240,9 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     await openRoundByHuman(1n, at(10));
     const placeBet = vi.spyOn(rounds, "placeBet");
 
-    await service.tick(at(11));
-    await service.tick(at(12));
-    await service.tick(at(13));
+    await tickAt(service, at(11));
+    await tickAt(service, at(12));
+    await tickAt(service, at(13));
 
     expect(placeBet).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls.filter(([m]) => String(m).includes("InsufficientTickets"))).toHaveLength(1);
@@ -223,7 +250,7 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
 
     await openRoundByHuman(2n, at(130)); // closes Round 1, which was past its closeAt
     placeBet.mockClear();
-    await service.tick(at(131));
+    await tickAt(service, at(131));
     expect(placeBet).toHaveBeenCalledTimes(1);
   });
 
@@ -232,14 +259,14 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     vi.spyOn(Logger.prototype, "warn").mockImplementation(() => undefined);
     const service = sparring();
     await openRoundByHuman(1n, at(10));
-    await service.tick(at(11));
+    await tickAt(service, at(11));
     // A bet that committed but whose response was lost: the row is ahead of the in-memory count.
     await prisma.session.updateMany({ where: { wallet: sparringWalletKey }, data: { nextSeq: 5 } });
 
     await openRoundByHuman(2n, at(130));
-    await service.tick(at(131)); // refused with SeqMismatch, nextSeq 5
+    await tickAt(service, at(131)); // refused with SeqMismatch, nextSeq 5
     await openRoundByHuman(3n, at(250));
-    await service.tick(at(251));
+    await tickAt(service, at(251));
 
     const seqs = (await prisma.position.findMany({ where: { owner: sparringWalletKey }, orderBy: { roundId: "asc" } }))
       .map((row) => [row.roundId, row.seq]);
@@ -249,21 +276,21 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
   it("signs a new delegation before the 24 hours end and bets with the new key", async () => {
     await fund(sparringWalletKey, 100n * STAKE_PER_TILE);
     const service = sparring();
-    await service.tick(at(0));
+    await tickAt(service, at(0));
     const [first] = await prisma.session.findMany({ where: { wallet: sparringWalletKey } });
 
-    await service.tick(at(24 * 3600 - RENEW_BEFORE_SECONDS - 60)); // an hour and a minute left
+    await tickAt(service, at(24 * 3600 - RENEW_BEFORE_SECONDS - 60)); // an hour and a minute left
     expect(await prisma.session.count({ where: { wallet: sparringWalletKey } })).toBe(1);
 
     const renewAt = 24 * 3600 - RENEW_BEFORE_SECONDS + 60;
-    await service.tick(at(renewAt));
+    await tickAt(service, at(renewAt));
     const rows = await prisma.session.findMany({ where: { wallet: sparringWalletKey }, orderBy: { issuedAt: "asc" } });
     expect(rows).toHaveLength(2);
     expect(rows[1]!.sessionPubkey).not.toBe(first!.sessionPubkey);
     expect(rows[1]!.expiresAt.getTime()).toBeGreaterThan(first!.expiresAt.getTime());
 
     await openRoundByHuman(1n, at(renewAt + 1));
-    await service.tick(at(renewAt + 2));
+    await tickAt(service, at(renewAt + 2));
     const position = await prisma.position.findFirstOrThrow({ where: { owner: sparringWalletKey } });
     expect(position.sessionId).toBe(rows[1]!.id);
   });
@@ -274,7 +301,7 @@ describe.skipIf(!DB_AVAILABLE)("sparring player on session keys", () => {
     const service = sparring(false);
 
     service.onModuleInit();
-    await service.tick(at(11));
+    await tickAt(service, at(11));
     service.onModuleDestroy();
 
     expect(await prisma.session.count({ where: { wallet: sparringWalletKey } })).toBe(0);

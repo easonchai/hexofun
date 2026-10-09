@@ -50,6 +50,17 @@ function refusal(code: BetRefusal, nextSeq?: number): Error {
 }
 
 /**
+ * The throttle key. The session comes from the unverified text, so it only
+ * joins the address when the text parses; garbage counts against the address
+ * alone and cannot spend a real session's allowance.
+ */
+export function betThrottleKey(req: Record<string, unknown>): string {
+  const message = (req.body as { message?: unknown } | undefined)?.message;
+  const session = typeof message === "string" ? parseBetMessage(message)?.session : undefined;
+  return session ? `${String(req.ip)}:${session}` : String(req.ip);
+}
+
+/**
  * The bet route (off-chain-tickets ticket 16). Throttled per session and
  * address: the session key comes from the unverified text, so keying on it
  * alone would let anyone spend a stranger's allowance with garbage.
@@ -63,11 +74,7 @@ export class BetsController {
     default: {
       limit: BETS_PER_WINDOW,
       ttl: BET_WINDOW_MS,
-      getTracker: (req) => {
-        const message = (req.body as { message?: unknown } | undefined)?.message;
-        const session = typeof message === "string" ? parseBetMessage(message)?.session : undefined;
-        return `${String(req.ip)}:${session ?? ""}`;
-      },
+      getTracker: betThrottleKey,
     },
   })
   async placeBet(@Body() body: unknown): Promise<{

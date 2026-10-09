@@ -138,7 +138,7 @@ export class SparringService implements OnModuleInit, OnModuleDestroy {
       sessionPubkey: key.publicKey.toBase58(),
       programId: this.programId,
     });
-    const result = await this.sessions.create(message, signRaw(wallet, message), now);
+    const result = await this.sessions.create(message, signRaw(wallet, message), this.origin, now);
     if (!result.ok) {
       this.sessionRetryAt = now.getTime() + SESSION_RETRY_MS;
       this.logger.error(`sparring delegation refused: ${result.code}`);
@@ -176,7 +176,8 @@ export class SparringService implements OnModuleInit, OnModuleDestroy {
     });
     // Bet once per Round: a refusal (InsufficientTickets once its Tickets run out) is not retried.
     this.doneRound = open.id;
-    const result = await this.rounds.placeBet(message, signRaw(session.key, message), now);
+    // No placement time: the engine reads its own clock after taking the lock, as the HTTP route does.
+    const result = await this.rounds.placeBet(message, signRaw(session.key, message));
     if (result.ok) {
       session.seq += 1;
       this.logger.log(`bet in round ${open.id}`);

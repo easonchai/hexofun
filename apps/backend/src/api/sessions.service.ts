@@ -71,6 +71,7 @@ export class SessionsService {
   async create(
     message: string,
     signature: Uint8Array,
+    origin: string | undefined,
     now: Date = new Date(),
   ): Promise<CreateResult> {
     const result = await verifyDelegation(
@@ -78,6 +79,7 @@ export class SessionsService {
       {
         now,
         allowedOrigins: this.allowedOrigins,
+        origin,
         chainId: this.chainId,
         programId: this.programId,
         consumeNonce: (nonce) => this.consumeNonce(nonce, now),

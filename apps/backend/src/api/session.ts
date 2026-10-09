@@ -94,6 +94,9 @@ export interface DelegationContext {
   now: Date;
   /** Origins the web is served from (`CORS_ORIGIN`). */
   allowedOrigins: readonly string[];
+  /** The request's `Origin` header; the signed URI must equal it, so a delegation
+   *  signed for the real site cannot be replayed from another one. */
+  origin: string | undefined;
   /** `CLUSTER`. */
   chainId: string;
   programId: string;
@@ -140,7 +143,7 @@ export async function verifyDelegation(
   const issuedAt = parseIso(pick("Issued At: "));
   const expiresAt = parseIso(pick("Expiration Time: "));
   if (!wallet || !session || !uri || !nonce || !issuedAt || !expiresAt) return fail("BadMessage");
-  if (!ctx.allowedOrigins.includes(uri)) return fail("BadMessage");
+  if (!ctx.allowedOrigins.includes(uri) || uri !== ctx.origin) return fail("BadMessage");
   let domain: string;
   try {
     domain = new URL(uri).host;

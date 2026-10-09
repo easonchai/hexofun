@@ -17,6 +17,7 @@ import {
   type BetFields,
   type BetRefusal,
 } from "./bet";
+import { betThrottleKey } from "./bets.controller";
 
 const SESSION = Keypair.generate();
 const OTHER = Keypair.generate();
@@ -260,5 +261,13 @@ describe("hashes and masks", () => {
 
   it("tileMask sets bit n for tile n, up to tile 35", () => {
     expect(tileMask([0, 35])).toBe(1n + (1n << 35n));
+  });
+});
+
+describe("betThrottleKey", () => {
+  it("is the address alone for text that does not parse, address plus session for text that does", () => {
+    expect(betThrottleKey({ ip: "1.2.3.4", body: { message: "garbage" } })).toBe("1.2.3.4");
+    expect(betThrottleKey({ ip: "1.2.3.4", body: {} })).toBe("1.2.3.4");
+    expect(betThrottleKey({ ip: "1.2.3.4", body: { message: betMessage(fields) } })).toBe(`1.2.3.4:${fields.session}`);
   });
 });

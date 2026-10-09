@@ -171,8 +171,9 @@ function nonNegativeBigInt(flag: string, raw: string): bigint {
 /** A basis-point field that is a u16 in `SetVenueParamsArgs`. The program's
  *  own bound per field is tighter and is what refuses a bad value. */
 function u16Bps(flag: string, raw: string): number {
+  // Digits only: Number("") is 0, Number("1e2") is 100 and Number("0x10") is 16.
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value > 65_535) {
     throw new Error(`--${flag} must be a whole number from 0 to 65535, got "${raw}"`);
   }
   return value;

@@ -120,6 +120,17 @@ describe("parseAdminCommand", () => {
     ).toThrow(/0 to 10000/);
   });
 
+  it("refuses a basis-point value that is not plain digits, naming the flag (audit-2026-10-09 09)", () => {
+    for (const bad of ["", "1e2", "0x10"]) {
+      expect(() => parseAdminCommand(["set-params", "--base-rate-bps", bad])).toThrow(/--base-rate-bps must be/);
+      expect(() => parseAdminCommand(["set-venue-params", "--yield-fee-bps", bad])).toThrow(/--yield-fee-bps must be/);
+    }
+    expect(parseAdminCommand(["set-venue-params", "--yield-fee-bps", "1000"])).toEqual({
+      kind: "set-venue-params",
+      params: { yieldFeeBps: 1000 },
+    });
+  });
+
   it("parses the two flags ticket 10 added to the program", () => {
     expect(
       parseAdminCommand(["set-params", "--min-jackpot", "42", "--payout-timeout", "86400"]),

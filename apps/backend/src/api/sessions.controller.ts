@@ -5,6 +5,7 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  Headers,
   NotFoundException,
   Param,
   Post,
@@ -63,7 +64,7 @@ export class SessionsController {
   }
 
   @Post()
-  async create(@Body() body: unknown): Promise<{
+  async create(@Body() body: unknown, @Headers("origin") origin?: string): Promise<{
     id: string;
     wallet: string;
     sessionPubkey: string;
@@ -74,7 +75,7 @@ export class SessionsController {
     if (typeof raw?.message !== "string" || raw.message.length === 0) {
       throw new BadRequestException("Send a JSON body with the delegation `message`.");
     }
-    const result = await this.sessions.create(raw.message, parseSignature(raw.signature));
+    const result = await this.sessions.create(raw.message, parseSignature(raw.signature), origin);
     if (!result.ok) {
       const payload = { code: result.code, message: DELEGATION_MESSAGES[result.code] };
       if (result.code === "BadSignature") throw new ForbiddenException(payload);

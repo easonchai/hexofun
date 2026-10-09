@@ -122,6 +122,28 @@ describe("runBootGuards", () => {
     ).rejects.toThrow(/CLUSTER=devnet/);
   });
 
+  it("throws when the fallback RPC is on another cluster, and passes with none or a matching one", async () => {
+    await expect(
+      runBootGuards(deps({ fallbackGenesisHash: async () => CLUSTER_GENESIS_HASHES["mainnet-beta"] })),
+    ).rejects.toThrow(/RPC_FALLBACK_URL's genesis hash/);
+    await expect(
+      runBootGuards(deps({ fallbackGenesisHash: async () => CLUSTER_GENESIS_HASHES.devnet })),
+    ).resolves.toBeUndefined();
+    await expect(runBootGuards(deps())).resolves.toBeUndefined();
+  });
+
+  it("fails the boot, without the url, when the fallback RPC cannot answer", async () => {
+    await expect(
+      runBootGuards(
+        deps({
+          fallbackGenesisHash: async () => {
+            throw new Error("fetch failed https://rpc.example/?api-key=secret");
+          },
+        }),
+      ),
+    ).rejects.toThrow(/^RPC_FALLBACK_URL did not answer getGenesisHash/);
+  });
+
   it("throws on a mint mismatch when the Pool already exists on chain", async () => {
     await expect(
       runBootGuards(deps({ acceptedMint: Keypair.generate().publicKey.toBase58() })),

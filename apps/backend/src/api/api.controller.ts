@@ -1,4 +1,5 @@
 import { BadRequestException, Controller, Get, Param, Query } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
 import { PublicKey } from "@solana/web3.js";
 
 import { ApiService } from "./api.service";
@@ -37,8 +38,12 @@ const parseOwner = (raw: string): string => {
   }
 };
 
+/** The web polls these every 2 s; 60 a minute per address and route covers that with room to spare. */
+export const READS_PER_MINUTE = 60;
+
 /** The read half of spec.md §3.5. Everything comes from Postgres. */
 @Controller()
+@Throttle({ default: { limit: READS_PER_MINUTE, ttl: 60_000 } })
 export class ApiController {
   constructor(private readonly api: ApiService) {}
 

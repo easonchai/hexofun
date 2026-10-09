@@ -19,12 +19,16 @@ export const CLUSTER_GENESIS_HASHES: Record<Cluster, string> = {
   "mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
 };
 
-export function assertClusterMatchesGenesis(cluster: Cluster, genesisHash: string): void {
+export function assertClusterMatchesGenesis(
+  cluster: Cluster,
+  genesisHash: string,
+  source: "RPC_URL" | "RPC_FALLBACK_URL" = "RPC_URL",
+): void {
   const expected = CLUSTER_GENESIS_HASHES[cluster];
   if (genesisHash !== expected) {
     throw new Error(
-      `CLUSTER=${cluster} does not match RPC_URL's genesis hash ${genesisHash} ` +
-        `(expected ${expected} for ${cluster}); check RPC_URL`,
+      `CLUSTER=${cluster} does not match ${source}'s genesis hash ${genesisHash} ` +
+        `(expected ${expected} for ${cluster}); check ${source}`,
     );
   }
 }
@@ -159,6 +163,9 @@ export interface BootGuardDeps {
   readonly poolAddress: PublicKey;
   readonly acceptedMint: string;
   readonly cluster: Cluster;
+  /** The fallback RPC's genesis hash, when `RPC_FALLBACK_URL` is set. Read from
+   *  the fallback itself, since `connection` only reaches it after a failure. */
+  readonly fallbackGenesisHash?: () => Promise<string>;
   /** The process env: ADMIN_ADDRESS, TREASURY, BUYBACK_RESERVE and the venue
    *  keys bootstrap prints (VENUE_KIND, KLEND_*, KVAULT_ADDRESS). */
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -219,6 +226,13 @@ export function expectedPinsFromEnv(
 export async function runBootGuards(deps: BootGuardDeps): Promise<void> {
   const genesisHash = await deps.connection.getGenesisHash();
   assertClusterMatchesGenesis(deps.cluster, genesisHash);
+  if (deps.fallbackGenesisHash) {
+    // The cause is dropped: web3.js puts the whole RPC url, api key included, in its error text.
+    const fallbackHash = await deps.fallbackGenesisHash().catch(() => {
+      throw new Error("RPC_FALLBACK_URL did not answer getGenesisHash; fix it or unset it");
+    });
+    assertClusterMatchesGenesis(deps.cluster, fallbackHash, "RPC_FALLBACK_URL");
+  }
 
   const poolInfo = await deps.connection.getAccountInfo(deps.poolAddress);
   if (poolInfo) {

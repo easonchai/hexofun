@@ -356,7 +356,7 @@ function seconds(flag: string, raw: string): number {
 /** A basis-point rate, 0..=10_000 (100%). */
 export function houseCutBps(flag: string, raw: string): number {
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0 || value > 10_000) {
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value > 10_000) {
     throw new Error(
       `--${flag} must be a whole number from 0 to 10000, got "${raw}"`,
     );

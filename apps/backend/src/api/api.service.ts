@@ -634,7 +634,7 @@ export class ApiService {
   }
 
   /** Every event that moves this owner's Principal, oldest first, for
-   *  `positionBasis`. Seq scan on `data`, same trade as `getFeed`. */
+   *  `positionBasis`. Uses the same owner/winner indexes as `getFeed`. */
   private principalEvents(owner: string): Promise<OwnerEvent[]> {
     return this.prisma.$queryRaw<OwnerEvent[]>`
       SELECT name, data
@@ -793,7 +793,7 @@ export class ApiService {
    * Newest first. `owner`, when given, keeps only events about that wallet. `JackpotPaid`
    * carries `winner` rather than `owner`, so both keys are checked; dropping
    * the `winner` half would make a "Prize Win" row vanish from that wallet's
-   * filtered history. No GIN index on `data`: a seq scan is fine at demo scale.
+   * filtered history. Two expression indexes, on `data->>'owner'` and `data->>'winner'`, serve the filter.
    */
   getFeed(limit: number, owner?: string): Promise<FeedRow[]> {
     const ownerFilter =

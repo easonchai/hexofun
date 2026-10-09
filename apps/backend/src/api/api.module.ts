@@ -27,8 +27,9 @@ import { SparringService } from "./sparring.service";
  * spec.md §3.5. The interceptor and the guard are registered here rather than
  * in main.ts so importing this module is the whole wiring. `skipIf` keeps the
  * global guard off every route but the faucet, access and one referrals
- * route: the frontend polls the read routes every 2 s and /healthz is a
- * container probe. Access is throttled too, same limit: a script trying
+ * route, plus the read routes (ApiController), which carry their own 60 a
+ * minute limit per address and route, set on the class, enough for the web's
+ * 2 s polling (audit-2026-10-09 09). /healthz is a container probe. Access is throttled too, same limit: a script trying
  * invite codes against POST /access/redeem is exactly what this guards
  * against (ticket 06). `POST /game/bets` is throttled per session and
  * address on its handler (off-chain-tickets 16). `POST /error-reports` is written to the shared
@@ -52,7 +53,8 @@ import { SparringService } from "./sparring.service";
             controller === ErrorReportController ||
             controller === FastPauseController ||
             controller === SessionsController ||
-            controller === BetsController
+            controller === BetsController ||
+            controller === ApiController
           ) {
             return false;
           }

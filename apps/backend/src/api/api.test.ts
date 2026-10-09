@@ -2077,6 +2077,18 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     });
   });
 
+  // audit-2026-10-09 09: the read routes are public and hit Postgres, so each
+  // gets 60 a minute per address.
+  describe("GET /feed throttling", () => {
+    it("answers 429 on the 61st read in a minute from one address, not another", async () => {
+      for (let i = 0; i < 60; i += 1) {
+        await http.get("/feed").set("x-forwarded-for", "203.0.113.31").expect(200);
+      }
+      await http.get("/feed").set("x-forwarded-for", "203.0.113.31").expect(429);
+      await http.get("/feed").set("x-forwarded-for", "203.0.113.32").expect(200);
+    });
+  });
+
   describe("POST /faucet", () => {
     it("rejects a body without a usable owner", async () => {
       await http.post("/faucet").send({}).expect(400);

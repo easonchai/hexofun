@@ -122,7 +122,7 @@ describe.skipIf(!DB_AVAILABLE)("session delegation", () => {
     it("stores the delegation and answers with its id", async () => {
       const d = await delegation();
       const { body } = await http
-        .post("/game/sessions")
+        .post("/game/sessions").set("Origin", ORIGIN)
         .send({ message: d.message, signature: d.signature })
         .expect(201);
       expect(body).toMatchObject({
@@ -142,8 +142,8 @@ describe.skipIf(!DB_AVAILABLE)("session delegation", () => {
     it("spends the nonce: a second post of the same message is refused", async () => {
       const d = await delegation();
       const send = { message: d.message, signature: d.signature };
-      await http.post("/game/sessions").send(send).expect(201);
-      const { body } = await http.post("/game/sessions").send(send).expect(409);
+      await http.post("/game/sessions").set("Origin", ORIGIN).send(send).expect(201);
+      const { body } = await http.post("/game/sessions").set("Origin", ORIGIN).send(send).expect(409);
       expect(body.code).toBe("NonceInvalid");
       expect(await prisma.session.count()).toBe(1);
     });
@@ -152,14 +152,14 @@ describe.skipIf(!DB_AVAILABLE)("session delegation", () => {
       const d = await delegation();
       await prisma.sessionNonce.deleteMany();
       await http
-        .post("/game/sessions")
+        .post("/game/sessions").set("Origin", ORIGIN)
         .send({ message: d.message, signature: d.signature })
         .expect(409);
 
       const stale = await sessions.issueNonce(new Date(Date.now() - 11 * 60_000));
       await prisma.sessionNonce.create({ data: { nonce: d.nonce, expiresAt: stale.expiresAt } });
       await http
-        .post("/game/sessions")
+        .post("/game/sessions").set("Origin", ORIGIN)
         .send({ message: d.message, signature: d.signature })
         .expect(409);
       expect(await prisma.session.count()).toBe(0);
@@ -169,27 +169,37 @@ describe.skipIf(!DB_AVAILABLE)("session delegation", () => {
       const wallet = Keypair.generate();
       const d = await delegation(wallet, Keypair.generate());
       const { body } = await http
-        .post("/game/sessions")
+        .post("/game/sessions").set("Origin", ORIGIN)
         .send({ message: d.message, signature: d.signature })
         .expect(403);
       expect(body.code).toBe("BadSignature");
       await http
-        .post("/game/sessions")
+        .post("/game/sessions").set("Origin", ORIGIN)
         .send({ message: d.message, signature: sign(wallet, d.message) })
         .expect(201);
     });
 
+    it("refuses a signed URI that differs from the Origin header, or a missing header, and keeps the nonce", async () => {
+      const d = await delegation();
+      const send = { message: d.message, signature: d.signature };
+      const other = await http.post("/game/sessions").set("Origin", "http://localhost:5173").send(send).expect(400);
+      expect(other.body.code).toBe("BadMessage");
+      const missing = await http.post("/game/sessions").send(send).expect(400);
+      expect(missing.body.code).toBe("BadMessage");
+      await http.post("/game/sessions").set("Origin", ORIGIN).send(send).expect(201);
+    });
+
     it("400s a body with no message or a malformed signature", async () => {
-      await http.post("/game/sessions").send({ signature: "x" }).expect(400);
-      await http.post("/game/sessions").send({ message: "hi", signature: "0OIl" }).expect(400);
-      await http.post("/game/sessions").send({ message: "hi", signature: bs58.encode(Buffer.alloc(8)) }).expect(400);
+      await http.post("/game/sessions").set("Origin", ORIGIN).send({ signature: "x" }).expect(400);
+      await http.post("/game/sessions").set("Origin", ORIGIN).send({ message: "hi", signature: "0OIl" }).expect(400);
+      await http.post("/game/sessions").set("Origin", ORIGIN).send({ message: "hi", signature: bs58.encode(Buffer.alloc(8)) }).expect(400);
     });
   });
 
   describe("checkSession", () => {
     async function created() {
       const d = await delegation();
-      await http.post("/game/sessions").send({ message: d.message, signature: d.signature }).expect(201);
+      await http.post("/game/sessions").set("Origin", ORIGIN).send({ message: d.message, signature: d.signature }).expect(201);
       return { ...d, key: d.session.publicKey.toBase58() };
     }
 
@@ -219,7 +229,7 @@ describe.skipIf(!DB_AVAILABLE)("session delegation", () => {
     async function created() {
       const d = await delegation();
       const { body } = await http
-        .post("/game/sessions")
+        .post("/game/sessions").set("Origin", ORIGIN)
         .send({ message: d.message, signature: d.signature })
         .expect(201);
       return { ...d, id: body.id as string, key: d.session.publicKey.toBase58() };
