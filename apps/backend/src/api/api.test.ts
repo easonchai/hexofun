@@ -1464,6 +1464,21 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       }
     });
 
+    // audit-2026-10-09 06: the indexer records a cut-off log; the alert names it for three days.
+    it("is 503 with EVENT_LOG_TRUNCATED naming a recent truncated signature, and 200 once it ages out", async () => {
+      await prisma.operatorState.update({ where: { poolAddress: POOL_ADDRESS }, data: { withdrawShortfall: 0n } });
+      try {
+        await prisma.truncatedLog.create({ data: { poolAddress: POOL_ADDRESS, signature: "cutSig1", slot: 50n } });
+        const { body } = await http.get("/alerts").expect(503);
+        expect(body.alerts).toEqual([{ code: "EVENT_LOG_TRUNCATED", message: expect.stringContaining("cutSig1") }]);
+        await prisma.truncatedLog.updateMany({ data: { createdAt: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000) } });
+        await http.get("/alerts").expect(200);
+      } finally {
+        await prisma.truncatedLog.deleteMany();
+        await prisma.operatorState.update({ where: { poolAddress: POOL_ADDRESS }, data: { withdrawShortfall: 250_000n } });
+      }
+    });
+
     it("is 200 with no alerts once the withdraw shortfall clears", async () => {
       await prisma.operatorState.update({
         where: { poolAddress: POOL_ADDRESS },

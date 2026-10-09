@@ -34,7 +34,8 @@ export type AlertCode =
   | "PARAMS_CHANGED"
   | "TICKET_LEDGER_MISMATCH"
   | "SNAPSHOT_MISMATCH"
-  | "SNAPSHOT_NEAR_CAP";
+  | "SNAPSHOT_NEAR_CAP"
+  | "EVENT_LOG_TRUNCATED";
 
 export interface Alert {
   code: AlertCode;
@@ -53,6 +54,10 @@ export const PARAMS_CHANGED_RECENT_S = 60 * 60;
  *  so `SNAPSHOT_NEAR_CAP` pages at this share of it. */
 export const SNAPSHOT_LEAF_CAP = 2 ** MAX_SNAPSHOT_DEPTH;
 export const SNAPSHOT_NEAR_CAP_SHARE = 0.9;
+/** audit-2026-10-09 06: how long `EVENT_LOG_TRUNCATED` stays up after the
+ *  indexer records a cut-off log. There is no acknowledge path for alerts, so
+ *  the window is the clear; three days outlasts a weekend. */
+export const TRUNCATED_LOG_RECENT_S = 3 * 24 * 60 * 60;
 /** Ticket 09: how long the operator's last error may persist, while ticks
  *  keep running, before OPERATOR_FAILING pages someone. Not env-tunable, for
  *  the same reason as the two constants above. */
@@ -146,6 +151,9 @@ export interface AlertInputs {
   ticketLedgerMismatches: number;
   /** Wallets holding Tickets now, the next snapshot's leaf count. */
   ticketHolders: number;
+  /** Signatures of transactions whose log Solana cut off, recorded inside the
+   *  last `TRUNCATED_LOG_RECENT_S`; newest first. */
+  truncatedLogSignatures: string[];
 }
 
 /** `/status`'s operator block, which both the alerts and the ops todo list read. */
@@ -359,6 +367,12 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: `${inputs.ticketHolders} wallets hold Tickets; the snapshot fits ${SNAPSHOT_LEAF_CAP}, and past that the indexer stops at the next EpochBegan.`,
     });
   }
+  if (inputs.truncatedLogSignatures.length > 0) {
+    alerts.push({
+      code: "EVENT_LOG_TRUNCATED",
+      message: `Solana cut off the log of ${inputs.truncatedLogSignatures.join(", ")}, so its events were not read. Reconcile the wallets it touched.`,
+    });
+  }
   return alerts;
 }
 
@@ -400,13 +414,18 @@ export class AlertsController {
 
   @Get("alerts")
   async getAlerts(): Promise<{ alerts: Alert[] }> {
-    const [status, recent, venueProposal, paramsChanged, ledgerCheck, ticketHolders] = await Promise.all([
+    const [status, recent, venueProposal, paramsChanged, ledgerCheck, ticketHolders, truncatedLogs] = await Promise.all([
       this.api.getStatus(),
       this.recentRollover(),
       this.openVenueProposal(),
       this.recentParamsSet(),
       this.prisma.ledgerCheck.findUnique({ where: { poolAddress: this.api.poolAddress } }),
       this.prisma.ticketBalance.count({ where: { poolAddress: this.api.poolAddress, tickets: { gt: 0n } } }),
+      this.prisma.truncatedLog.findMany({
+        where: { poolAddress: this.api.poolAddress, createdAt: { gte: new Date(Date.now() - TRUNCATED_LOG_RECENT_S * 1000) } },
+        orderBy: { createdAt: "desc" },
+        select: { signature: true },
+      }),
     ]);
     const nowSeconds = Math.floor(Date.now() / 1000);
     const secondsToEpochClose =
@@ -448,6 +467,7 @@ export class AlertsController {
         paramsChanged,
         ticketLedgerMismatches: ledgerCheck?.mismatches ?? 0,
         ticketHolders,
+        truncatedLogSignatures: truncatedLogs.map((row) => row.signature),
       },
       {
         tickStaleSeconds: this.tickStaleSeconds,

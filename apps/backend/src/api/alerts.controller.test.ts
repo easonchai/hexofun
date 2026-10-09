@@ -47,6 +47,7 @@ const HEALTHY: AlertInputs = {
   paramsChanged: null,
   ticketLedgerMismatches: 0,
   ticketHolders: 12,
+  truncatedLogSignatures: [],
 };
 
 const PROPOSAL = {
@@ -294,6 +295,12 @@ describe("evaluateAlerts", () => {
     expect(alert?.message).toContain(`${SNAPSHOT_LEAF_CAP}`);
   });
 
+  it("EVENT_LOG_TRUNCATED names every recorded signature", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, truncatedLogSignatures: ["sigNew", "sigOld"] }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "EVENT_LOG_TRUNCATED" });
+    expect(alert?.message).toContain("sigNew, sigOld");
+  });
+
   it("SNAPSHOT_MISMATCH fires while the operator holds a refused winner proof", () => {
     const [alert] = evaluateAlerts({ ...HEALTHY, snapshotMismatch: true }, THRESHOLDS);
     expect(alert).toMatchObject({ code: "SNAPSHOT_MISMATCH" });
@@ -330,6 +337,7 @@ describe("evaluateAlerts", () => {
         paramsChanged: { pool: "P", epochSeconds: "86400" },
         ticketLedgerMismatches: 1,
         ticketHolders: SNAPSHOT_LEAF_CAP,
+        truncatedLogSignatures: ["sig1"],
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -357,6 +365,7 @@ describe("evaluateAlerts", () => {
       "PARAMS_CHANGED",
       "TICKET_LEDGER_MISMATCH",
       "SNAPSHOT_NEAR_CAP",
+      "EVENT_LOG_TRUNCATED",
     ]);
   });
 });

@@ -294,6 +294,18 @@ model LedgerCheck {
   mismatches  Int
 }
 
+// A pool transaction whose log Solana cut off (audit-2026-10-09 06). Its events
+// were not read, so the Ticket side is the operator's to reconcile; `/alerts`
+// raises EVENT_LOG_TRUNCATED for a while after `createdAt`.
+model TruncatedLog {
+  poolAddress String
+  signature   String
+  slot        BigInt
+  createdAt   DateTime @default(now())
+
+  @@id([poolAddress, signature])
+}
+
 model FaucetClaim {
   owner       String @id
   lastClaimAt BigInt

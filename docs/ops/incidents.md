@@ -312,6 +312,21 @@ so a wrong balance can put the wrong count in a leaf.
 3. An epoch whose snapshot is already committed on chain keeps that snapshot. Fix the wallet before the next
    `EpochBegan`, which snapshots and resets every balance.
 
+<a id="event-log-truncated"></a>
+## Transaction log truncated
+
+Starts with `EVENT_LOG_TRUNCATED`. Solana cuts a transaction's log at 10 KB, and the indexer found one
+for this pool (the alert names the signature). A big batch of withdrawals plus the venue's own CPI logs can
+pass it. The indexer decoded none of that transaction's events and booked nothing to the Ticket ledger. It
+did re-read every Pool, Epoch and Player account the transaction touched, so those mirrors are right. The
+alert clears itself three days after the indexer recorded it.
+
+1. Read the transaction on an explorer and list the wallets it touched: `SELECT * FROM "TruncatedLog"`
+   gives the signatures and slots.
+2. The Ticket side is yours. Compare each touched wallet's `TicketBalance.principal` with its `Player`
+   Principal and book the difference as a new `TicketLedger` row. Do not edit rows.
+3. Do it before the next `EpochBegan`, which snapshots and resets every balance from Principal.
+
 <a id="snapshot-near-cap"></a>
 ## Snapshot near its leaf cap
 

@@ -11,7 +11,7 @@ import { BN, BorshCoder, convertIdlToCamelCase } from "@anchor-lang/core";
 import type { ConfigService } from "@nestjs/config";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { bindReferral } from "../api/referral-code";
 import { INVITE_CODE_ALPHABET, INVITE_CODE_LENGTH } from "../api/invite-code";
@@ -99,6 +99,7 @@ async function wipe(): Promise<void> {
     prisma.ticketBalance.deleteMany(),
     prisma.epochSnapshot.deleteMany(),
     prisma.ledgerCheck.deleteMany(),
+    prisma.truncatedLog.deleteMany(),
     prisma.gameConfig.deleteMany(),
     prisma.cursor.deleteMany(),
     prisma.venueProposal.deleteMany(),
@@ -1765,6 +1766,73 @@ describe("referral qualification", () => {
     const row = await prisma.referral.findUniqueOrThrow({ where: { referee } });
     expect(row.principal).toBe(60_000_000n);
     expect(row.aboveSince).toBe(1_600_000_000n);
+  });
+});
+
+// audit-2026-10-09 06: Solana cuts a transaction's log at 10 KB. Its events are
+// never decoded; the accounts it names are re-read and the signature recorded.
+describe("truncated transaction logs", () => {
+  const TRUNCATED = "Log truncated";
+  const truncatedLogs = (signature: string) => [...batch(signature, 50n, [deposited]).logs, TRUNCATED];
+  const ownerKeys = () => [chain.poolAddress(), chain.playerAddress(OWNER), STRANGER];
+  const fireLive = async (signature: string) => {
+    indexer["subscribeToLogs"]();
+    connection.fireLogs(chain.poolAddress(), "finalized", { err: null, signature, logs: truncatedLogs(signature) }, 50);
+    await indexer["queue"];
+  };
+
+  beforeEach(async () => {
+    await seedActivePool();
+    connection.accountOwner = PROGRAM_ID;
+    indexer["lastSyncedSlot"] = 100n;
+    await put("pool", chain.poolAddress(), poolAccount());
+    await put("player", chain.playerAddress(OWNER), playerAccount(OWNER, { principal: bn(7_000_000) }));
+  });
+  afterEach(() => {
+    connection.accountOwner = PublicKey.default;
+    connection.signaturesForAddress = [];
+  });
+
+  it("the finalized catch-up refreshes the accounts, records the signature and still reads its neighbours", async () => {
+    connection.signaturesForAddress = [
+      { signature: "ok-1", slot: 51, err: null, blockTime: 1_700_000_051 },
+      { signature: "cut-1", slot: 50, err: null, blockTime: 1_700_000_050 },
+    ];
+    connection.setTransaction("cut-1", truncatedLogs("cut-1"), ownerKeys());
+    connection.setTransaction("ok-1", batch("ok-1", 51n, [epochRolledOver]).logs);
+
+    await indexer["catchUpEvents"]();
+
+    // The Player in the key list is re-read from chain.
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) })).toMatchObject({ principal: 7_000_000n });
+    expect(await prisma.truncatedLog.findMany()).toMatchObject([{ poolAddress: active(), signature: "cut-1", slot: 50n }]);
+    // The Deposited before the cut is not read: no ledger row. The intact neighbour is stored.
+    expect(await prisma.ticketBalance.count()).toBe(0);
+    expect(await prisma.ticketLedger.count()).toBe(0);
+    expect(await prisma.event.findMany()).toMatchObject([{ signature: "ok-1", name: "EpochRolledOver" }]);
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ lastSignature: "ok-1" });
+    // A replay records nothing new.
+    await indexer["catchUpEvents"]();
+    expect(await prisma.truncatedLog.count()).toBe(1);
+  });
+
+  it("the live log path does the same without moving the cursor", async () => {
+    connection.setTransaction("cut-2", truncatedLogs("cut-2"), ownerKeys());
+    await fireLive("cut-2");
+
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) })).toMatchObject({ principal: 7_000_000n });
+    expect(await prisma.truncatedLog.findMany()).toMatchObject([{ signature: "cut-2", slot: 50n }]);
+    expect(await prisma.event.count()).toBe(0);
+    expect(await prisma.ticketLedger.count()).toBe(0);
+    expect(await prisma.cursor.findUnique({ where: { poolAddress: active() } })).toBeNull();
+  });
+
+  it("skips a program account that is not the PDA of its own owner", async () => {
+    const stray = Keypair.generate().publicKey;
+    await put("player", stray, playerAccount(OWNER)); // right layout, wrong address
+    connection.setTransaction("cut-3", truncatedLogs("cut-3"), [...ownerKeys(), stray]);
+    await fireLive("cut-3");
+    expect(await prisma.player.count()).toBe(1);
   });
 });
 

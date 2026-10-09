@@ -133,6 +133,13 @@ const YIELD_INDEX_MIN_GAP_S = 60n;
 const SWEEP_INDEX_LAG = 60n;
 const lagged = (slot: bigint): bigint => (slot > SWEEP_INDEX_LAG ? slot - SWEEP_INDEX_LAG : 0n);
 
+/** The line Solana writes into a transaction's log when it passes the 10 KB cap. */
+const LOG_TRUNCATED = "Log truncated";
+/** `getMultipleAccounts` takes at most 100 keys. */
+const ACCOUNTS_PER_READ = 100;
+/** Apply order for a refresh: the Pool first, since the rest reference it (ADR 0016). */
+const KIND_ORDER: WantedAccount["kind"][] = ["pool", "venueProposal", "epoch", "player"];
+
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
 // Anchor's `Program` runs the IDL through `convertIdlToCamelCase` before it
@@ -1069,8 +1076,86 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       this.noteFailure(`no finalized logs yet for ${info.signature}`);
       return false;
     }
+    if (logs.includes(LOG_TRUNCATED)) {
+      await this.ingestTruncated(info.signature, batch.slot);
+      await this.persist(batch, []); // moves the cursor past it, with no events to store
+      return true;
+    }
     await this.persist({ ...batch, logs }, decodeEventLogs(this.parser, logs));
     return true;
+  }
+
+  /**
+   * A transaction whose log Solana cut off has events nobody can read, so none
+   * are decoded (audit-2026-10-09 06). The accounts it touched are re-read from
+   * chain instead, so the Pool, Epoch and Player mirrors are right, and the
+   * signature is recorded for `/alerts`. The Ticket ledger is not touched: its
+   * side is for an operator to reconcile against the Principal comparison.
+   * Safe to run twice, as the live and catch-up paths both do.
+   */
+  private async ingestTruncated(signature: string, slot: bigint): Promise<void> {
+    const tx = await this.chain.connection.getTransaction(signature, {
+      commitment: "finalized",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (!tx) throw new Error(`no finalized transaction yet for truncated ${signature}`);
+    const loaded = tx.meta?.loadedAddresses;
+    const keys = tx.transaction.message
+      .getAccountKeys(loaded ? { accountKeysFromLookups: loaded } : undefined)
+      .keySegments()
+      .flat();
+    const owned: { address: string; kind: WantedAccount["kind"]; data: Buffer }[] = [];
+    for (let start = 0; start < keys.length; start += ACCOUNTS_PER_READ) {
+      const chunk = keys.slice(start, start + ACCOUNTS_PER_READ);
+      const infos = await this.chain.connection.getMultipleAccountsInfo(chunk);
+      for (const [i, info] of infos.entries()) {
+        // SAFETY: `infos` has one entry per key of `chunk`.
+        const pubkey = chunk[i]!;
+        if (info === null || !info.owner.equals(this.chain.programId)) continue;
+        const kind = this.mirroredKind(pubkey, info.data);
+        if (kind !== undefined) owned.push({ address: pubkey.toBase58(), kind, data: info.data });
+      }
+    }
+    owned.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+    for (const { address, kind, data } of owned) await this.applyAccount(address, { kind }, data, slot);
+    await this.prisma.truncatedLog.upsert({
+      where: { poolAddress_signature: { poolAddress: this.activePool, signature } },
+      create: { poolAddress: this.activePool, signature, slot },
+      update: {},
+    });
+    this.logger.warn(`log truncated in ${signature}: refreshed ${owned.length} accounts, its events were not read`);
+  }
+
+  /** Which mirrored account `data` is, or undefined for one that is not this pool's own
+   *  (another pool's Epoch or Player, a layout this IDL cannot decode). */
+  private mirroredKind(pubkey: PublicKey, data: Buffer): WantedAccount["kind"] | undefined {
+    const coder = this.chain.program.coder.accounts;
+    for (const kind of Object.values(ACCOUNT)) {
+      // SAFETY: the interface types `memcmp` as `any`; BorshAccountsCoder
+      // returns `{ offset: 0, bytes: base58(discriminator) }`.
+      const { bytes } = coder.memcmp(kind) as { bytes: string };
+      const discriminator = Buffer.from(bs58.decode(bytes));
+      if (!data.subarray(0, discriminator.length).equals(discriminator)) continue;
+      try {
+        switch (kind) {
+          case "pool":
+            return pubkey.equals(this.chain.poolAddress()) ? kind : undefined;
+          case "venueProposal":
+            return pubkey.equals(this.chain.venueProposalAddress()) ? kind : undefined;
+          case "epoch": {
+            const epoch = coder.decode<DecodedEpoch>(kind, data);
+            return pubkey.equals(this.chain.epochAddress(BigInt(epoch.epochId.toString()))) ? kind : undefined;
+          }
+          case "player": {
+            const player = coder.decode<DecodedPlayer>(kind, data);
+            return pubkey.equals(this.chain.playerAddress(player.owner)) ? kind : undefined;
+          }
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -1099,6 +1184,10 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           // loses nothing: this path never moves the cursor, so catch-up
           // replays it once the sweep has written the Pool.
           if (this.lastSyncedSlot === undefined) return;
+          if (logs.logs.includes(LOG_TRUNCATED)) {
+            await this.ingestTruncated(logs.signature, BigInt(context.slot));
+            return;
+          }
           const events = decodeEventLogs(this.parser, logs.logs);
           if (events.length === 0) return;
           await this.persist(
