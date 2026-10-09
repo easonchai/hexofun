@@ -1784,6 +1784,15 @@ describe("instruction builders", () => {
       instructions.randomnessFor(drawing.vrfSeed).toBase58(),
     );
   });
+
+  it("pays a House leaf to the pinned House, whose address keeps the first Operator's seed (audit-2026-10-09 02)", async () => {
+    // After set_operator the leaf owner is the new Operator, whose own PDA is not the House.
+    const rotated = pool({ operator: Keypair.generate().publicKey });
+    const leaf = { index: 0, owner: rotated.operator.toBase58(), tickets: 1n, siblings: [] };
+    const keys = keysOf(await instructions.payout(rotated, 1n, leaf));
+    expect(keys).toContain(rotated.house.toBase58());
+    expect(keys).not.toContain(playerAddress(PROGRAM_ID, POOL, rotated.operator).toBase58());
+  });
 });
 
 describe("randomness", () => {

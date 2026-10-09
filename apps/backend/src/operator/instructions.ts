@@ -324,7 +324,11 @@ export class OperatorInstructions {
           pool: pool.address,
           acceptedMint: pool.acceptedMint,
           epoch: this.epoch(pool, epochId),
-          winner: this.player(pool, new PublicKey(proof.owner)),
+          // The House's leaf owner is the current Operator (`set_operator` rewrites
+          // it), but its address keeps the first Operator's seed.
+          winner: new PublicKey(proof.owner).equals(pool.operator)
+            ? pool.house
+            : this.player(pool, new PublicKey(proof.owner)),
           jackpotVault: jackpotVaultAddress(this.programId, pool.address),
           principalVault: principalVaultAddress(this.programId, pool.address),
           treasury: pool.treasury,

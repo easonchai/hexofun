@@ -678,7 +678,6 @@ export const EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   // cranked their own payout first (the UI offers that), or a second
   // request re-stamped `pending_epoch` to the epoch now running.
   "NothingPending",
-  "NotPreviousEpoch",
   // The admin's shutdown() landed between this tick's read of `pool.shutdown`
   // and one of the steps it gates confirming (ops-and-envs ticket 02): the
   // gates above make this rare, not impossible, and the next tick reads the
