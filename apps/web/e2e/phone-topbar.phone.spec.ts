@@ -1,10 +1,12 @@
 /**
  * Ticket 03: the phone topbar fits the screen. Runs only on the "phone"
  * Playwright project (see playwright.config.ts's testMatch), so it never
- * runs against desktop chromium. No wallet, no backend needed: same
+ * runs against desktop chromium. Burner wallet, mocked backend: same
  * rationale as mobile-layout.phone.spec.ts, this only asserts on layout.
  */
-import { expect, test, type Page } from "playwright/test";
+import { expect, type Page } from "playwright/test";
+
+import { test } from "./admitted";
 
 const TAB_TESTIDS = ["tab-dashboard", "tab-mine"];
 

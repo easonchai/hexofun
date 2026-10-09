@@ -33,6 +33,8 @@
  * test mode is decided, add a connectPrivyTestWallet() alongside
  * connectBurnerWallet() and branch on whether VITE_PRIVY_APP_ID is set.
  *
+ * Set E2E_LIVE_STACK=1 once that stack is up; without it the test skips.
+ *
  * Not verified end to end: standing up the local validator, program,
  * backend and frontend together was out of scope for this pass (see ticket
  * 13's `## Comments`). Only `playwright test --list` proved this file
@@ -74,6 +76,8 @@ function parseAfterLabel(text: string, label: string): number {
   }
   return Number(match[1]);
 }
+
+test.skip(!process.env.E2E_LIVE_STACK, "needs a live localnet stack (set E2E_LIVE_STACK=1)");
 
 test("faucet, deposit, withdraw", async ({
   page,

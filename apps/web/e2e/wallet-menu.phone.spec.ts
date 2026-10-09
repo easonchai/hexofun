@@ -1,19 +1,16 @@
 /**
  * Wallet menu on phones: the topbar hides the Tickets and balance chips at
  * 390px, so the dropdown under the address pill is the only place a phone
- * user sees them. Needs a connected wallet, so unlike the other phone specs
- * this drives the dev burner wallet and needs the same local stack as
- * demo.spec.ts (see that file's header). Runs only on the "phone" project.
+ * user sees them. Needs a connected wallet: `test` from ./admitted loads the
+ * page with the dev burner already connected and the backend mocked, so there
+ * is no stack to run. Runs only on the "phone" project.
  */
-import { expect, test, type Page } from "playwright/test";
+import { expect, type Page } from "playwright/test";
+
+import { test } from "./admitted";
 
 async function connectBurnerWallet(page: Page): Promise<void> {
   await page.goto("/");
-  await page.getByTestId("connect-button").click();
-  const burnerOption = page.getByRole("button", { name: /burner/i });
-  if (await burnerOption.isVisible({ timeout: 5_000 }).catch(() => false)) {
-    await burnerOption.click();
-  }
   await expect(page.getByTestId("connect-button")).toHaveAttribute(
     "title",
     /^Copy /,
@@ -57,8 +54,7 @@ test.describe("phone wallet menu", () => {
     await page.getByTestId("connect-button").click();
     await page.getByTestId("disconnect-button").click();
     await expect(page.getByTestId("wallet-menu")).toHaveCount(0);
-    await expect(page.getByTestId("connect-button")).toHaveText("CONNECT", {
-      timeout: 10_000,
-    });
+    // Disconnected, the invite gate covers the app again.
+    await expect(page.getByTestId("access-gate")).toBeVisible({ timeout: 10_000 });
   });
 });

@@ -3,9 +3,9 @@
  * Tickets from the API and the PLAY tab shows the Coming soon card. No chain,
  * no backend: every API call is answered by `page.route`.
  *
- * Needs a dev server started with the burner wallet and the gate, because
- * Vite inlines these at build time (Playwright's webServer reuses a server
- * already on :5173):
+ * Needs a dev server built with the burner wallet and the gate, because Vite
+ * inlines these at build time. The "gated" project in playwright.config.ts
+ * starts one on :5197. To run it by hand instead:
  *
  *   VITE_BURNER_WALLET=1 VITE_PUBLIC_RPC_URL=http://127.0.0.1:8899 \
  *   VITE_API_URL=http://127.0.0.1:8080 VITE_GATE_GAME=off \

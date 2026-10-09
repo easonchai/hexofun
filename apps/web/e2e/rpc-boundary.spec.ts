@@ -10,6 +10,10 @@
  * failure mode this ticket removes — shows up here as a request to one of
  * the hosts below, whether or not it is the one the app is configured for.
  *
+ * The app mounts only past the invite gate, so "no wallet" is the gate on
+ * screen: the page loads, the gate shows, and no RPC host is contacted. The
+ * wallet's own balance read stays out of scope (see below).
+ *
  * Checked against known RPC provider domains rather than one specific
  * configured host, so this holds regardless of which endpoint `.env`/
  * `.env.local` points at, and against both a local dev server and a
@@ -57,7 +61,9 @@ test("contacts no Solana RPC host while no wallet is connected", async ({ page }
   });
 
   await page.goto("/#play");
-  await expect(page.getByTestId("tile-0")).toBeVisible();
+  // With no wallet the invite gate (AccessGate.tsx) is all that mounts; the
+  // board only appears past it, so the gate is the "nothing connected" state.
+  await expect(page.getByTestId("access-gate")).toBeVisible();
   // No event to wait for here — this is an absence check. One state-poll
   // cycle plus margin is enough to catch a chain read hiding in an effect
   // that fires after mount rather than on the first render.
