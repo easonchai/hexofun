@@ -7,7 +7,7 @@
   Then http://localhost:5173, Phantom set to devnet. Faucet gives you 1000 hexUSDC.
 
   Check it came up: curl localhost:8080/status should show rpcOk: true and a lastAction a few seconds old. Watch it work with docker
-  compose -f docker-compose.dev.yml logs -f backend, a round every round_seconds plus a few seconds to settle.
+  compose -f docker-compose.dev.yml logs -f backend.
 
   Shut down with down in place of up -d.
 
@@ -53,21 +53,8 @@
   ends_at, because the next grid point is not there yet, and either way the draw keeps the same clock time. See "Epoch anchor: when
   the draw lands" below.
 
-  close_buffer: the draw window
-
-  close_buffer is the number of seconds before a Round's ends_at that Positions close and request_round_randomness starts accepting
-  requests. The operator's first tick step requests randomness the moment that window opens, so ORAO's round trip runs inside the
-  countdown instead of after it.
-
-  Measured on devnet over 40 Rounds: request to settle takes 4s to 7s on 39 of them and 71s once (ORAO's tail). The request itself
-  lands about 2s after the window opens (blockhash fetch, send, confirm). close_buffer is set to 12s on 30s rounds: 2s to land
-  the request, 4s to 7s for the draw, and the rest is margin. The web countdown ends at the close and the stage reads DRAWING
-  until the settle lands, at which point the reveal fires, so a slow draw shows as a longer DRAWING rather than a timer stuck at
-  zero. The operator sleeps until its next deadline, so the next Round opens a second after ends_at; a 60s safety tick and the
-  randomness subscription are what else wakes it. vrf_timeout (180s, the program's floor) bounds the ORAO tail.
-
-  Demo cadence (2026-09-10): epoch_seconds 86400, round_seconds 30, close_buffer 12, on the anchored pool bootstrapped with
-  --epoch-anchor 2026-09-13T16:00:00Z. One draw a day, landing at 00:00 MYT. Rounds switch on the next Round, epochs on the next
+  Demo cadence (2026-09-10): epoch_seconds 86400 on the anchored pool bootstrapped with
+  --epoch-anchor 2026-09-13T16:00:00Z. One draw a day, landing at 00:00 MYT. A change applies from the next
   epoch, and epoch_seconds is now safe to change mid-epoch because touch reads the epoch's stored ends_at instead of adding the
   parameter to the start. Before this the pool ran hourly at epoch_seconds 3600 off an arbitrary boundary.
 
@@ -265,60 +252,40 @@
        step 7's `admin start-deploy`, which only the Admin can send. If the old venue recovers and the team stays,
        `admin start-deploy` alone resumes deploying.
 
-  Daily referral bonus (docs/plan/hexo-referrals ticket 08)
+  Daily referral bonus (off-chain-tickets ticket 22)
 
-  Fully automatic, no manual step: the operator's own crank grants it, right after begin_epoch opens each new epoch, off
-  the qualified referrals in Postgres. GET /status's bonusGrantedToday and bonusCap (ticket 05) show the pool-wide total
-  against bonus_cap_bps; a grant stuck against the cap logs a warning on the operator and retries next tick rather than
-  failing it, so a quiet crank with bonusGrantedToday sitting under bonusCap most of the day is expected, not a bug.
+  Fully automatic, no manual step. Once per ledger epoch the operator books one grant_referral row in the Ticket ledger
+  for each Referrer that has no grant for that epoch yet, off the qualified referrals in Postgres, in one database
+  transaction under the ledger lock. The pool-wide cap is the Game config's bonusCapBps (below).
+  GET /epochs/<id>/referral-grants serves the grant rows with the inputs stored beside them, so every amount can be recomputed.
   REFERRAL_QUALIFY_SECONDS (default 604800, 7 days) is how long a referral's Principal has to stay above 50 USDC before it
   counts; shorten it on devnet in .env to see a referral qualify sooner without waiting a week.
 
-    set -a; . ./.env; set +a; pnpm --filter @hexvault/backend admin set-params --epoch-seconds 86400 --round-seconds 30 --close-buffer 12
+  Game config: round length, house cut, Ticket price
 
-  Round length: 90s (2026-09-14)
+  Rounds run in the backend, not the program (ADR 0025), so these are no longer set-params flags. They live in an
+  append-only GameConfig row per pool, the newest in force: roundSeconds (default 60, at least 60), houseCutBps (600, 6%),
+  ticketsPerUsdc (10), bonusCapBps (500), referralTiers and maxTilesPerBet (36). The backend seeds the defaults on first
+  boot. To change one, open the ops console's Game config panel and sign with a wallet listed in OPS_WALLETS; the panel
+  posts to /ops/game-config, which answers 404 while OPS_WALLETS is empty. GET /game/config shows the row in force. A Round
+  keeps the row it opened with, so a change applies from the next Round that opens.
 
-  Every Round costs about five transactions, so round_seconds sets the biggest line on the RPC bill. At 60s the idle backend
-  projects to just over a 1M-credit free-tier month, and 30s is worse; at 90s it projects to about 560k. bootstrap now defaults to 90.
-  A live Pool keeps its old value until set-params moves it, and the change takes effect on the next Round. 120s roughly halves
-  the round-linked cost again if the bill comes in over.
+  Rounds send no transactions and reveal from drand, so round length no longer moves the RPC bill or the SOL bill
+  (docs/ops/funds.md, "SOL costs"). close_buffer went with them.
 
-    Pool 7 (dev, .env):     epoch_seconds 86400, round_seconds 30, close_buffer 12. Move to 90: pending.
-    Pool 8 (VPS, .env.vps): epoch_seconds 86400, round_seconds 30, close_buffer 12. Move to 90: pending.
+  set-params
 
-    set -a; . ./.env; set +a
-    DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --round-seconds 90
-
-  Same again from a fresh shell with .env.vps for Pool 8. Replace "pending" with the signature and slot once each lands.
-
-  The buffer only works once the program that honours it is deployed. Until 2026-09-06 devnet ran the program from before ff22d53,
-  whose request_round_randomness required `now >= ends_at`, so every draw request was rejected with RoundNotEnded until the round
-  ended and settled 4s to 7s after zero no matter what close_buffer said. The tell in the operator log is a run of
-  `skipped: RoundNotEnded` right before each `sent request_round_randomness`; the tell on chain is the AnchorError line number,
-  rounds.rs:162, which the current source does not have. The pool also ran at close_buffer 5 while this note said 8; nobody had run
-  set-params.
-
-  Tune it with set-params if ORAO's latency changes, no redeploy needed. The program still enforces 0 <= close_buffer < round_seconds.
-  set-params also carries --min-jackpot (whole USDC; an epoch closing under it rolls over instead of paying dust) and --payout-timeout
-  (seconds a drawn epoch waits for its payout before it may roll over unpaid, above 0), alongside --epoch-seconds, --epoch-anchor, --round-seconds,
-  --close-buffer, --vrf-timeout, --min-deposit and --house-cut-bps. Ticket 05 added --base-rate-bps and --bonus-cap-bps (basis points,
-  0 to 10000) and --tickets-per-usdc (a positive whole number).
+  set-params changes the Pool's on-chain parameters, no redeploy needed: --epoch-seconds, --epoch-anchor, --vrf-timeout,
+  --min-deposit, --min-jackpot (whole USDC; an epoch closing under it rolls over instead of paying dust), --payout-timeout
+  (seconds a drawn epoch waits for its payout before it may roll over unpaid, above 0) and --base-rate-bps (0 to 10000).
+  Venue settings are set-venue-params.
   Run it with the root .env exported first. The CLI reads process.env directly and loads no file of its own, so nothing reaches it
   except what the shell exports. DATABASE_URL is the catch: admin validates the backend's full env but neither .env nor .env.vps sets
   it (compose builds it from the POSTGRES_* keys), so a dummy value has to come along or the command dies on a missing key it never
   uses. (The docker `run --rm backend ... tsx` form in docs/plan does not work: the runtime image has no tsx and no decorator config.)
 
     set -a; . ./.env; set +a
-    DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --close-buffer 15
-
-  House cut: the set-params flag
-
-  --house-cut-bps sets the pool's House cut rate in basis points, a whole number from 0 to
-  10000 inclusive (0% to 100%). The default at pool creation is 600, 6%. A change applies to
-  the next round settled, never to one already settled.
-
-    set -a; . ./.env; set +a
-    DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --house-cut-bps 600
+    DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --payout-timeout 86400
 
   Epoch anchor: when the draw lands
 
@@ -374,15 +341,12 @@
          sed -i '' 's/^POOL_ID=.*/POOL_ID=7/' .env
          set -a; . ./.env; set +a
          pnpm --filter @hexvault/backend bootstrap \
-           --epoch-anchor 2026-09-13T16:00:00Z --epoch-seconds 86400 \
-           --round-seconds 30
-         DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --close-buffer 12
+           --epoch-anchor 2026-09-13T16:00:00Z --epoch-seconds 86400
 
-       bootstrap takes no --close-buffer and no --vrf-timeout: create_pool always gets the
-       defaults from src/bootstrap/params.ts (close_buffer 5, vrf_timeout 180, min_deposit 1
-       hexUSDC). Only set-params changes them, which is why 12 is a second command. --house-cut-bps 600
-
-       600 bps is the default, so pass the flag only for a different rate. stdout is a pasteable
+       bootstrap takes no --vrf-timeout or --min-deposit: create_pool always gets the defaults
+       from src/bootstrap/params.ts (vrf_timeout 180, min_deposit 1 hexUSDC), and only set-params
+       changes them. Round length and the House cut are the Game config's, not the pool's (see
+       "Game config" above); the backend seeds the defaults on first boot. stdout is a pasteable
        KEY=value block and progress goes to stderr, so `bootstrap > pool.env` gives a clean file.
        Paste ACCEPTED_MINT back into .env if the block names a mint you did not already have.
 
@@ -426,9 +390,7 @@
          sed -i '' 's/^POOL_ID=.*/POOL_ID=8/' .env.vps
          set -a; . ./.env.vps; set +a
          pnpm --filter @hexvault/backend bootstrap \
-           --epoch-anchor 2026-09-13T16:00:00Z --epoch-seconds 86400 \
-           --round-seconds 30
-         DATABASE_URL=postgresql://x pnpm --filter @hexvault/backend admin set-params --close-buffer 12
+           --epoch-anchor 2026-09-13T16:00:00Z --epoch-seconds 86400
          pnpm --filter @hexvault/backend sparring-setup
 
        Open a new shell first. `set -a` on a second env file does not unset what the first one
