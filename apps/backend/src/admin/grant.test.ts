@@ -55,6 +55,15 @@ describe("grantTickets", () => {
       /HTTP 403.*WalletNotListed/,
     );
   });
+
+  it("with no answer, says the grant may have landed and to check the ledger before retrying", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    await expect(grantTickets(command, TEAM, { pool: POOL, backendUrl: "http://b/", fetchFn })).rejects.toThrow(
+      `may have landed. Check http://b/players/${OWNER.toBase58()}/ledger for reason "launch bonus"`,
+    );
+  });
 });
 
 describe("loadKeypairFile", () => {

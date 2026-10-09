@@ -8,9 +8,11 @@ import { Keypair } from "@solana/web3.js";
 import bs58 from "bs58";
 
 import { grantMessage } from "../api/grants";
+import { LEDGER_TRANSACTION } from "../ledger/ledger-store";
 import type { AdminCommand } from "./args";
 
-const REQUEST_TIMEOUT_MS = 15_000;
+/** Outlasts the backend's wait on the ledger lock, so a grant queued behind it is not reported failed. */
+const REQUEST_TIMEOUT_MS = LEDGER_TRANSACTION.timeout + 10_000;
 
 /** A `solana-keygen` file: a JSON array of the 64 secret key bytes. */
 export function loadKeypairFile(path: string): Keypair {
@@ -49,19 +51,30 @@ export async function grantTickets(
   const message = grantMessage(deps.pool, wallet, command.amount, command.reason, time);
   const signature = bs58.encode(signEd25519(null, Buffer.from(message, "utf8"), key));
 
-  const response = await (deps.fetchFn ?? fetch)(`${deps.backendUrl.replace(/\/+$/, "")}/ops/grants`, {
-    method: "POST",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    headers: { "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({
-      wallet,
-      amount: Number(command.amount),
-      reason: command.reason,
-      signer: signer.publicKey.toBase58(),
-      time,
-      signature,
-    }),
-  });
+  const backendUrl = deps.backendUrl.replace(/\/+$/, "");
+  let response: Response;
+  try {
+    response = await (deps.fetchFn ?? fetch)(`${backendUrl}/ops/grants`, {
+      method: "POST",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        wallet,
+        amount: Number(command.amount),
+        reason: command.reason,
+        signer: signer.publicKey.toBase58(),
+        time,
+        signature,
+      }),
+    });
+  } catch (cause) {
+    // A retry signs a fresh time, so replay protection would not stop a second grant.
+    throw new Error(
+      `no answer from the backend; the grant may have landed. Check ${backendUrl}/players/${wallet}/ledger ` +
+        `for reason "${command.reason}" before retrying`,
+      { cause },
+    );
+  }
   const json = (await response.json().catch(() => null)) as { id?: string; code?: string; message?: string } | null;
   if (!response.ok) {
     const why = json?.code ? `${json.code}: ${json.message ?? ""}` : (json?.message ?? "");
