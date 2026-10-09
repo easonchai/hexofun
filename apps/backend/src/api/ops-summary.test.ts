@@ -308,6 +308,32 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("OpsSummaryService"
     expect(summary).toHaveProperty("rpcOk");
   });
 
+  // audit-2026-10-09 07
+  it("lists the wallets whose ledger Principal differs from their Player's, with both figures", async () => {
+    await seedActive();
+    const wallet = (n: number) => Keypair.generate().publicKey.toBase58() + n;
+    const [drifting, matching] = [wallet(1), wallet(2)];
+    const player = (owner: string, principal: bigint) => ({
+      poolAddress: POOL.toBase58(), owner, principal, epochId: 1n, isHouse: false,
+      pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n,
+    });
+    const balance = (owner: string, principal: bigint) => ({
+      poolAddress: POOL.toBase58(), owner, tickets: 0n, principal, epochId: 1n,
+    });
+    try {
+      await prisma.player.createMany({ data: [player(drifting, 900n), player(matching, 500n)] });
+      await prisma.ticketBalance.createMany({ data: [balance(drifting, 700n), balance(matching, 500n)] });
+      const summary = await ops.getOpsSummary();
+      expect(summary.ledgerDrift).toEqual({
+        count: 1,
+        wallets: [{ owner: drifting, ledgerPrincipal: 700n, chainPrincipal: 900n }],
+      });
+    } finally {
+      await prisma.ticketBalance.deleteMany();
+    }
+    expect((await ops.getOpsSummary()).ledgerDrift).toEqual({ count: 2, wallets: expect.any(Array) });
+  });
+
   it("reports the open venue proposal with its unlock time, and null when none is open", async () => {
     await seedActive();
     const none = await ops.getOpsSummary();

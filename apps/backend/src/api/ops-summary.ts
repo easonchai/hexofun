@@ -15,6 +15,7 @@ import {
 import { isFulfilled, randomnessAddress } from "../operator/vrf";
 import { HARVEST_LEAD_SECONDS } from "../operator/venue";
 import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
+import { principalDrift, type PrincipalDrift } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
 import { isOperatorFailing, isOperatorStale, operatorAges } from "./alerts.controller";
 import { ApiService } from "./api.service";
@@ -87,7 +88,13 @@ export interface OpsSummaryExtras {
   todo: TodoItem[];
   /** `OPS_WALLETS` as base58: the wallets `POST /ops/fast-pause` accepts. Empty when unset. */
   fastPauseWallets: string[];
+  /** Wallets whose ledger Principal differs from their Player's: the total and the first few by
+   *  wallet, with both figures (audit-2026-10-09 07). */
+  ledgerDrift: { count: number; wallets: PrincipalDrift[] };
 }
+
+/** How many drifting wallets the summary lists. */
+export const LEDGER_DRIFT_LISTED = 5;
 
 export type OpsSummary = Awaited<ReturnType<ApiService["getStatus"]>> & OpsSummaryExtras;
 
@@ -158,10 +165,11 @@ export class OpsSummaryService {
     // Cached for BALANCES_TTL_MS and already warm from getStatus, so this is
     // the same reserve read, not a second RPC call.
     const reserve = (await this.api.chainBalances(pool?.klendReserve)).reserve;
-    const [harvested, view, proposal] = await Promise.all([
+    const [harvested, view, proposal, ledgerDrift] = await Promise.all([
       this.harvestedTotals(),
       this.chainView(pool !== null),
       this.prisma.venueProposal.findUnique({ where: { poolAddress } }),
+      principalDrift(this.prisma, poolAddress, LEDGER_DRIFT_LISTED),
     ]);
     const stuck = view === null ? null : view.stuck;
     const todo =
@@ -219,6 +227,7 @@ export class OpsSummaryService {
       stuck,
       todo,
       fastPauseWallets: this.fastPauseWallets,
+      ledgerDrift,
     };
   }
 

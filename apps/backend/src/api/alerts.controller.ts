@@ -146,8 +146,9 @@ export interface AlertInputs {
    *  there is none. Pool and nothing else is left out, so a new field on the
    *  event shows up here without a code change. */
   paramsChanged: Record<string, unknown> | null;
-  /** Wallets whose `TicketBalance` differs from their ledger sum at the last
-   *  nightly check; 0 before the first check. */
+  /** Wallets whose `TicketBalance` differs from their ledger sum, or whose ledger
+   *  Principal differs from their Player's, at the last nightly check; 0 before
+   *  the first check. */
   ticketLedgerMismatches: number;
   /** Wallets holding Tickets now, the next snapshot's leaf count. */
   ticketHolders: number;
@@ -358,7 +359,7 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
   if (inputs.ticketLedgerMismatches > 0) {
     alerts.push({
       code: "TICKET_LEDGER_MISMATCH",
-      message: `${inputs.ticketLedgerMismatches} wallets hold Tickets that their ledger rows do not sum to.`,
+      message: `${inputs.ticketLedgerMismatches} wallets differ from their ledger rows or from their Player's Principal.`,
     });
   }
   if (inputs.ticketHolders >= SNAPSHOT_LEAF_CAP * SNAPSHOT_NEAR_CAP_SHARE) {

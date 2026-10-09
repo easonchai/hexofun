@@ -175,7 +175,44 @@ async function resetTickets(
     WHERE b."poolAddress" = ${poolAddress} AND b."owner" = basis."owner"`;
 }
 
-/** Wallets whose balance row differs from the sum of their ledger deltas. */
+/** A wallet whose ledger Principal differs from its mirrored Player's. */
+export interface PrincipalDrift {
+  owner: string;
+  ledgerPrincipal: bigint;
+  chainPrincipal: bigint;
+}
+
+/**
+ * Wallets whose ledger Principal (`TicketBalance.principal`, set from each
+ * event) differs from the Player mirror's, with the total count and the first
+ * `limit` by wallet. A lost, doubled or mis-booked event shows up here, and the
+ * next reset turns it into a wrong draw weight. The House holds no Principal and
+ * is skipped, as is a balance with no Player; a Player with no balance row counts
+ * (its events never reached the ledger). A Player confirmed seconds before the
+ * ledger finalizes its transaction reads as drift until the next look.
+ */
+export async function principalDrift(
+  prisma: PrismaClient,
+  poolAddress: string,
+  limit: number,
+): Promise<{ count: number; wallets: PrincipalDrift[] }> {
+  const rows = await prisma.$queryRaw<{ owner: string; ledger: bigint; chain: bigint; total: bigint }[]>`
+    SELECT p."owner", COALESCE(b."principal", 0) AS "ledger", p."principal" AS "chain", count(*) OVER () AS "total"
+    FROM "Player" p
+    LEFT JOIN "TicketBalance" b ON b."poolAddress" = p."poolAddress" AND b."owner" = p."owner"
+    WHERE p."poolAddress" = ${poolAddress} AND NOT p."isHouse" AND COALESCE(b."principal", 0) <> p."principal"
+    ORDER BY p."owner"
+    LIMIT ${limit}`;
+  return {
+    count: Number(rows[0]?.total ?? 0n),
+    wallets: rows.map((row) => ({ owner: row.owner, ledgerPrincipal: row.ledger, chainPrincipal: row.chain })),
+  };
+}
+
+/**
+ * Wallets whose balance row differs from the sum of their ledger deltas, plus
+ * wallets whose ledger Principal differs from their Player's.
+ */
 export async function countLedgerMismatches(prisma: PrismaClient, poolAddress: string): Promise<number> {
   const [row] = await prisma.$queryRaw<{ count: bigint }[]>`
     SELECT count(*) AS count
@@ -184,7 +221,7 @@ export async function countLedgerMismatches(prisma: PrismaClient, poolAddress: s
       SELECT "owner", SUM("delta") AS "sum" FROM "TicketLedger" WHERE "poolAddress" = ${poolAddress} GROUP BY "owner"
     ) l ON l."owner" = b."owner"
     WHERE COALESCE(b."tickets", 0) <> COALESCE(l."sum", 0)`;
-  return Number(row?.count ?? 0n);
+  return Number(row?.count ?? 0n) + (await principalDrift(prisma, poolAddress, 1)).count;
 }
 
 /** Runs the check when the stored one is a day old and records the result for `/alerts`. */

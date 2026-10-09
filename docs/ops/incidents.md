@@ -301,10 +301,14 @@ crank is due" below.
 ## Ticket ledger out of step
 
 Starts with `TICKET_LEDGER_MISMATCH`. The indexer's daily check found wallets whose `TicketBalance.tickets`
-differs from the sum of their `TicketLedger.delta` rows. The snapshot and the draw read the balances,
-so a wrong balance can put the wrong count in a leaf.
+differs from the sum of their `TicketLedger.delta` rows, or whose ledger Principal (`TicketBalance.principal`)
+differs from their `Player` Principal. The snapshot and the draw read the balances, and every reset derives
+Tickets from Principal, so a wrong balance can put the wrong count in a leaf.
 
-1. Find the wallets: `SELECT b.owner, b.tickets, COALESCE(SUM(l.delta), 0) AS ledger FROM "TicketBalance" b
+0. For the Principal term, `GET /ops/summary` lists the first five wallets as `ledgerDrift` with both
+   figures. A wallet that deposited seconds before the daily check can show once and clear on the next look;
+   one that stays is a lost or doubled event, often a `EVENT_LOG_TRUNCATED` transaction.
+1. Find the wallets whose Tickets differ from their rows: `SELECT b.owner, b.tickets, COALESCE(SUM(l.delta), 0) AS ledger FROM "TicketBalance" b
    LEFT JOIN "TicketLedger" l USING ("poolAddress", owner) GROUP BY b.owner, b.tickets
    HAVING b.tickets <> COALESCE(SUM(l.delta), 0)`.
 2. Do not edit either table. The ledger is append-only, so a fix is a new row. Read the wallet's rows and
@@ -324,7 +328,8 @@ alert clears itself three days after the indexer recorded it.
 1. Read the transaction on an explorer and list the wallets it touched: `SELECT * FROM "TruncatedLog"`
    gives the signatures and slots.
 2. The Ticket side is yours. Compare each touched wallet's `TicketBalance.principal` with its `Player`
-   Principal and book the difference as a new `TicketLedger` row. Do not edit rows.
+   Principal (`GET /ops/summary` lists the drifting ones as `ledgerDrift`) and book the difference as a new
+   `TicketLedger` row. Do not edit rows.
 3. Do it before the next `EpochBegan`, which snapshots and resets every balance from Principal.
 
 <a id="snapshot-near-cap"></a>

@@ -22,7 +22,7 @@ import { loadIdl } from "../chain/idl";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountingConnection } from "../test-utils/counting-connection";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
-import { checkLedgerIfDue, countLedgerMismatches, LEDGER_CHECK_INTERVAL_S } from "../ledger/ledger-store";
+import { checkLedgerIfDue, countLedgerMismatches, LEDGER_CHECK_INTERVAL_S, principalDrift } from "../ledger/ledger-store";
 import { buildSumTree } from "../snapshot/sum-tree";
 import { decodeEventLogs } from "./decode";
 import { IndexerService, type LogBatch } from "./indexer.service";
@@ -2079,6 +2079,39 @@ describe("ticket ledger", () => {
     await seedEpoch(6n);
     await indexer.ingestLogs(batch("r1", 10n, [began(7)]));
     expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ ledgerEpochId: 7n });
+  });
+
+  // audit-2026-10-09 07: the ledger's Principal is checked against the mirrored Player's.
+  it("counts a wallet whose ledger Principal differs from its Player's, and ignores the House and a wallet with no Player", async () => {
+    const mirror = (owner: PublicKey, principal: bigint, isHouse = false) =>
+      prisma.player.create({
+        data: {
+          poolAddress: active(), owner: owner.toBase58(), principal, epochId: 1n, isHouse,
+          pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n,
+        },
+      });
+    const house = Keypair.generate().publicKey;
+    await indexer.ingestLogs(batch("p1", 10n, [money("Deposited", A, 100, 100)]));
+    await indexer.ingestLogs(batch("p2", 11n, [money("Deposited", B, 50, 50)]));
+    await indexer.ingestLogs(batch("p3", 12n, [money("Deposited", C, 70, 70)])); // C never gets a Player
+    await mirror(A, 100n);
+    await mirror(B, 50n);
+    await mirror(house, 9n, true);
+    expect(await countLedgerMismatches(prisma, active())).toBe(0);
+
+    await prisma.player.update({ where: key(A), data: { principal: 180n } });
+    expect(await countLedgerMismatches(prisma, active())).toBe(1);
+    // Only the new term: the balance still sums to its ledger rows, so the nightly check stores 1.
+    await checkLedgerIfDue(prisma, active(), 5_000n);
+    expect(await prisma.ledgerCheck.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ mismatches: 1 });
+    expect(await principalDrift(prisma, active(), 5)).toEqual({
+      count: 1,
+      wallets: [{ owner: A.toBase58(), ledgerPrincipal: 100n, chainPrincipal: 180n }],
+    });
+
+    // A Player the ledger has never seen is a lost event, not a skip.
+    await mirror(D, 25n);
+    expect((await principalDrift(prisma, active(), 5)).count).toBe(2);
   });
 
   it("runs the nightly check once a day and stores the count for /alerts", async () => {
