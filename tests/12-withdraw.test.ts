@@ -725,9 +725,9 @@ describe("cancel_withdraw", () => {
       await request(ctx, owner, 400n * USDC);
       const stranger = await ctx.fundedWallet(1n);
 
-      // A stranger signing for the owner's Player fails the Player's seeds.
+      // A stranger signing for the owner's Player is refused as not its owner.
       const before = await untouched(ctx, owner);
-      await refused(ctx, cancelMethod(ctx, stranger, owner).rpc(), /ConstraintSeeds/);
+      await refused(ctx, cancelMethod(ctx, stranger, owner).rpc(), /Unauthorized/);
       expect(await untouched(ctx, owner)).toEqual(before);
       expect(big((await fetchPlayer(ctx, owner)).pendingWithdraw)).toBe(400n * USDC);
       expect(big((await fetchPool(ctx)).pendingWithdrawals)).toBe(400n * USDC);

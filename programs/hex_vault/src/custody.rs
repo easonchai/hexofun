@@ -2079,7 +2079,7 @@ pub struct RequestWithdraw<'info> {
 
 /// True when `player` is `owner`'s account in `pool`: the PDA seeded from
 /// `owner`, or the Pool's House when `owner` is its current owner.
-fn is_players_account(pool: &Account<Pool>, player: &Account<Player>, owner: Pubkey) -> bool {
+pub(crate) fn is_players_account(pool: &Account<Pool>, player: &Account<Player>, owner: Pubkey) -> bool {
     if player.key() == pool.house {
         return player.owner == owner;
     }
@@ -2102,8 +2102,7 @@ pub struct CancelWithdraw<'info> {
 
     #[account(
         mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],
-        bump = player.bump,
+        constraint = is_players_account(&pool, &player, owner.key()) @ HexVaultError::Unauthorized,
     )]
     pub player: Box<Account<'info, Player>>,
 }
@@ -2117,12 +2116,12 @@ pub struct ProcessWithdraw<'info> {
     )]
     pub pool: Box<Account<'info, Pool>>,
 
-    /// Seeded from its own `owner`, which is what makes this safe without a
-    /// signer: the destination below has to belong to that same owner.
+    /// Seeded from its own `owner` (or the Pool's House, see
+    /// `is_players_account`), which is what makes this safe without a signer:
+    /// the destination below has to belong to that same owner.
     #[account(
         mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), player.owner.as_ref()],
-        bump = player.bump,
+        constraint = is_players_account(&pool, &player, player.owner) @ HexVaultError::Unauthorized,
     )]
     pub player: Box<Account<'info, Player>>,
 
@@ -2178,6 +2177,8 @@ pub struct EmergencyWithdraw<'info> {
     )]
     pub pool: Box<Account<'info, Pool>>,
 
+    // Seeds only: the House is refused in the handler, so a rotated House
+    // needs no `is_players_account` here.
     #[account(
         mut,
         seeds = [SEED_PLAYER, pool.key().as_ref(), player.owner.as_ref()],
@@ -2267,7 +2268,7 @@ pub struct BuyTickets<'info> {
     pub pool: Box<Account<'info, Pool>>,
 
     /// Must already exist: a Player only has a cap to buy against once it
-    /// holds Principal.
+    /// holds Principal. Seeds only: the House is refused in the handler.
     #[account(
         mut,
         seeds = [SEED_PLAYER, pool.key().as_ref(), owner.key().as_ref()],

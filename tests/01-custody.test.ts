@@ -848,6 +848,33 @@ describe("roles", () => {
         Keypair.generate(),
       );
       await expect(requestOnHouse(pool.operator, oldToken)).rejects.toThrow(/Unauthorized/);
+
+      // The same holds for cancel and process: the rotated House passes their
+      // account checks (nothing is queued, since the House holds no Principal
+      // and nothing can queue it), and the old key does not.
+      const cancelOnHouse = (signer: Keypair) =>
+        program.methods
+          .cancelWithdraw()
+          .accountsPartial({ owner: signer.publicKey, pool: pool.pool, player: pool.house })
+          .signers([signer])
+          .rpc();
+      await expect(cancelOnHouse(next)).rejects.toThrow(/NothingPending/);
+      await expect(cancelOnHouse(pool.operator)).rejects.toThrow(/Unauthorized/);
+      await expect(
+        program.methods
+          .processWithdraw()
+          .accountsPartial({
+            pool: pool.pool,
+            player: pool.house,
+            owner: null,
+            acceptedMint: pool.mint,
+            ownerToken: nextToken,
+            principalVault: pool.principalVault,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            ...pool.venue,
+          })
+          .rpc(),
+      ).rejects.toThrow(/NothingPending/);
       await assertSolvent(pool);
     },
     60_000,

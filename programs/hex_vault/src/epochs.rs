@@ -19,9 +19,10 @@ use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked};
 
 use crate::constants::{
-    epoch_status, EPOCH_VERSION, MAX_SNAPSHOT_DEPTH, SEED_EPOCH, SEED_JACKPOT, SEED_PLAYER,
+    epoch_status, EPOCH_VERSION, MAX_SNAPSHOT_DEPTH, SEED_EPOCH, SEED_JACKPOT,
     SEED_POOL, SEED_PRINCIPAL,
 };
+use crate::custody::is_players_account;
 use crate::errors::HexVaultError;
 use crate::events::{EpochBegan, EpochDrawn, EpochRolledOver, JackpotFunded, JackpotPaid};
 use crate::snapshot::{self, Commitment, SumNode};
@@ -691,10 +692,10 @@ pub struct Payout<'info> {
     )]
     pub epoch: Box<Account<'info, Epoch>>,
 
+    // The House wins too, and `set_operator` moves its owner off its seed.
     #[account(
         mut,
-        seeds = [SEED_PLAYER, pool.key().as_ref(), winner.owner.as_ref()],
-        bump = winner.bump,
+        constraint = is_players_account(&pool, &winner, winner.owner) @ HexVaultError::Unauthorized,
     )]
     pub winner: Box<Account<'info, Player>>,
 

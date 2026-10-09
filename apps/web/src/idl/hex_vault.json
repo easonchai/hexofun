@@ -227,7 +227,7 @@
           "name": "player",
           "docs": [
             "Must already exist: a Player only has a cap to buy against once it",
-            "holds Principal."
+            "holds Principal. Seeds only: the House is refused in the handler."
           ],
           "writable": true,
           "pda": {
@@ -419,30 +419,7 @@
         },
         {
           "name": "player",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  108,
-                  97,
-                  121,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "owner"
-              }
-            ]
-          }
+          "writable": true
         }
       ],
       "args": []
@@ -1695,31 +1672,7 @@
         },
         {
           "name": "winner",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  108,
-                  97,
-                  121,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "winner.owner",
-                "account": "Player"
-              }
-            ]
-          }
+          "writable": true
         },
         {
           "name": "jackpot_vault",
@@ -1862,34 +1815,11 @@
         {
           "name": "player",
           "docs": [
-            "Seeded from its own `owner`, which is what makes this safe without a",
-            "signer: the destination below has to belong to that same owner."
+            "Seeded from its own `owner` (or the Pool's House, see",
+            "`is_players_account`), which is what makes this safe without a signer:",
+            "the destination below has to belong to that same owner."
           ],
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  112,
-                  108,
-                  97,
-                  121,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "pool"
-              },
-              {
-                "kind": "account",
-                "path": "player.owner",
-                "account": "Player"
-              }
-            ]
-          }
+          "writable": true
         },
         {
           "name": "owner",

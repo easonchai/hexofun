@@ -18,6 +18,7 @@ import { BN } from "@anchor-lang/core";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { getOrCreateAssociatedTokenAccount, mintTo, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import {
+  airdrop,
   deployToVenue,
   epochPda,
   findEvent,
@@ -539,6 +540,42 @@ describe("epochs", () => {
       const paid = await fetchEpoch(pool, 1n);
       expect(paid.status).toBe(epoch_status.PAID);
       expect(paid.winner.toString()).toBe(pool.operator.publicKey.toString());
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "a House rotated to a new Operator still wins: its address keeps the first Operator's seed",
+    async () => {
+      const pool = await setupPool({ epochSeconds: 6 });
+      const next = Keypair.generate();
+      await airdrop(next.publicKey, 2);
+      await program.methods
+        .setOperator(next.publicKey)
+        .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool, house: pool.house })
+        .signers([pool.admin])
+        .rpc();
+      // From here the new key is the operator that cranks.
+      const rotated = { ...pool, operator: next };
+      await beginEpoch(rotated, 0n);
+      await retryUntilOk(() => beginEpoch(rotated, 1n));
+
+      const funder = await pool.fundedWallet(10_000_000n);
+      await fundJackpot(pool, funder, 1_000_000n);
+      const held = solo(next.publicKey, 6_000_000n);
+      const closed = await requestAndDrawFor(rotated, 1n, held, next.publicKey);
+      expect(closed.status).toBe(epoch_status.DRAWN);
+
+      const buybackBefore = await program.provider.connection.getTokenAccountBalance(pool.buybackReserve);
+      // The winner is the House at its original address, whose owner is `next`.
+      await payoutMethod(rotated, 1n, next.publicKey, held)
+        .accountsPartial({ winner: pool.house })
+        .rpc();
+      const buybackAfter = await program.provider.connection.getTokenAccountBalance(pool.buybackReserve);
+      expect(BigInt(buybackAfter.value.amount) - BigInt(buybackBefore.value.amount)).toBe(500_000n);
+      const paid = await fetchEpoch(pool, 1n);
+      expect(paid.status).toBe(epoch_status.PAID);
+      expect(paid.winner.toString()).toBe(next.publicKey.toString());
     },
     TIMEOUT,
   );
