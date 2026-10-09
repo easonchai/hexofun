@@ -50,6 +50,8 @@ describe.skipIf(!DB_AVAILABLE)("Referral bonus grants", () => {
 
   beforeAll(async () => {
     prisma = new PrismaClient({ datasourceUrl: TEST_DATABASE_URL });
+    // Connect here, so the first beforeEach's TRUNCATE does not also pay for the connect under a full parallel run.
+    await prisma.$connect();
   });
 
   afterAll(async () => {
