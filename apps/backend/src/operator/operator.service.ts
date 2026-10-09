@@ -226,7 +226,9 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
         }
       }
       if (outcome.action) this.logger.log(`sent ${outcome.action}`);
-      const stepError = outcome.stepError ?? (await this.grantReferralBonuses());
+      // The job runs whatever the chain steps reported; a step error wins the slot.
+      const referralError = await this.grantReferralBonuses();
+      const stepError = outcome.stepError ?? referralError;
       if (stepError) this.logger.warn(`tick step failed: ${stepError}`);
       const waitMs = msUntilWake(ctx.now, outcome.nextWakeAt);
       await this.writeState(outcome, stepError ?? null, waitMs);

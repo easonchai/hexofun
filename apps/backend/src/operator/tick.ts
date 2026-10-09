@@ -457,8 +457,12 @@ async function decide(ctx: TickContext): Promise<Decision> {
             ctx.warn(`epoch ${epochId}: payout proof refused (${message}); not retrying`);
           } else if (UNPAYABLE_WINNER.some((marker) => message.includes(marker))) {
             ctx.warn(`epoch ${epochId}: the winner cannot be paid (${message}); rolling over after payout_timeout`);
+          } else if (EXPECTED_ERRORS.has(message)) {
+            ctx.warn(`epoch ${epochId}: payout skipped (${message})`);
           } else {
-            throw cause;
+            // Not thrown: the rollover check, venue cranks and withdrawals
+            // below still run. The next tick pays again.
+            stepError = stepError ?? `payout failed: ${message}`;
           }
         }
       }
@@ -570,16 +574,43 @@ async function decide(ctx: TickContext): Promise<Decision> {
     // queue one at a time instead — a single bad owner cannot then block
     // anyone behind them, at the cost of one payout per tick instead of
     // `WITHDRAW_BATCH_SIZE`.
-    const batch = withdrawStateIn.singleMode ? due.slice(0, 1) : due.slice(0, WITHDRAW_BATCH_SIZE);
+    let batch: typeof due = [];
+    let offset = 0;
+    let landed = false;
+    // `NothingPending` means the chain already paid the owner (the mirror lags,
+    // or the depositor cranked their own). The error does not name the owner,
+    // so a batch that hits it is halved until the offender is alone; that owner
+    // is dropped for this tick without a failure count, and the rest are sent.
+    const pay = async (entries: typeof due): Promise<void> => {
+      try {
+        await ctx.send(await ctx.ix.processWithdrawals(pool, entries));
+        landed = true;
+      } catch (cause) {
+        if (errorMessage(cause) !== "NothingPending") throw cause;
+        if (entries.length === 1) return;
+        const mid = entries.length >> 1;
+        await pay(entries.slice(0, mid));
+        await pay(entries.slice(mid));
+      }
+    };
     try {
-      await ctx.send(await ctx.ix.processWithdrawals(pool, batch));
+      // A batch whose every owner was already paid sends nothing; take the next.
+      while (!landed && offset < due.length) {
+        batch = due.slice(offset, offset + (withdrawStateIn.singleMode ? 1 : WITHDRAW_BATCH_SIZE));
+        offset += batch.length;
+        await pay(batch);
+      }
+      if (!landed) {
+        withdrawStateOut = withdrawStateIn;
+        return finish({ ...NOTHING, withdrawShortfall });
+      }
       const failures = new Map(withdrawStateIn.failures);
       for (const entry of batch) failures.delete(entry.owner);
       withdrawStateOut = {
         epochId: pool.currentEpochId,
         // Back to batching once a send lands cleanly with nothing left
         // waiting behind it; otherwise keep cranking singly until it does.
-        singleMode: withdrawStateIn.singleMode && due.length > batch.length,
+        singleMode: withdrawStateIn.singleMode && due.length > offset,
         failures,
         skipped: withdrawStateIn.skipped,
       };

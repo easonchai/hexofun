@@ -20,6 +20,9 @@ export const HARVEST_LEAD_SECONDS = 600n;
  *  safety tick runs every 60 s, so this is what stops a refused crank from
  *  turning into a send per minute. */
 export const VENUE_RETRY_SECONDS = 600n;
+/** Harvest retries sooner: its window is the same 600 s, so a 600 s cooldown
+ *  would mean a harvest that fails once is never retried before the draw. */
+export const HARVEST_RETRY_SECONDS = 90n;
 
 const BPS = 10_000n;
 
@@ -78,7 +81,8 @@ export function venueFailed(state: VenueState, kind: VenueKind, now: bigint): Ve
 /** Whether `kind` is out of its cool-down. */
 export function venueReady(state: VenueState, kind: VenueKind, now: bigint): boolean {
   const failedAt = state.failedAt[kind];
-  return failedAt === undefined || now >= failedAt + VENUE_RETRY_SECONDS;
+  const cooldown = kind === "harvest" ? HARVEST_RETRY_SECONDS : VENUE_RETRY_SECONDS;
+  return failedAt === undefined || now >= failedAt + cooldown;
 }
 
 /**

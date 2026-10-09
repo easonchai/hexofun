@@ -554,16 +554,59 @@ describe("runTick", () => {
     expect(warned).toHaveLength(1);
   });
 
-  it("6. any other payout failure still fails the tick, and a Drawn epoch with a stopped proof rolls over once its timeouts pass", async () => {
-    const boom = context({
+  it("6. (audit 04) an unknown payout failure is the step error, and the epoch still rolls over past its timeouts", async () => {
+    const sends: string[] = [];
+    const { ctx } = context({
+      pool: pool({ payoutTimeout: 30n }),
+      previousEpoch: drawn({ drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n) }),
+      payoutProof: async () => proofAt(42n),
+      send: async (ixs) => {
+        const name = label(ixs[0]!);
+        sends.push(name);
+        if (name === "payout") throw new Error("InsufficientVaultLiquidity");
+        return "sig";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(sends).toEqual(["payout", "rollover_epoch"]);
+    expect(outcome.action).toBe("rollover_epoch");
+    expect(outcome.stepError).toBe("payout failed: InsufficientVaultLiquidity");
+  });
+
+  it("6. (audit 04) an unknown payout failure still lets a due withdrawal through", async () => {
+    const sends: string[] = [];
+    const { ctx } = context({
+      pool: pool({ paused: true }),
+      previousEpoch: drawn(),
+      payoutProof: async () => proofAt(42n),
+      duePendingWithdrawals: async () => pending(1),
+      send: async (ixs) => {
+        const name = label(ixs.at(-1)!);
+        sends.push(name);
+        if (name === "payout") throw new Error("InsufficientVaultLiquidity");
+        return "sig";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(sends).toEqual(["payout", "process_withdraw"]);
+    expect(outcome.action).toBe("process_withdraw");
+    expect(outcome.stepError).toBe("payout failed: InsufficientVaultLiquidity");
+  });
+
+  it("6. a payout that loses a race (an expected error) is a warning, not a step error", async () => {
+    const { ctx, warned } = context({
       previousEpoch: drawn(),
       payoutProof: async () => proofAt(42n),
       send: async () => {
-        throw new Error("InsufficientVaultLiquidity");
+        throw new Error("EpochNotDrawn");
       },
     });
-    await expect(runTick(boom.ctx)).rejects.toThrow("InsufficientVaultLiquidity");
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toBeUndefined();
+    expect(warned[0]).toContain("EpochNotDrawn");
+  });
 
+  it("6. a Drawn epoch with a stopped proof rolls over once its timeouts pass", async () => {
     const stopped = context({
       pool: pool({ payoutTimeout: 30n }),
       previousEpoch: drawn({ drawnAt: NOW - (DRAWN_UNPAID_ALERT_SECONDS + 1n) }),
@@ -791,6 +834,63 @@ describe("runTick", () => {
     expect(outcome.action).toBeNull();
     expect(outcome.stepError).toMatch(/blockhash expired/);
     expect(outcome.withdrawState?.singleMode).toBe(true);
+  });
+
+  it("6b. (audit 04) a NothingPending owner is dropped for the tick and the rest are paid, with no failure counted", async () => {
+    const due = pending(3);
+    const bad = due[1]!.owner;
+    const paid: string[][] = [];
+    const { ctx } = context({
+      duePendingWithdrawals: async () => due,
+      send: async (ixs) => {
+        const owners = due.map((e) => e.owner).filter((o) => ixs.some((ix) => ix.keys.some((k) => k.pubkey.toBase58() === o)));
+        if (owners.includes(bad)) throw new Error("NothingPending");
+        paid.push(owners);
+        return "sig";
+      },
+    });
+    const outcome = await runTick(ctx);
+
+    expect(outcome.action).toBe("process_withdraw");
+    // The offender is isolated by halving; everyone else lands in this tick.
+    expect(paid.flat().sort()).toEqual([due[0]!.owner, due[2]!.owner].sort());
+    expect(outcome.stepError).toBeUndefined();
+    expect(outcome.withdrawState?.singleMode).toBe(false);
+    expect(outcome.withdrawState?.failures.size).toBe(0);
+  });
+
+  it("6b. (audit 04) in single mode a NothingPending head does not block the next owner or add a failure", async () => {
+    const due = pending(2);
+    const failures = new Map([[due[0]!.owner, 1]]);
+    const { ctx, sent } = context({
+      duePendingWithdrawals: async () => due,
+      lastWithdrawState: { epochId: 2n, singleMode: true, failures, skipped: new Set() },
+      send: async (ixs) => {
+        if (ixs.some((ix) => ix.keys.some((k) => k.pubkey.toBase58() === due[0]!.owner))) {
+          throw new Error("NothingPending");
+        }
+        sent.push(ixs);
+        return "sig";
+      },
+    });
+    const outcome = await runTick(ctx);
+
+    expect(sent).toHaveLength(1);
+    expect(outcome.stepError).toBeUndefined();
+    expect(outcome.withdrawState?.failures.get(due[0]!.owner)).toBe(1);
+  });
+
+  it("6b. (audit 04) a queue of owners who were all paid already sends nothing and sets no error", async () => {
+    const { ctx } = context({
+      duePendingWithdrawals: async () => pending(2),
+      send: async () => {
+        throw new Error("NothingPending");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.action).toBeNull();
+    expect(outcome.stepError).toBeUndefined();
+    expect(outcome.withdrawState?.singleMode).toBe(false);
   });
 
   it("6b. sends no withdrawal while the pool is impaired, and resumes when it clears", async () => {
@@ -1548,6 +1648,52 @@ describe("venue cranks (ticket 13)", () => {
     expect(outcome.action).toBe("process_withdraw");
     expect(outcome.venueState?.failedAt.harvest).toBe(NOW);
     expect(outcome.venueState?.harvestedEpoch).toBeNull();
+  });
+
+  it("(audit 04) an unknown payout failure still lets a due venue crank through", async () => {
+    const sends: string[] = [];
+    const { ctx } = context({
+      pool: harvestPool(),
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWN, target: 42n, drawnAt: NOW - 10n }),
+      principalVaultBalance: async () => 1_000n * U,
+      payoutProof: async () => proofAt(42n),
+      send: async (ixs) => {
+        const name = label(ixs[0]!);
+        sends.push(name);
+        if (name === "payout") throw new Error("InsufficientVaultLiquidity");
+        return "sig";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(sends).toEqual(["payout", "harvest"]);
+    expect(outcome.action).toBe("harvest");
+    expect(outcome.stepError).toBe("payout failed: InsufficientVaultLiquidity");
+  });
+
+  it("(audit 04) a failed harvest is ready again after 90 seconds; a failed deploy is not", async () => {
+    const failedAt = NOW - 90n;
+    const harvest = context({
+      pool: harvestPool(),
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+      lastVenueState: { harvestedEpoch: null, failedAt: { harvest: failedAt } },
+    });
+    expect((await runTick(harvest.ctx)).action).toBe("harvest");
+
+    const justFailed = context({
+      pool: harvestPool(),
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+      lastVenueState: { harvestedEpoch: null, failedAt: { harvest: NOW - 89n } },
+    });
+    expect((await runTick(justFailed.ctx)).action).toBeNull();
+
+    // 10_000 USDC idle on an empty venue: a deploy is due unless it is cooling.
+    const deploy = venueTick(10_000n * U, {
+      lastVenueState: { harvestedEpoch: null, failedAt: { deploy: failedAt } },
+    });
+    expect((await runTick(deploy.ctx)).action).toBeNull();
   });
 
   it("NothingToHarvest counts as harvested for the epoch", async () => {
