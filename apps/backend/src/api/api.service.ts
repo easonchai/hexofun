@@ -576,8 +576,9 @@ export class ApiService {
    * current epoch, `pendingMaturesAt`, when the queued
    * withdrawal pays (null with nothing queued), and `positionYield`, what the
    * open position has earned, settled or not (`positionBasis`). That one is
-   * null while the Player row is newer than the newest stored event, because
-   * the basis then lacks the change that moved Principal.
+   * null while the Player row is newer than the newest stored event and that
+   * event's Principal differs, because the basis then lacks the change that
+   * moved Principal.
    */
   async getPlayer(owner: string) {
     const [pool, player] = await Promise.all([
@@ -609,7 +610,13 @@ export class ApiService {
         _max: { slot: true },
       }),
     ]);
-    const eventsCurrent = player.slot <= (newestEvent._max.slot ?? 0n);
+    // Or the owner's newest event already left Principal where the row has
+    // it: the hourly sweep restamps every unchanged row near the tip, and a
+    // quiet pool would otherwise read null until its next event.
+    const lastPrincipal = ownerEvents.at(-1)?.data.principal;
+    const eventsCurrent =
+      player.slot <= (newestEvent._max.slot ?? 0n) ||
+      (lastPrincipal !== undefined && BigInt(String(lastPrincipal)) === player.principal);
     const unsettled = unsettledYield(player.principal, toBigInt(pool.yieldIndex), toBigInt(player.yieldIndex));
     return {
       ...playerDto(mine, total),

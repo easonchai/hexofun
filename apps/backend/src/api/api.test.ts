@@ -748,13 +748,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
   // `Deposited` row does; counting the new Principal against a basis that lacks
   // it showed the whole deposit as earnings (fork run 2026-10-09).
   it("GET /players/:owner reports positionYield null while the Player row is newer than the newest stored event", async () => {
-    const deposit = (slot: bigint, amount: string) => ({
+    const deposit = (slot: bigint, amount: string, principal: string) => ({
       slot,
       signature: `sigLag${slot}`,
       index: 0,
       poolAddress: POOL_ADDRESS,
       name: "Deposited",
-      data: { owner: BOB, amount },
+      data: { owner: BOB, amount, principal },
       blockTime: NOW,
     });
     const setPlayer = (principal: bigint, slot: bigint) =>
@@ -767,13 +767,18 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       // First deposit: the row is at slot 500, no event that new yet.
       await setPlayer(6_900n, 500n);
       expect(await positionYield()).toBeNull();
-      await prisma.event.createMany({ data: [deposit(500n, "6900")] });
+      await prisma.event.createMany({ data: [deposit(500n, "6900", "6900")] });
       expect(await positionYield()).toBe("0");
 
       // Top-up: 1,100 more at slot 600, not in Event yet.
       await setPlayer(8_000n, 600n);
       expect(await positionYield()).toBeNull();
-      await prisma.event.createMany({ data: [deposit(600n, "1100")] });
+      await prisma.event.createMany({ data: [deposit(600n, "1100", "8000")] });
+      expect(await positionYield()).toBe("0");
+
+      // The hourly sweep restamps the unchanged row near the tip, past every
+      // event; the newest event's Principal still matches, so no dash.
+      await setPlayer(8_000n, 900n);
       expect(await positionYield()).toBe("0");
     } finally {
       await prisma.event.deleteMany({ where: { signature: { in: ["sigLag500", "sigLag600"] } } });
