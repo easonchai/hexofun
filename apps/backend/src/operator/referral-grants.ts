@@ -14,6 +14,7 @@ import {
   type ReferrerBonusInput,
   type ShareWeight,
 } from "../api/referral-bonus";
+import { referralTiersFromRow } from "../api/game-config";
 import { isQualified } from "../api/referral";
 import { lockLedger } from "../ledger/ledger-store";
 
@@ -47,7 +48,11 @@ export async function grantReferralBonuses(
       const [pool, config, referrals, recorded] = await Promise.all([
         tx.pool.findUnique({ where: { address: poolAddress }, select: { totalPrincipal: true } }),
         // The row in force is the newest.
-        tx.gameConfig.findFirst({ where: { poolAddress }, orderBy: { id: "desc" }, select: { bonusCapBps: true } }),
+        tx.gameConfig.findFirst({
+          where: { poolAddress },
+          orderBy: { id: "desc" },
+          select: { bonusCapBps: true, referralTiers: true },
+        }),
         // Referral is wallet-level and outlives any one pool; Player is the Active pool's.
         tx.referral.findMany({ select: { referee: true, referrer: true, principal: true, aboveSince: true } }),
         tx.referralGrant.findMany({ where: { poolAddress, epochId }, select: { referrer: true, amount: true } }),
@@ -75,7 +80,8 @@ export async function grantReferralBonuses(
         qualifiedReferralPrincipals: qualified.map((row) => row.principal),
       }));
       const spent = recorded.reduce((sum, row) => sum + row.amount, 0n);
-      const bonuses = computeBonuses(inputs, pool.totalPrincipal, config.bonusCapBps, spent);
+      const tiers = referralTiersFromRow(config.referralTiers, `pool ${poolAddress}`);
+      const bonuses = computeBonuses(tiers, inputs, pool.totalPrincipal, config.bonusCapBps, spent);
       if (bonuses.length === 0) return 0;
 
       const ref = `referral:${epochId}`;
@@ -95,6 +101,7 @@ export async function grantReferralBonuses(
             uncapped: bonus.uncapped,
             qualifiedCount: bonus.qualifiedCount,
             rateBps: bonus.rateBps,
+            tier: bandForCount(tiers, bonus.qualifiedCount).band.tier,
             referrerPrincipal: principalOf.get(bonus.referrer) ?? 0n,
             totalPrincipal: pool.totalPrincipal,
             bonusCapBps: config.bonusCapBps,
@@ -141,7 +148,7 @@ export async function referralGrantsForEpoch(prisma: PrismaClient, poolAddress: 
       referrer: grant.referrer,
       amount: grant.amount,
       uncapped: grant.uncapped,
-      tier: bandForCount(grant.qualifiedCount).band.tier,
+      tier: grant.tier,
       rateBps: grant.rateBps,
       qualifiedCount: grant.qualifiedCount,
       referrerPrincipal: grant.referrerPrincipal,

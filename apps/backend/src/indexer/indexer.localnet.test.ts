@@ -40,6 +40,7 @@ import { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
 import { deployWallet } from "../chain/deploy-wallet.fixture";
 import { programDataAddress } from "../chain/pda";
+import { DEFAULT_GAME_CONFIG } from "../api/game-config";
 import { decodeEpoch } from "../operator/chain-state";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
@@ -484,7 +485,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     const before = (await balance()).tickets;
 
     await prisma.gameConfig.create({
-      data: { poolAddress, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps: 500, referralTiers: [], maxTilesPerBet: 36 },
+      data: { poolAddress, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps: 500, referralTiers: DEFAULT_GAME_CONFIG.referralTiers, maxTilesPerBet: 36 },
     });
     await prisma.referral.create({
       data: { referee: Keypair.generate().publicKey.toBase58(), referrer: owner, code: "AAAAAA", boundAt: 1n, principal: 100_000_000n, aboveSince: 1n },

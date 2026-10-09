@@ -375,6 +375,9 @@ model ReferralGrant {
   uncapped       BigInt
   qualifiedCount Int
   rateBps        Int
+  /// The band's tier number under the Game config row in force at grant time,
+  /// so the grants route never re-derives it from today's tiers.
+  tier           Int     @default(0)
   txSig          String?
   /// The Referrer's own locked Principal when the grant was computed (the per-Referrer cap).
   referrerPrincipal BigInt @default(0)

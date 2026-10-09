@@ -17,6 +17,7 @@ import { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
 import { PrismaService } from "../prisma/prisma.service";
 import { isUniqueConstraintViolation } from "./access.controller";
+import { referralTiersFromRow } from "./game-config";
 import { applyReferralMessage, normalizeInviteCode, verifyApplyReferralSignature } from "./invite-code";
 import { bindReferral, ensureReferralCode } from "./referral-code";
 import { buildReferralsResponse, type ReferralInput } from "./referral-summary";
@@ -112,14 +113,22 @@ export class ReferralsController {
     const wallet = parseWallet(walletRaw);
     const qualifySeconds = this.config.get("REFERRAL_QUALIFY_SECONDS", { infer: true });
 
-    const [referralCode, referralRows, pool] = await Promise.all([
+    const [referralCode, referralRows, pool, gameConfig] = await Promise.all([
       this.referralCodeFor(wallet),
       this.prisma.referral.findMany({
         where: { referrer: wallet },
         select: { referee: true, aboveSince: true, boundAt: true },
       }),
       this.prisma.pool.findUnique({ where: { address: this.poolAddress } }),
+      // The row in force is the newest.
+      this.prisma.gameConfig.findFirst({
+        where: { poolAddress: this.poolAddress },
+        orderBy: { id: "desc" },
+        select: { referralTiers: true },
+      }),
     ]);
+    if (gameConfig === null) throw new Error(`pool ${this.poolAddress} has no Game config row, so the referral tiers are unknown`);
+    const tiers = referralTiersFromRow(gameConfig.referralTiers, `pool ${this.poolAddress}`);
 
     const [grantToday, shares] = await Promise.all([
       this.bonusGrant(pool?.currentEpochId, wallet),
@@ -133,6 +142,7 @@ export class ReferralsController {
     }));
 
     return buildReferralsResponse(
+      tiers,
       referralCode,
       referrals,
       nowSeconds(),

@@ -65,6 +65,16 @@ function parseTiers(raw: unknown): ReferralTier[] | null {
   return tiers;
 }
 
+/**
+ * The tiers stored on a Game config row, re-parsed on read. A row that fails
+ * is an error: falling back to the seed would pay at rates nobody signed.
+ */
+export function referralTiersFromRow(raw: unknown, context: string): ReferralTier[] {
+  const tiers = parseTiers(raw);
+  if (tiers === null) throw new Error(`${context}: the Game config row's referralTiers do not parse`);
+  return tiers;
+}
+
 /** The fields in canonical key order, or null when any is missing or out of range. */
 export function parseGameConfigFields(raw: unknown): GameConfigFields | null {
   const r = raw as Partial<Record<keyof GameConfigFields, unknown>> | null;

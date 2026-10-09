@@ -29,6 +29,7 @@ import { PrismaModule } from "../prisma/prisma.module";
 import { PrismaService } from "../prisma/prisma.service";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
 import { LIVE_PLAYER_DEFAULTS, LIVE_POOL_DEFAULTS } from "../test-utils/live-yield-defaults";
+import { DEFAULT_GAME_CONFIG } from "./game-config";
 import { applyReferralMessage } from "./invite-code";
 import { REFERRAL_QUALIFY_PRINCIPAL } from "./referral";
 import { ReferralsController } from "./referrals.controller";
@@ -46,7 +47,7 @@ const fakeChain = { provide: ChainService, useValue: { poolAddress: () => new Pu
 
 async function truncate(prisma: PrismaService): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE "Pool", "InviteCode", "InviteRedemption", "Referral", "ReferralGrant", "ReferralGrantShare", "ReferralCode", "Player" CASCADE',
+    'TRUNCATE "Pool", "InviteCode", "InviteRedemption", "Referral", "ReferralGrant", "ReferralGrantShare", "ReferralCode", "Player", "GameConfig" CASCADE',
   );
 }
 
@@ -142,10 +143,28 @@ describe.skipIf(!DB_AVAILABLE)("GET /referrals/:wallet", () => {
     await prisma.player.deleteMany();
     // Last: every pool-scoped row above references it (onDelete: Restrict).
     await prisma.pool.deleteMany();
+    await prisma.gameConfig.deleteMany();
+    await setTiers(DEFAULT_GAME_CONFIG.referralTiers);
   });
+
+  /** A new Game config row; the newest is in force. */
+  const setTiers = (referralTiers: object) =>
+    prisma.gameConfig.create({
+      data: { poolAddress: POOL_ADDRESS, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps: 500, referralTiers, maxTilesPerBet: 36 },
+    });
 
   it("400s a malformed wallet", async () => {
     await http.get("/referrals/not-a-wallet").expect(400);
+  });
+
+  it("bands over the tiers of the Game config row in force", async () => {
+    await prisma.referral.create({
+      data: { referee: Keypair.generate().publicKey.toBase58(), referrer: REFERRER, code: "ABCD2345", boundAt: 1n, aboveSince: 0n, principal: 50_000_000n },
+    });
+    await setTiers([{ tier: 9, min: 1, max: null, rateBps: 1000 }]);
+    const { body } = await http.get(`/referrals/${REFERRER}`).expect(200);
+    expect(body.band).toEqual({ tier: 9, rateBps: 1000, minCount: 1, maxCount: null });
+    expect(body.nextBand).toBeNull();
   });
 
   it("is the empty state for a wallet with nothing indexed yet (no pool either)", async () => {

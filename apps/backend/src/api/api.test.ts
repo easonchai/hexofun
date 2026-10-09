@@ -1012,7 +1012,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       await prisma.referralGrant.create({
         data: {
           poolAddress: POOL_ADDRESS, epochId: PREVIOUS_EPOCH, referrer: ALICE, amount: 9n, uncapped: 9n, qualifiedCount: 3,
-          rateBps: 300, referrerPrincipal: 1_000n, totalPrincipal: 5_000n, bonusCapBps: 500,
+          rateBps: 300, tier: 2, referrerPrincipal: 1_000n, totalPrincipal: 5_000n, bonusCapBps: 500,
         },
       });
       await prisma.referralGrantShare.create({

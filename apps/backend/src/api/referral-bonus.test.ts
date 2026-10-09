@@ -4,6 +4,7 @@ import {
   bandForCount,
   computeBonuses,
   REFERRAL_BONUS_BASIS_CAP,
+  RATE_TIERS,
   remainingGrantCap,
   splitShares,
   type ReferrerBonusInput,
@@ -30,7 +31,7 @@ function referrer(
 describe("computeBonuses: rate tiers by qualified count", () => {
   it("0 qualified referrals earns nothing", () => {
     expect(
-      computeBonuses([referrer("r", [])], NO_POOL_CAP.totalPrincipal, NO_POOL_CAP.capBps),
+      computeBonuses(RATE_TIERS, [referrer("r", [])], NO_POOL_CAP.totalPrincipal, NO_POOL_CAP.capBps),
     ).toEqual([]);
   });
 
@@ -45,6 +46,7 @@ describe("computeBonuses: rate tiers by qualified count", () => {
   ])("%d qualified referrals rates at %d bps", (count, rateBps) => {
     const referrals = Array.from({ length: count }, () => 10_000_000n); // 10 USDC each
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", referrals)],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -57,6 +59,7 @@ describe("computeBonuses: the worked example", () => {
   it("6 referrals at 300 USDC each, rate 4%, basis 1800 USDC -> 72 USDC of tickets", () => {
     const referrals = Array.from({ length: 6 }, () => 300n * USDC);
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", referrals)],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -70,6 +73,7 @@ describe("computeBonuses: the $2,500 per-referral basis cap", () => {
     // Rate tier 1 (200 bps) on a lone 5,000 USDC referral: uncapped basis
     // would give 100 USDC; capped at 2,500 it gives 50.
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", [5_000n * USDC])],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -85,6 +89,7 @@ describe("computeBonuses: the referrer's own remaining-headroom cap", () => {
     // referrer's own Principal, so the payout is capped at that Principal.
     const referrals = Array.from({ length: 11 }, () => 2_500n * USDC);
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", referrals, 10n * USDC)],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -97,6 +102,7 @@ describe("computeBonuses: the referrer's own remaining-headroom cap", () => {
     // the referrer only holds 10 USDC, so that is the ceiling.
     const referrals = Array.from({ length: 11 }, () => 2_500n * USDC);
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", referrals, 10n * USDC)],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -109,6 +115,7 @@ describe("computeBonuses: the referrer's own remaining-headroom cap", () => {
     // Same referrer, 100 USDC Principal, but 90 already granted this epoch:
     // only 10 USDC of headroom is left, well under the uncapped bonus.
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", [1_000n * USDC], 100n * USDC, 90n * USDC)],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -119,6 +126,7 @@ describe("computeBonuses: the referrer's own remaining-headroom cap", () => {
   it("a referrer already granted their full Principal today earns nothing more", () => {
     expect(
       computeBonuses(
+        RATE_TIERS,
         [referrer("r", [1_000n * USDC], 100n * USDC, 100n * USDC)],
         NO_POOL_CAP.totalPrincipal,
         NO_POOL_CAP.capBps,
@@ -153,7 +161,7 @@ describe("computeBonuses: pool-wide pro-rata scale-down", () => {
     const threeReferrals = Array.from({ length: 3 }, () => 1_000n * USDC);
     const inputs = [referrer("a", threeReferrals), referrer("b", threeReferrals)];
     const totalPrincipal = 3_000n * USDC; // 5% cap bps -> 150 USDC pool cap
-    const bonuses = computeBonuses(inputs, totalPrincipal, 500);
+    const bonuses = computeBonuses(RATE_TIERS, inputs, totalPrincipal, 500);
     const total = bonuses.reduce((sum, bonus) => sum + bonus.amount, 0n);
     expect(total).toBeLessThanOrEqual((totalPrincipal * 500n) / 10_000n);
     expect(bonuses.map((bonus) => bonus.amount).sort()).toEqual([75n * USDC, 75n * USDC]);
@@ -161,7 +169,7 @@ describe("computeBonuses: pool-wide pro-rata scale-down", () => {
 
   it("does not scale when the sum is already within the pool cap", () => {
     const inputs = [referrer("a", [10n * USDC])];
-    const bonuses = computeBonuses(inputs, NO_POOL_CAP.totalPrincipal, NO_POOL_CAP.capBps);
+    const bonuses = computeBonuses(RATE_TIERS, inputs, NO_POOL_CAP.totalPrincipal, NO_POOL_CAP.capBps);
     expect(bonuses).toEqual([
       { referrer: "a", amount: 200_000n, uncapped: 200_000n, qualifiedCount: 1, rateBps: 200 },
     ]);
@@ -172,7 +180,7 @@ describe("computeBonuses: pool-wide pro-rata scale-down", () => {
     // the $2,500 basis cap: with the pool cap this small, whale's share still
     // floors to a positive number but shrimp's floors to 0 and drops out.
     const inputs = [referrer("whale", [3_000n * USDC]), referrer("shrimp", [10_000n])];
-    const bonuses = computeBonuses(inputs, 10_000_000n, 1); // pool cap floors to 1,000 atomic units
+    const bonuses = computeBonuses(RATE_TIERS, inputs, 10_000_000n, 1); // pool cap floors to 1,000 atomic units
     expect(bonuses.some((bonus) => bonus.referrer === "shrimp")).toBe(false);
     expect(bonuses.some((bonus) => bonus.referrer === "whale")).toBe(true);
   });
@@ -189,6 +197,7 @@ describe("computeBonuses: alreadyGrantedThisEpoch (pool cap headroom)", () => {
     const totalPrincipal = 3_000n * USDC;
     const referrals = Array.from({ length: 3 }, () => 1_000n * USDC);
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("late", referrals)],
       totalPrincipal,
       500,
@@ -200,6 +209,7 @@ describe("computeBonuses: alreadyGrantedThisEpoch (pool cap headroom)", () => {
   it("returns nothing when the epoch's recorded grants already used the whole pool cap", () => {
     const totalPrincipal = 3_000n * USDC;
     const bonuses = computeBonuses(
+      RATE_TIERS,
       [referrer("late", [1_000n * USDC])],
       totalPrincipal,
       500,
@@ -210,8 +220,9 @@ describe("computeBonuses: alreadyGrantedThisEpoch (pool cap headroom)", () => {
 
   it("defaults to 0 already granted, same as omitting the argument entirely", () => {
     const inputs = [referrer("a", [10n * USDC])];
-    const withDefault = computeBonuses(inputs, NO_POOL_CAP.totalPrincipal, NO_POOL_CAP.capBps);
+    const withDefault = computeBonuses(RATE_TIERS, inputs, NO_POOL_CAP.totalPrincipal, NO_POOL_CAP.capBps);
     const withExplicitZero = computeBonuses(
+      RATE_TIERS,
       inputs,
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -225,6 +236,7 @@ describe("computeBonuses: referrers who earn nothing", () => {
   it("zero qualified referrals -> nothing", () => {
     expect(
       computeBonuses(
+        RATE_TIERS,
         [referrer("r", [])],
         NO_POOL_CAP.totalPrincipal,
         NO_POOL_CAP.capBps,
@@ -235,6 +247,7 @@ describe("computeBonuses: referrers who earn nothing", () => {
   it("a referrer with no Player (principal 0) -> nothing", () => {
     expect(
       computeBonuses(
+        RATE_TIERS,
         [referrer("r", [10n * USDC], 0n)],
         NO_POOL_CAP.totalPrincipal,
         NO_POOL_CAP.capBps,
@@ -244,6 +257,7 @@ describe("computeBonuses: referrers who earn nothing", () => {
 
   it("mixes an eligible referrer with an ineligible one: only the eligible one is returned", () => {
     const bonuses = computeBonuses(
+      RATE_TIERS,
       [referrer("earns", [10n * USDC]), referrer("nothing", [])],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -258,6 +272,7 @@ describe("computeBonuses: referrers who earn nothing", () => {
 describe("computeBonuses: uncapped", () => {
   it("not capped: uncapped equals amount when neither cap binds", () => {
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", [10n * USDC])],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -270,6 +285,7 @@ describe("computeBonuses: uncapped", () => {
     // $2,500 (5% tier) raw to $1,375, a $10 Principal caps amount at $10.
     const referrals = Array.from({ length: 11 }, () => 2_500n * USDC);
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", referrals, 10n * USDC)],
       NO_POOL_CAP.totalPrincipal,
       NO_POOL_CAP.capBps,
@@ -283,7 +299,7 @@ describe("computeBonuses: uncapped", () => {
     // are identical and the same cap/sum factor lands them on 75 USDC each.
     const threeReferrals = Array.from({ length: 3 }, () => 1_000n * USDC);
     const inputs = [referrer("a", threeReferrals), referrer("b", threeReferrals)];
-    const bonuses = computeBonuses(inputs, 3_000n * USDC, 500);
+    const bonuses = computeBonuses(RATE_TIERS, inputs, 3_000n * USDC, 500);
     for (const bonus of bonuses) {
       expect(bonus.amount).toBe(75n * USDC);
       expect(bonus.uncapped).toBe(bonus.amount);
@@ -298,6 +314,7 @@ describe("computeBonuses: uncapped", () => {
     // $1,375 * 40/100 = $550.
     const referrals = Array.from({ length: 11 }, () => 2_500n * USDC);
     const [bonus] = computeBonuses(
+      RATE_TIERS,
       [referrer("r", referrals, 100n * USDC)],
       4_000n * USDC,
       100, // 1% of $4,000 = $40 pool cap
@@ -409,14 +426,14 @@ describe("splitShares", () => {
 
 describe("bandForCount", () => {
   it("0 qualified referrals: tier 0 (no rate), next band is tier 1 (1-2, 200 bps)", () => {
-    expect(bandForCount(0)).toEqual({
+    expect(bandForCount(RATE_TIERS, 0)).toEqual({
       band: { tier: 0, rateBps: 0, minCount: 0, maxCount: 0 },
       nextBand: { tier: 1, rateBps: 200, minCount: 1, maxCount: 2 },
     });
   });
 
   it("4 qualified referrals: tier 2 (3-5, 300 bps), next band is tier 3 (6-10, 400 bps)", () => {
-    expect(bandForCount(4)).toEqual({
+    expect(bandForCount(RATE_TIERS, 4)).toEqual({
       band: { tier: 2, rateBps: 300, minCount: 3, maxCount: 5 },
       nextBand: { tier: 3, rateBps: 400, minCount: 6, maxCount: 10 },
     });
@@ -430,16 +447,41 @@ describe("bandForCount", () => {
     [6, { tier: 3, rateBps: 400, minCount: 6, maxCount: 10 }, { tier: 4, rateBps: 500, minCount: 11, maxCount: null }],
     [10, { tier: 3, rateBps: 400, minCount: 6, maxCount: 10 }, { tier: 4, rateBps: 500, minCount: 11, maxCount: null }],
   ])("%d qualified referrals bands as %o, next %o", (count, band, nextBand) => {
-    expect(bandForCount(count)).toEqual({ band, nextBand });
+    expect(bandForCount(RATE_TIERS, count)).toEqual({ band, nextBand });
   });
 
   it("the top band (11+, tier 4) has no next band", () => {
-    expect(bandForCount(11)).toEqual({
+    expect(bandForCount(RATE_TIERS, 11)).toEqual({
       band: { tier: 4, rateBps: 500, minCount: 11, maxCount: null },
       nextBand: null,
     });
-    expect(bandForCount(50)).toEqual({
+    expect(bandForCount(RATE_TIERS, 50)).toEqual({
       band: { tier: 4, rateBps: 500, minCount: 11, maxCount: null },
+      nextBand: null,
+    });
+  });
+});
+
+describe("custom tiers (the Game config's referralTiers)", () => {
+  const ONE_TIER = [{ tier: 1, min: 1, max: null, rateBps: 1000 }];
+
+  it("computeBonuses pays the passed rate, not the seed's", () => {
+    const [bonus] = computeBonuses(
+      ONE_TIER,
+      [referrer("r", [1_000n * USDC])],
+      NO_POOL_CAP.totalPrincipal,
+      NO_POOL_CAP.capBps,
+    );
+    expect(bonus).toMatchObject({ amount: 100n * USDC, rateBps: 1000, qualifiedCount: 1 });
+  });
+
+  it("bandForCount follows the passed tiers", () => {
+    expect(bandForCount(ONE_TIER, 0)).toEqual({
+      band: { tier: 0, rateBps: 0, minCount: 0, maxCount: 0 },
+      nextBand: { tier: 1, rateBps: 1000, minCount: 1, maxCount: null },
+    });
+    expect(bandForCount(ONE_TIER, 20)).toEqual({
+      band: { tier: 1, rateBps: 1000, minCount: 1, maxCount: null },
       nextBand: null,
     });
   });

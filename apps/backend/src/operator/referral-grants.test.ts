@@ -8,6 +8,7 @@ import { PrismaClient } from "@prisma/client";
 import { Keypair } from "@solana/web3.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { DEFAULT_GAME_CONFIG } from "../api/game-config";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
 import { LIVE_POOL_DEFAULTS } from "../test-utils/live-yield-defaults";
 import { grantReferralBonuses, referralGrantsForEpoch } from "./referral-grants";
@@ -72,9 +73,9 @@ describe.skipIf(!DB_AVAILABLE)("Referral bonus grants", () => {
     await setCap(500);
   });
 
-  const setCap = (bonusCapBps: number) =>
+  const setCap = (bonusCapBps: number, referralTiers: unknown = DEFAULT_GAME_CONFIG.referralTiers) =>
     prisma.gameConfig.create({
-      data: { poolAddress: POOL, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps, referralTiers: [], maxTilesPerBet: 36 },
+      data: { poolAddress: POOL, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps, referralTiers: referralTiers as object, maxTilesPerBet: 36 },
     });
 
   const grantRows = () =>
@@ -120,6 +121,25 @@ describe.skipIf(!DB_AVAILABLE)("Referral bonus grants", () => {
     expect(total).toBeLessThanOrEqual(100n * USDC);
     expect(total).toBeGreaterThan(99n * USDC); // 180 USDC scaled to the 100 USDC cap, floored per grant
     expect(grants.every((g) => g.bonusCapBps === 1)).toBe(true);
+  });
+
+  it("pays at the tiers of the Game config row in force, and the route keeps the tier it was paid at", async () => {
+    await setCap(500, [{ tier: 7, min: 1, max: null, rateBps: 1000 }]); // newest row: one tier, 10%
+    const a = await referrerWith(1_000n, [100n, 100n, 100n]); // the seed tiers would pay 3% of 300 = 9 USDC
+    expect(await run()).toBe(1);
+    expect((await grantRows()).map((r) => r.delta)).toEqual([30n * USDC]);
+
+    await setCap(500); // a later change back to the seed tiers must not rewrite the booked grant
+    const { grants } = await referralGrantsForEpoch(prisma, POOL, EPOCH);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).toMatchObject({ referrer: a.referrer, amount: 30n * USDC, tier: 7, rateBps: 1000 });
+  });
+
+  it("throws when the row in force has tiers that do not parse, instead of using the seed", async () => {
+    await setCap(500, [{ tier: 1, min: 0, max: null, rateBps: 200 }]);
+    await referrerWith(1_000n, [100n]);
+    await expect(run()).rejects.toThrow(/referralTiers do not parse/);
+    expect(await grantRows()).toEqual([]);
   });
 
   it("grants a Referrer that qualifies later against the headroom the first grants left", async () => {
