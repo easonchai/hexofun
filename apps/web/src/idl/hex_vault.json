@@ -4208,6 +4208,11 @@
       "code": 6112,
       "name": "ProofRangeMismatch",
       "msg": "the drawn target is outside the leaf's range"
+    },
+    {
+      "code": 6113,
+      "name": "HarvestBelowMinimum",
+      "msg": "the harvest needs a venue redeem under the pool's minimum venue move"
     }
   ],
   "types": [

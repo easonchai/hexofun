@@ -466,16 +466,16 @@ describe("harvest", () => {
 
       expect((await balance(ctx.treasury)) - treasury).toBe(90n * USDC);
       expect((await balance(ctx.jackpotVault)) - jackpot).toBe(810n * USDC);
-      // 900 redeemed in, 900 paid out.
-      expect(await balance(ctx.principalVault)).toBe(vault);
+      // The 100 of free idle pays first; the other 800 is redeemed. 900 paid out.
+      expect(await balance(ctx.principalVault)).toBe(vault - 100n * USDC);
       const pool = await fetchPool(ctx);
       expect(pool.feeOwed.toString()).toBe("0");
       expect(pool.prizeOwed.toString()).toBe("0");
       expect(pool.yieldOwed.toString()).toBe("0");
-      // 450 shares left at 2.0.
-      expect(pool.venueValue.toString()).toBe((900n * USDC).toString());
+      // 500 shares left at 2.0.
+      expect(pool.venueValue.toString()).toBe((1_000n * USDC).toString());
       const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
-      expect(reserve.shares.toString()).toBe((450n * USDC).toString());
+      expect(reserve.shares.toString()).toBe((500n * USDC).toString());
 
       const event = await findEvent<HarvestEvent>(signature, "harvested");
       expect(event?.gain.toString()).toBe((900n * USDC).toString());
@@ -509,25 +509,25 @@ describe("harvest", () => {
       await refused(ctx, harvestMethod(ctx).rpc(), /NothingToHarvest/);
       expect(await snapshot()).toEqual(before);
 
-      // 450 shares at 2.5 are worth 1,125: a gain of 225 over the 900 booked.
-      // Fee 22.5, prize 202.5, redeemed as 90 shares. The totals were zeroed
-      // by the first harvest, so the event shows 225, not 1,125.
+      // 500 shares at 2.5 are worth 1,250: a gain of 250 over the 1,000 booked.
+      // Fee 25, prize 225, redeemed as 100 shares (the vault is empty). The
+      // totals were zeroed by the first harvest, so the event shows 250.
       await setRate(ctx, 25n * 10n ** 17n);
-      await fundStub(ctx, 225n * USDC);
+      await fundStub(ctx, 250n * USDC);
       await waitPastLastSync(ctx);
       const treasury = await balance(ctx.treasury);
       const jackpot = await balance(ctx.jackpotVault);
       const signature = await harvest(ctx);
 
-      expect((await balance(ctx.treasury)) - treasury).toBe(22_500_000n);
-      expect((await balance(ctx.jackpotVault)) - jackpot).toBe(202_500_000n);
+      expect((await balance(ctx.treasury)) - treasury).toBe(25n * USDC);
+      expect((await balance(ctx.jackpotVault)) - jackpot).toBe(225n * USDC);
       const event = await findEvent<HarvestEvent>(signature, "harvested");
-      expect(event?.gain.toString()).toBe((225n * USDC).toString());
-      expect(event?.fee.toString()).toBe("22500000");
-      expect(event?.prizeShare.toString()).toBe("202500000");
+      expect(event?.gain.toString()).toBe((250n * USDC).toString());
+      expect(event?.fee.toString()).toBe((25n * USDC).toString());
+      expect(event?.prizeShare.toString()).toBe((225n * USDC).toString());
       const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
-      expect(reserve.shares.toString()).toBe((360n * USDC).toString());
-      expect((await fetchPool(ctx)).venueValue.toString()).toBe((900n * USDC).toString());
+      expect(reserve.shares.toString()).toBe((400n * USDC).toString());
+      expect((await fetchPool(ctx)).venueValue.toString()).toBe((1_000n * USDC).toString());
     },
     TIMEOUT,
   );
@@ -569,15 +569,16 @@ describe("harvest", () => {
       expect(split.fee).toBe(90n * USDC);
       expect(split.depositor > 0n && split.prize > 0n).toBe(true);
 
-      // Redeeming `owed` burns ceil(owed / 2) shares at 2.0 and the value falls
-      // by twice that, so the venue costs one unit too many when `owed` is odd.
-      // The fee bears it.
+      // The 100 of free idle pays first. Redeeming the `gap` burns ceil(gap / 2)
+      // shares at 2.0 and the value falls by twice that, so the venue costs one
+      // unit too many when `gap` is odd. The fee bears it.
       const owed = split.fee + split.prize;
-      const fall = 2n * ((owed + 1n) / 2n);
-      const dust = fall - owed;
+      const gap = owed - 100n * USDC;
+      const fall = 2n * ((gap + 1n) / 2n);
+      const dust = fall - gap;
       expect((await balance(ctx.treasury)) - treasury).toBe(split.fee - dust);
       expect((await balance(ctx.jackpotVault)) - jackpot).toBe(split.prize);
-      expect((await balance(ctx.principalVault)) - vault).toBe(dust);
+      expect((await balance(ctx.principalVault)) - vault).toBe(dust - 100n * USDC);
 
       expect(after.feeOwed.toString()).toBe("0");
       expect(after.prizeOwed.toString()).toBe("0");
@@ -631,6 +632,124 @@ describe("harvest", () => {
       const after = await fetchPool(ctx);
       expect(after.feeOwed.toString()).toBe("0");
       expect(after.prizeOwed.toString()).toBe("0");
+    },
+    TIMEOUT,
+  );
+});
+
+describe("harvest redeems only the gap free idle leaves", () => {
+  it(
+    "pays from free idle without a redeem when it covers what is owed",
+    async () => {
+      const ctx = await mintedPool(1_000n * USDC);
+      await deploy(ctx, 900n * USDC);
+      // 900 shares at 1.1 are worth 990: a gain of 90, a 9 fee, an 81 prize.
+      // The vault holds 100, so no redeem runs.
+      await setRate(ctx, 11n * 10n ** 17n);
+      await waitPastLastSync(ctx);
+      const reserveBefore = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+      const [treasury, jackpot, vault] = [
+        await balance(ctx.treasury),
+        await balance(ctx.jackpotVault),
+        await balance(ctx.principalVault),
+      ];
+
+      await harvest(ctx);
+
+      expect((await balance(ctx.treasury)) - treasury).toBe(9n * USDC);
+      expect((await balance(ctx.jackpotVault)) - jackpot).toBe(81n * USDC);
+      expect(await balance(ctx.principalVault)).toBe(vault - 90n * USDC);
+      const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+      expect(reserve.shares.toString()).toBe(reserveBefore.shares.toString());
+      expect(await stubVenueValue(ctx)).toBe(990n * USDC);
+      expect((await fetchPool(ctx)).venueValue.toString()).toBe((990n * USDC).toString());
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "fails with HarvestBelowMinimum and changes nothing when the gap is under the minimum venue move",
+    async () => {
+      const ctx = await mintedPool(1_000n * USDC);
+      await deploy(ctx, 400n * USDC);
+      // 400 shares at 2.625 are worth 1,050: a gain of 650 against 600 idle,
+      // a gap of 50 under the 100 minimum.
+      await setRate(ctx, 2_625n * 10n ** 15n);
+      await fundStub(ctx, 650n * USDC);
+      await waitPastLastSync(ctx);
+      const poolBefore = await fetchPool(ctx);
+      const snapshot = () =>
+        Promise.all(
+          [ctx.treasury, ctx.jackpotVault, ctx.principalVault, ctx.venue.klendCtoken].map(balance),
+        );
+      const before = await snapshot();
+
+      await refused(ctx, harvestMethod(ctx).rpc(), /HarvestBelowMinimum/);
+
+      expect(await snapshot()).toEqual(before);
+      const poolAfter = await fetchPool(ctx);
+      expect(poolAfter.feeOwed.toString()).toBe(poolBefore.feeOwed.toString());
+      expect(poolAfter.venueValue.toString()).toBe(poolBefore.venueValue.toString());
+      const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+      expect(reserve.shares.toString()).toBe((400n * USDC).toString());
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "redeems the gap and pays both destinations when it is at least the minimum venue move",
+    async () => {
+      const ctx = await mintedPool(1_000n * USDC);
+      await deploy(ctx, 800n * USDC);
+      // 800 shares at 2.0 are worth 1,600: a gain of 800 against 200 idle, a
+      // gap of 600. The fee is 80 and the prize 720.
+      await setRate(ctx, 2n * SCALE);
+      await fundStub(ctx, 800n * USDC);
+      await waitPastLastSync(ctx);
+      const [treasury, jackpot] = [await balance(ctx.treasury), await balance(ctx.jackpotVault)];
+
+      await harvest(ctx);
+
+      expect((await balance(ctx.treasury)) - treasury).toBe(80n * USDC);
+      expect((await balance(ctx.jackpotVault)) - jackpot).toBe(720n * USDC);
+      // 200 of free idle plus 600 redeemed, 800 paid out.
+      expect(await balance(ctx.principalVault)).toBe(0n);
+      const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+      expect(reserve.shares.toString()).toBe((500n * USDC).toString());
+      expect((await fetchPool(ctx)).venueValue.toString()).toBe((1_000n * USDC).toString());
+    },
+    TIMEOUT,
+  );
+
+  it(
+    "does not count a Pending withdrawal as free idle",
+    async () => {
+      const { ctx, owner } = await fundedPool(1_000n * USDC, { baseRateBps: 0 });
+      await deploy(ctx, 900n * USDC);
+      await beginFirstEpoch(ctx);
+      // The vault holds 100; 60 of it is queued, so free idle is 40.
+      await requestWithdraw(ctx, owner, 60n * USDC);
+      expect((await fetchPool(ctx)).pendingWithdrawals.toString()).toBe((60n * USDC).toString());
+
+      // 900 shares at 1.1 are worth 990: owed 90. The vault holds that much, but
+      // 40 free idle leaves a gap of 50, under the minimum.
+      await setRate(ctx, 11n * 10n ** 17n);
+      await waitPastLastSync(ctx);
+      await refused(ctx, harvestMethod(ctx).rpc(), /HarvestBelowMinimum/);
+
+      // At 2.0 the owed 900 leaves a gap of 860, redeemed from the venue, and
+      // the 60 queued stays in the vault.
+      await setRate(ctx, 2n * SCALE);
+      await fundStub(ctx, 900n * USDC);
+      await waitPastLastSync(ctx);
+      await harvest(ctx);
+
+      expect(await balance(ctx.principalVault)).toBe(60n * USDC);
+      expect((await fetchPlayer(ctx, owner)).pendingWithdraw.toString()).toBe(
+        (60n * USDC).toString(),
+      );
+      const reserve = await program.account.testReserve.fetch(ctx.venue.klendReserve);
+      expect(reserve.shares.toString()).toBe((470n * USDC).toString());
     },
     TIMEOUT,
   );

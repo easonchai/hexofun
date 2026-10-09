@@ -119,7 +119,8 @@ pub fn cancel_venue(ctx: Context<CancelVenue>) -> Result<()> {
 /// into the principal vault. The USDC never leaves the program, which is why
 /// the Admin and the Operator may do it at any time (the emergency park) and
 /// anyone may while a proposal is open (the Operator's crank, and a way out if
-/// the keys are gone).
+/// the keys are gone). A signer who is neither must move at least
+/// `min_venue_move`, so a stranger cannot grind the position into kVault dust.
 ///
 /// The venue value drops by what came back. A klend reserve that cannot pay
 /// fails `VenueIlliquid` and nothing moves. A venue that returns less than
@@ -144,6 +145,13 @@ pub fn drain_venue<'info>(ctx: Context<'info, DrainVenue<'info>>, amount: u64) -
         HexVaultError::Unauthorized
     );
     require!(amount > 0, HexVaultError::ZeroAmount);
+    // A stranger's drain is worth at least the dust a kVault redeem costs; the
+    // Admin and Operator can still bring the position under the dust line.
+    let trusted = signer == a.pool.admin || signer == a.pool.operator;
+    require!(
+        trusted || amount >= a.pool.min_venue_move,
+        HexVaultError::VenueMoveTooSmall
+    );
     require!(amount <= read, HexVaultError::VenueIlliquid);
 
     let before = a.principal_vault.amount;

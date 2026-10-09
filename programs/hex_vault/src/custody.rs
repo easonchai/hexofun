@@ -1016,17 +1016,21 @@ pub fn recall<'info>(ctx: Context<'info, Recall<'info>>, amount: u64) -> Result<
     Ok(())
 }
 
-/// Permissionless (ticket 07). Syncs, redeems the fee owed plus the prize
-/// share owed, pays the first to `pool.treasury` and the second to the
-/// jackpot vault, and zeroes both. Depositors' yield, every Player and the
-/// index are untouched.
+/// Permissionless (ticket 07). Syncs, pays the fee owed to `pool.treasury` and
+/// the prize share owed to the jackpot vault, and zeroes both. Depositors'
+/// yield, every Player and the index are untouched.
 ///
 /// With nothing owed it fails with `NothingToHarvest`, moving no USDC.
+///
+/// Free idle (the principal vault less Pending withdrawals) pays first. Only
+/// the gap between what is owed and free idle is redeemed from the venue, and
+/// a gap under `min_venue_move` fails with `HarvestBelowMinimum`, so a
+/// stranger cannot turn each call into kVault dust. No gap, no redeem.
 ///
 /// A gain is booked against the venue's value, so the owed USDC is at the
 /// venue. The one case where it is not is after a recall that brought the
 /// whole position home (Shutdown): then `venue_value` is under what is owed,
-/// the rest already sits in the vault, and only `min(owed, venue_value)` is
+/// the rest already sits in the vault, and only `min(gap, venue_value)` is
 /// redeemed. If the venue cannot return that much the redeem fails with
 /// `VenueIlliquid` and the whole instruction reverts, sync included, with
 /// nothing paid and nothing zeroed.
@@ -1050,7 +1054,20 @@ pub fn harvest<'info>(ctx: Context<'info, Harvest<'info>>) -> Result<()> {
         .ok_or(HexVaultError::ArithmeticOverflow)?;
     require!(owed > 0, HexVaultError::NothingToHarvest);
 
-    let from_venue = owed.min(read);
+    // Free idle pays first: a redeem costs dust on a kVault, so only the gap
+    // between what is owed and free idle comes from the venue, and only if it
+    // is worth a redeem.
+    let free_idle = a
+        .principal_vault
+        .amount
+        .saturating_sub(a.pool.pending_withdrawals);
+    let gap = owed.saturating_sub(free_idle);
+    require!(
+        gap == 0 || gap >= a.pool.min_venue_move,
+        HexVaultError::HarvestBelowMinimum
+    );
+
+    let from_venue = gap.min(read);
     let mut dust = 0;
     if from_venue > 0 {
         let before = a.principal_vault.amount;

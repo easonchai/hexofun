@@ -155,6 +155,32 @@ describe("drain_venue", () => {
   );
 
   it(
+    "a stranger's drain under the minimum venue move fails while a proposal is open, one at it succeeds, and the Admin and Operator drain under it",
+    async () => {
+      const ctx = await deployedPool();
+      const stranger = Keypair.generate();
+      await airdrop(stranger.publicKey, 1);
+      const min = BigInt((await program.account.pool.fetch(ctx.pool)).minVenueMove.toString());
+      await propose(ctx);
+      await waitPastLastSync(ctx);
+
+      await expect(drainVenueMethod(ctx, min - 1n, stranger).rpc()).rejects.toThrow(
+        /VenueMoveTooSmall/,
+      );
+      expect(await stubVenueValue(ctx)).toBe(4_000n * USDC);
+
+      await drainVenueMethod(ctx, min, stranger).rpc();
+      expect(await stubVenueValue(ctx)).toBe(4_000n * USDC - min);
+
+      await drainVenueMethod(ctx, 1n).rpc();
+      await drainVenueMethod(ctx, 1n, ctx.operator).rpc();
+      expect(await stubVenueValue(ctx)).toBe(4_000n * USDC - min - 2n);
+      await assertSolvent(ctx);
+    },
+    TIMEOUT,
+  );
+
+  it(
     "a drain larger than the venue holds fails with VenueIlliquid and moves nothing",
     async () => {
       const ctx = await deployedPool();

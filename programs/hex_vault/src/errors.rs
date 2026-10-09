@@ -301,4 +301,8 @@ pub enum HexVaultError {
     ProofSumMismatch,
     #[msg("the drawn target is outside the leaf's range")]
     ProofRangeMismatch,
+
+    // audit-2026-10-09 ticket 01. Appended too.
+    #[msg("the harvest needs a venue redeem under the pool's minimum venue move")]
+    HarvestBelowMinimum,
 }

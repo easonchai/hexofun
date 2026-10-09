@@ -37,14 +37,15 @@ const fetchPool = (ctx: PoolCtx) => program.account.pool.fetch(ctx.pool);
 const balance = async (account: PublicKey): Promise<bigint> =>
   BigInt((await provider.connection.getTokenAccountBalance(account)).value.amount);
 
-/** 10,000 USDC deposited (all Pending, epoch 0), 9,000 deployed, then the rate
- *  doubles so a fee is owed and booked. The stub vault is funded for the gain. */
-async function gainedPool() {
+/** 10,000 USDC (plus `extra` units) deposited (all Pending, epoch 0), 9,000
+ *  deployed, then the rate doubles so a fee is owed and booked. The stub vault
+ *  is funded for the gain. */
+async function gainedPool(extra = 0n) {
   // Base rate 0: no Depositor share, so the fee and the prize split the gain.
   const ctx = await setupPool({ baseRateBps: 0 });
-  const owner = await ctx.fundedWallet(10_000n * USDC);
+  const owner = await ctx.fundedWallet(10_000n * USDC + extra);
   await program.methods
-    .deposit(new BN((10_000n * USDC).toString()))
+    .deposit(new BN((10_000n * USDC + extra).toString()))
     .accountsPartial({
       owner: owner.keypair.publicKey,
       pool: ctx.pool,
@@ -100,11 +101,14 @@ describe("redeem dust", () => {
   it(
     "harvest pays the whole fee when the vault received what the value fell by",
     async () => {
-      const { ctx } = await gainedPool();
+      // One extra unit deposited, so the gap harvest redeems (owed less free
+      // idle) is odd.
+      const { ctx } = await gainedPool(1n);
       const pool = await fetchPool(ctx);
       const owed = big(pool.feeOwed) + big(pool.prizeOwed);
-      // Odd, so `owed + 1` is even and the fall equals what arrives.
+      // Odd, so `gap + 1` is even and the fall equals what arrives.
       expect(owed % 2n).toBe(1n);
+      expect((owed - (await balance(ctx.principalVault))) % 2n).toBe(1n);
       const treasury = await balance(ctx.treasury);
 
       await harvestMethod(ctx, ctx.treasury).rpc();
