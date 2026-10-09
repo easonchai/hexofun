@@ -32,6 +32,7 @@ import {
   launchCountdown,
   launchCountdownLabel,
   prizeCardState,
+  prizeShown,
   showsNextDrawLabel,
 } from "../launch.js";
 import { earningsLine, formatAddress, formatMoney2 } from "../lib/money.js";
@@ -272,7 +273,7 @@ export function Dashboard(props: DashboardScreenProps) {
             <Star />
           </div>
           <div className="dash-prize" data-testid="dash-prize">
-            {currentEpoch ? wholeDollars(currentEpoch.jackpotAmount) : "$—"}
+            {currentEpoch ? wholeDollars(prizeShown(currentEpoch)) : "$—"}
           </div>
           {showsNextDrawLabel(cardState, drawing, remaining) && (
             <div className="dash-clock-label">NEXT DRAW IN</div>

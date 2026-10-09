@@ -682,7 +682,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(body.id).toBe("7");
     // Open epoch: the indexed snapshot is 0, the vault balance is what shows.
     expect(body.jackpotAmount).toBe(VAULT_BALANCE.toString());
-    expect(body.drawing).toEqual({ epochId: "6", status: 1 });
+    expect(body.drawing).toEqual({ epochId: "6", status: 1, jackpotAmount: "12000000" });
     assertNoLargeNumbers(body, "/epochs/current");
   });
 
@@ -1649,7 +1649,7 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
       expect(body.currentEpoch.jackpotAmount).toBe(VAULT_BALANCE.toString());
       // Epoch 6 (the one that just ended) is seeded Ended, so the mid-draw
       // case is exercised by the default seed, not extra setup.
-      expect(body.currentEpoch.drawing).toEqual({ epochId: "6", status: 1 });
+      expect(body.currentEpoch.drawing).toEqual({ epochId: "6", status: 1, jackpotAmount: "12000000" });
       expect(body.player).toMatchObject({
         owner: ALICE,
         odds: "100.00",

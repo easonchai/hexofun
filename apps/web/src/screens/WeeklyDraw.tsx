@@ -18,6 +18,7 @@ import type { PublicKey } from "@solana/web3.js";
 import { atomicShort } from "../activityRows.js";
 import { apiBaseUrl, fetchEpochs, type CurrentEpochDto, type EpochDto, type PlayerDto } from "../api.js";
 import { hmText } from "../engine.js";
+import { prizeShown } from "../launch.js";
 import { formatAddress } from "../lib/money.js";
 import { PanelCard, Stat, StatGrid } from "../ui.js";
 import { useApiPoll } from "../useApiPoll.js";
@@ -89,7 +90,7 @@ export function WeeklyDraw(props: WeeklyDrawScreenProps) {
           <Stat
             label="Prize"
             value={
-              currentEpoch ? `${atomicShort(currentEpoch.jackpotAmount)} ${SYMBOL}` : "—"
+              currentEpoch ? `${atomicShort(prizeShown(currentEpoch))} ${SYMBOL}` : "—"
             }
             testid="prize-amount"
           />

@@ -272,6 +272,8 @@ export interface PoolSummaryDto {
 export interface DrawingProgressDto {
   epochId: string;
   status: StatusValue;
+  /** Atomic USDC the draw is for; "0" until `request_draw` snapshots it. */
+  jackpotAmount: string;
 }
 
 export type CurrentEpochDto = EpochDto & {

@@ -1103,12 +1103,14 @@ export interface FeedRow {
 }
 
 /** Draw progress for the epoch that just ended, from the row already read.
- *  Null unless `previous` is Ended (waiting for the draw) or Drawing. */
+ *  Null unless `previous` is Ended (waiting for the draw) or Drawing.
+ *  `jackpotAmount` is what it draws for: 0 until `request_draw` snapshots it,
+ *  then reserved out of the vault, so the new epoch's live figure leaves it out. */
 function drawingProgressFrom(previous: Epoch | null) {
   if (previous === null || (previous.status !== EPOCH_ENDED && previous.status !== EPOCH_DRAWING)) {
     return null;
   }
-  return { epochId: previous.id, status: previous.status };
+  return { epochId: previous.id, status: previous.status, jackpotAmount: previous.jackpotAmount };
 }
 
 /** A klend reserve's decoded figures, or null when the account is not one

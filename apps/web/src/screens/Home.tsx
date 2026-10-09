@@ -17,6 +17,7 @@ import {
   launchCountdown,
   launchCountdownLabel,
   prizeCardState,
+  prizeShown,
   showsNextDrawLabel,
 } from "../launch.js";
 
@@ -156,7 +157,7 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
           <Star />
         </div>
         <div className="home-amount" data-testid="home-prize">
-          {currentEpoch ? wholeDollars(currentEpoch.jackpotAmount) : "$—"}
+          {currentEpoch ? wholeDollars(prizeShown(currentEpoch)) : "$—"}
         </div>
         <p className="home-tagline">
           Save your <em>money</em>, play your <em>luck</em>

@@ -4,8 +4,25 @@ import {
   launchCountdown,
   launchCountdownLabel,
   prizeCardState,
+  prizeShown,
   showsNextDrawLabel,
 } from "./launch.js";
+
+describe("prizeShown", () => {
+  it("shows the live prize with no draw under way", () => {
+    expect(prizeShown({ jackpotAmount: "5", drawing: null })).toBe("5");
+  });
+
+  it("keeps the live prize while the ended epoch waits for request_draw", () => {
+    expect(prizeShown({ jackpotAmount: "5", drawing: { epochId: "4", status: 1, jackpotAmount: "0" } })).toBe("5");
+  });
+
+  it("shows the drawn-for prize once request_draw reserved it", () => {
+    expect(
+      prizeShown({ jackpotAmount: "0", drawing: { epochId: "4", status: 2, jackpotAmount: "2816873" } }),
+    ).toBe("2816873");
+  });
+});
 
 describe("launchCountdown", () => {
   it("is unscheduled with no launch time configured", () => {
