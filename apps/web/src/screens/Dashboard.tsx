@@ -200,6 +200,9 @@ export function Dashboard(props: DashboardScreenProps) {
   // What the open position has earned, settled into Principal or not; zero
   // until the backend knows the wallet.
   const earnings = BigInt(playerExtras.data?.positionYield ?? "0");
+  // Settled yield already sits in Principal; add the unsettled part so the
+  // card shows everything earned either way.
+  const balance = principal + BigInt(playerExtras.data?.unsettledYield ?? "0");
   const apy = baseRateBps === null ? null : apyFromBaseRateBps(baseRateBps);
   // Odds need the pool-wide weight denominator, so they only exist once the
   // backend knows this wallet. Before the first deposit the whole strip goes.
@@ -216,7 +219,7 @@ export function Dashboard(props: DashboardScreenProps) {
             <div>
               <dt>PRINCIPAL</dt>
               <dd className="dash-principal" data-testid="dash-principal">
-                ${fmt2(principal)}
+                ${fmt2(balance)}
               </dd>
             </div>
             <div>
