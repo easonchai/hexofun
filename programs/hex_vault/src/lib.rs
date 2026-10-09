@@ -69,19 +69,18 @@ declare_id!("LFk9ba6QXuM9oYRRNGGPxMGzfo13X3DAr8ghSPz72C6");
 // `no-entrypoint`) must not get a second `security_txt` symbol linked in
 // alongside its own program's.
 //
-// project_url and contacts are TODO: the user owns the live app URL and the
-// real contact channels (see spec.md "Open items the user owns"). Fill them
-// in before the mainnet deploy; a placeholder security.txt is worse than
-// none, since it earns a wasted report to a dead inbox.
+// contacts is TODO: the user owns the real contact channels (see spec.md
+// "Open items the user owns"). Fill it in before the mainnet deploy; a
+// placeholder security.txt is worse than none, since it earns a wasted report
+// to a dead inbox.
 #[cfg(not(feature = "no-entrypoint"))]
 solana_security_txt::security_txt! {
     name: "HexVault",
-    // TODO(user): replace with the live app URL once deployed.
-    project_url: "TODO: https://hexvault.example",
+    project_url: "https://app.hexofun.lol",
     // TODO(user): replace with a real, monitored contact before mainnet.
     contacts: "email:TODO@hexvault.example",
-    policy: "We do not currently pay a bug bounty. Report vulnerabilities responsibly to the contact above; do not disclose or exploit before we confirm a fix.",
-    source_code: "https://github.com/easonchai/HexVault"
+    // No source_code: the repository is private.
+    policy: "We do not currently pay a bug bounty. Report vulnerabilities responsibly to the contact above; do not disclose or exploit before we confirm a fix."
 }
 
 #[program]
