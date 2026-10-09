@@ -1,5 +1,5 @@
 // Off-chain tickets ticket 15: the delegation text, and the prompt rules of
-// `ensureSession` / `revokeSession`, with a fake wallet, storage, clock and API.
+// `ensureSession`, with a fake wallet, storage, clock and API.
 import { utils as anchorUtils } from "@anchor-lang/core";
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
@@ -11,8 +11,6 @@ import {
   ensureSession,
   httpSessionApi,
   loadSession,
-  revokeMessage,
-  revokeSession,
   LEDGER_COPY,
   REFRESH_BELOW_MS,
   SESSION_SECONDS,
@@ -53,16 +51,12 @@ class MemoryStorage {
 
 /** A recording backend: hands out sequential nonces, stores nothing. */
 function fakeApi(over: Partial<SessionApi> = {}) {
-  const calls = { nonce: 0, sessions: [] as { message: string; signature: string }[], revokes: [] as { id: string; time: number; signature: string }[] };
+  const calls = { nonce: 0, sessions: [] as { message: string; signature: string }[] };
   const api: SessionApi = {
     fetchNonce: async () => ({ ok: true, nonce: `nonce${++calls.nonce}` }),
     postSession: async (message, signature) => {
       calls.sessions.push({ message, signature });
       return { ok: true, id: `session${calls.sessions.length}`, expiresAt: new Date(T0 + SESSION_SECONDS * 1000).toISOString() };
-    },
-    postRevoke: async (id, time, signature) => {
-      calls.revokes.push({ id, time, signature });
-      return { ok: true };
     },
     ...over,
   };
@@ -276,42 +270,6 @@ describe("ensureSession", () => {
   });
 });
 
-describe("revokeSession", () => {
-  it("sends the wallet's signature over the revoke text and clears the key", async () => {
-    const { deps, calls, storage } = setup();
-    await ensureSession(deps);
-    expect(storage.map.size).toBe(1);
-
-    expect(await revokeSession(deps)).toEqual({ ok: true, sent: true });
-    const [revoke] = calls.revokes;
-    expect(revoke).toMatchObject({ id: "session1", time: T0 / 1000 });
-    const text = new TextEncoder().encode(revokeMessage(KEY.publicKey.toBase58(), T0 / 1000));
-    expect(await verifyWith(WALLET, text, bs58.decode(revoke!.signature))).toBe(true);
-    expect(storage.map.size).toBe(0);
-  });
-
-  it("makes the next ensure prompt again", async () => {
-    const { deps, prompts } = setup();
-    await ensureSession(deps);
-    await revokeSession(deps);
-    expect(await ensureSession(deps)).toMatchObject({ ok: true, prompted: true });
-    expect(prompts.signMessage).toBe(3);
-  });
-
-  it("clears the key even when the server is down, and keeps it when the wallet refuses", async () => {
-    const down = setup({ api: { postRevoke: async () => ({ ok: false, message: "offline" }) } });
-    await ensureSession(down.deps);
-    expect(await revokeSession(down.deps)).toEqual({ ok: true, sent: false });
-    expect(down.storage.map.size).toBe(0);
-
-    const kept = setup();
-    await ensureSession(kept.deps);
-    const refusing = { ...kept.deps, signer: { ...kept.deps.signer, signMessage: async () => { throw new Error("no"); } } };
-    expect(await revokeSession(refusing)).toMatchObject({ ok: false, reason: "rejected" });
-    expect(kept.storage.map.size).toBe(1);
-  });
-});
-
 describe("httpSessionApi", () => {
   const reply = (status: number, body: unknown) => async () =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -324,7 +282,7 @@ describe("httpSessionApi", () => {
       throw new TypeError("Failed to fetch");
     });
     expect(await offline.fetchNonce()).toMatchObject({ ok: false });
-    expect(await offline.postRevoke("id", 1, "s")).toMatchObject({ ok: false });
+    expect(await offline.postSession("m", "s")).toMatchObject({ ok: false });
   });
 
   it("reads the nonce and the created session", async () => {

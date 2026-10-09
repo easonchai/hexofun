@@ -606,12 +606,7 @@ export function App() {
             <BetDrawer
               open={drawerOpen && !betSession.cannotSign}
               onOpenChange={setDrawerOpen}
-              session={{
-                active: betSession.session !== null,
-                busy: betSession.busy,
-                error: betSession.error,
-                onRevoke: () => void betSession.revoke(),
-              }}
+              session={{ busy: betSession.busy, error: betSession.error }}
               soundOn={soundOn}
               onToggleSound={() => {
                 const next = !soundOn;

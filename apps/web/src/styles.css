@@ -2378,23 +2378,6 @@ input::placeholder {
     padding: 0 16px;
   }
 
-  .session-revoke {
-    margin-left: auto;
-    cursor: pointer;
-    padding: 7px 10px;
-    border: 1px solid var(--card-border);
-    border-radius: 8px;
-    background: none;
-    color: var(--accent-text);
-    font-size: 11px;
-    font-weight: 600;
-  }
-
-  .session-revoke:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
   .session-status {
     margin: 0;
     padding: 0 16px;

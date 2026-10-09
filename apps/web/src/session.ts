@@ -3,7 +3,7 @@
  * A connected wallet signs once per 24 hours a SIWS-shaped text that names a
  * browser-held ed25519 key; the key then signs bets with no wallet popup.
  *
- * `delegationMessage` and `revokeMessage` mirror the backend exactly
+ * `delegationMessage` mirrors the backend exactly
  * (apps/backend/src/api/session.ts): the server rebuilds the text and refuses
  * a single differing byte. Everything with a side effect (storage, clock,
  * network, wallet) comes in through `SessionDeps`, so the prompt rules are
@@ -54,9 +54,6 @@ export function delegationMessage(f: DelegationFields): string {
   ].join("\n");
 }
 
-export const revokeMessage = (sessionPubkey: string, unixSeconds: number): string =>
-  `HexVault revoke session ${sessionPubkey} ${unixSeconds}`;
-
 /** The SIWS input a wallet's `signIn` builds `delegationMessage` from. */
 export interface SignInInput {
   domain: string;
@@ -102,12 +99,10 @@ export type NonceResult =
 export type PostResult =
   | { ok: true; id: string; expiresAt: string }
   | { ok: false; code: string; message: string };
-export type RevokePostResult = { ok: true } | { ok: false; message: string };
 
 export interface SessionApi {
   fetchNonce(): Promise<NonceResult>;
   postSession(message: string, signature: string): Promise<PostResult>;
-  postRevoke(id: string, time: number, signature: string): Promise<RevokePostResult>;
 }
 
 export interface SessionDeps {
@@ -271,38 +266,6 @@ export async function ensureSession(deps: SessionDeps): Promise<EnsureResult> {
   return { ok: true, session: { keypair, id: posted.id, expiresAt }, prompted: true };
 }
 
-export type RevokeResult =
-  | { ok: true; sent: boolean }
-  | { ok: false; reason: "rejected"; message: string };
-
-/**
- * Signs the revoke with the wallet, sends it, and clears the local key.
- * The key goes even if the send fails: this browser must not keep a key the
- * user asked to retire. A refused wallet prompt changes nothing.
- */
-export async function revokeSession(deps: SessionDeps): Promise<RevokeResult> {
-  const { signer } = deps;
-  const live = loadSession(deps, signer.wallet);
-  if (!live) return { ok: true, sent: false };
-  if (!signer.signMessage) {
-    // A signIn-only wallet cannot sign the revoke text; retire the key locally.
-    dropSession(deps, signer.wallet);
-    return { ok: true, sent: false };
-  }
-
-  const time = Math.floor(deps.now() / 1000);
-  let signature: Uint8Array;
-  try {
-    const text = revokeMessage(live.keypair.publicKey.toBase58(), time);
-    signature = await signer.signMessage(new TextEncoder().encode(text));
-  } catch {
-    return { ok: false, reason: "rejected", message: "The wallet did not sign the revoke." };
-  }
-  const sent = await deps.api.postRevoke(live.id, time, bs58.encode(signature));
-  dropSession(deps, signer.wallet);
-  return { ok: true, sent: sent.ok };
-}
-
 /** The HTTP side of `SessionApi`. Nothing throws: a failure comes back as a
  *  plain-copy message, like the rest of api.ts. */
 export function httpSessionApi(
@@ -346,20 +309,6 @@ export function httpSessionApi(
         return { ok: true, id: body.id, expiresAt: body.expiresAt };
       } catch {
         return { ok: false, code: "", message: "Could not reach the server. Try again." };
-      }
-    },
-    async postRevoke(id, time, signature) {
-      try {
-        const response = await fetchImpl(`${baseUrl}/game/sessions/${encodeURIComponent(id)}/revoke`, {
-          method: "POST",
-          headers: json,
-          body: JSON.stringify({ time, signature }),
-        });
-        return response.ok
-          ? { ok: true }
-          : { ok: false, message: failure(await response.json().catch(() => null), response.status) };
-      } catch {
-        return { ok: false, message: "Could not reach the server. Try again." };
       }
     },
   };

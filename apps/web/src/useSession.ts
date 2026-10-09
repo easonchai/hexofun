@@ -14,7 +14,6 @@ import {
   ensureSession,
   httpSessionApi,
   loadSession,
-  revokeSession,
   type EnsureResult,
   type LiveSession,
   type SessionDeps,
@@ -24,14 +23,13 @@ import type { GameSigner } from "./wallets.js";
 export interface SessionState {
   /** The wallet's live session; null before the first delegation. */
   session: LiveSession | null;
-  /** True while the wallet is open for a delegation or a revoke. */
+  /** True while the wallet is open for a delegation. */
   busy: boolean;
-  /** Plain-copy reason the last ensure or revoke failed; null otherwise. */
+  /** Plain-copy reason the last ensure failed; null otherwise. */
   error: string | null;
   /** Connected with a wallet that signs neither SIWS nor messages (Ledger). */
   cannotSign: boolean;
   ensure: () => Promise<EnsureResult | null>;
-  revoke: () => Promise<void>;
   /** Forgets the key so the next `ensure` prompts again (after SessionInvalid). */
   drop: () => void;
 }
@@ -113,23 +111,6 @@ export function useSession(signer: GameSigner): SessionState {
     return run;
   }, [deps]);
 
-  const revoke = useCallback(async (): Promise<void> => {
-    const d = deps();
-    if (!d) return;
-    setBusy(true);
-    try {
-      const result = await revokeSession(d);
-      if (result.ok) {
-        setSession(null);
-        setError(result.sent ? null : "The revoke did not reach the server. The key is gone from this browser.");
-      } else {
-        setError(result.message);
-      }
-    } finally {
-      setBusy(false);
-    }
-  }, [deps]);
-
   const drop = useCallback((): void => {
     const d = deps();
     if (d) dropSession(d, d.signer.wallet);
@@ -142,7 +123,6 @@ export function useSession(signer: GameSigner): SessionState {
     error,
     cannotSign: signer.connected && cannotSignMessages(signer),
     ensure,
-    revoke,
     drop,
   };
 }

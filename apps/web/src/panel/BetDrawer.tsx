@@ -20,10 +20,8 @@ const TABS: { id: PanelTab; label: string }[] = [
 
 /** Betting session state for the footer (off-chain-tickets ticket 15). */
 export type DrawerSession = {
-  active: boolean;
   busy: boolean;
   error: string | null;
-  onRevoke: () => void;
 };
 
 type Props = {
@@ -101,17 +99,6 @@ export function BetDrawer({
               >
                 <SoundIcon on={soundOn} />
               </button>
-              {session.active ? (
-                <button
-                  type="button"
-                  className="session-revoke"
-                  data-testid="session-revoke"
-                  disabled={session.busy}
-                  onClick={session.onRevoke}
-                >
-                  Revoke session
-                </button>
-              ) : null}
             </div>
             {session.busy || session.error ? (
               <p

@@ -91,11 +91,10 @@ const state = {
 interface Recorded {
   nonces: number;
   sessions: { message: string; signature: string }[];
-  revokes: { id: string; time: number; signature: string }[];
 }
 
 async function mockBackend(page: Page): Promise<Recorded> {
-  const seen: Recorded = { nonces: 0, sessions: [], revokes: [] };
+  const seen: Recorded = { nonces: 0, sessions: [] };
   const json = (body: unknown, status = 200) => ({
     status,
     contentType: "application/json",
@@ -116,10 +115,6 @@ async function mockBackend(page: Page): Promise<Recorded> {
       return route.fulfill(
         json({ id: `session${seen.sessions.length}`, expiresAt: new Date(Date.now() + DAY_MS).toISOString() }, 201),
       );
-    }
-    if (/^\/game\/sessions\/[^/]+\/revoke$/.test(path)) {
-      seen.revokes.push({ id: path.split("/")[3]!, ...request.postDataJSON() });
-      return route.fulfill(json({ id: "x", revokedAt: new Date().toISOString() }, 201));
     }
     return route.fulfill(json({ message: "mocked" }, 404));
   });
@@ -167,14 +162,14 @@ const walletOf = (message: string): string => message.split("\n")[1]!;
 const sessionKey = (page: Page) =>
   page.evaluate(() => Object.keys(localStorage).find((key) => key.startsWith("hexvault.session.v1.")) ?? null);
 
-test("a fresh wallet is prompted once, a reload is not, the five-minute rule and Revoke prompt again", async ({ page }) => {
+test("a fresh wallet is prompted once, a reload is not, the five-minute rule and a cleared key prompt again", async ({ page }) => {
   const seen = await mockBackend(page);
   await openPlay(page);
 
   // Fresh wallet: opening the drawer asks for one delegation.
   await openDrawer(page);
   await expect.poll(() => seen.sessions.length).toBe(1);
-  await expect(page.getByTestId("session-revoke")).toBeVisible();
+  await expect(page.getByTestId("session-revoke")).toHaveCount(0);
   const [first] = seen.sessions;
   expect(first!.message).toContain("Nonce: nonce1");
   expect(first!.message).toContain(`URI: ${new URL(page.url()).origin}`);
@@ -210,15 +205,14 @@ test("a fresh wallet is prompted once, a reload is not, the five-minute rule and
   await openDrawer(page);
   await expect.poll(() => seen.sessions.length).toBe(2);
 
-  // Revoke sends the signed revoke and clears the key.
-  await page.getByTestId("session-revoke").click();
-  await expect.poll(() => seen.revokes.length).toBe(1);
-  expect(seen.revokes[0]!.id).toBe("session2");
-  await expect.poll(() => sessionKey(page)).toBeNull();
-  await expect(page.getByTestId("session-revoke")).toHaveCount(0);
-
-  // The next open prompts again.
+  // No stored key: the next open prompts again.
   await closeDrawer(page);
+  await page.evaluate(() => {
+    for (const name of Object.keys(localStorage)) {
+      if (name.startsWith("hexvault.session.v1.")) localStorage.removeItem(name);
+    }
+  });
+  await expect.poll(() => sessionKey(page)).toBeNull();
   await openDrawer(page);
   await expect.poll(() => seen.sessions.length).toBe(3);
 });
