@@ -32,6 +32,7 @@ import {
   type RememberedBoard,
 } from "./engine.js";
 import { formatAtomic, formatAtomic2, parseAtomic } from "./lib/money.js";
+import { fetchGameConfig } from "./ops/gameConfig.js";
 import { decodeBetRefusal, decodePlayerError, thrownReason } from "./playerErrors.js";
 import { sfx, setSoundOn, subscribeSound, isSoundOn } from "./sfx.js";
 import { SHUTDOWN_BANNER, SHUTDOWN_REASON } from "./shutdown.js";
@@ -54,6 +55,7 @@ const SYMBOL = "USDC";
 const DECIMALS = 6;
 /** The Game config's `roundSeconds` default. Only the epoch-tail label reads it. */
 const ROUND_SECONDS = 60n;
+const loadGameConfig = (signal: AbortSignal) => fetchGameConfig(apiBaseUrl(), signal);
 export function App() {
   const { connection } = useConnection();
   const signer = useGameSigner();
@@ -184,6 +186,7 @@ export function App() {
     (signal: AbortSignal) => fetchFeed(apiBaseUrl(), 12, signal),
     [],
   );
+  const houseCutBps = useApiPoll(loadGameConfig, 30_000).data?.inForce?.houseCutBps ?? null;
   const feedPoll = useApiPoll(loadFeed, 2000);
   const feedRows = useMemo<FeedRow[]>(
     () => eventsToRows(feedPoll.data ?? [], ownerKey),
@@ -563,6 +566,7 @@ export function App() {
               engine={engine}
               canPick={canBet && !locked}
               operatorStale={status.stale}
+              houseCutBps={houseCutBps}
               idleLabel={
                 state
                   ? idleBoardLabel(

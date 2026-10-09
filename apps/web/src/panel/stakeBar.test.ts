@@ -82,10 +82,10 @@ describe("stakeBarModel — placed state", () => {
 });
 
 describe("stakeBarModel — closed state (locked)", () => {
-  it("shows the revealing copy once the Round is past its close", () => {
+  it("shows the drawing copy once the Round is past its close", () => {
     const model = stakeBarModel("1", [1, 2], null, "locked", DECIMALS);
     expect(model.state).toBe("closed");
-    expect(model.label).toBe("REVEALING…");
+    expect(model.label).toBe("DRAWING…");
   });
 
   it("still surfaces the placed Position's figures once locked", () => {
@@ -93,6 +93,6 @@ describe("stakeBarModel — closed state (locked)", () => {
     const model = stakeBarModel("1", [], active, "locked", DECIMALS);
     expect(model.state).toBe("closed");
     expect(model.tilesSelected).toBe("2");
-    expect(model.label).toBe("REVEALING…");
+    expect(model.label).toBe("DRAWING…");
   });
 });

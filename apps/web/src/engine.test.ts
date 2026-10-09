@@ -33,7 +33,6 @@ const NOON = BigInt(Date.parse("2026-10-08T12:00:00Z") / 1000);
 const open = (overrides: Partial<OpenRound> = {}): OpenRound => ({
   roundId: 4n,
   closeAt: NOON + 120n,
-  seedCommitment: "c".repeat(64),
   tileTotals: Array<bigint>(36).fill(0n),
   ...overrides,
 });
@@ -42,7 +41,6 @@ const result = (overrides: Partial<ResultRound> = {}): ResultRound => ({
   roundId: 3n,
   status: "closed",
   tile: null,
-  seedCommitment: "d".repeat(64),
   ...overrides,
 });
 
@@ -135,7 +133,7 @@ describe("API Rounds to engine Rounds", () => {
 
   it("maps the newest finished Round and refuses an open one", () => {
     const dto: LastRoundDto = { id: "3", status: "settled", tile: 17, seedCommitment: "d".repeat(64) };
-    expect(resultRoundFrom(dto)).toEqual({ roundId: 3n, status: "settled", tile: 17, seedCommitment: "d".repeat(64) });
+    expect(resultRoundFrom(dto)).toEqual({ roundId: 3n, status: "settled", tile: 17 });
     expect(resultRoundFrom(null)).toBeNull();
     expect(resultRoundFrom({ ...dto, status: "open" })).toBeNull();
   });
@@ -152,15 +150,13 @@ describe("boardResult: what the board says beside the countdown", () => {
     expect(boardResult("idle", null, null)).toBeNull();
   });
 
-  it("shows REVEALING with the commitment while a closed Round waits on its beacon", () => {
-    expect(boardResult("idle", null, result({ status: "closed" }))).toEqual({
-      kind: "revealing",
-      seedCommitment: "d".repeat(64),
-    });
+  it("shows DRAWING while a closed or revealed Round waits on its tile", () => {
+    expect(boardResult("idle", null, result({ status: "closed" }))).toBe("DRAWING");
+    expect(boardResult("idle", null, result({ status: "revealed" }))).toBe("DRAWING");
   });
 
-  it("shows REVEALING for the open Round once its close has passed", () => {
-    expect(boardResult("locked", open(), null)).toEqual({ kind: "revealing", seedCommitment: "c".repeat(64) });
+  it("shows DRAWING for the open Round once its close has passed", () => {
+    expect(boardResult("locked", open(), null)).toBe("DRAWING");
   });
 
   it("keeps the countdown for a new open Round beside a closed one", () => {
@@ -170,8 +166,8 @@ describe("boardResult: what the board says beside the countdown", () => {
     expect(boardResult("mine", next, result({ status: "closed" }))).toBeNull();
   });
 
-  it("shows the void and nothing for a settled Round", () => {
-    expect(boardResult("idle", null, result({ status: "voided" }))).toEqual({ kind: "voided" });
+  it("shows nothing for a voided or a settled Round", () => {
+    expect(boardResult("idle", null, result({ status: "voided" }))).toBeNull();
     expect(boardResult("idle", null, result({ status: "settled", tile: 5 }))).toBeNull();
   });
 });
@@ -228,8 +224,6 @@ describe("decideReveal", () => {
 });
 
 describe("idleBoardLabel", () => {
-  const INVITE = "PLACE A BET TO OPEN THE NEXT ROUND";
-
   it("says nothing while a round is open, paused or not", () => {
     expect(idleBoardLabel(true, true, true)).toBeNull();
   });
@@ -240,22 +234,22 @@ describe("idleBoardLabel", () => {
   it("says game paused between rounds once the game is paused", () => {
     expect(idleBoardLabel(false, true, true)).toBe("GAME PAUSED");
   });
-  it("invites a bet to open the next Round of a running game", () => {
-    expect(idleBoardLabel(false, true, false)).toBe(INVITE);
+  it("stays blank for a running game with no Round open", () => {
+    expect(idleBoardLabel(false, true, false)).toBeNull();
   });
 
   // Longest Round 2 × 60 - 1 = 119 s, plus 60 s for the reveal: 179 s.
   it("uses the longest Round plus the reveal allowance for the epoch tail", () => {
     expect(longestRoundSeconds(60n)).toBe(119n);
-    expect(idleBoardLabel(false, true, false, 1_820n, 2_000n, 60n)).toBe(INVITE);
+    expect(idleBoardLabel(false, true, false, 1_820n, 2_000n, 60n)).toBeNull();
     expect(idleBoardLabel(false, true, false, 1_822n, 2_000n, 60n)).toBe("ROUND CLOSED, NEW DAY STARTS IN 178S");
     expect(idleBoardLabel(false, true, false, 1_999n, 2_000n, 60n)).toBe("ROUND CLOSED, NEW DAY STARTS IN 1S");
   });
   it("holds at zero until the next epoch begins", () => {
     expect(idleBoardLabel(false, true, false, 2_003n, 2_000n, 60n)).toBe("ROUND CLOSED, NEW DAY STARTS IN 0S");
   });
-  it("goes back to the invitation once the new epoch is current", () => {
-    expect(idleBoardLabel(false, true, false, 2_003n, 88_400n, 60n)).toBe(INVITE);
+  it("goes blank again once the new epoch is current", () => {
+    expect(idleBoardLabel(false, true, false, 2_003n, 88_400n, 60n)).toBeNull();
   });
   it("lets an open round or a paused game win over the countdown", () => {
     expect(idleBoardLabel(true, true, false, 1_990n, 2_000n, 60n)).toBeNull();

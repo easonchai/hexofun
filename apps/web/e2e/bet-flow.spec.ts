@@ -2,7 +2,7 @@
  * Off-chain tickets ticket 18: the board and the bet flow on the PLAY tab, with
  * the dev burner as the wallet and a scripted backend. No chain, no real API:
  * every call is answered by `page.route`, and the script moves the Round
- * through open, closed (REVEALING), settled and voided.
+ * through open, closed (DRAWING), settled and voided.
  *
  * Needs a dev server with the burner and the game gate OFF (unset), because
  * Vite inlines these at build time:
@@ -162,13 +162,13 @@ async function connectBurner(page: Page): Promise<void> {
   await expect(page.getByTestId("topbar-tickets")).toBeVisible({ timeout: 15_000 });
 }
 
-test("a first bet opens a Round, the board counts down, then REVEALING, the tile and a void", async ({ page }) => {
+test("a first bet opens a Round, the board counts down, then DRAWING, the tile and a void", async ({ page }) => {
   const script = await mockBackend(page);
   await page.goto("/#play");
   await connectBurner(page);
 
-  // Idle board: the invitation, and the bet is allowed.
-  await expect(page.getByTestId("board-idle-label")).toHaveText("PLACE A BET TO OPEN THE NEXT ROUND");
+  // Idle board: blank, as on dev, and the bet is allowed.
+  await expect(page.getByTestId("board-idle-label")).toHaveCount(0);
 
   await page.getByTestId("tile-3").click();
   await page.getByTestId("tile-7").click();
@@ -188,15 +188,18 @@ test("a first bet opens a Round, the board counts down, then REVEALING, the tile
   await expect(page.getByTestId("round-timer")).toHaveText(/^0[01]:\d\d$/);
   await expect(page.getByTestId("deploy")).toContainText("DEPLOYED");
 
-  // Closed, beacon not out: REVEALING with the commitment and no countdown.
+  // Closed, beacon not out: DRAWING and no countdown, on the board and the deploy button.
   script.stage = "closed";
-  await expect(page.getByTestId("round-timer")).toHaveText("REVEALING");
-  await expect(page.getByTestId("seed-commitment")).toContainText(COMMITMENT);
+  await expect(page.getByTestId("round-timer")).toHaveText("DRAWING");
+  await expect(page.getByTestId("seed-commitment")).toHaveCount(0);
 
   // No beacon for ten minutes: the Round voids and the stake is back.
   script.stage = "voided";
   script.tickets = TICKETS;
-  await expect(page.getByTestId("board-idle-label")).toHaveText("ROUND VOIDED, STAKES REFUNDED");
+  // A voided Round shows nothing on the board; the positions just clear.
+  await expect(page.getByTestId("round-timer")).toHaveCount(0);
+  await expect(page.getByTestId("board-idle-label")).toHaveCount(0);
+  await expect(page.getByTestId("topbar-tickets")).toContainText("7.50");
 });
 
 test("a settled Round lands the tile and pays the winner", async ({ page }) => {

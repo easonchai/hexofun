@@ -5,7 +5,7 @@
 import type { LastRoundDto, OpenRoundDto, PositionDto } from "./api.js";
 
 export type Phase =
-  | /** no Round is open: the next bet opens one */ "idle"
+  | /** no Round is open (paused, epoch tail, or just restarted) */ "idle"
   /** a Round is open: countdown to its close */
   | "mine"
   /** past the close, before the server has closed the Round: bets are shut, no countdown */
@@ -15,7 +15,6 @@ export type Phase =
 export interface OpenRound {
   roundId: bigint;
   closeAt: bigint;
-  seedCommitment: string;
   /** Tickets staked on each tile, 36 of them. */
   tileTotals: bigint[];
 }
@@ -28,7 +27,6 @@ export interface ResultRound {
   status: ResultStatus;
   /** Protocol tile 0..35 once settled. */
   tile: number | null;
-  seedCommitment: string;
 }
 
 export interface PositionLike {
@@ -42,7 +40,6 @@ export function openRoundFrom(dto: OpenRoundDto | null): OpenRound | null {
   return {
     roundId: BigInt(dto.id),
     closeAt: BigInt(Math.floor(Date.parse(dto.closeAt) / 1000)),
-    seedCommitment: dto.seedCommitment,
     tileTotals: dto.tileTotals.map((total) => BigInt(total)),
   };
 }
@@ -50,7 +47,7 @@ export function openRoundFrom(dto: OpenRoundDto | null): OpenRound | null {
 /** `/state`'s newest finished Round → the engine's. */
 export function resultRoundFrom(dto: LastRoundDto | null): ResultRound | null {
   if (dto === null || dto.status === "open") return null;
-  return { roundId: BigInt(dto.id), status: dto.status, tile: dto.tile, seedCommitment: dto.seedCommitment };
+  return { roundId: BigInt(dto.id), status: dto.status, tile: dto.tile };
 }
 
 /** The wallet's Positions by Round id, from `/state`. */
@@ -69,14 +66,14 @@ export function phaseFor(open: OpenRound | null, now: bigint): Phase {
   return now < open.closeAt ? "mine" : "locked";
 }
 
-/** What the board says in the timer's spot while a Round awaits its beacon or was voided. */
-export type BoardResult = { kind: "revealing"; seedCommitment: string } | { kind: "voided" } | null;
+/** What the board says in the timer's spot once betting shuts. */
+export type BoardResult = "DRAWING" | null;
 
 /**
- * "REVEALING" with the commitment from the moment betting shuts until the tile
- * lands, "ROUND VOIDED" when no beacon came. An open Round's countdown wins
- * over a result still pending behind it: the result animates when it lands,
- * but the board keeps counting to the new close.
+ * "DRAWING" from the moment betting shuts until the tile lands. A voided Round
+ * shows nothing: its positions just clear. An open Round's countdown wins over
+ * a result still pending behind it: the result animates when it lands, but the
+ * board keeps counting to the new close.
  */
 export function boardResult(
   phase: Phase,
@@ -84,11 +81,8 @@ export function boardResult(
   last: ResultRound | null,
 ): BoardResult {
   if (phase === "mine") return null;
-  if (open) return { kind: "revealing", seedCommitment: open.seedCommitment };
-  if (last?.status === "closed" || last?.status === "revealed") {
-    return { kind: "revealing", seedCommitment: last.seedCommitment };
-  }
-  return last?.status === "voided" ? { kind: "voided" } : null;
+  if (open || last?.status === "closed" || last?.status === "revealed") return "DRAWING";
+  return null;
 }
 
 /** Seconds until the open Round closes, during "mine"; zero otherwise. */
@@ -110,8 +104,8 @@ export const REVEAL_ALLOWANCE_SECONDS = 60n;
  * pool is new and nothing has started, whatever the game switch says.
  * Otherwise the game switch decides, then the epoch tail: a Round the epoch
  * cannot hold, with its reveal, is refused, so the label counts down to the
- * epoch end and goes away when the next epoch begins. Anything else is the
- * invitation to open the next Round with a bet.
+ * epoch end and goes away when the next epoch begins. Anything else is blank:
+ * the engine keeps a Round open, and a bet opens one if it is not.
  */
 export function idleBoardLabel(
   roundOpen: boolean,
@@ -129,7 +123,7 @@ export function idleBoardLabel(
     const left = epochEndsAt > now ? epochEndsAt - now : 0n;
     return `ROUND CLOSED, NEW DAY STARTS IN ${left}S`;
   }
-  return "PLACE A BET TO OPEN THE NEXT ROUND";
+  return null;
 }
 
 /** What the reveal choreography should do right now for the remembered result. */

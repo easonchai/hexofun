@@ -75,7 +75,7 @@ export interface EngineOutput {
   /** Display numbers 1..36 the user has picked. */
   selected: number[];
   setSelected: (tiles: number[]) => void;
-  /** "REVEALING" with the seed commitment, or "ROUND VOIDED"; null when the board has a countdown or nothing to say. */
+  /** "DRAWING" while a closed Round waits on its beacon; null when the board has a countdown or nothing to say. */
   result: BoardResult;
   reveal: RevealState | null;
   banner: string | null;

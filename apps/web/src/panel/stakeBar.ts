@@ -25,7 +25,7 @@ export interface StakeBarModel {
   label: string;
 }
 
-const CLOSED_LABEL = "REVEALING…";
+const CLOSED_LABEL = "DRAWING…";
 
 /** Derives the stake bar's model from the panel's own inputs and the Round phase. */
 export function stakeBarModel(

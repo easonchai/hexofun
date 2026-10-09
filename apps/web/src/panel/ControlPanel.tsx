@@ -114,6 +114,8 @@ export function ControlPanel(props: ControlPanelProps) {
   const ready = canDeploy && tiles > 0 && stake > 0n && !locked && !deployBusy;
   const showScan = ready && !locked;
   const showLocked = locked && !deployBusy;
+  // Betting is shut and the Round waits on its beacon; the button can't be pressed either way.
+  const settling = engine.phase === "locked" && !deployBusy;
 
   /** Prototype deploy burst: six symbols radiating out for 0.65s. */
   const [burst, setBurst] = useState(false);
@@ -289,7 +291,7 @@ export function ControlPanel(props: ControlPanelProps) {
 
         <button
           type="button"
-          className={`btn-deploy${locked ? " locked" : ""}${!canDeploy || tiles === 0 || stake === 0n ? " dim" : ""}`}
+          className={`btn-deploy${locked ? " locked" : ""}${settling ? " settling" : ""}${!canDeploy || tiles === 0 || stake === 0n ? " dim" : ""}`}
           data-testid="deploy"
           disabled={!ready}
           title={deployHint ?? undefined}
@@ -334,7 +336,7 @@ export function ControlPanel(props: ControlPanelProps) {
               </span>
             </span>
           ) : (
-            <span>{tiles === 0 ? "SELECT TILES" : locked ? "DEPLOYED" : "DEPLOY"}</span>
+            <span>{settling ? "DRAWING…" : tiles === 0 ? "SELECT TILES" : locked ? "DEPLOYED" : "DEPLOY"}</span>
           )}
         </button>
         {deployNote ? (

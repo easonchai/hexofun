@@ -92,7 +92,14 @@ export function LogoWordmark({
   );
 }
 
-export function RoundPotPill({ value }: { value: bigint }) {
+export function RoundPotPill({
+  value,
+  houseCutBps,
+}: {
+  value: bigint;
+  /** The Game config's House cut; null until `/game/config` has answered. */
+  houseCutBps: number | null;
+}) {
   return (
     <div
       className="hexpot"
@@ -105,7 +112,10 @@ export function RoundPotPill({ value }: { value: bigint }) {
         <div className="hexpot-tooltip">
           <div className="hexpot-tooltip-title">ROUND POT</div>
           <div>
-            Tickets everyone has staked on this round. The House takes a cut
+            Tickets everyone has staked on this round.{" "}
+            {houseCutBps === null
+              ? "The House takes a cut"
+              : `${houseCutBps / 100}% goes to the House`}{" "}
             and the winning tiles split the rest.
           </div>
         </div>
@@ -122,6 +132,8 @@ export interface ArenaProps {
   onToggleTile: (displayNumber: number) => void;
   /** True when the backend status pill is amber: the operator isn't ticking. */
   operatorStale?: boolean;
+  /** The Game config's House cut, for the pot tooltip; null until it loads. */
+  houseCutBps?: number | null;
   /** `idleBoardLabel`'s answer: shown in the timer's spot while there is no
    *  countdown, so an empty board says why it is empty. */
   idleLabel?: string | null;
@@ -132,6 +144,7 @@ export function Arena({
   canPick,
   onToggleTile,
   operatorStale = false,
+  houseCutBps = null,
   idleLabel = null,
 }: ArenaProps) {
   const {
@@ -154,17 +167,14 @@ export function Arena({
   const revealDots = reveal?.fired ? reveal.laser.activeDotTimes : {};
   const flyMap = reveal?.flyMap ?? {};
   const seconds = Number(secondsLeft);
-  const revealing = result?.kind === "revealing";
   // The countdown ends at the close; from there the draw waits on its beacon,
   // whose length is drand's, so the timer says what is happening instead.
-  const timerLabel = phase === "mine" ? timerText(secondsLeft) : revealing ? "REVEALING" : null;
+  const timerLabel = phase === "mine" ? timerText(secondsLeft) : result;
   const timerRed = phase === "mine" && seconds <= 2;
-  // No countdown and no reveal under way: a voided Round, else the idle label.
-  const boardLabel = result?.kind === "voided" ? "ROUND VOIDED, STAKES REFUNDED" : idleLabel;
 
   // Idle through the countdown and the draw; when the result lands the core
   // shakes hard for the build-up, then detonates as the laser fires.
-  const coreLive = phase !== "idle" || revealing;
+  const coreLive = phase !== "idle" || result !== null;
   const shake =
     reveal && !reveal.fired
       ? "hexShake .08s infinite"
@@ -215,14 +225,9 @@ export function Arena({
           >
             {operatorStale ? "OPERATOR PAUSED" : timerLabel}
           </div>
-        ) : !banner && boardLabel ? (
+        ) : !banner && idleLabel ? (
           <div className="stage-timer stage-timer-stale" data-testid="board-idle-label">
-            {boardLabel}
-          </div>
-        ) : null}
-        {result?.kind === "revealing" && !banner ? (
-          <div className="stage-commitment" data-testid="seed-commitment" title="sha256 of the seed this Round reveals">
-            seed commitment {result.seedCommitment}
+            {idleLabel}
           </div>
         ) : null}
         {banner ? (
@@ -400,7 +405,7 @@ export function Arena({
           ) : null}
         </div>
 
-        <RoundPotPill value={pot} />
+        <RoundPotPill value={pot} houseCutBps={houseCutBps} />
       </div>
 
       {/* Game gate (ticket 02, feature-gates): covers the board instead of
