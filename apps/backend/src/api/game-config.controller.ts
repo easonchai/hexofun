@@ -129,10 +129,21 @@ export class GameConfigController implements OnModuleInit {
         ? new BadRequestException(error)
         : new ForbiddenException(error);
     }
+    // A change signed without the cap (the web's form) keeps the cap in force
+    // rather than falling back to the column default.
+    const inForce =
+      verdict.fields.maxAdminGrant === undefined
+        ? await this.prisma.gameConfig.findFirst({
+            where: { poolAddress: pool },
+            orderBy: { id: "desc" },
+            select: { maxAdminGrant: true },
+          })
+        : null;
     try {
       const row = await this.prisma.gameConfig.create({
         data: {
           poolAddress: pool,
+          ...(inForce !== null && { maxAdminGrant: inForce.maxAdminGrant }),
           ...verdict.fields,
           signer: wallet.toBase58(),
           signature: bs58.encode(signature),

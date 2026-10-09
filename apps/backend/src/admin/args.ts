@@ -139,7 +139,7 @@ export const USAGE = [
   "  migrate-venue   (permissionless; repins the pool to the proposed venue once the 48 hour lock has elapsed and the old position is down to min-venue-move; no USDC moves; deploys then use the new venue)",
   "  drain-venue --amount N   (admin or operator; brings N raw atomic USDC home from the venue and pauses deploys in the same transaction, so the crank cannot redeploy; start-deploy resumes)",
   `  create-invite [--max-uses N] [--owner PUBKEY] [--count K]   (max-uses defaults to ${INVITE_CODE_MAX_USES})`,
-  "  grant-tickets --owner PUBKEY --amount N --reason TEXT --keypair FILE [--backend URL]   (a team wallet signs; the backend books a grant_admin row, uncapped; prints the row id)",
+  "  grant-tickets --owner PUBKEY --amount N --reason TEXT --keypair FILE [--backend URL]   (a team wallet signs; the backend books a grant_admin row, up to the Game config's maxAdminGrant; prints the row id)",
   "  shutdown --confirm POOL_ID  (irreversible; POOL_ID must match the configured pool)",
   `  emergency-crank [--batch N]   (permissionless; N players per transaction, default ${DEFAULT_EMERGENCY_CRANK_BATCH})`,
   "  sweep-house",

@@ -126,6 +126,14 @@ describe.skipIf(!isDatabaseReachableSync(TEST_DATABASE_URL))("Game config routes
     expect(res.body.history.map((r: { id: number }) => r.id)).toEqual([b.body.id, a.body.id, expect.any(Number)]);
   });
 
+  it("keeps the admin grant cap in force when a change leaves it out (audit-2026-10-09 08)", async () => {
+    const http = await boot(team());
+    const { maxAdminGrant: _drop, ...legacy } = DEFAULT_GAME_CONFIG;
+    await http.post("/ops/game-config").send(body({ ...legacy, maxAdminGrant: 50_000 })).expect(201);
+    const res = await http.post("/ops/game-config").send(body({ ...legacy, houseCutBps: 700 }, { time: now() })).expect(201);
+    expect(res.body).toMatchObject({ houseCutBps: 700, maxAdminGrant: 50_000 });
+  });
+
   it("refuses to apply the same signed change twice", async () => {
     const http = await boot(team());
     const signed = body({ ...DEFAULT_GAME_CONFIG, houseCutBps: 700 });
