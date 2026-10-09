@@ -93,6 +93,8 @@ describe.skipIf(!DB_AVAILABLE)("round open and bet acceptance", () => {
     rounds.revealDue = async () => {};
     await ensurePoolRow(prisma, POOL, 1n);
     await app.init();
+    // The engine's sweep runs on the real clock; these Rounds run on a 2026 test clock and must not be closed under them.
+    rounds.onModuleDestroy();
     await app.getHttpAdapter().getInstance().ready();
     http = request(app.getHttpServer());
   });
