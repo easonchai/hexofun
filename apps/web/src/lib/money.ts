@@ -91,6 +91,21 @@ export function addCapped(current: bigint, step: bigint, cap: bigint | null): bi
 }
 
 /**
+ * The Vault's withdraw cap: Principal plus the yield the in-transaction Sync
+ * settles first, less what is already queued (ADR 0020). `unsettledYield` is
+ * `/players`' figure off the indexed pool index, which the chain only raises,
+ * so it never overdraws. Undefined (no `/players` answer yet) leaves it out.
+ */
+export function withdrawCap(
+  principal: bigint,
+  unsettledYield: string | undefined,
+  pendingWithdraw: bigint,
+): bigint {
+  const total = principal + BigInt(unsettledYield ?? "0");
+  return total > pendingWithdraw ? total - pendingWithdraw : 0n;
+}
+
+/**
  * The Vault card's Yield line: the yield earned since the last settle as
  * two-decimal text, or null (no line) at 0 or while the read is unknown.
  */

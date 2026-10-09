@@ -45,6 +45,7 @@ import {
   pendingTickets,
   splitWithdraw,
   unsettledYieldLine,
+  withdrawCap,
 } from "../lib/money.js";
 import {
   decodePlayerError,
@@ -181,17 +182,6 @@ export function Vault(props: VaultScreenProps) {
   const connected = owner !== null && program !== null && pool !== null;
   const amount = parseAtomic(amountText, DECIMALS);
   const amountUsdc = amount === null ? 0 : Number(formatAtomic(amount, DECIMALS));
-  /**
-   * What the pills clamp to: wallet on deposit, Principal less what is already
-   * queued on withdraw (a queued amount stays inside Principal, ADR 0020).
-   * `request_withdraw` only checks that, so Tickets spent in the game do not
-   * hold any of it back. Null only on deposit,
-   * when the wallet balance read failed (ticket 15) — the pills and the
-   * over-balance check both stand down rather than guess.
-   */
-  const cap =
-    mode === "deposit" ? walletBalance : principal > pendingWithdraw ? principal - pendingWithdraw : 0n;
-  const balanceUnavailable = mode === "deposit" && walletBalance === null;
   const rentWarning = solRentWarning(solBalance, { sponsored: sendTransaction !== undefined });
 
   const ownerBase58 = owner?.toBase58();
@@ -203,6 +193,19 @@ export function Vault(props: VaultScreenProps) {
     [ownerBase58],
   );
   const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
+  /**
+   * What the pills clamp to: wallet on deposit; on withdraw, Principal plus
+   * the yield the Sync settles, less what is already queued (`withdrawCap`,
+   * fork-run-fixes 13). `request_withdraw` only checks that, so Tickets spent
+   * in the game do not hold any of it back. Null only on deposit,
+   * when the wallet balance read failed (ticket 15) — the pills and the
+   * over-balance check both stand down rather than guess.
+   */
+  const cap =
+    mode === "deposit"
+      ? walletBalance
+      : withdrawCap(principal, playerExtras.data?.unsettledYield, pendingWithdraw);
+  const balanceUnavailable = mode === "deposit" && walletBalance === null;
 
   // While the pool is impaired every withdrawal pays a share of the amount, and
   // the program takes no deposit.
@@ -402,7 +405,7 @@ export function Vault(props: VaultScreenProps) {
                   ? walletBalance === null
                     ? "Balance unavailable"
                     : `Available ${fmt2(walletBalance)} ${SYMBOL}`
-                  : `Available to withdraw: ${fmt2(shutdown ? principal : (cap ?? 0n))} ${SYMBOL}`}
+                  : `Available to withdraw: ${fmt2(cap ?? 0n)} ${SYMBOL}`}
               </span>
             </label>
 

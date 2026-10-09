@@ -118,7 +118,7 @@ test("faucet, deposit, withdraw", async ({
   // The dashboard's Withdraw button opens the widget already on that tab.
   await page.getByTestId("tab-dashboard").click();
   await page.getByTestId("dash-withdraw").click();
-  // The ceiling is Principal less anything already queued.
+  // The ceiling is Principal plus unsettled yield, less anything already queued.
   const shownWithdrawable = parseAfterLabel(
     await page.getByTestId("withdrawable-now").innerText(),
     "Available to withdraw:",

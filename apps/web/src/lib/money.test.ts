@@ -16,6 +16,7 @@ import {
   splitWithdraw,
   unsettledYieldLine,
   earningsLine,
+  withdrawCap,
 } from "./money.js";
 
 describe("vault widget math", () => {
@@ -82,6 +83,20 @@ describe("withdrawal math", () => {
       "6aDF…SGvB",
     );
     expect(formatAddress("short")).toBe("short");
+  });
+});
+
+describe("withdrawCap", () => {
+  it("adds the unsettled yield the Sync will settle, less the queue", () => {
+    expect(withdrawCap(6_875_070_000n, "2397691", 1_000_000n)).toBe(6_876_467_691n);
+  });
+
+  it("falls back to Principal less the queue before /players answers", () => {
+    expect(withdrawCap(6_875_070_000n, undefined, 1_000_000n)).toBe(6_874_070_000n);
+  });
+
+  it("never goes below zero", () => {
+    expect(withdrawCap(5n, "0", 9n)).toBe(0n);
   });
 });
 
