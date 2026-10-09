@@ -21,6 +21,12 @@ const burnerEnv = {
   VITE_PUBLIC_RPC_URL: "http://127.0.0.1:8899",
   VITE_API_URL: "http://127.0.0.1:8080",
   VITE_PRIVY_APP_ID: "off",
+  // Blank wins over a checkout's .env/.env.local and reads as unset, so the
+  // mocks' Pool (IDL program, pool 1, devnet) matches and analytics stay off.
+  VITE_PROGRAM_ID: "",
+  VITE_POOL_ID: "",
+  VITE_CLUSTER: "",
+  VITE_POSTHOG_KEY: "",
 };
 
 // Bind the host the URL names: Playwright polls that host, and Vite's default
