@@ -56,3 +56,20 @@ export function prizeCardState(
   if (!hasEpoch) return "live";
   return jackpotPaused ? "paused" : "live";
 }
+
+/** The draw is running: the program says so, or the clock has run out. */
+export function isDrawing(drawing: boolean, remaining: bigint | null): boolean {
+  return drawing || (remaining !== null && remaining <= 0n);
+}
+
+/**
+ * "NEXT DRAW IN" belongs above a countdown: the launch one or the live clock.
+ * DRAWING… and DRAW PAUSED have nothing to count to.
+ */
+export function showsNextDrawLabel(
+  state: PrizeCardState,
+  drawing: boolean,
+  remaining: bigint | null,
+): boolean {
+  return state === "launch" || (state === "live" && !isDrawing(drawing, remaining));
+}

@@ -27,7 +27,13 @@ import { CLUSTER, GAME_GATED, JACKPOT_GATED } from "../chain.js";
 import { dhmsParts } from "../engine.js";
 import { dollars, toHistoryList } from "../historyRows.js";
 import { InfoGlyph } from "../InfoTip.js";
-import { launchCountdown, launchCountdownLabel, prizeCardState } from "../launch.js";
+import {
+  isDrawing,
+  launchCountdown,
+  launchCountdownLabel,
+  prizeCardState,
+  showsNextDrawLabel,
+} from "../launch.js";
 import { earningsLine, formatAddress, formatMoney2 } from "../lib/money.js";
 import { useApiPoll } from "../useApiPoll.js";
 import { Star, wholeDollars } from "./Home.js";
@@ -268,7 +274,9 @@ export function Dashboard(props: DashboardScreenProps) {
           <div className="dash-prize" data-testid="dash-prize">
             {currentEpoch ? wholeDollars(currentEpoch.jackpotAmount) : "$—"}
           </div>
-          <div className="dash-clock-label">NEXT DRAW IN</div>
+          {showsNextDrawLabel(cardState, drawing, remaining) && (
+            <div className="dash-clock-label">NEXT DRAW IN</div>
+          )}
           {cardState === "launch" ? (
             <div className="dash-drawing" data-testid="dash-launch-countdown">
               {launchLabel}
@@ -277,7 +285,7 @@ export function Dashboard(props: DashboardScreenProps) {
             <div className="dash-drawing" data-testid="dash-draw-paused">
               DRAW PAUSED
             </div>
-          ) : drawing || (remaining !== null && remaining <= 0n) ? (
+          ) : isDrawing(drawing, remaining) ? (
             <div className="dash-drawing" data-testid="dash-drawing">
               DRAWING…
             </div>

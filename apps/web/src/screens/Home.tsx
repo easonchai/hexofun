@@ -12,7 +12,13 @@ import { useEffect, useState } from "react";
 import type { CurrentEpochDto } from "../api.js";
 import { JACKPOT_GATED } from "../chain.js";
 import { dhmsParts } from "../engine.js";
-import { launchCountdown, launchCountdownLabel, prizeCardState } from "../launch.js";
+import {
+  isDrawing,
+  launchCountdown,
+  launchCountdownLabel,
+  prizeCardState,
+  showsNextDrawLabel,
+} from "../launch.js";
 
 export interface HomeProps {
   /** Chain clock seconds, for the draw countdown. */
@@ -158,7 +164,11 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
       </div>
 
       <div className="home-clock">
-        <div className="home-clock-label">DAILY PRIZE DRAW · NEXT DRAW IN</div>
+        <div className="home-clock-label">
+          {showsNextDrawLabel(cardState, drawing, remaining)
+            ? "DAILY PRIZE DRAW · NEXT DRAW IN"
+            : "DAILY PRIZE DRAW"}
+        </div>
         {cardState === "launch" ? (
           <div className="home-drawing" data-testid="home-launch-countdown">
             {launchLabel}
@@ -167,7 +177,7 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
           <div className="home-drawing" data-testid="home-draw-paused">
             DRAW PAUSED
           </div>
-        ) : drawing || (remaining !== null && remaining <= 0n) ? (
+        ) : isDrawing(drawing, remaining) ? (
           <div className="home-drawing" data-testid="home-drawing">
             DRAWING…
           </div>
