@@ -6,10 +6,13 @@
  */
 import { Program } from "@anchor-lang/core";
 import {
+  AddressLookupTableAccount,
   Keypair,
   PublicKey,
   SYSVAR_INSTRUCTIONS_PUBKEY,
   Transaction,
+  TransactionMessage,
+  VersionedTransaction,
   type Connection,
   type TransactionInstruction,
 } from "@solana/web3.js";
@@ -20,12 +23,14 @@ import {
   cancelWithdraw,
   deposit,
   klendRemaining,
+  processWithdraw,
   requestWithdraw,
   shutdownWithdraw,
 } from "./actions.js";
 import { PROGRAM_ID, VENUE_KIND } from "./chain.js";
 import type { HexVaultProgram } from "./chain.js";
 import { idl } from "./idl.js";
+import { KLEND_PROGRAM_ID } from "./kvault.js";
 import { poolFromDto, type PoolLike } from "./read.js";
 import type { PoolDto } from "./api.js";
 
@@ -46,13 +51,44 @@ const pool: PoolLike = {
   venueKind: VENUE_KIND.klend,
 };
 
+/**
+ * A one-allocation kVault as `fetchKvaultView` reads it: the vault state with
+ * `reserve` in slot 0 and `table` as its lookup table, the reserve naming
+ * `market`, and an empty lookup table so the v0 message compiles.
+ */
+function kvaultChain(reserve: PublicKey, market: PublicKey, table: PublicKey) {
+  const vault = Buffer.alloc(8 + 62_544);
+  reserve.toBuffer().copy(vault, 312);
+  vault.writeBigUInt64LE(1n, 312 + 1104); // ctokens, so the allocation counts as funded
+  table.toBuffer().copy(vault, 58_568);
+  const reserveData = Buffer.alloc(2_600);
+  market.toBuffer().copy(reserveData, 32);
+  return {
+    getAccountInfo: async () => ({ data: vault }),
+    getMultipleAccountsInfo: async () => [{ data: reserveData }],
+    getAddressLookupTable: async () => ({
+      value: new AddressLookupTableAccount({
+        key: table,
+        state: {
+          deactivationSlot: 2n ** 64n - 1n,
+          lastExtendedSlot: 0,
+          lastExtendedSlotStartIndex: 0,
+          addresses: [],
+        },
+      }),
+    }),
+  };
+}
+
 /** Runs `action` against a real Program and returns the program's instructions it sent. */
 async function sent(
   action: (program: HexVaultProgram, owner: { publicKey: PublicKey }) => Promise<unknown>,
+  chain: Partial<ReturnType<typeof kvaultChain>> = {},
 ): Promise<TransactionInstruction[]> {
   const signer = Keypair.generate();
-  let captured: Transaction | null = null;
+  let captured: Transaction | VersionedTransaction | null = null;
   const connection = {
+    ...chain,
     rpcEndpoint: "http://127.0.0.1:1",
     getLatestBlockhash: async () => ({
       blockhash: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
@@ -65,8 +101,9 @@ async function sent(
   const wallet = {
     publicKey: signer.publicKey,
     signTransaction: async <T,>(tx: T): Promise<T> => {
-      captured = tx as unknown as Transaction;
-      (tx as unknown as Transaction).sign(signer);
+      captured = tx as unknown as Transaction | VersionedTransaction;
+      if ("version" in (tx as object)) (tx as VersionedTransaction).sign([signer]);
+      else (tx as Transaction).sign(signer);
       return tx;
     },
     signAllTransactions: async <T,>(txs: T[]): Promise<T[]> => txs,
@@ -74,7 +111,10 @@ async function sent(
   const program = new Program(idl, { connection, wallet }) as unknown as HexVaultProgram;
   const result = await action(program, { publicKey: signer.publicKey });
   expect(result).toEqual({ kind: "landed", signature: "sig" });
-  return (captured as Transaction | null)!.instructions.filter((ix) =>
+  const tx = captured as Transaction | VersionedTransaction | null;
+  const instructions =
+    tx && "version" in tx ? TransactionMessage.decompile(tx.message).instructions : tx!.instructions;
+  return instructions.filter((ix) =>
     // The Program's own id, not PROGRAM_ID: a local VITE_PROGRAM_ID may differ.
     ix.programId.equals(program.programId),
   );
@@ -135,6 +175,42 @@ describe("player instructions against the IDL", () => {
   });
 });
 
+describe("a kVault pool (fork-run-fixes ticket 10)", () => {
+  const reserve = key();
+  const market = key();
+  const table = key();
+  const kv: PoolLike = { ...pool, venueKind: VENUE_KIND.kvault };
+
+  it("deposit and process_withdraw carry the klend program, each reserve and its market", async () => {
+    const [ix] = await sent((p, o) => deposit(p, o, kv, 5n), kvaultChain(reserve, market, table));
+    const keys = ix!.keys.map((k) => k.pubkey.toBase58());
+    expect(keys.slice(idlAccounts("deposit"))).toEqual(
+      [KLEND_PROGRAM_ID, reserve, market].map((k) => k.toBase58()),
+    );
+    const [process] = await sent((p, o) => processWithdraw(p, o, kv), kvaultChain(reserve, market, table));
+    expect(process!.keys).toHaveLength(idlAccounts("process_withdraw") + 3);
+  });
+
+  it("request_withdraw adds the redeem extras, the writable vault and the writable mint", async () => {
+    const [ix] = await sent((p, o) => requestWithdraw(p, o, kv, 5n), kvaultChain(reserve, market, table));
+    const named = idlAccounts("request_withdraw");
+    expect(ix!.keys).toHaveLength(named + 3 + 9 + 2);
+    const last = ix!.keys.at(-1)!;
+    expect(last.pubkey.equals(kv.acceptedMint) && last.isWritable).toBe(true);
+    const vaultMeta = ix!.keys.find((k) => k.pubkey.equals(kv.klendMarket) && k.isWritable);
+    expect(vaultMeta).toBeDefined();
+  });
+
+  it("the shutdown pair reads the vault once and gives both instructions the kVault list", async () => {
+    const [request, process] = await sent(
+      (p, o) => shutdownWithdraw(p, o, kv, 5n, 0n),
+      kvaultChain(reserve, market, table),
+    );
+    expect(request!.keys).toHaveLength(idlAccounts("request_withdraw") + 14);
+    expect(process!.keys).toHaveLength(idlAccounts("process_withdraw") + 14);
+  });
+});
+
 describe("klendRemaining", () => {
   it("is empty for the test-venue stub kind, whichever program is pinned", () => {
     expect(klendRemaining({ ...pool, venueKind: VENUE_KIND.stub })).toEqual([]);
@@ -142,7 +218,7 @@ describe("klendRemaining", () => {
 
   it("goes by the kind, not the pinned program, and refuses a kind it does not know", () => {
     expect(klendRemaining({ ...pool, klendProgram: PROGRAM_ID })).toHaveLength(4);
-    expect(() => klendRemaining({ ...pool, venueKind: 2 })).toThrow(/unsupported venue kind 2/);
+    expect(() => klendRemaining({ ...pool, venueKind: 3 })).toThrow(/unsupported venue kind 3/);
   });
 
   it("derives the market authority, liquidity vault and cToken mint, then the sysvar", () => {

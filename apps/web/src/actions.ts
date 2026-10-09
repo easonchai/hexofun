@@ -20,6 +20,7 @@ import {
   TransactionExpiredBlockheightExceededError,
   TransactionMessage,
   VersionedTransaction,
+  type AccountMeta,
   type AddressLookupTableAccount,
   type Connection,
   type TransactionInstruction,
@@ -37,6 +38,7 @@ import {
   type HexVaultProgram,
   type TxBuilder,
 } from "./chain.js";
+import { fetchKvaultView, kvaultRemaining } from "./kvault.js";
 import type { PoolLike } from "./read.js";
 import { shutdownWithdrawStep } from "./shutdown.js";
 
@@ -368,11 +370,9 @@ const venueAccounts = (pool: PoolLike) => ({
  * operator/instructions.ts `venueRemaining` does the same). A kind this
  * build does not know throws rather than guess an account list.
  */
-export function klendRemaining(pool: PoolLike) {
+export function klendRemaining(pool: PoolLike): AccountMeta[] {
   if (pool.venueKind === VENUE_KIND.stub) return [];
   if (pool.venueKind !== VENUE_KIND.klend) {
-    // A kVault pool's player actions are not built: they need the vault read,
-    // its lookup table and a v0 send through the player wallet path.
     throw new Error(`unsupported venue kind ${pool.venueKind}`);
   }
   const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
@@ -393,15 +393,56 @@ export function klendRemaining(pool: PoolLike) {
   ];
 }
 
+interface VenueSend {
+  /** The remaining accounts the instruction's Sync (and redeem) reads. */
+  remaining: AccountMeta[];
+  /** Non-empty only for a kVault pool, whose account list fits a legacy
+   *  transaction only with the vault's lookup table (venue-switch ticket 06). */
+  lookupTables: AddressLookupTableAccount[];
+}
+
+/**
+ * `klendRemaining` for klend and the stub, where a Sync alone (`deposit`,
+ * `process_withdraw`) reads none of them. For a kVault pool the program
+ * values the position from the klend program, every allocation reserve and
+ * its market (kvault.rs `layout`), so the vault state is read now, never
+ * cached: the curator can change the allocation list at any time, and a list
+ * that no longer matches fails with `VaultAccountMismatch` for a retry to pick
+ * up. A redeem (`request_withdraw` refunding past free idle) adds the CPI
+ * extras the Ops console's `venueRemaining` passes.
+ */
+async function venueRemaining(
+  program: HexVaultProgram,
+  pool: PoolLike,
+  use: "sync" | "redeem",
+): Promise<VenueSend> {
+  if (pool.venueKind !== VENUE_KIND.kvault) {
+    const klend = klendRemaining(pool);
+    return { remaining: use === "redeem" ? klend : [], lookupTables: [] };
+  }
+  const connection = providerOf(program).connection;
+  const view = await fetchKvaultView(connection, pool.klendMarket, pool.klendProgram);
+  const { value } = await connection.getAddressLookupTable(view.lookupTable);
+  if (!value) throw new Error(`lookup table ${view.lookupTable.toBase58()} does not exist`);
+  return {
+    remaining: kvaultRemaining(
+      view,
+      use === "sync" ? { valueOnly: true } : { writableMint: pool.acceptedMint },
+    ),
+    lookupTables: [value],
+  };
+}
+
 /** Sends `builder`'s instructions through `sendMany` above. */
 async function send(
   program: HexVaultProgram,
   owner: TxSigner,
   builder: TxBuilder,
   priorityFeeMicroLamports: number,
+  lookupTables: AddressLookupTableAccount[] = [],
 ): Promise<SendResult> {
   const unsigned = await builder.transaction();
-  return sendMany(program, owner, unsigned.instructions, priorityFeeMicroLamports);
+  return sendMany(program, owner, unsigned.instructions, priorityFeeMicroLamports, lookupTables);
 }
 
 export async function deposit(
@@ -412,6 +453,7 @@ export async function deposit(
 ): Promise<SendResult> {
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const venue = await venueRemaining(program, pool, "sync");
   const builder = method(
     program,
     "deposit",
@@ -427,6 +469,7 @@ export async function deposit(
       tokenProgram: TOKEN_PROGRAM,
       systemProgram: SystemProgram.programId,
     })
+    .remainingAccounts(venue.remaining)
     // The faucet may already have created it; idempotent either way.
     .preInstructions([
       createAssociatedTokenAccountIdempotentInstruction(
@@ -437,7 +480,7 @@ export async function deposit(
         TOKEN_PROGRAM,
       ),
     ]);
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+  return send(program, owner, builder, pool.priorityFeeMicroLamports, venue.lookupTables);
 }
 
 /**
@@ -488,6 +531,7 @@ export async function requestWithdraw(
 ): Promise<SendResult> {
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const venue = await venueRemaining(program, pool, "redeem");
   const builder = method(
     program,
     "requestWithdraw",
@@ -502,7 +546,7 @@ export async function requestWithdraw(
       ...venueAccounts(pool),
       tokenProgram: TOKEN_PROGRAM,
     })
-    .remainingAccounts(klendRemaining(pool))
+    .remainingAccounts(venue.remaining)
     // A mainnet depositor may have closed the ATA since depositing.
     .preInstructions([
       createAssociatedTokenAccountIdempotentInstruction(
@@ -513,7 +557,7 @@ export async function requestWithdraw(
         TOKEN_PROGRAM,
       ),
     ]);
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+  return send(program, owner, builder, pool.priorityFeeMicroLamports, venue.lookupTables);
 }
 
 /**
@@ -550,6 +594,7 @@ export async function processWithdraw(
 ): Promise<SendResult> {
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const venue = await venueRemaining(program, pool, "sync");
   const builder = method(program, "processWithdraw")()
     .accounts({
       pool: pool.address,
@@ -561,6 +606,7 @@ export async function processWithdraw(
       ...venueAccounts(pool),
       tokenProgram: TOKEN_PROGRAM,
     })
+    .remainingAccounts(venue.remaining)
     // A mainnet depositor may have closed the ATA since depositing; the
     // transfer needs it back, and this costs nothing when it is already there.
     .preInstructions([
@@ -572,7 +618,7 @@ export async function processWithdraw(
         TOKEN_PROGRAM,
       ),
     ]);
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+  return send(program, owner, builder, pool.priorityFeeMicroLamports, venue.lookupTables);
 }
 
 /**
@@ -593,6 +639,9 @@ export async function shutdownWithdraw(
   if (step.kind === "none") throw new Error("nothing to withdraw");
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  // One vault read serves both instructions: a Sync ignores the redeem
+  // extras, so `process_withdraw` on a kVault takes the same list.
+  const venue = await venueRemaining(program, pool, "redeem");
   const instructions: TransactionInstruction[] = [];
   if (step.kind === "request-and-process") {
     instructions.push(
@@ -610,7 +659,7 @@ export async function shutdownWithdraw(
           ...venueAccounts(pool),
           tokenProgram: TOKEN_PROGRAM,
         })
-        .remainingAccounts(klendRemaining(pool))
+        .remainingAccounts(venue.remaining)
         .instruction(),
     );
   }
@@ -635,7 +684,8 @@ export async function shutdownWithdraw(
         ...venueAccounts(pool),
         tokenProgram: TOKEN_PROGRAM,
       })
+      .remainingAccounts(pool.venueKind === VENUE_KIND.kvault ? venue.remaining : [])
       .instruction(),
   );
-  return sendMany(program, owner, instructions, pool.priorityFeeMicroLamports);
+  return sendMany(program, owner, instructions, pool.priorityFeeMicroLamports, venue.lookupTables);
 }
