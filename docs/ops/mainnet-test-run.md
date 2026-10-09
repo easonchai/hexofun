@@ -2,7 +2,9 @@
 
 Five tiers, cheapest first. Each tier gates the next. Written 2026-10-05 at `879bb67` on
 `feature/mainnet-contracts`, updated 2026-10-07 at `10542ae` for the venue switch (ADR 0023), the
-kVault backing, the Ops console and `cancel_withdraw`. Sources: `tests/run-local.sh`,
+kVault backing, the Ops console and `cancel_withdraw`, and 2026-10-09 for the off-chain rework
+(ADR 0025: Tickets, grants and the game live in the backend). The run log below is history and
+still names the retired pieces. Sources: `tests/run-local.sh`,
 `tests/fork/run-fork.sh`, `scripts/surf.sh`, `scripts/deploy.sh`, `runbook.md`, `docs/ops/deploy.md`,
 `docs/plan/yield-claimer/issues/17-devnet-rehearsal.md`,
 `docs/plan/mainnet/issues/08-cutover-devnet-rehearsal-then-mainnet.md`.
@@ -117,13 +119,13 @@ cargo test -p hex_vault
 ```
 
 Expect all green (66 passed on 2026-10-05, 7 of them in `venue::klend::tests`; 99 on 2026-10-07). Covers the
-yield index arithmetic, Fenwick weight tree, `check_fresh`, solvency formula.
+yield index arithmetic, the snapshot proof check (`snapshot.rs`), `check_fresh`, solvency formula.
 
 ## Tier 2: localnet suites, stub venue
 
-Builds with `--features test-vrf,test-venue`, boots an isolated validator, deploys, runs the 18
-vitest suites in `tests/` (01 to 19, no 09; 12 covers `cancel_withdraw`, 17 to 19 the venue switch
-stub to stub). Restores `target/` afterwards.
+Builds with `--features test-vrf,test-venue`, boots an isolated validator, deploys, runs the 16
+vitest suites in `tests/` (01 to 20, with gaps; 11 covers next-epoch Tickets, 12 `cancel_withdraw`,
+17 to 19 the venue switch stub to stub, 20 the snapshot draw). Restores `target/` afterwards.
 
 ```sh
 tests/run-local.sh                                   # all suites
@@ -190,12 +192,15 @@ time only with `surfnet_timeTravel` and `absoluteTimestamp`.
 
 `scripts/surf.sh` runs the same fork as a deployment you click through. It deploys the plain
 build at `LFk9…`, funds `keys/surf/` roles with forked USDC and SOL, bootstraps Pool 1 on Kamino's
-USDC reserve (jackpot, game and buy tickets paused; daily epochs, 90 s rounds), writes `.env.surf`
+USDC reserve (jackpot, game and buy tickets paused; daily epochs), writes `.env.surf`
 and `apps/web/.env.surf`, and stays up until Ctrl-C. `tests/fork/surf.ts` fakes ORAO fulfilment by
-rewriting each pending request account, so rounds and draws settle with the real binary.
+rewriting each pending request account, so the daily draw settles with the real binary. Rounds
+are not on chain: the backend seeds the Game config on first boot (60 s rounds), runs them on its
+own clock, and reads real drand beacons from `api.drand.sh` and `drand.cloudflare.com`, so the
+fork host needs internet and `surf.sh warp` does not move them.
 
 The fork reports mainnet's genesis hash, so everything runs with `CLUSTER=mainnet-beta`: no
-faucet in the web, fund wallets with `surf.sh fund`. A warp across a live round voids it. The
+faucet in the web, fund wallets with `surf.sh fund`. The
 web's burner wallet (`VITE_BURNER_WALLET=1`) is a fixed keypair, so fund it once and it stays
 funded across reloads.
 
@@ -223,7 +228,7 @@ scripts/surf.sh admin start-buy-tickets
 # 5. time and VRF
 scripts/surf.sh warp-epoch 8                         # 8 min before epoch end: harvest window, then draw
 scripts/surf.sh warp 3600                            # yield index moves, sync books it
-scripts/surf.sh vrf off; scripts/surf.sh vrf on      # VRF timeout, void-round, rollover-epoch
+scripts/surf.sh vrf off; scripts/surf.sh vrf on      # VRF timeout, rollover-epoch
 
 # 6. venue switch (runbook "Changing a pool's venue"); the 48 h lock is one warp
 scripts/surf.sh admin propose-venue --kind kvault --program ... --market ... --reserve ... --ctoken ...
@@ -232,7 +237,8 @@ scripts/surf.sh warp 172800                          # tick drains, drains again
 scripts/surf.sh admin cancel-venue                   # the other branch, on a second proposal
 
 # 7. admin and ops paths
-scripts/surf.sh admin pause-game | pause-jackpot | pause-deploy | start-deploy | set-params ... | grant-tickets ...
+scripts/surf.sh admin pause-game | pause-jackpot | pause-deploy | start-deploy | set-params ...
+scripts/surf.sh admin grant-tickets --owner <pubkey> --amount N --reason TEXT --keypair keys/surf/admin.json   # off chain; admin pubkey must be in OPS_WALLETS
 scripts/surf.sh logs fork|simnet|vrf|relay|backend
 ```
 
@@ -260,22 +266,24 @@ Ledger paths, `scripts/deploy.sh`.
 2. Deposit 1000 from A. Tickets 0, Balance 1000 pending, `/status` has no epoch, no round opens.
 3. Deposit 1000 from B. Same.
 4. Wait for a tick: idle above the target deploys, `venueValue` > 0, yield index > 0 with no epoch.
-5. `admin grant-tickets --owner <B> --amount 10000000` is refused `JackpotPaused`: every grant, admin
-   included, is refused while the jackpot is paused, and before launch it always is. A pre-launch
-   grant would land on epoch 0's Tickets and be reset at epoch 1 anyway. Grant again after step 6.
-   Buy tickets has no UI (hidden in `Vault.tsx` behind `buyTicketsVisible`) and no CLI, so its
-   `NoEpochYet` refusal stays covered by `tests/03-epochs.test.ts` only.
+5. Skip a grant here. `admin grant-tickets` is not a chain transaction, so the program has nothing
+   to refuse, and the backend does not check the jackpot pause either. A pre-launch grant books on
+   epoch 0 and the epoch 1 reset takes it back to the Ticket basis, so it proves nothing. Grant
+   after step 6. Buy tickets has no UI (hidden in `Vault.tsx` behind `buyTicketsVisible`) and no
+   CLI, so its `NoEpochYet` refusal stays covered by `tests/03-epochs.test.ts` only.
 6. `admin start-jackpot`. `LAUNCH_AT` is unset on the fork, so `begin_epoch` fires on the next tick. `/state` shows epoch 1
    ending at the next grid point. A and B hold full Tickets with no transaction of their own.
-   Now `admin grant-tickets --owner <B> --amount 10000000` succeeds and B's `weight` rises by
-   exactly that. One Ticket is one micro-USDC of weight, so `--amount 10` is 0.00001 USDC worth.
-   The admin path leaves `bonusGranted` at 0; only operator grants count against the caps.
+   Add the admin pubkey to `OPS_WALLETS` in `.env.surf` and restart the backend (without it the
+   endpoint answers 404). Now `admin grant-tickets --owner <B> --amount 10000000 --reason test
+   --keypair keys/surf/admin.json` prints a ledger row id, and B's Tickets in `GET /players/<B>`
+   rise by exactly that. One Ticket is one micro-USDC of Principal, so `--amount 10` is 0.00001 USDC
+   worth. The row is `grant_admin` with the signer and signature on it, and has no cap.
 7. `admin start-game`, `admin start-buy-tickets`. `/state` `gamePaused` and `jackpotPaused` false.
 
 **B. Deposits and balance**
 
-8. Deposit 500 from A during epoch 1. Shows as pending until epoch 2. Weight tree one node per
-   player.
+8. Deposit 500 from A during epoch 1. Shows as pending until epoch 2, and the Tickets for it count
+   from epoch 2's reset.
 9. `scripts/surf.sh warp 3600`. Both balances tick up; after the next sync they match the yield
    index arithmetic to the unit (`/state` vs the screen, within one tick).
 10. Buy tickets: skipped on the fork while the UI is hidden (localnet covers credit at full value
@@ -298,9 +306,9 @@ Ledger paths, `scripts/deploy.sh`.
 16. Cancel again: refused, nothing queued. From B, try to cancel A's request: refused.
 17. From A, request 400, then 500 in the same epoch: one merged request of 900. Cancel once:
     clears all of it.
-18. From A, request 900 again. From A, open a round (step 24 shape) and let it sit: Process
-    withdraw after the epoch is blocked while the Position is open. Cancel the withdraw while the
-    Position is open: succeeds.
+18. From A, request 900 again. Cancel the withdraw: succeeds. A bet in a Round is a ledger row, not
+    an account on chain, so nothing in the program blocks a withdraw or its cancel while a Round is
+    open.
 19. From B, request more than idle USDC. Operator log shows a recall sized for it; `venueValue`
     drops. Cancel it: the recalled USDC stays idle and the next deploy takes it back out.
 20. From B, request 1500 and leave it queued. It stays in the draw (Tickets unchanged) until
@@ -309,15 +317,22 @@ Ledger paths, `scripts/deploy.sh`.
 
 **D. Rounds and the game**
 
-22. From A, buy a position; from B, another. Let the round close and settle: the winner's stake
-    comes back whole, the loser's goes to the winner, House cut to the treasury account.
-23. `scripts/surf.sh vrf off`. Open a round from A, warp past `vrf_timeout`
-    (`scripts/surf.sh warp 300`). `/ops` Advanced shows Void round lit; click it as any wallet.
-    Refunded. `scripts/surf.sh vrf on`.
-24. Forfeit: open a round from A alone, let it close with no challenger. Pays the House.
-25. `scripts/surf.sh warp-epoch 1`. Try to buy a position: refused, the board says the round is
-    closed because it would end after the epoch.
-26. `admin pause-game`: board shows "GAME PAUSED", buy refused. `admin start-game`.
+22. From A, bet on a tile on the board (the first bet opens the Round, and the web signs it with a
+    session key after one wallet approval); from B, bet on another. Let the Round close on the
+    minute and reveal. The winner's stake comes back whole, the loser's goes to the winner, and the
+    House cut books as a `house_credit` ledger row. These are Ticket rows, not token moves, so no
+    treasury balance changes. Check it with `node scripts/verify-round.mjs
+    http://localhost:8080/rounds/<id>/record`, which prints one `ok` line per step.
+23. A void needs a beacon that never arrives, and the fork reads the real drand relays, so skip it
+    here. The refund rows are covered by `round-settle.test.ts` and `round-reveal.test.ts`. There is
+    no on-chain void to click any more.
+24. Forfeit: bet one tile from A and look for a Round whose revealed tile nobody covered. The whole
+    pot goes to the House as one `house_credit` row with no cut. The Round's record shows it.
+25. `scripts/surf.sh warp-epoch 1`. Try to bet: the backend refuses `RoundOutsideEpoch` when the
+    Round's close would fall after the epoch end, and the board says a new round would end after
+    the day does. Rounds run on wall time and the epoch end is chain time, so if the warp does not
+    trigger it, note that rather than forcing it.
+26. `admin pause-game`: board shows "GAME PAUSED", a bet is refused `GamePaused`. `admin start-game`.
 
 **E. Epoch end, harvest, draw**
 
@@ -341,23 +356,29 @@ Ledger paths, `scripts/deploy.sh`.
 33. `/status` solvency margin non-negative at every step above.
 34. Restart the backend container mid-epoch. Boot guard accepts the pool, indexer catches up, no
     crank sent twice (compare the operator log before and after).
-35. Open a round, let two events land in one slot (buy and settle back to back). Both are in
-    account history with distinct indexes; a restart replays neither.
-36. `admin set-params --round-seconds 120`, `admin set-venue-params --idle-target-bps ...`,
+35. Send two chain transactions back to back so they can share a slot (a deposit from A, a
+    `request_withdraw` from B). Both are in account history with distinct indexes; a restart
+    replays neither.
+36. `admin set-params --vrf-timeout 200`, `admin set-venue-params --idle-target-bps ...`,
     `admin set-treasury-accounts --treasury <ta> --buyback-reserve <ta>`: each reads back from the
-    Pool and `/ops/summary` on the next poll.
+    Pool and `/ops/summary` on the next poll. Put `--vrf-timeout 180` back. Round length is not a
+    Pool field any more; step 41 changes it through the Game config.
 37. Priority fee: set `PRIORITY_FEE_MAX_MICROLAMPORTS` low, confirm a tick still lands under it.
 
 **G. Ops console (section "Ops console")**
 
 38. No wallet: page reads, banner colour matches `/alerts`, Details and Advanced collapsed.
 39. Admin wallet: badge Admin. Pause and start every switch from the Pause block. Set params and
-    Set venue params show the diff before sending. Grant tickets to B (amount in Tickets, one per micro-USDC).
+    Set venue params show the diff before sending.
 40. Operator wallet: badge Operator. Pause Pool, Game, Jackpot, Deployment. Bought tickets and
     every start show "Prepare for Squads" with a base58 transaction.
 41. Set `OPS_WALLETS=<B>` in `.env.surf`, restart the backend. Wallet B: badge Fast pause signer,
     Fast pause on the four switches signs a message and the pause lands from the operator key.
-    Unset it: the page says Fast pause is not enabled on this env.
+    Under Advanced, the same wallet can change the Game config (set round seconds to 120; the
+    next Round that opens uses it, and `GET /game/config` shows the new row with the signer) and
+    Grant Tickets (amount in Tickets, one per micro-USDC; the form shows the stored ledger row).
+    Unset it: the page says Fast pause is not enabled on this env, and the backend answers 404 to
+    Game config changes and grants too. Put round seconds back to 60.
 42. Wallet B otherwise: Viewer. The four routine cranks light only when due (make one due: pause
     deploys from the admin wallet, deposit from A, start deploys, Deploy to venue lights). Click
     each once. Cover deficit says there is none.
@@ -470,11 +491,13 @@ scripts/deploy.sh devnew --idl                                        # publish 
 set -a; . ./.env.devnew; set +a
 pnpm --filter @hexvault/backend bootstrap --start \
   --admin <a plain wallet you hold> --operator <operator-pubkey> \
-  --epoch-seconds 86400 --round-seconds 90 --min-jackpot 1
+  --epoch-seconds 86400 --min-jackpot 1
 ```
 
-Bootstrap prints `WEIGHT_TREE` and the four klend pins as the chain recorded them. Diff them
-against 4.2. For a faster rehearsal, bootstrap with `--epoch-seconds 3600` first, run the whole
+Bootstrap prints `POOL_ADDRESS`, the vault and Treasury addresses and the four klend pins as the
+chain recorded them. Diff the pins against 4.2. Round length is not a bootstrap flag any more. The
+backend seeds the Game config (60 s rounds) on first boot, and a wallet on `OPS_WALLETS` changes it
+from `/ops`. For a faster rehearsal, bootstrap with `--epoch-seconds 3600` first, run the whole
 checklist in hours, then bootstrap a second pool at 86400 for the three-day soak.
 
 ### 4.4 Bring up the stack
@@ -485,7 +508,9 @@ curl -s localhost:8080/healthz    # rpcOk, operatorSol
 curl -s localhost:8080/status     # solvency margin, venue, lastAction
 ```
 
-Set `VITE_POOL_ID`, `VITE_PROGRAM_ID` on the Vercel preview, redeploy the web app.
+Set `VITE_POOL_ID`, `VITE_PROGRAM_ID` on the Vercel preview, redeploy the web app. Set
+`OPS_WALLETS` in `.env.devnew` to the team wallets that will use Fast pause, Game config and Grant
+Tickets; with it empty the backend answers 404 to all three.
 
 ### 4.5 Run the checklist
 
@@ -537,7 +562,7 @@ on the suite alone; every other line still needs its devnet tick.
 
 ### Deposits and balance
 
-- [ ] * Deposit from wallet A. Weight tree grows by one node. Balance shows pending.
+- [ ] * Deposit from wallet A. Balance shows pending.
 - [ ] * Deposit from wallet B the same day. Both pending.
 - [ ] * After the next epoch begins, both activate. Tickets match the eager model.
 - [ ] * After a day, both balances match the yield index arithmetic to the last unit.
@@ -589,29 +614,31 @@ and watch the `/ops` Venue switch stepper mark each step.
 - [ ] * One withdraw larger than the pending deposit refunds that part now and queues the rest.
 - [ ] * The queued part stays in the draw and pays after the next epoch begins.
 - [ ] A matured withdraw the vault cannot cover triggers a recall first and lands on the next tick.
-- [ ] Open positions block the queued payout.
 - [ ] Haircut exit needs the owner's signature.
 - [ ] * `cancel_withdraw` on a queued request clears `pending_withdraw` and the pool's reservation. Principal, Tickets and the vault balance do not move. The indexer decodes `WithdrawCancelled` and `/state` shows no pending withdrawal.
-- [ ] `cancel_withdraw` works while paused, shut down, impaired and with an open Position (it moves nothing, so nothing blocks it). It is refused with no request queued, and by anyone but the owner.
+- [ ] `cancel_withdraw` works while paused, shut down and impaired (it moves nothing, so nothing blocks it). It is refused with no request queued, and by anyone but the owner.
 - [ ] Two requests in one epoch merge; one cancel clears the merged amount.
 - [ ] A request cancelled after a recall was sized for it: the recalled USDC stays idle and the next deploy takes it back out.
 
 ### Rounds and the game
 
-- [ ] A round settles with a winner. Winner's stake comes back whole.
-- [ ] A voided round refunds.
-- [ ] A forfeited round pays the House.
-- [ ] `buy_position` that would end after the epoch end is refused. Board says the round is closed.
-- [ ] `pause-game` and `start-game` from the admin.
+Rounds are off chain (ADR 0025), so these are backend checks. The chain sees none of them.
+
+- [ ] A bet through the board opens a Round. At the close, the tile reveals from a drand beacon and the Round settles with a winner. Winner's stake comes back whole.
+- [ ] `node scripts/verify-round.mjs <api host>/rounds/<id>/record` passes every step on a settled Round.
+- [ ] A voided Round (no beacon within 10 minutes) refunds every bet. Run the verifier with `--relay https://api.drand.sh` on it. *(Not reproducible on the fork; backend tests cover the rows.)*
+- [ ] A Round whose tile nobody covered pays the House.
+- [ ] A bet whose Round would close after the epoch end is refused `RoundOutsideEpoch`. Board says the round would end after the day.
+- [ ] `pause-game` refuses bets (`GamePaused`) and opens no new Round; `start-game` from the admin resumes. A change in the Game config applies from the next Round that opens.
 
 ### Epochs and the draw
 
-- [ ] * Draw selects over tickets. Prize pays to the Player whose leaf holds the target.
+- [ ] * Draw selects over tickets. `payout` carries the winner's leaf and proof, and the chain checks it against the root `request_draw` committed. Prize pays to the Player whose leaf holds the target.
 - [ ] * Winner's Principal and Tickets both rise at once. No registration step anywhere.
 - [ ] Epoch under `min_jackpot` rolls over instead of paying dust.
 - [ ] `payout` is permissionless: run it from a third wallet.
 - [ ] `payout_timeout` path: a winner with no token account is paid after the timeout.
-- [ ] `rollover-epoch` and `void-round` take the ORAO randomness account and succeed.
+- [ ] `rollover-epoch` takes the ORAO randomness account and succeeds past the timeout.
 
 ### Launch window (before epoch 1)
 
@@ -621,13 +648,13 @@ the next grid point.
 
 - [ ] * Deposit before `start-jackpot`. Tickets show 0, Balance shows the full amount pending. No round opens, `/status` has no epoch.
 - [ ] * Idle above the target deploys to the venue during the window. Yield index rises with no epoch existing.
-- [ ] * `buy_tickets` is refused before epoch 1 (`NoEpochYet`). Every grant, admin included, is refused `JackpotPaused` until `start-jackpot`. After epoch 1 begins an admin grant succeeds.
+- [ ] * `buy_tickets` is refused before epoch 1 (`NoEpochYet`). A grant is a ledger row and the chain refuses nothing. One booked before epoch 1 is reset to the Ticket basis at `begin_epoch`, so grant after epoch 1 begins.
 - [ ] * `start-jackpot`, then `LAUNCH_AT` passes: `begin_epoch` fires on that tick, not a safety interval later. Epoch 1 ends at the next grid point.
-- [ ] * Every pre-launch depositor holds full Tickets in epoch 1 with no transaction of their own (the tree reads live Principal). A deposit made during epoch 1 is pending until epoch 2.
+- [ ] * Every pre-launch depositor holds full Tickets in epoch 1 with no transaction of their own (the `begin_epoch` reset books their Principal as Tickets). A deposit made during epoch 1 is pending until epoch 2.
 - [ ] * Harvest runs inside epoch 1's last 10 minutes and the window's whole yield lands in the jackpot vault before `request_draw`. Pick `LAUNCH_AT` at least 15 minutes before the grid point, or the stub closes before the harvest window opens and the first prize rolls into epoch 2.
 - [ ] * Epoch 1 draws only among pre-launch depositors, pays, and the Prize credits Principal and Tickets at once.
 - [ ] If epoch 1's jackpot is under `min_jackpot`, it rolls over and epoch 2 draws with both days' yield. Decide whether to `fund-jackpot` before launch so the first draw pays.
-- [ ] A round opened in the window (only possible until audit-fixes ticket 08 lands) takes no stake after `begin_epoch` and leaves through `void-round`.
+- [ ] No Round opens in the window: the engine waits for epoch 1, and a bet before then is refused.
 
 ### Operator and ops
 
@@ -639,7 +666,6 @@ the next grid point.
 - [ ] `set-venue-params`, `set-treasury-accounts`, `set-params` from the admin take effect on chain.
 - [ ] Squads path: `propose-admin` to a devnet squad, `accept-admin` via base58 import, one `set-params` through Squads. Record the blockhash behaviour.
 - [ ] Shutdown drill on a throwaway pool: `shutdown --confirm`, `recall`, `emergency-crank`, `sweep-house`. Every depositor is whole.
-- [ ] After the drill, `close-weight-tree` (audit-fixes ticket 07) returns the tree's rent to the named account and fails before `total_principal` and `jackpot_reserved` are both zero.
 - [ ] Indexer keys events on signature and index. Two events in one slot both land; a backend restart replays none twice.
 - [ ] Deploy sizing leaves room for the sync's gain: a deploy right after a long sync does not trip the idle floor.
 
@@ -651,7 +677,7 @@ the next grid point.
 - [ ] Pause block: Admin signs pause and start; Operator pauses Pool, Game, Jackpot, Deployment and not Bought tickets; Fast pause signs a message and the backend sends with the Operator key; any other wallet gets "Prepare for Squads" with a base58 transaction. Only the Admin restarts, and the confirm box says so.
 - [ ] `OPS_WALLETS` unset: the page says Fast pause is not enabled on this env.
 - [ ] Routine cranks (Deploy, Recall, Harvest, Process withdraw) lit only when due; each sends and the banner clears on the next poll.
-- [ ] Advanced: Set params and Set venue params show each field's change before sending; Grant tickets; Fund jackpot from the wallet's own USDC; Cover deficit clears Impaired at zero; Void round and Roll over epoch say "No stuck Round" or "No stuck epoch" until the timeout.
+- [ ] Advanced: Set params and Set venue params show each field's change before sending; Game config changes the round length for the next Round and Grant Tickets books a ledger row (both need a wallet on `OPS_WALLETS`); Fund jackpot from the wallet's own USDC; Cover deficit clears Impaired at zero; Roll over epoch says "No stuck epoch" until the timeout.
 - [ ] Venue switch stepper marks the current step, shows CLI steps as text, Drain and Migrate as buttons once the chain allows them; a Viewer may Migrate, and Drain while a proposal is open.
 - [ ] Headline strip figures match `/ops/summary`; "Show raw" survives reload; "Copy JSON" copies the summary.
 - [ ] Phone: operator sections fit, the page scrolls, Details and Advanced collapsed by default.
@@ -672,7 +698,7 @@ the next grid point.
 - [ ] Account history lists refunds and cancellations.
 - [ ] Feature gates hide the board and prize cards and dim PLAY while set.
 - [ ] Referral binding, invite gate, buy tickets preview.
-- [ ] Measured CU and fee per user transaction recorded (deposit, withdraw, cancel_withdraw, buy_tickets, buy_position).
+- [ ] Measured CU and fee per user transaction recorded (deposit, withdraw, cancel_withdraw, buy_tickets). A bet is not a chain transaction and has none to record.
 
 ### Still open after this run
 

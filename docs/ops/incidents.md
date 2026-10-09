@@ -9,19 +9,20 @@ Squads.
 
 <a id="operator-stale"></a>
 <a id="indexer-stale"></a>
-## Chain stall mid-round
+## Operator or indexer stall
 
 Starts with `OPERATOR_STALE`, sometimes alongside `INDEXER_STALE`.
 
 1. Check `GET /status`: `operator.lastAction` and `operator.lastTickAt` for the operator,
    `cursor.ageSeconds` for the indexer.
-2. The operator sleeps until the next chain-clock deadline, a round's `close_buffer`, a request's
-   `vrf_timeout`, an epoch's `payout_timeout`, and works through one epoch and one round at a time:
-   `begin_epoch`, `request_draw`, `draw`, `payout`, and `create_round`, then
-   `settle_round` or `void_round`, with `deploy_to_venue`, `recall` and `harvest` between them as the
-   pool's liquidity needs. A 60s safety tick is the backstop if a deadline is missed.
-   Waiting on a deadline is not a stall by itself, as long as `lastTickAt` keeps advancing.
-3. A round whose randomness never arrives voids itself once `vrf_timeout` passes its request; an
+2. The operator sleeps until the next chain-clock deadline, an epoch's end, a request's
+   `vrf_timeout`, an epoch's `payout_timeout`, a venue deadline, and works through one epoch at a
+   time: `begin_epoch`, `request_draw`, `draw`, `payout`, with `deploy_to_venue`, `recall` and
+   `harvest` between them as the pool's liquidity needs, then `process_withdraw` for the queue. It
+   sends no round transactions, because Rounds are off chain. A 60s safety tick is the backstop if a
+   deadline is missed. Waiting on a deadline is not a stall by itself, as long as `lastTickAt` keeps
+   advancing.
+3. An epoch whose randomness never arrives rolls over once `vrf_timeout` passes its request, and an
    epoch stuck `Drawn` with no payout rolls over once `payout_timeout` passes. Neither needs a
    human today. See "VRF not fulfilling" below if this keeps repeating.
 4. If the tick is genuinely stuck rather than waiting, check the backend logs
@@ -32,13 +33,17 @@ Starts with `OPERATOR_STALE`, sometimes alongside `INDEXER_STALE`.
    `docker compose -f docker-compose.dev.yml restart backend` (swap the compose file for the
    environment, see [`docs/ops/environments.md`](environments.md)).
 6. Pause the game (`admin pause-game`, either key) if rounds stay visibly stuck after a restart.
-   It stops `create_round` and `buy_position` and leaves deposits and the daily draw alone; an
-   already-open round still plays out to settlement. The pool-wide `pause` (see "Suspected
-   exploit" below) stops `create_round`, `deposit` and `buy_tickets`. `pause-jackpot` holds the
-   next epoch and the draw.
-7. Players see the countdown end at `close_buffer` and the stage read DRAWING until settle lands
-   ([`runbook.md`](../../runbook.md)). A real stall shows as DRAWING, or "no open round", staying
-   that way well past the usual few seconds.
+   The backend then refuses new bets (`GamePaused`) and opens no new Round, and leaves deposits and
+   the daily draw alone; an already-open Round still closes and settles. The pool-wide `pause` (see
+   "Suspected exploit" below) stops `deposit` and `buy_tickets` on chain and stops bets and new
+   Rounds in the backend. `pause-jackpot` holds `begin_epoch`, `request_draw` and `buy_tickets`.
+7. Rounds do not wait on the operator. The backend closes a Round on the minute, reveals its tile
+   from a drand beacon and books the settle rows itself, and it voids the Round and refunds every
+   bet if no valid beacon arrives within 10 minutes of the beacon round's release. Players see the
+   stage read DRAWING until the tile lands ([`runbook.md`](../../runbook.md)). A Round that stays
+   DRAWING past that window points at the backend logs and the drand relays, not the chain. Anyone can check a
+   settled or voided Round with `node scripts/verify-round.mjs https://<api host>/rounds/<id>/record`
+   ([`docs/game-verification.md`](../game-verification.md)).
 
 <a id="rpc-down"></a>
 <a id="rpc-fallback-active"></a>
@@ -50,8 +55,8 @@ Starts with `RPC_DOWN` or `RPC_FALLBACK_ACTIVE`.
    primary sends that one call to `RPC_FALLBACK_URL`, and the next call tries the primary again
    (production-hardening ticket 03). Check `GET /status`'s `rpcEndpoint` (`"primary"` or
    `"fallback"`) and `rpcFallbackAt`.
-2. If `RPC_FALLBACK_URL` is set and rounds and draws are still landing (`operator.lastAction`
-   recent, `openRoundId` advancing), no action is needed beyond watching it.
+2. If `RPC_FALLBACK_URL` is set and the operator's sends are still landing (`operator.lastAction`
+   and `operator.lastTickAt` recent), no action is needed beyond watching it.
 3. `RPC_DOWN` without a working fallback needs a new endpoint. Set `RPC_URL` (and
    `RPC_FALLBACK_URL`, if a second provider is available) in the environment's env file, then
    recreate the backend so it picks up the change: `docker compose -f docker-compose.dev.yml up -d
@@ -62,43 +67,43 @@ Starts with `RPC_DOWN` or `RPC_FALLBACK_ACTIVE`.
    the next build. Never put a keyed URL there; it ships to every visitor
    ([`runbook.md`](../../runbook.md), "Frontend RPC endpoint").
 
-<a id="round-voided-recently"></a>
 <a id="epoch-rolled-over-recently"></a>
 ## VRF not fulfilling
 
-Starts with `ROUND_VOIDED_RECENTLY` or `EPOCH_ROLLED_OVER_RECENTLY`.
+Starts with `EPOCH_ROLLED_OVER_RECENTLY`.
 
 1. Confirm it is ORAO and not the operator: check the backend logs for a sent
-   `request_round_randomness` or `draw` with a confirmed signature and no matching settle, and
-   check `GET /status` / `GET /epochs/current` for a round or epoch parked past its `vrf_timeout`.
-2. Void and rollover fire on their own once the timeout passes: `void_round` once `vrf_timeout`
-   passes a round's or a drawing epoch's request, `rollover_epoch` once `payout_timeout` passes a
-   drawn epoch. Any signer may call either one after the timeout, as a backstop if the operator
-   itself is down. That is why the program floors both: `vrf_timeout` at 180s and `payout_timeout`
-   at 600s (`constants.rs`), so a stranger cannot void a merely slow fulfilment.
+   `request_draw` with a confirmed signature and no matching `draw`, and
+   check `GET /epochs/current` for an epoch parked past its `vrf_timeout`.
+2. Rollover fires on its own once the timeout passes: `rollover_epoch` once `vrf_timeout` passes a
+   drawing epoch's request, or once `payout_timeout` passes a drawn epoch. Any signer may call it
+   after the timeout, as a backstop if the operator itself is down. That is why the program floors
+   both: `vrf_timeout` at 180s and `payout_timeout` at 600s (`constants.rs`), so a stranger cannot
+   roll over a merely slow fulfilment.
 3. Check ORAO's own status page or Discord for a network-wide outage, and whether other ORAO
    consumers on the same cluster are stuck too. A HexVault-only stall points at the operator or its
-   RPC instead, see "Chain stall mid-round" above.
+   RPC instead, see "Operator or indexer stall" above.
 4. Raise `vrf_timeout` if ORAO is consistently slower than the configured value (180s at
-   bootstrap, which is also the program's floor, so you can only raise it), so an honest but slow draw stops voiding: `admin set-params --vrf-timeout N`.
+   bootstrap, which is also the program's floor, so you can only raise it), so an honest but slow
+   draw stops rolling over: `admin set-params --vrf-timeout N`.
 
 ## Suspected exploit
 
 Starts with whichever code names the damage, or none if the report comes in first.
 
 1. Pause first, from either key: `pnpm --filter @hexvault/backend admin pause`. It signs locally
-   with whichever key the environment has loaded, admin or operator, and stops `create_round`,
-   `deposit` and `buy_tickets`. An already-open round still takes `buy_position`, and
-   `grant_tickets` still mints, until production-hardening ticket 02 lands.
+   with whichever key the environment has loaded, admin or operator, and stops `deposit` and
+   `buy_tickets` on chain. The backend reads the same switch: it refuses new bets and opens no
+   Round. `grant-tickets` does not check any pause, because it only books a ledger row for a wallet
+   on `OPS_WALLETS`.
 2. Assess: compare recent events and vault balances (jackpot vault, principal vault, House Player)
-   against what `GET /status`, `GET /rounds/:id` and `GET /players/:owner` report, and check the
-   backend logs for anything unexpected.
+   against what `GET /status`, `GET /rounds/:id/record` and `GET /players/:owner` report, and check
+   the backend logs for anything unexpected.
 3. Decide the next step:
    - **False alarm, or contained**: `pnpm --filter @hexvault/backend admin unpause` (admin-only,
      goes through Squads on mainnet).
    - **A code fix is needed**: ship it with `scripts/deploy.sh <env> --upgrade`
-     ([`docs/ops/deploy.md`](deploy.md#upgrading)). Run it only once no Round is open
-     (`GET /status`'s `openRoundId`).
+     ([`docs/ops/deploy.md`](deploy.md#upgrading)).
    - **Funds need to come out for good**: let any already-drawn epoch's `payout` land, then
      `shutdown --confirm <pool-id>`, recall the venue position, `emergency-crank [--batch N]`,
      `sweep-house`, in that order
@@ -144,30 +149,26 @@ Starts with `OPERATOR_FAILING`.
 1. First check: `GET /status`'s `operator.lastError` code and the backend logs for the same tick's
    full error text (the log line the code was derived from). `lastTickAt` is still advancing here,
    which is what separates this from `OPERATOR_STALE`; every tick runs, every one errors.
-2. Work the error like "Chain stall mid-round" above once the cause is in hand: an RPC problem, an
+2. Work the error like "Operator or indexer stall" above once the cause is in hand: an RPC problem, an
    Anchor error naming a bad account or balance, or a bug in the tick itself.
 
 <a id="epoch-no-progress"></a>
-<a id="stuck-round"></a>
 <a id="stuck-epoch"></a>
 ## Epoch stuck without progress
 
-Starts with `EPOCH_NO_PROGRESS`. The console's `STUCK_ROUND` and `STUCK_EPOCH` lines belong here
-too. They appear once the program would accept `void_round` or `rollover_epoch`, so step 2 is the
-Void round and Roll over epoch buttons under Advanced.
+Starts with `EPOCH_NO_PROGRESS`. The console's `STUCK_EPOCH` line belongs here too. It appears once
+the program would accept `rollover_epoch`, so step 2 is the Roll over epoch button under Advanced.
 
-1. First check: `GET /epochs/current`'s `status` against `endsAt` and `vrfTimeout`. This fires only once an epoch has run well past the point every self-healing
-   timeout (void, rollover) should already have moved it on, so treat it as "the backstop itself
-   didn't fire" and check the operator logs for why: `OPERATOR_STALE`, a stuck RPC, or a bug in the
-   void/rollover path.
-2. Push it by hand. Both exits are permissionless and the program enforces the deadline, so a
+1. First check: `GET /epochs/current`'s `status` against `endsAt` and `vrfTimeout`. This fires only once an epoch has run well past the point the self-healing
+   rollover should already have moved it on, so treat it as "the backstop itself didn't fire" and
+   check the operator logs for why: `OPERATOR_STALE`, a stuck RPC, or a bug in the rollover path.
+2. Push it by hand. The exit is permissionless and the program enforces the deadline, so a
    too-early call fails with `VrfTimeoutNotElapsed` and changes nothing:
-   `admin rollover-epoch --epoch N` for an Ended, Drawing or Drawn epoch past its timeout,
-   `admin void-round --round N` for an Open or Requested round past `vrf_timeout`. Ids are in
-   `GET /epochs/current` and `GET /status`. The operator voids a round itself, Open or Requested,
-   and rolls over a Drawing or Drawn epoch, but never an Ended one: it sends that one to the draw
-   with `request_draw`, and an Ended epoch that stays stuck means `request_draw` keeps failing, so
-   read the operator's error before giving up the draw.
+   `admin rollover-epoch --epoch N` for an Ended, Drawing or Drawn epoch past its timeout. The id
+   is in `GET /epochs/current`. The operator rolls over a Drawing or Drawn epoch itself, but never
+   an Ended one: it sends that one to the draw with `request_draw`, and an Ended epoch that stays
+   stuck means `request_draw` keeps failing, so read the operator's error before giving up the
+   draw.
 
 <a id="drawn-unpaid"></a>
 ## Drawn epoch sitting unpaid
@@ -347,20 +348,6 @@ retrying that epoch. Nobody is paid until the rows are right, and `DRAWN_UNPAID`
 4. Once the rows rebuild the chain's root, restart the backend (it forgets the stop) or run `payout` by hand
    with the proof from `GET /epochs/<id>/draw`. `payout` is permissionless.
 
-<a id="weight-tree-nearly-full"></a>
-## Weight tree filling up
-
-Starts with `WEIGHT_TREE_NEARLY_FULL`.
-
-1. `GET /status`'s `treeNodeCount` against `treeCapacity` (187,244 Players). Past the capacity
-   deposits from a new wallet fail with `WeightTreeFull`. The alert fires at 80% of capacity.
-2. The Operator releases one empty Player's leaf per tick (`release_leaf`, after the Player has been
-   empty for more than one epoch), and `deposit` reuses released leaves before growing the tree.
-   Many wallets that deposited and refunded in one epoch therefore come back on their own. Anyone can
-   also call `release_leaf` for a Player with no Principal, no queued withdrawal and no open Position.
-3. A second tree is out of scope for the current program. If the count still climbs with real
-   Players, that needs a design decision well before the last leaf is taken.
-
 <a id="venue-proposed"></a>
 ## A venue proposal is open
 
@@ -425,7 +412,7 @@ come from the `todo` list in `GET /ops/summary`, not from `/alerts`.
    it on its next tick". Do nothing.
 2. The line turns amber when the Operator is stale or failing, or when the condition has held past
    that window. The bot did not do its job. Work `OPERATOR_STALE` or `OPERATOR_FAILING` first
-   ("Chain stall mid-round", "Operator failing silently" above).
+   ("Operator or indexer stall", "Operator failing silently" above).
 3. If the Operator will stay down, press the matching button under Routine cranks: Deploy to venue,
    Recall, Harvest or Process withdraw. All four are permissionless, so any wallet with SOL can
    sign. A due todo fills in the amount for Deploy and Recall and the owner for Process withdraw.
@@ -446,6 +433,6 @@ Starts with `WITHDRAW_OWNERS_SKIPPED`.
    in the next epoch.
 2. Read that owner's send error in the backend logs. An Impaired pool is the known cause, because
    `process_withdraw` then needs the owner's own signature ("Venue loss" above). Otherwise look at
-   the owner's token account and the Position they may still hold open.
+   the owner's token account.
 3. The skipped owner's withdrawal stays queued and keeps showing as `WITHDRAWS_DUE`. Once the
    cause is fixed, Process withdraw under Routine cranks pays it by hand.

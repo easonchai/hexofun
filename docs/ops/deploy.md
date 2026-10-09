@@ -106,20 +106,17 @@ program extend <program-id> <bytes>` command and, outside `--dry-run`, asks to r
 before continuing; `solana program deploy` also auto-extends if a required extend was skipped, so
 declining here is not a hard stop.
 
-**Never `--upgrade` across the live-yield layout rewrite.** That rewrite (yield-claimer ticket 04)
-changed the layout and discriminator of `Pool`, `Player`, `Round` and `Position`, so it deploys to
-a fresh program ID per environment with pools bootstrapped anew. See
+**Never `--upgrade` across a layout rewrite.** The live-yield rewrite (yield-claimer ticket 04) and
+the off-chain rework (off-chain-tickets ticket 08, ADR 0025) each changed the layout and
+discriminator of `Pool` and `Player`, so each deployed to a fresh program ID per environment with
+pools bootstrapped anew. The rework also dropped the `Round` and `Position` accounts altogether. See
 [`environments.md`](environments.md#the-live-yield-layout-rewrite-needs-one-in-every-environment).
 
-**Deploy an upgrade only when no `Round` is open.** Before the rewrite, `Round` had no reserved
-padding, so a `Round` account open at the moment of an upgrade that changed `Round`'s layout
-failed to deserialize on the next instruction that touched it. Since the rewrite `Round` carries
-64 reserved bytes and `Position` 32, but an open round is still the one account an upgrade can
-strand mid-flight, so the rule stays. Check `GET /status` (`openRoundId`) or wait for the current
-round to settle before running `--upgrade`.
+There is no open-round rule for an upgrade. Rounds are Postgres rows in the backend now (ADR 0025),
+so an upgrade has no on-chain round account to strand.
 
-`Pool`, `Epoch`, `Player`, `Round` and `Position` carry `version` and `_reserved` padding so an
-upgrade that only adds a field there needs no such care; see ADR 0013.
+`Pool`, `Epoch` and `Player` carry `version` and `_reserved` padding so an upgrade that only adds a
+field there needs no such care; see ADR 0013.
 
 ### Rollback
 
@@ -197,8 +194,8 @@ Three things bit on devnew on 2026-09-28, all outside this repo:
 - A new capability is a new instruction (`foo_v2`), not a new required argument on an existing
   one; old clients keep working.
 - The live-yield layout rewrite was the one exception, on a fresh program ID per environment
-  (ADR 0013's 2026-10-04 amendment). It also gave `Round` and `Position` padding, so they follow
-  this policy from then on.
+  (ADR 0013's 2026-10-04 amendment). The custody-only rework (ADR 0025) was a second exception on
+  the same terms. The accounts that remain follow this policy from then on.
 
 ## Admin signing: local key, Ledger or Squads
 
@@ -212,9 +209,10 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   the Solana app first. If `ADMIN_ADDRESS` is also set, the CLI checks the Ledger's pubkey
   against it before building any transaction and fails closed on a mismatch.
 - **Squads** (mainnet today): set `ADMIN_ADDRESS` to the multisig vault's address without loading
-  its key anywhere. Every admin-gated command (`set-params`, `shutdown`, `sweep-house`,
-  `set-operator`, `propose-admin`, `accept-admin`, and `grant-tickets`'s admin path) then builds the instruction with the vault as signer and fee
-  payer and prints one base58 transaction on stdout instead of sending it
+  its key anywhere. Every admin-gated command that sends a transaction (`set-params`, `shutdown`,
+  `sweep-house`, `set-operator`, `propose-admin`, `accept-admin`) then builds the instruction with
+  the vault as signer and fee payer and prints one base58 transaction on stdout instead of sending
+  it
   (`apps/backend/src/admin/squads.ts`, `adminMode`); everything else it prints goes to stderr, so
   `admin sweep-house | pbcopy` hands Squads a clean paste. In Squads:
   Transaction Builder, Add instruction, Import base58 encoded tx, paste, simulate, then collect
@@ -223,7 +221,9 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   re-run the command for a fresh one if the paste took too long. `pause`, `pause-game`,
   `pause-jackpot`, `fund-jackpot` and `emergency-crank` never go through Squads: they are
   permissionless or dual-signer by design, so none of them has to wait on multisig approval,
-  which matters most for `pause` in an incident.
+  which matters most for `pause` in an incident. `grant-tickets` is not a chain transaction at
+  all. It signs a message with `--keypair`, a wallet listed in the backend's `OPS_WALLETS`, and
+  posts it to the backend, which books the ledger row.
 
 `scripts/deploy.sh mainnet --upgrade` always signs the program upgrade itself with a Ledger
 (`--upgrade-authority usb://ledger`), independent of whichever of the three modes above the admin
@@ -265,8 +265,10 @@ missing variables. `VENUE_KIND` (`klend`, the default, `stub` or `kvault`) is th
 0, 1 or 2, stored at `create_pool`; the program refuses a kind its build does not support. On a
 localnet built with `--features test-vrf,test-venue`, `VENUE_KIND=stub` pins the stub venue and
 runs `test_venue_init` (`apps/backend/scripts/bootstrap-localnet.sh` sets it; `KLEND_VENUE=test`
-still works as the old spelling). Bootstrap refuses the stub on mainnet. Bootstrap prints `WEIGHT_TREE` and the four pins as the chain recorded them, for a second
-person to check.
+still works as the old spelling). Bootstrap refuses the stub on mainnet. Bootstrap prints the addresses it created (`POOL_ADDRESS`,
+`PRINCIPAL_VAULT`, `JACKPOT_VAULT`, `TREASURY`, `BUYBACK_RESERVE`) and the four pins
+(`KLEND_PROGRAM`, `KLEND_MARKET`, `KLEND_RESERVE`, `KLEND_CTOKEN`) as the chain recorded them, for a
+second person to check.
 
 ## Moving admin and the upgrade authority to Squads later
 
