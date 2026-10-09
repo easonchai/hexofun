@@ -61,17 +61,10 @@ async function surf(method: string, params: unknown[]): Promise<unknown> {
   return body.result;
 }
 
-/** Seeds of every Round and Epoch that has asked for randomness. */
+/** Seeds of every Epoch that has asked for randomness. Rounds are off-chain (ADR 0025). */
 async function requestedSeeds(): Promise<{ label: string; seed: Buffer }[]> {
-  const [rounds, epochs] = await Promise.all([
-    program.account.round.all(),
-    program.account.epoch.all(),
-  ]);
+  const epochs = await program.account.epoch.all();
   const out: { label: string; seed: Buffer }[] = [];
-  for (const { account } of rounds) {
-    const seed = Buffer.from(account.vrfSeed);
-    if (seed.some((b) => b !== 0)) out.push({ label: `round ${account.roundId}`, seed });
-  }
   for (const { account } of epochs) {
     const seed = Buffer.from(account.vrfSeed);
     if (seed.some((b) => b !== 0)) out.push({ label: `epoch ${account.epochId}`, seed });
