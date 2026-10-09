@@ -94,6 +94,8 @@ export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
   "BelowPendingWithdrawals",
   "DeployExceedsIdle",
   "DeployPaused",
+  // The gap a harvest must redeem from the venue is under min_venue_move.
+  "HarvestBelowMinimum",
   "PoolImpaired",
   "PoolShutDown",
   "RecallExceedsTarget",

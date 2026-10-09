@@ -1696,6 +1696,22 @@ describe("venue cranks (ticket 13)", () => {
     expect((await runTick(deploy.ctx)).action).toBeNull();
   });
 
+  it("a harvest refused with HarvestBelowMinimum is a warning and a cooldown, not a step error", async () => {
+    const { ctx, warned } = context({
+      pool: harvestPool(),
+      currentEpoch: endingIn(HARVEST_LEAD_SECONDS - 1n),
+      principalVaultBalance: async () => 1_000n * U,
+      send: async () => {
+        throw new Error("HarvestBelowMinimum");
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.stepError).toBeUndefined();
+    expect(warned).toEqual(["harvest refused, retrying in a while: HarvestBelowMinimum"]);
+    expect(outcome.venueState?.failedAt.harvest).toBe(NOW);
+    expect(outcome.venueState?.harvestedEpoch).toBeNull();
+  });
+
   it("NothingToHarvest counts as harvested for the epoch", async () => {
     const { ctx } = context({
       pool: harvestPool(),
