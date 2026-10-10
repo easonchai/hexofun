@@ -513,6 +513,9 @@
   Never put a Solami key in the web's VITE_PUBLIC_RPC_URL: Vite inlines it, and each browser's confirmTransaction would open a
   socket against the plan's connection cap (5 on Pro, 2 on Dev, per Solami's GET /pricing on 2026-10-10).
 
+  SUBGRAPH_URL (https://api.solami.dev/index/hexo/graphql) and SUBGRAPH_API_KEY (the Solami key) are set together or not at all; with
+  both, catch-up reads the subgraph while it is Live and within 300 slots, and `/status` shows subgraphSyncedSlot and subgraphBehindSlots.
+
   Mainnet stack
 
   Mainnet runs as a second compose project on the same box, out of the same checkout and behind the same Traefik. The two stacks

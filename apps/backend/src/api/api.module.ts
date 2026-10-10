@@ -3,6 +3,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 
 import { ChainModule } from "../chain/chain.module";
+import { subgraphProvider } from "../indexer/subgraph";
 import { AccessController } from "./access.controller";
 import { AlertsController } from "./alerts.controller";
 import { ApiController } from "./api.controller";
@@ -90,6 +91,8 @@ import { WebhooksController } from "./webhooks.controller";
     RoundsService,
     SparringService,
     OpsSummaryService,
+    // Solami ticket 05: `/status` reads the subgraph's synced slot.
+    subgraphProvider,
     { provide: APP_INTERCEPTOR, useClass: SerializationInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],

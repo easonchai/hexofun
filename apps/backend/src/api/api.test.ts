@@ -8,6 +8,7 @@ process.env.DATABASE_URL = TEST_DATABASE_URL;
 import type { INestApplication } from "@nestjs/common";
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import { FastifyAdapter } from "@nestjs/platform-fastify";
+import { ConfigService } from "@nestjs/config";
 import { Test } from "@nestjs/testing";
 import { Prisma, type Player, type TicketReason } from "@prisma/client";
 import {
@@ -1316,6 +1317,22 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
   it("GET /status carries a null webhookLastSlot before any webhook delivery", async () => {
     const { body } = await http.get("/status").expect(200);
     expect(body.webhookLastSlot).toBeNull();
+  });
+
+  // Solami ticket 05: unset here, so both are null; with a client, the slot
+  // it reports and how far that sits behind the RPC's (1234 in fakeChain).
+  it("GET /status carries the subgraph's synced slot and lag, null with it unset or failing", async () => {
+    const { body } = await http.get("/status").expect(200);
+    expect(body).toMatchObject({ subgraphSyncedSlot: null, subgraphBehindSlots: null });
+
+    const config = app.get(ConfigService);
+    const subgraph = { syncedSlot: async () => ({ slot: 1200, live: true }), transactionsSince: async () => [] };
+    const withSubgraph = new ApiService(prisma, fakeChain as unknown as ChainService, config, subgraph);
+    expect(await withSubgraph.getStatus()).toMatchObject({ subgraphSyncedSlot: 1200, subgraphBehindSlots: 34 });
+
+    const failing = { ...subgraph, syncedSlot: () => Promise.reject(new Error("subgraph status failed: answered 401")) };
+    const withFailing = new ApiService(prisma, fakeChain as unknown as ChainService, config, failing);
+    expect(await withFailing.getStatus()).toMatchObject({ subgraphSyncedSlot: null, subgraphBehindSlots: null });
   });
 
   it("GET /status carries the configured launch time before Epoch 1", async () => {

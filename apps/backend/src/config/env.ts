@@ -147,6 +147,12 @@ export interface HexVaultEnv {
   /** The tip each Beam send pays, in lamports: at least, and by default,
    *  100,000. Parsed only with `BEAM_KEYPAIR` set. */
   BEAM_TIP_LAMPORTS?: number;
+  /** Solami ticket 05: the hexo subgraph's GraphQL endpoint, ending in
+   *  `/graphql`, and the Solami key sent as its bearer. Both or neither; with
+   *  both, the Indexer's catch-up reads the subgraph while it keeps pace with
+   *  the chain and the RPC walk otherwise. Mainnet only. */
+  SUBGRAPH_URL?: string;
+  SUBGRAPH_API_KEY?: string;
 }
 
 /**
@@ -383,7 +389,35 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
           BEAM_TIP_LAMPORTS: beamTipLamports(env.BEAM_TIP_LAMPORTS),
         }
       : {}),
+    ...subgraphVars(env.SUBGRAPH_URL, env.SUBGRAPH_API_KEY),
   };
+}
+
+/** Both or neither. One without the other counts as unset and says so once,
+ *  here at boot. The URL must end in `/graphql`: the subgraph's status route
+ *  is the same path without it. Neither value is echoed. */
+function subgraphVars(
+  rawUrl: unknown,
+  rawKey: unknown,
+): Pick<HexVaultEnv, "SUBGRAPH_URL" | "SUBGRAPH_API_KEY"> {
+  if (!rawUrl && !rawKey) return {};
+  if (!rawUrl || !rawKey) {
+    new Logger("env").warn(
+      `${rawUrl ? "SUBGRAPH_API_KEY" : "SUBGRAPH_URL"} is unset, so the subgraph is off and catch-up stays on the RPC walk`,
+    );
+    return {};
+  }
+  const url = String(rawUrl).trim();
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // reported below
+  }
+  if (!parsed || !/^https?:$/.test(parsed.protocol) || !parsed.pathname.endsWith("/graphql")) {
+    throw new Error("SUBGRAPH_URL must be an http(s) URL ending in /graphql");
+  }
+  return { SUBGRAPH_URL: url, SUBGRAPH_API_KEY: String(rawKey).trim() };
 }
 
 /** A 64-byte base58 secret, or the boot fails without echoing the value. */

@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { Inject, Injectable, Logger, NotFoundException, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Prisma,
@@ -15,6 +15,7 @@ import bs58 from "bs58";
 import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
+import { SUBGRAPH_CLIENT, type SubgraphSource } from "../indexer/subgraph";
 import { clockUnixTimestamp } from "../operator/chain-state";
 import { snapshotReasons } from "../ledger/snapshot-reasons";
 import { referralGrantsForEpoch } from "../operator/referral-grants";
@@ -199,6 +200,7 @@ interface CachedRead<T> {
 export class ApiService {
   private readonly logger = new Logger(ApiService.name);
   private probe: CachedRead<RpcHealth> | undefined;
+  private subgraphProbe: CachedRead<number | null> | undefined;
   private clock: CachedRead<ClockReading> | undefined;
   private jackpotBalance: CachedRead<bigint> | undefined;
   private balances: CachedRead<ChainBalances> | undefined;
@@ -244,6 +246,8 @@ export class ApiService {
     private readonly prisma: PrismaService,
     private readonly chain: ChainService,
     config: ConfigService<HexVaultEnv, true>,
+    /** Solami ticket 05: set only when `SUBGRAPH_URL` and `SUBGRAPH_API_KEY` are. */
+    @Optional() @Inject(SUBGRAPH_CLIENT) private readonly subgraph: SubgraphSource | null = null,
   ) {
     this.poolAddress = chain.poolAddress().toBase58();
     this.operatorSolWarn = config.get("OPERATOR_SOL_WARN", { infer: true });
@@ -817,11 +821,12 @@ export class ApiService {
     // A freshly cut-over pool has no OperatorState or Cursor row until its
     // first tick and sync; statusFrom reads those nulls as "never ran"
     // rather than showing the retired pool's (ADR 0016).
-    const [operator, cursor, pool, rpc] = await Promise.all([
+    const [operator, cursor, pool, rpc, subgraphSlot] = await Promise.all([
       this.prisma.operatorState.findUnique({ where: { poolAddress } }),
       this.prisma.cursor.findUnique({ where: { poolAddress } }),
       this.prisma.pool.findUnique({ where: { address: poolAddress } }),
       this.rpcHealth(),
+      this.subgraphSyncedSlot(),
     ]);
     const balances = await this.chainBalances(pool?.klendReserve);
     // Players whose deposit has not earned a Ticket yet: one made in the
@@ -858,6 +863,9 @@ export class ApiService {
       webhookLastSlot: webhookLastSlot(),
       // Solami ticket 08: in-memory Beam send counts since boot, null when off.
       beam: this.chain.beam?.status() ?? null,
+      // Solami ticket 05: null with the subgraph unset or its read failed.
+      subgraphSyncedSlot: subgraphSlot,
+      subgraphBehindSlots: subgraphSlot === null || rpc.slot === null ? null : rpc.slot - subgraphSlot,
     };
   }
 
@@ -1046,6 +1054,22 @@ export class ApiService {
   private rpcHealth(): Promise<RpcHealth> {
     this.probe = this.cached(this.probe, RPC_PROBE_TTL_MS, () => this.probeRpc());
     return this.probe.result;
+  }
+
+  /** The subgraph's synced slot, on `rpcOk`'s cadence; null when it is not
+   *  configured or the read failed (the client has already scrubbed the error). */
+  private subgraphSyncedSlot(): Promise<number | null> {
+    const subgraph = this.subgraph;
+    if (subgraph === null) return Promise.resolve(null);
+    this.subgraphProbe = this.cached(this.subgraphProbe, RPC_PROBE_TTL_MS, async () => {
+      try {
+        return (await subgraph.syncedSlot()).slot;
+      } catch (cause) {
+        this.logger.warn(`subgraph status read failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+        return null;
+      }
+    });
+    return this.subgraphProbe.result;
   }
 
   /**

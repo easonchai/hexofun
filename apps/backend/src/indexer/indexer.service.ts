@@ -1,12 +1,14 @@
 import {
+  Inject,
   Injectable,
   Logger,
+  Optional,
   type OnModuleDestroy,
   type OnModuleInit,
 } from "@nestjs/common";
 import { EventParser } from "@anchor-lang/core";
 import { Prisma } from "@prisma/client";
-import type { Epoch, Player } from "@prisma/client";
+import type { Cursor, Epoch, Player } from "@prisma/client";
 import { PublicKey, type ConfirmedSignatureInfo } from "@solana/web3.js";
 import bs58 from "bs58";
 
@@ -32,6 +34,7 @@ import {
   type DecodedPool,
   type DecodedVenueProposal,
 } from "./decode";
+import { SUBGRAPH_CLIENT, type SubgraphSource, type SubgraphTransaction } from "./subgraph";
 
 /** What a log-triggered read expects at an address, plus anything the row
  *  builder needs that the account bytes do not carry. */
@@ -124,6 +127,10 @@ const V2_UNSUPPORTED_RESET_MS = 60 * 60 * 1000;
 // with `before` past as many of these as the backlog since the cursor takes,
 // so a long outage no longer loses anything older than one page.
 const SIGNATURE_PAGE = 1_000;
+/** Solami ticket 05: the subgraph serves catch-up while its synced slot is
+ *  within this many slots of the chain head the sweep last saw. Below the
+ *  `INDEXER_STALE` alert, so the RPC walk takes over before that fires. */
+export const SUBGRAPH_FRESH_SLOTS = 300n;
 
 /** The Yield index history keeps at most one point a minute (spec "Backend"). */
 const YIELD_INDEX_MIN_GAP_S = 60n;
@@ -258,10 +265,14 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    *  this service reads or writes is filtered or keyed by it, so a retired
    *  pool's rows in the same database are never read as current (ADR 0016). */
   private readonly activePool: string;
+  /** Which source the last catch-up used, so a change is logged once. */
+  private catchUpSource: string | undefined;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly chain: ChainService,
+    /** Solami ticket 05: set only when `SUBGRAPH_URL` and `SUBGRAPH_API_KEY` are. */
+    @Optional() @Inject(SUBGRAPH_CLIENT) private readonly subgraph: SubgraphSource | null = null,
   ) {
     this.parser = new EventParser(this.chain.programId, this.chain.program.coder);
     this.activePool = this.chain.poolAddress().toBase58();
@@ -1044,6 +1055,19 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // A new pool has no Cursor row, so this walks its whole history rather
     // than hunting for a retired pool's last signature (ADR 0016).
     const cursor = await this.prisma.cursor.findUnique({ where: { poolAddress: this.activePool } });
+    const rows = await this.subgraphBacklog(cursor);
+    if (rows !== undefined) {
+      // One queue slot for the whole backlog, as the RPC walk below does.
+      await this.enqueue(async () => {
+        for (const row of rows) {
+          await this.ingestFinalized(
+            { signature: row.signature, slot: row.slot, blockTime: null, logs: row.logs },
+            row.failed ? "failed" : row.truncated ? "truncated" : "ok",
+          );
+        }
+      });
+      return;
+    }
     const backlog: ConfirmedSignatureInfo[] = [];
     let before: string | undefined;
     for (;;) {
@@ -1095,10 +1119,8 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         info.blockTime === null || info.blockTime === undefined ? null : BigInt(info.blockTime),
       logs: [],
     };
-    // A failed transaction committed nothing, so it has no events. The cursor
-    // still moves past it, otherwise every tick re-lists it forever.
     if (info.err) {
-      await this.persist(batch, []);
+      await this.ingestFinalized(batch, "failed");
       return true;
     }
     const tx = await this.chain.connection.getTransaction(info.signature, {
@@ -1110,13 +1132,88 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       this.noteFailure(`no finalized logs yet for ${info.signature}`);
       return false;
     }
-    if (logs.includes(LOG_TRUNCATED)) {
-      await this.ingestTruncated(info.signature, batch.slot);
-      await this.persist(batch, []); // moves the cursor past it, with no events to store
-      return true;
-    }
-    await this.persist({ ...batch, logs }, decodeEventLogs(this.parser, logs));
+    await this.ingestFinalized({ ...batch, logs }, logs.includes(LOG_TRUNCATED) ? "truncated" : "ok");
     return true;
+  }
+
+  /** One finalized transaction from either catch-up source, cursor advancing. */
+  private async ingestFinalized(batch: LogBatch, outcome: "ok" | "failed" | "truncated"): Promise<void> {
+    // A failed transaction committed nothing, so it has no events. The cursor
+    // still moves past it, otherwise every tick re-lists it forever.
+    if (outcome === "failed") {
+      await this.persist({ ...batch, logs: [] }, []);
+      return;
+    }
+    if (outcome === "truncated") {
+      await this.ingestTruncated(batch.signature, batch.slot);
+      await this.persist({ ...batch, logs: [] }, []); // moves the cursor past it, with no events to store
+      return;
+    }
+    await this.persist(batch, decodeEventLogs(this.parser, batch.logs));
+  }
+
+  /**
+   * Solami ticket 05: the backlog from the subgraph, or undefined when this
+   * tick runs the RPC walk instead (subgraph unset, not `Live`, more than
+   * `SUBGRAPH_FRESH_SLOTS` behind the sweep's head, or a read failed).
+   *
+   * Rows start at the cursor's slot, and `persist` never moves the cursor
+   * back, so only rows at exactly that slot can already be consumed. Those
+   * are skipped when they are the cursor's own signature, their events are
+   * ledgered, or their truncated log is recorded. A row only the live feed
+   * stored still goes through, so the ledger books it as the RPC walk would.
+   */
+  private async subgraphBacklog(cursor: Cursor | null): Promise<SubgraphTransaction[] | undefined> {
+    if (this.subgraph === null) return undefined;
+    let rows: SubgraphTransaction[];
+    try {
+      const head = this.lastSyncedSlot;
+      if (head === undefined) return this.useRpcWalk("no head", "no chain head yet");
+      const synced = await this.subgraph.syncedSlot();
+      if (!synced.live) return this.useRpcWalk("not live", "subgraph status is not Live");
+      const behind = head - BigInt(synced.slot);
+      if (behind > SUBGRAPH_FRESH_SLOTS) {
+        return this.useRpcWalk("behind", `subgraph ${behind} slots behind`);
+      }
+      rows = await this.subgraph.transactionsSince(cursor?.lastSlot ?? 0n, this.activePool);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.useRpcWalk("failed", `subgraph read failed: ${message}`);
+    }
+    this.noteCatchUpSource("subgraph", "subgraph");
+    const lastSlot = cursor?.lastSlot;
+    if (lastSlot === null || lastSlot === undefined) return rows;
+    // Bounded by one slot of one pool's transactions, not by a caller.
+    const sameSlot = rows.filter((row) => row.slot === lastSlot).map((row) => row.signature);
+    if (sameSlot.length === 0) return rows;
+    const [ledgered, truncated] = await Promise.all([
+      this.prisma.event.findMany({
+        where: { poolAddress: this.activePool, signature: { in: sameSlot }, ledgered: true },
+        select: { signature: true },
+      }),
+      this.prisma.truncatedLog.findMany({
+        where: { poolAddress: this.activePool, signature: { in: sameSlot } },
+        select: { signature: true },
+      }),
+    ]);
+    const consumed = new Set([
+      cursor?.lastSignature,
+      ...ledgered.map((row) => row.signature),
+      ...truncated.map((row) => row.signature),
+    ]);
+    return rows.filter((row) => row.slot !== lastSlot || !consumed.has(row.signature));
+  }
+
+  private useRpcWalk(reason: string, detail: string): undefined {
+    this.noteCatchUpSource(`rpc ${reason}`, `rpc (${detail})`);
+    return undefined;
+  }
+
+  /** Logs `catch-up source: <line>` when `source` differs from the last tick's. */
+  private noteCatchUpSource(source: string, line: string): void {
+    if (source === this.catchUpSource) return;
+    this.catchUpSource = source;
+    this.logger.log(`catch-up source: ${line}`);
   }
 
   /**

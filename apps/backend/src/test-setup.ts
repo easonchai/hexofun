@@ -35,6 +35,9 @@ delete process.env.SOLAMI_WEBHOOK_SECRET;
 // transactions to the real Beam endpoint.
 delete process.env.BEAM_KEYPAIR;
 delete process.env.BEAM_TIP_LAMPORTS;
+// Solami ticket 05: a shell SUBGRAPH_URL would point catch-up at the real subgraph.
+delete process.env.SUBGRAPH_URL;
+delete process.env.SUBGRAPH_API_KEY;
 // Beta-launch-fixes ticket 05: a harmless default so any suite that flips a
 // seeded Pool's currentEpochId to 0 sees `/state`/`/status` carry a launch
 // time, without every other suite (whose Pool already has an Epoch) noticing.

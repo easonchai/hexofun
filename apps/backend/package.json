@@ -12,7 +12,8 @@
     "bootstrap": "tsx src/bootstrap.ts",
     "admin": "tsx src/admin/main.ts",
     "sparring-setup": "tsx src/sparring-setup.ts",
-    "sync-idl": "node scripts/sync-idl.mjs"
+    "sync-idl": "node scripts/sync-idl.mjs",
+    "subgraph:schema": "tsx src/indexer/subgraph-schema.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "1.1.2",
