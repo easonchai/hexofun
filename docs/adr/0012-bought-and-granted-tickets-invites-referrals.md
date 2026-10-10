@@ -1,9 +1,13 @@
 # Tickets can be bought or granted, and an app-level invite gate feeds a referral bonus
 
+Amended by ADR 0022 (2026-10-06): the buy and per-Player grant caps below count locked Principal
+(the Pending deposit excluded), and the pool-wide grant cap counts the `total_principal` of the
+epoch's start. The wording below is the original.
+
 Until now every Ticket (`Player.entries`) came from a deposit, the game, or a payout. Growth
 needed two more sources that do not touch Principal: `buy_tickets` spends USDC at a pool-set
 `tickets_per_usdc` rate and sends it to the jackpot vault, never returned, capped per Player per
-epoch at that Player's own live Principal. `grant_tickets` credits Tickets with no USDC at all,
+epoch at that Player's own live Principal (see the amendment above). `grant_tickets` credits Tickets with no USDC at all,
 through two paths on one instruction: an operator path capped per Player and pool-wide
 (`bonus_cap_bps` of `total_principal`) for the automated referral bonus, and an uncapped admin
 path, House included, for a manual fix. Both are ordinary Tickets the instant they land: the

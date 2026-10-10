@@ -3,6 +3,10 @@ members = ["programs/hex_vault"]
 resolver = "2"
 
 [profile.release]
+# Program rent scales with binary size: "s" cut 1,168,792 B to 1,028,648 B
+# (about 0.7 SOL of mainnet rent). "z" is smaller (954,904 B) but costs
+# more CU on every transaction.
+opt-level = "s"
 overflow-checks = true
 lto = "fat"
 codegen-units = 1

@@ -1,0 +1,295 @@
+// The Operator's three venue cranks (yield-claimer ticket 13): deploy idle
+// USDC above the idle band, recall when it falls under the floor, and harvest
+// once per epoch before it ends. Pure over a fabricated pool, so the
+// decisions are tested without a chain; `tick.ts` sends what this picks.
+//
+// All three are permissionless on the program side and the program enforces
+// every limit again (`DeployExceedsIdle`, `RecallExceedsTarget`,
+// `VenueMoveTooSmall` and so on). The numbers here only decide when asking is
+// worth a transaction, so a rounding difference costs one failed, cooled-down
+// attempt and never a wrong transfer.
+import { PublicKey } from "@solana/web3.js";
+
+import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
+import type { EpochState, PoolState } from "./chain-state";
+
+/** Harvest runs inside this many seconds before `epoch_end`, so the prize
+ *  share is in the jackpot vault when `request_draw` snapshots it. */
+export const HARVEST_LEAD_SECONDS = 600n;
+/** After a crank fails, it is not tried again for this many chain seconds. The
+ *  safety tick runs every 60 s, so this is what stops a refused crank from
+ *  turning into a send per minute. */
+export const VENUE_RETRY_SECONDS = 600n;
+/** Harvest retries sooner: its window is the same 600 s, so a 600 s cooldown
+ *  would mean a harvest that fails once is never retried before the draw. */
+export const HARVEST_RETRY_SECONDS = 90n;
+
+const BPS = 10_000n;
+
+/** The open venue proposal, as far as the tick needs it. Null when none. */
+export interface VenueProposalState {
+  readonly proposedAt: bigint;
+}
+
+/** Chain time the lock ends. The tick starts draining only then, so a
+ *  proposal does not cost the old venue's yield for two days. */
+export const venueUnlocksAt = (proposal: VenueProposalState): bigint =>
+  proposal.proposedAt + VENUE_LOCK_SECONDS;
+
+export type VenueKind = "deploy" | "recall" | "harvest" | "drain" | "migrate";
+
+export type VenueCrank =
+  | { readonly kind: "deploy"; readonly amount: bigint }
+  | { readonly kind: "recall"; readonly amount: bigint }
+  | { readonly kind: "drain"; readonly amount: bigint }
+  | { readonly kind: "migrate" }
+  | { readonly kind: "harvest" };
+
+/** What the cranks remember between ticks. The service keeps it in memory; a
+ *  restart at worst repeats a harvest the program answers with
+ *  `NothingToHarvest`, or retries a failed crank a few minutes early. */
+export interface VenueState {
+  /** The epoch whose pre-end harvest already landed. */
+  readonly harvestedEpoch: bigint | null;
+  /** Chain time of each crank's last failed attempt. */
+  readonly failedAt: Readonly<Partial<Record<VenueKind, bigint>>>;
+}
+
+export const EMPTY_VENUE_STATE: VenueState = { harvestedEpoch: null, failedAt: {} };
+
+/** A crank landed (`NothingToHarvest` counts for harvest: nothing was owed). */
+export function venueSucceeded(
+  state: VenueState,
+  kind: VenueKind,
+  epochId: bigint | null,
+): VenueState {
+  const failedAt = { ...state.failedAt };
+  delete failedAt[kind];
+  // The new venue starts with a clean slate: a deploy refused before the
+  // migration is no reason to wait out its cool-down after it.
+  if (kind === "migrate") delete failedAt.deploy;
+  return {
+    harvestedEpoch: kind === "harvest" && epochId !== null ? epochId : state.harvestedEpoch,
+    failedAt,
+  };
+}
+
+export function venueFailed(state: VenueState, kind: VenueKind, now: bigint): VenueState {
+  return { ...state, failedAt: { ...state.failedAt, [kind]: now } };
+}
+
+/** Whether `kind` is out of its cool-down. */
+export function venueReady(state: VenueState, kind: VenueKind, now: bigint): boolean {
+  const failedAt = state.failedAt[kind];
+  const cooldown = kind === "harvest" ? HARVEST_RETRY_SECONDS : VENUE_RETRY_SECONDS;
+  return failedAt === undefined || now >= failedAt + cooldown;
+}
+
+/**
+ * Program errors a venue crank can hit when the pool moved between the tick's
+ * read and its send. They are logged as a warning, not recorded as a tick
+ * error; the cool-down in `VenueState` is what keeps them from repeating.
+ */
+export const VENUE_EXPECTED_ERRORS: ReadonlySet<string> = new Set([
+  "BelowPendingWithdrawals",
+  "DeployExceedsIdle",
+  "DeployPaused",
+  // The gap a harvest must redeem from the venue is under min_venue_move.
+  "HarvestBelowMinimum",
+  "PoolImpaired",
+  "PoolShutDown",
+  "RecallExceedsTarget",
+  "RecallNotNeeded",
+  "ReserveLiquidityTooLow",
+  "ReserveShareCapExceeded",
+  "VenueIlliquid",
+  // A migration tried a moment early, or the position grew back above dust.
+  "VenueLockNotElapsed",
+  "VenueMoveTooSmall",
+  "VenuePositionNotEmpty",
+  // A venue change is proposed: deploys wait for the Admin to cancel or
+  // execute it. Expected, so a warning and a cool-down, not an alert.
+  "VenueProposalOpen",
+  // A kVault that cannot pay the whole recall now (its idle tokens and the
+  // source reserve's liquidity are short): the redeem paid less, the program
+  // reverted it, and a later tick tries again.
+  "VenueShortReturn",
+]);
+
+/** An unpinned pool has `Pubkey::default()` for its klend program. */
+export const hasVenue = (pool: PoolState): boolean => !pool.klendProgram.equals(PublicKey.default);
+
+/** Free idle: the principal vault less what Pending withdrawals have claimed.
+ *  Negative when the vault holds less than is queued. */
+export const freeIdle = (pool: PoolState, vaultBalance: bigint): bigint =>
+  vaultBalance - pool.pendingWithdrawals;
+
+/** What the idle band is a share of: free idle plus the venue position,
+ *  never negative. */
+function bandBase(pool: PoolState, vaultBalance: bigint): bigint {
+  const total = freeIdle(pool, vaultBalance) + pool.venueValue;
+  return total > 0n ? total : 0n;
+}
+
+/** The program rounds the target up, so the band is never undershot. */
+export function idleTarget(pool: PoolState, vaultBalance: bigint): bigint {
+  return (bandBase(pool, vaultBalance) * BigInt(pool.idleTargetBps) + BPS - 1n) / BPS;
+}
+
+/**
+ * Held back from a deploy. `deploy_to_venue` syncs before it checks the
+ * amount, and the sync books the yield earned since `venueValue` was last
+ * written, which raises the idle target by the target's share of that gain.
+ * An exact-fit amount then fails with DeployExceedsIdle every time once the
+ * venue holds anything. 1 bp of the position covers a gain of 0.1% at a 10%
+ * target: about a week at a 5% supply rate.
+ */
+const deployMargin = (pool: PoolState): bigint => pool.venueValue / 10_000n;
+
+function idleFloor(pool: PoolState, vaultBalance: bigint): bigint {
+  return (bandBase(pool, vaultBalance) * BigInt(pool.idleFloorBps)) / BPS;
+}
+
+/**
+ * The recall that brings free idle back up to the target, or null when
+ * nothing worthwhile can be recalled. The program takes a recall of at least
+ * `min_venue_move`, or exactly the gap between the vault and the queued
+ * withdrawals, so a small queued withdrawal can always be made payable. Never
+ * more than the venue holds.
+ */
+export function recallAmount(pool: PoolState, vaultBalance: bigint): bigint | null {
+  let amount = idleTarget(pool, vaultBalance) - freeIdle(pool, vaultBalance);
+  if (amount > pool.venueValue) amount = pool.venueValue;
+  if (amount >= pool.minVenueMove && amount > 0n) return amount;
+  const short = pool.pendingWithdrawals > vaultBalance ? pool.pendingWithdrawals - vaultBalance : 0n;
+  return short > 0n && short <= pool.venueValue ? short : null;
+}
+
+/**
+ * The next drain step while a proposal stands and its lock has elapsed, or
+ * null. Dust (at most `min_venue_move`) stays: the migration accepts it.
+ * `available` is the venue's free liquidity, null when it cannot be read (the
+ * stub, a failed read), in which case the whole position is asked for and the
+ * program's own illiquid check decides. A klend redeem can pay one unit more
+ * than asked, so a step sized by liquidity stays one under it.
+ */
+export function drainAmount(
+  pool: PoolState,
+  proposal: VenueProposalState | null,
+  available: bigint | null,
+  now: bigint,
+): bigint | null {
+  if (proposal === null || now < venueUnlocksAt(proposal)) return null;
+  if (pool.venueValue <= pool.minVenueMove) return null;
+  return liquidStep(pool, available);
+}
+
+/**
+ * After Shutdown, the whole position, sized like a drain step, or null when
+ * the venue is empty. The program lifts the band and `min_venue_move` for a
+ * recall then, and `emergency_withdraw` pays only from the vault. The recall's
+ * sync books the gain since the last one, which stays behind; the next tick
+ * recalls that too.
+ */
+export function shutdownRecallAmount(pool: PoolState, available: bigint | null): bigint | null {
+  if (!pool.shutdown || pool.venueValue <= 0n) return null;
+  return liquidStep(pool, available);
+}
+
+function liquidStep(pool: PoolState, available: bigint | null): bigint | null {
+  const amount =
+    available !== null && available <= pool.venueValue ? available - 1n : pool.venueValue;
+  return amount > 0n ? amount : null;
+}
+
+/** Inside the last `HARVEST_LEAD_SECONDS` of the current epoch, once. */
+function harvestDue(
+  pool: PoolState,
+  currentEpoch: EpochState | null,
+  now: bigint,
+  state: VenueState,
+): boolean {
+  if (currentEpoch === null || pool.impaired) return false;
+  if (state.harvestedEpoch === currentEpoch.epochId) return false;
+  if (now < currentEpoch.endsAt - HARVEST_LEAD_SECONDS || now >= currentEpoch.endsAt) return false;
+  // `feeOwed` and `prizeOwed` only move at a sync, so a position that has
+  // been earning since the last one still counts.
+  return pool.venueValue > 0n || pool.feeOwed + pool.prizeOwed > 0n;
+}
+
+/** The chain time harvest next becomes due, for the scheduler's deadline, or
+ *  null when this epoch is already harvested. */
+export function nextHarvestAt(
+  currentEpoch: EpochState | null,
+  state: VenueState,
+): bigint | null {
+  if (currentEpoch === null || state.harvestedEpoch === currentEpoch.epochId) return null;
+  return currentEpoch.endsAt - HARVEST_LEAD_SECONDS;
+}
+
+/**
+ * The one venue crank this tick should send, or null. Harvest first, because
+ * its window closes; then recall, because an under-floor vault is what makes
+ * a refund redeem from the venue; then, with a proposal open, drain and finally migrate,
+ * or else deploy.
+ *
+ * Deploy waits out a deploy pause and an impaired venue, and nothing deploys
+ * after Shutdown. Recall and harvest stay available then (harvest is refused
+ * only while impaired), and after Shutdown the recall takes the whole position.
+ */
+export function decideVenue(input: {
+  readonly pool: PoolState;
+  readonly vaultBalance: bigint;
+  readonly now: bigint;
+  readonly currentEpoch: EpochState | null;
+  readonly state: VenueState;
+  /** The open venue proposal, null when none. */
+  readonly proposal: VenueProposalState | null;
+  /** The venue's free liquidity, null when unknown. Only drains and the
+   *  shutdown recall read it. */
+  readonly venueAvailable: bigint | null;
+}): VenueCrank | null {
+  const { pool, vaultBalance, now, currentEpoch, state, proposal, venueAvailable } = input;
+  if (!hasVenue(pool)) return null;
+
+  if (venueReady(state, "harvest", now) && harvestDue(pool, currentEpoch, now, state)) {
+    return { kind: "harvest" };
+  }
+
+  // Shut down: bring everything home. Nothing deploys, and a drain is moot.
+  if (pool.shutdown) {
+    const amount = shutdownRecallAmount(pool, venueAvailable);
+    return amount !== null && venueReady(state, "recall", now) ? { kind: "recall", amount } : null;
+  }
+
+  const free = freeIdle(pool, vaultBalance);
+  if (venueReady(state, "recall", now) && free < idleFloor(pool, vaultBalance)) {
+    const amount = recallAmount(pool, vaultBalance);
+    if (amount !== null) return { kind: "recall", amount };
+  }
+
+  // A proposal refuses deploys outright (`VenueProposalOpen`), so none is
+  // tried. Once its lock has elapsed the position is drained step by step.
+  if (proposal !== null) {
+    const amount = drainAmount(pool, proposal, venueAvailable, now);
+    if (amount !== null) return venueReady(state, "drain", now) ? { kind: "drain", amount } : null;
+    // Nothing left to drain: either the position is down to dust, so the
+    // migration executes once the lock allows it, or the venue has no
+    // liquidity yet and the drain waits.
+    if (now >= venueUnlocksAt(proposal) && pool.venueValue <= pool.minVenueMove) {
+      return venueReady(state, "migrate", now) ? { kind: "migrate" } : null;
+    }
+    return null;
+  }
+
+  if (
+    venueReady(state, "deploy", now) &&
+    !pool.deployPaused &&
+    !pool.impaired &&
+    !pool.shutdown
+  ) {
+    const amount = free - idleTarget(pool, vaultBalance) - deployMargin(pool);
+    if (amount > 0n && amount >= pool.minVenueMove) return { kind: "deploy", amount };
+  }
+  return null;
+}

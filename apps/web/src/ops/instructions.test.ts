@@ -1,0 +1,188 @@
+import { Program } from "@anchor-lang/core";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { describe, expect, it } from "vitest";
+
+import {
+  jackpotVaultAddress,
+  playerAddress,
+  principalVaultAddress,
+  PROGRAM_ID,
+  epochAddress,
+  venueProposalAddress,
+  VENUE_KIND,
+  type HexVaultProgram,
+} from "../chain.js";
+import { idl } from "../idl.js";
+import {
+  coverDeficit,
+  deployToVenue,
+  drainVenue,
+  harvest,
+  migrateVenue,
+  parseUsdcAmount,
+  processWithdraw,
+  recall,
+  rolloverEpoch,
+  type VenuePool,
+} from "./instructions.js";
+
+const key = () => Keypair.generate().publicKey;
+const program = new Program(
+  { ...idl, address: PROGRAM_ID.toBase58() },
+  { connection: new Connection("http://127.0.0.1:1") },
+) as unknown as HexVaultProgram;
+
+const pool: VenuePool = {
+  address: key(),
+  admin: key(),
+  acceptedMint: key(),
+  treasury: key(),
+  klendProgram: key(),
+  klendMarket: key(),
+  klendReserve: key(),
+  klendCtoken: key(),
+  venueKind: VENUE_KIND.klend,
+};
+const caller = key();
+const idlAccounts = (name: string) => idl.instructions.find((ix) => ix.name === name)!.accounts.length;
+const keysOf = (ix: { keys: { pubkey: PublicKey }[] }) => ix.keys.map((k) => k.pubkey.toBase58());
+/** Klend extras ride along after the IDL accounts: market authority, supply vault, cToken mint, sysvar. */
+const KLEND_EXTRAS = 4;
+
+describe("parseUsdcAmount", () => {
+  it("parses to 6-decimal base units", () => {
+    expect(parseUsdcAmount("1")).toBe(1_000_000n);
+    expect(parseUsdcAmount(" 12.345678 ")).toBe(12_345_678n);
+    expect(parseUsdcAmount("0.000001")).toBe(1n);
+  });
+  it("rejects zero, blanks, signs and extra precision", () => {
+    for (const bad of ["", "0", "0.0", "-1", "1e3", "abc", "1.0000001", "1,5"]) {
+      expect(parseUsdcAmount(bad)).toBeNull();
+    }
+  });
+});
+
+describe("venue crank account lists", () => {
+  const venue = [pool.klendProgram, pool.klendMarket, pool.klendReserve, pool.klendCtoken].map((k) => k.toBase58());
+
+  it("deploy_to_venue and recall match the IDL plus the klend extras", async () => {
+    for (const [build, name] of [
+      [deployToVenue, "deploy_to_venue"],
+      [recall, "recall"],
+    ] as const) {
+      const ix = await build(program, pool, 5n);
+      expect(ix.keys).toHaveLength(idlAccounts(name) + KLEND_EXTRAS);
+      expect(keysOf(ix)).toEqual(
+        expect.arrayContaining([
+          pool.address.toBase58(),
+          principalVaultAddress(pool.address).toBase58(),
+          pool.acceptedMint.toBase58(),
+          ...venue,
+        ]),
+      );
+    }
+  });
+
+  it("harvest names the vaults and the treasury", async () => {
+    const ix = await harvest(program, pool);
+    expect(ix.keys).toHaveLength(idlAccounts("harvest") + KLEND_EXTRAS);
+    expect(keysOf(ix)).toEqual(
+      expect.arrayContaining([
+        jackpotVaultAddress(pool.address).toBase58(),
+        pool.treasury.toBase58(),
+        ...venue,
+      ]),
+    );
+  });
+
+  it("the stub kind gets no extras, whichever program is pinned", async () => {
+    for (const klendProgram of [PROGRAM_ID, pool.klendProgram]) {
+      const stub = { ...pool, klendProgram, venueKind: VENUE_KIND.stub };
+      expect((await harvest(program, stub)).keys).toHaveLength(idlAccounts("harvest"));
+    }
+  });
+
+  it("the klend kind gets the extras even when this program is pinned, and an unknown kind throws", async () => {
+    const klend = { ...pool, klendProgram: PROGRAM_ID };
+    expect((await harvest(program, klend)).keys).toHaveLength(idlAccounts("harvest") + KLEND_EXTRAS);
+    expect(() => harvest(program, { ...pool, venueKind: 3 })).toThrow(/unsupported venue kind 3/);
+  });
+
+  it("a kVault pool needs its vault read, then drains with the redeem accounts and migrates value-only", async () => {
+    const k = () => Keypair.generate().publicKey;
+    const view = {
+      vault: k(), program: k(), tokenMint: k(), tokenVault: k(), baseVaultAuthority: k(), sharesMint: k(), idle: 0n, lookupTable: k(),
+      allocations: [{ reserve: k(), ctokenVault: k(), ctokens: 1n, market: k(), liquiditySupply: k(), collateralMint: k(), available: 5n }],
+    };
+    const kv = { ...pool, venueKind: 2 };
+    expect(() => drainVenue(program, kv, kv.admin, 1n)).toThrow(/vault read first/);
+    const withVault = { ...kv, kvault: view };
+    const drain = await drainVenue(program, withVault, kv.admin, 1n);
+    const migrate = await migrateVenue(program, withVault);
+    // Drain carries the vault's token vault and the writable USDC mint; a migrate does not.
+    const keys = (ix: { keys: { pubkey: PublicKey }[] }) => ix.keys.map((x) => x.pubkey.toBase58());
+    expect(keys(drain)).toContain(view.tokenVault.toBase58());
+    expect(keys(migrate)).not.toContain(view.tokenVault.toBase58());
+    expect(keys(migrate)).toContain(view.allocations[0]!.reserve.toBase58());
+  });
+
+  it("deploy_to_venue names the venue proposal PDA the program refuses on", async () => {
+    expect(keysOf(await deployToVenue(program, pool, 5n))).toContain(
+      venueProposalAddress(pool.address).toBase58(),
+    );
+  });
+
+  it("drain_venue is signed by the wallet and names the proposal PDA, the pins and the klend extras", async () => {
+    const ix = await drainVenue(program, pool, caller, 5n);
+    expect(ix.keys).toHaveLength(idlAccounts("drain_venue") + KLEND_EXTRAS);
+    expect(ix.keys[0]!.pubkey.equals(caller)).toBe(true);
+    expect(ix.keys[0]!.isSigner).toBe(true);
+    expect(keysOf(ix)).toEqual(
+      expect.arrayContaining([
+        venueProposalAddress(pool.address).toBase58(),
+        principalVaultAddress(pool.address).toBase58(),
+        pool.klendReserve.toBase58(),
+      ]),
+    );
+    const stub = await drainVenue(program, { ...pool, venueKind: VENUE_KIND.stub }, caller, 5n);
+    expect(stub.keys).toHaveLength(idlAccounts("drain_venue"));
+  });
+
+  it("migrate_venue names the proposal, the Admin for the rent and the OLD venue, with no signer", async () => {
+    const ix = await migrateVenue(program, pool);
+    expect(ix.keys).toHaveLength(idlAccounts("migrate_venue") + KLEND_EXTRAS);
+    expect(ix.keys.some((k) => k.isSigner)).toBe(false);
+    expect(keysOf(ix)).toEqual(
+      expect.arrayContaining([
+        venueProposalAddress(pool.address).toBase58(),
+        pool.admin.toBase58(),
+        ...venue,
+      ]),
+    );
+  });
+
+  it("cover_deficit pays from the wallet's USDC account", async () => {
+    const ix = await coverDeficit(program, pool, caller);
+    expect(ix.keys).toHaveLength(idlAccounts("cover_deficit") + KLEND_EXTRAS);
+    expect(ix.keys[0]!.pubkey.equals(caller)).toBe(true);
+    expect(ix.keys[0]!.isSigner).toBe(true);
+  });
+});
+
+describe("recovery instructions", () => {
+  it("process_withdraw prepends an idempotent ATA create and leaves the owner signer out", async () => {
+    const owner = key();
+    const [ata, ix] = await processWithdraw(program, pool, caller, owner);
+    expect(ata!.programId.toBase58()).not.toBe(PROGRAM_ID.toBase58());
+    expect(ix!.keys).toHaveLength(idlAccounts("process_withdraw"));
+    expect(keysOf(ix!)).toContain(playerAddress(pool.address, owner).toBase58());
+    expect(ix!.keys.some((k) => k.isSigner)).toBe(false);
+  });
+
+  it("rollover_epoch names the stuck epoch and its randomness account", async () => {
+    const seed = Uint8Array.from({ length: 32 }, (_, i) => i);
+    const epoch = await rolloverEpoch(program, pool, caller, { epochId: 3n, vrfSeed: seed });
+    expect(epoch.keys).toHaveLength(idlAccounts("rollover_epoch"));
+    expect(keysOf(epoch)).toContain(epochAddress(pool.address, 3n).toBase58());
+  });
+});

@@ -6,16 +6,19 @@
  * routes to PLAY and EARN.
  *
  * Copy is the Figma's, except the draw cadence and the yield. Epochs are a
- * day long (`epochSeconds` 86_400), and `touch` sets `entries = principal`
- * on every rollover, so both the draw and the ticket reset are daily. The
- * Figma's headline yield rate is gone: the pool pays no rate, the whole
- * yield becomes the day's Prize, and principal leaves the vault for a
- * lending venue during the epoch (ADR 0009, ADR 0010).
+ * day long (`epochSeconds` 86_400) and a Player's Tickets reset to their
+ * Principal on every rollover, so both the draw and the ticket reset are daily. The
+ * Figma's headline yield rate is gone: depositors earn a floating rate up to
+ * a ceiling, the yield above it is the day's Prize, and the one rate figure
+ * (FAQ) reads "up to X%" beside the 7-day paid rate off `GET /pool`
+ * (yield-claimer ticket 15, ADR 0017). Nothing is promised.
  */
 import { DemoBoard } from "../arena/DemoBoard.js";
 import { LogoCog, LogoWordmark } from "../arena/Arena.js";
 import { Textile } from "../arena/Textile.js";
 import { Faq, type FaqItem } from "../Faq.js";
+import { useLivePool } from "../useLiveYield.js";
+import { rateCopy } from "../yieldTick.js";
 import { GlyphRow } from "./Home.js";
 
 const STATS = [
@@ -32,11 +35,11 @@ const HOW = [
   ],
   [
     "The pool earns, you keep your deposit",
-    "Your USDC is lent out during the day. Everything it earns becomes that day's prize, whether you play or not.",
+    "Your USDC is lent out through a third-party venue. What it earns goes to your balance first, up to a ceiling rate. Anything above the ceiling becomes that day's prize, whether you play or not.",
   ],
   [
     "Every dollar is a ticket",
-    "$1 deposited is 1 ticket in the daily jackpot. The jackpot is the yield the whole pool earned that day.",
+    "$1 deposited is 1 ticket in the daily jackpot. The jackpot is the yield above the depositors' ceiling rate.",
   ],
   [
     "Sit tight, or play for more",
@@ -47,7 +50,7 @@ const HOW = [
 const RULES = [
   [
     "Where your deposit sits?",
-    "During the day the admin may move the pool's principal out of the vault and lend it on a third-party venue. What it earns there is the prize, and the principal comes back to the vault before any payout goes out. That venue is someone else's code, and this is a private beta with no audit, so a failure there is a real risk to the deposit.",
+    "The pool lends most of its principal on a third-party venue and keeps the rest idle in the vault to pay withdrawals. What the venue earns pays depositors up to a ceiling rate, and the rest is the prize. That venue is someone else's code, and this is a private beta with no audit, so a failure there is a real risk to the deposit.",
   ],
   [
     "Withdrawals",
@@ -78,11 +81,11 @@ const FAQ: readonly FaqItem[] = [
   },
   {
     q: "Where does the jackpot come from?",
-    a: "From the yield the pool earned that day. Nothing else.",
+    a: "From the yield above what depositors earn, plus any sponsor money. Nothing else.",
   },
   {
     q: "How big is the prize?",
-    a: "Whatever the pool earned that day, split with nobody. There is no promised rate: a quiet day is a small prize, and a day that earns less than the pool's minimum rolls into tomorrow instead of paying out.",
+    a: "Whatever the venue paid that day above the depositors' ceiling rate, after the pool's fee, split with nobody. A quiet day is a small prize, and a day that earns less than the pool's minimum rolls into tomorrow instead of paying out.",
   },
   {
     q: "Can I withdraw anytime?",
@@ -162,6 +165,17 @@ function TextileBg() {
 }
 
 export function About() {
+  const live = useLivePool()?.live;
+  const rate = live ? rateCopy(live) : null;
+  // Second in the list, after "Can I lose my deposit?". The number is the
+  // ceiling and what the pool actually paid, never a promise.
+  const earn: FaqItem = {
+    q: "What do I earn on my deposit?",
+    a: rate
+      ? `Your balance earns what the venue pays, up to a ceiling: ${rate.ceiling} a year right now. Over the last 7 days the pool paid ${rate.trailing}. The rate floats and is not promised.`
+      : "Your balance earns what the venue pays, up to a ceiling. The rate floats and is not promised.",
+  };
+  const faq = [...FAQ.slice(0, 1), earn, ...FAQ.slice(1)];
   return (
     <div className="about" data-testid="about-screen">
       <section className="about-hero">
@@ -254,7 +268,7 @@ export function About() {
           The Short <em>Answers</em>
         </h2>
         <div className="about-faq" data-testid="about-faq">
-          <Faq items={FAQ} itemClassName="about-faq-item" />
+          <Faq items={faq}itemClassName="about-faq-item" />
         </div>
       </section>
 

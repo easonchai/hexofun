@@ -2,6 +2,7 @@
 // and referral-bonus.test.ts's own table-test style.
 import { describe, expect, it } from "vitest";
 
+import { RATE_TIERS } from "./referral-bonus";
 import { buildReferralsResponse, maskWallet, type ReferralInput } from "./referral-summary";
 
 const referral = (overrides: Partial<ReferralInput> & { referee: string }): ReferralInput => ({
@@ -29,7 +30,7 @@ const NO_BONUS = { amount: 0n, uncapped: 0n };
 
 describe("buildReferralsResponse", () => {
   it("is the empty state for a wallet with no referrals", () => {
-    const response = buildReferralsResponse(null, [], NOW, QUALIFY_SECONDS, NO_BONUS);
+    const response = buildReferralsResponse(RATE_TIERS, null, [], NOW, QUALIFY_SECONDS, NO_BONUS);
     expect(response).toEqual({
       referralCode: null,
       referrals: { items: [], nextCursor: null },
@@ -43,15 +44,15 @@ describe("buildReferralsResponse", () => {
   // beta-launch-fixes ticket 13: invite codes are private, so the response
   // never carries an `inviteCodes` field at all.
   it("never returns an inviteCodes field", () => {
-    const response = buildReferralsResponse(null, [], NOW, QUALIFY_SECONDS, NO_BONUS);
+    const response = buildReferralsResponse(RATE_TIERS, null, [], NOW, QUALIFY_SECONDS, NO_BONUS);
     expect(response).not.toHaveProperty("inviteCodes");
   });
 
   it("passes the wallet's own referral code through, null before its first deposit", () => {
-    const withCode = buildReferralsResponse("ABCD2345", [], NOW, QUALIFY_SECONDS, NO_BONUS);
+    const withCode = buildReferralsResponse(RATE_TIERS, "ABCD2345", [], NOW, QUALIFY_SECONDS, NO_BONUS);
     expect(withCode.referralCode).toBe("ABCD2345");
 
-    const withoutCode = buildReferralsResponse(null, [], NOW, QUALIFY_SECONDS, NO_BONUS);
+    const withoutCode = buildReferralsResponse(RATE_TIERS, null, [], NOW, QUALIFY_SECONDS, NO_BONUS);
     expect(withoutCode.referralCode).toBeNull();
   });
 
@@ -61,7 +62,7 @@ describe("buildReferralsResponse", () => {
       referral({ referee: WALLET, aboveSince: NOW - 100_000n, boundAt: 2n }), // above, holding
       referral({ referee: WALLET, aboveSince: null, boundAt: 1n }), // below $50
     ];
-    const response = buildReferralsResponse(null, referrals, NOW, QUALIFY_SECONDS, NO_BONUS);
+    const response = buildReferralsResponse(RATE_TIERS, null, referrals, NOW, QUALIFY_SECONDS, NO_BONUS);
     // Newest boundAt first.
     expect(response.referrals.items).toEqual([
       { wallet: "9xQe…VFin", status: "qualified", daysLeft: null, bonusToday: 0n, joinedAt: 3n },
@@ -76,12 +77,24 @@ describe("buildReferralsResponse", () => {
     const referrals: ReferralInput[] = [
       referral({ referee: WALLET, bonusToday: 6_000_000n, boundAt: 1n }),
     ];
-    const response = buildReferralsResponse(null, referrals, NOW, QUALIFY_SECONDS, NO_BONUS);
+    const response = buildReferralsResponse(RATE_TIERS, null, referrals, NOW, QUALIFY_SECONDS, NO_BONUS);
     expect(response.referrals.items[0]?.bonusToday).toBe(6_000_000n);
   });
 
+  it("bands over the tiers it is given", () => {
+    const response = buildReferralsResponse(
+      [{ tier: 1, min: 1, max: null, rateBps: 1000 }],
+      null,
+      [],
+      NOW,
+      QUALIFY_SECONDS,
+      NO_BONUS,
+    );
+    expect(response.nextBand).toEqual({ tier: 1, rateBps: 1000, minCount: 1, maxCount: null });
+  });
+
   it("passes today's bonus amount and uncapped through unchanged", () => {
-    const response = buildReferralsResponse(null, [], NOW, QUALIFY_SECONDS, {
+    const response = buildReferralsResponse(RATE_TIERS, null, [], NOW, QUALIFY_SECONDS, {
       amount: 10_000_000n,
       uncapped: 72_000_000n,
     });
@@ -97,6 +110,7 @@ describe("buildReferralsResponse", () => {
 
     it("defaults to a page of 50, newest boundAt first", () => {
       const response = buildReferralsResponse(
+        RATE_TIERS,
         null,
         manyReferrals(60),
         NOW,
@@ -111,6 +125,7 @@ describe("buildReferralsResponse", () => {
 
     it("a nextCursor's page picks up right after it, and the last page has no nextCursor", () => {
       const first = buildReferralsResponse(
+        RATE_TIERS,
         null,
         manyReferrals(60),
         NOW,
@@ -120,6 +135,7 @@ describe("buildReferralsResponse", () => {
         50,
       );
       const second = buildReferralsResponse(
+        RATE_TIERS,
         null,
         manyReferrals(60),
         NOW,
@@ -135,6 +151,7 @@ describe("buildReferralsResponse", () => {
 
     it("respects an explicit limit", () => {
       const response = buildReferralsResponse(
+        RATE_TIERS,
         null,
         manyReferrals(5),
         NOW,
@@ -150,6 +167,7 @@ describe("buildReferralsResponse", () => {
     it("qualifiedCount counts every referral, not just the page", () => {
       const referrals = manyReferrals(3).map((r) => ({ ...r, aboveSince: 0n }));
       const response = buildReferralsResponse(
+        RATE_TIERS,
         null,
         referrals,
         BigInt(QUALIFY_SECONDS), // now == qualifySeconds, so aboveSince 0 is exactly qualified
@@ -219,7 +237,7 @@ describe("buildReferralsResponse", () => {
       const referrals: ReferralInput[] = Array.from({ length: qualifiedCount }, () =>
         referral({ referee: WALLET, aboveSince: NOW - BigInt(QUALIFY_SECONDS) }), // exactly qualified
       );
-      const response = buildReferralsResponse(null, referrals, NOW, QUALIFY_SECONDS, NO_BONUS);
+      const response = buildReferralsResponse(RATE_TIERS, null, referrals, NOW, QUALIFY_SECONDS, NO_BONUS);
       expect(response.qualifiedCount).toBe(qualifiedCount);
       expect(response.band).toEqual(band);
       expect(response.nextBand).toEqual(nextBand);

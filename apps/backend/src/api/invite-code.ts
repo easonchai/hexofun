@@ -77,7 +77,11 @@ export function accessMessage(wallet: string, code: string, referralCode?: strin
  * since neither tweetnacl nor @noble/curves is reachable from this package
  * (checked: @solana/web3.js 1.98.4 ships no runtime dependencies at all).
  */
-function verifySignedMessage(wallet: PublicKey, message: string, signature: Uint8Array): boolean {
+export function verifySignedMessage(
+  wallet: PublicKey,
+  message: string,
+  signature: Uint8Array,
+): boolean {
   let key;
   try {
     key = createPublicKey({
@@ -110,6 +114,22 @@ export function verifyAccessSignature(
  *  a redeem signature can't be replayed here, or vice versa. */
 export function applyReferralMessage(wallet: string, code: string): string {
   return `HEXO apply referral: ${wallet} ${code}`;
+}
+
+/** The four switches Fast pause can set (ops-console ticket 06). */
+export const FAST_PAUSE_SWITCHES = ["pool", "game", "jackpot", "deploy"] as const;
+export type FastPauseSwitch = (typeof FAST_PAUSE_SWITCHES)[number];
+
+/** The exact bytes `POST /ops/fast-pause` must be signed over. Fixed format,
+ *  `HEXO fast pause: <switch> <pool address> <unix seconds>`, distinct from
+ *  the access and referral messages so no signature replays across routes.
+ *  The web helper (ops-console ticket 07) must match it byte for byte. */
+export function fastPauseMessage(
+  feature: FastPauseSwitch,
+  pool: string,
+  unixSeconds: number,
+): string {
+  return `HEXO fast pause: ${feature} ${pool} ${unixSeconds}`;
 }
 
 /** True when `signature` is `wallet`'s ed25519 signature over

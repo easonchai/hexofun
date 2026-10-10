@@ -3,7 +3,8 @@
 One script, `scripts/deploy.sh <dev|staging|mainnet> [--upgrade] [--dry-run]`, builds, checks and
 deploys or upgrades the `hex_vault` program for one environment. The same script also has two
 opt-in actions, `--idl` (publish the on-chain IDL) and `verify` (reproducible-build
-verification); see "Publishing the IDL" and "Verifiable build" below. Run it from the repo root,
+verification), plus `scripts/deploy.sh mainnet handover` (see "Mainnet launch order"); see
+"Publishing the IDL" and "Verifiable build" below. Run it from the repo root,
 same as `scripts/check-deployable.sh` and `tests/run-local.sh`. See
 [`docs/ops/environments.md`](environments.md) for what each environment is.
 
@@ -21,17 +22,22 @@ The script, in order:
    for dev and staging, `.env.mainnet`'s `RPC_URL` for mainnet).
 2. Builds: `anchor build -- --features <feature>` for dev and staging, `solana-verify build --
    --features mainnet` for mainnet (see "Verifiable build" below).
-3. Runs `scripts/check-deployable.sh`, which refuses a `test-vrf` artifact.
-4. Asserts that the keypair's pubkey matches the built `declare_id!` (read from the built IDL's
-   `address` field), so a mismatched keypair fails before anything is written on chain.
+3. Runs `scripts/check-deployable.sh`, which refuses a `test-vrf` or `test-venue` artifact.
+4. Asserts that the keypair's pubkey matches the built `declare_id!` (the built IDL's `address`
+   field) and that the 32 bytes of that pubkey appear in the `.so` itself, so a mismatched keypair
+   or a stale IDL fails before anything is written on chain.
 5. Writes a buffer, then deploys or upgrades against it. Both calls carry a priority fee
    (`--with-compute-unit-price`, from `DEPLOY_CU_PRICE`, default `100000`) and
    `--max-sign-attempts 50` so a large program lands under congestion; mainnet also adds
    `--use-rpc`, since it only helps when the RPC is stake-weighted (Helius, Triton) and only
-   mainnet's RPC is.
+   mainnet's RPC is. On mainnet the hot key (the configured `solana` keypair) writes the buffer, so
+   the Ledger is not asked to sign each ~1 KB chunk of the 1 MB binary. An upgrade then hands the
+   buffer to the Ledger (`solana program set-buffer-authority`) and the Ledger signs the one
+   deploy transaction. A first deploy leaves the hot key as upgrade authority; see "Mainnet launch
+   order".
 6. After the deploy, asserts the on-chain upgrade authority (`solana program show
-   <program-id>`) equals the authority expected for the env: the Ledger on mainnet, the locally
-   configured keypair (`solana address`) elsewhere. Then checks `solana program show --buffers
+   <program-id>`) equals the authority expected for the env: the Ledger on a mainnet upgrade, the
+   locally configured keypair (`solana address`) elsewhere, including a first mainnet deploy. Then checks `solana program show --buffers
    --buffer-authority <that authority>` and fails if any buffer remains.
 7. Prints the program's `solana program show` output, then runs both apps' `sync-idl` scripts.
 
@@ -45,10 +51,33 @@ If a step after `write-buffer` fails, the script prints the exact `solana progra
 nobody. The post-deploy buffer check catches the same thing for any other leftover buffer under
 the same authority (an interrupted previous run, for example).
 
-Mainnet asks for a typed confirmation of the program ID before writing the buffer, and signs with
-`--upgrade-authority usb://ledger`. The fee payer defaults to the locally configured keypair
-(`solana config get`); set `FEE_PAYER_KEYPAIR` (a path, or another `usb://ledger[?key=N]`) to pay
-fees from somewhere else.
+Mainnet asks for a typed confirmation of the program ID before writing the buffer. A mainnet
+upgrade signs the deploy with `--upgrade-authority usb://ledger`. The fee payer defaults to the
+locally configured keypair (`solana config get`); set `FEE_PAYER_KEYPAIR` (a path, or another
+`usb://ledger[?key=N]`) to pay the deploy's fees from somewhere else.
+
+The script prints the cluster name (`devnet`, `mainnet-beta`), never the RPC URL, and pipes
+`solana` output through the same `redact` helper `surf.sh logs` uses. The URL carries the provider
+key (`.env.mainnet`, `DEPLOY_RPC_URL`), so it still must not be pasted into a ticket by hand.
+
+### Mainnet launch order
+
+`create_pool` is refused unless its payer is the program's upgrade authority (mainnet-readiness-fixes
+06), so a stranger cannot create pool 1 with their own admin the moment the program exists. The
+order is:
+
+1. `scripts/deploy.sh mainnet` deploys with the hot key as upgrade authority.
+2. Bootstrap creates the pool. Its payer is `OPERATOR_KEYPAIR`, so the keypair `solana address`
+   reports during step 1 must be the same key. Bootstrap and
+   the backend boot guard refuse an existing pool whose admin, treasury, buyback reserve, mint or
+   venue pins differ from the flags and env, and print the diff.
+3. `scripts/deploy.sh mainnet handover` moves the upgrade authority to the Ledger. It checks the
+   current authority is the hot key, asks you to type the Ledger pubkey, runs `solana program
+   set-upgrade-authority --new-upgrade-authority usb://ledger` (the Ledger signs as the new
+   authority, which proves it is reachable) and re-reads the authority.
+
+Do not run step 3 before bootstrap: no one can create a pool afterwards without the Ledger. Later
+upgrades use `scripts/deploy.sh mainnet --upgrade`, where the Ledger signs only the final deploy.
 
 ### The cosmetic "Program ID mismatch" warning
 
@@ -77,16 +106,17 @@ program extend <program-id> <bytes>` command and, outside `--dry-run`, asks to r
 before continuing; `solana program deploy` also auto-extends if a required extend was skipped, so
 declining here is not a hard stop.
 
-**Deploy an upgrade only when no `Round` is open.** `Round` has no reserved padding by design
-(ADR 0013): it is short-lived and reclaimed by `close_round`, so a layout change is acceptable
-there but only for rounds that open after the upgrade. A `Round` account already open at the
-moment of an upgrade that changes `Round`'s layout fails to deserialize on the next instruction
-that touches it, until the round is abandoned; its Entries (not USDC) become unclaimable and its
-rent is never reclaimed. Check `GET /status` (`openRoundId`) or wait for the current round to
-settle before running `--upgrade`.
+**Never `--upgrade` across a layout rewrite.** The live-yield rewrite (yield-claimer ticket 04) and
+the off-chain rework (off-chain-tickets ticket 08, ADR 0025) each changed the layout and
+discriminator of `Pool` and `Player`, so each deployed to a fresh program ID per environment with
+pools bootstrapped anew. The rework also dropped the `Round` and `Position` accounts altogether. See
+[`environments.md`](environments.md#the-live-yield-layout-rewrite-needs-one-in-every-environment).
 
-`Pool`, `Epoch` and `Player` carry `version` and `_reserved` padding precisely so an upgrade that
-only adds a field there needs no such care; see ADR 0013.
+There is no open-round rule for an upgrade. Rounds are Postgres rows in the backend now (ADR 0025),
+so an upgrade has no on-chain round account to strand.
+
+`Pool`, `Epoch` and `Player` carry `version` and `_reserved` padding so an upgrade that only adds a
+field there needs no such care; see ADR 0013.
 
 ### Rollback
 
@@ -163,8 +193,9 @@ Three things bit on devnew on 2026-09-28, all outside this repo:
   lazily on first touch.
 - A new capability is a new instruction (`foo_v2`), not a new required argument on an existing
   one; old clients keep working.
-- `Round` and `Position` are exempt: no padding, because they are short-lived and reclaimed, and
-  the affected-in-flight-rounds cost is accepted (see "Upgrading" above).
+- The live-yield layout rewrite was the one exception, on a fresh program ID per environment
+  (ADR 0013's 2026-10-04 amendment). The custody-only rework (ADR 0025) was a second exception on
+  the same terms. The accounts that remain follow this policy from then on.
 
 ## Admin signing: local key, Ledger or Squads
 
@@ -178,22 +209,23 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   the Solana app first. If `ADMIN_ADDRESS` is also set, the CLI checks the Ledger's pubkey
   against it before building any transaction and fails closed on a mismatch.
 - **Squads** (mainnet today): set `ADMIN_ADDRESS` to the multisig vault's address without loading
-  its key anywhere. Every admin-gated command (`set-params`, `shutdown`, `sweep-house`,
-  `withdraw-principal`, `return-principal`, `set-operator`, `propose-admin`, `accept-admin`, and
-  `grant-tickets`'s admin path) then builds the instruction with the vault as signer and fee
-  payer and prints one base58 transaction on stdout instead of sending it
+  its key anywhere. Every admin-gated command that sends a transaction (`set-params`, `shutdown`,
+  `sweep-house`, `set-operator`, `propose-admin`, `accept-admin`) then builds the instruction with
+  the vault as signer and fee payer and prints one base58 transaction on stdout instead of sending
+  it
   (`apps/backend/src/admin/squads.ts`, `adminMode`); everything else it prints goes to stderr, so
-  `admin withdraw-principal --amount 25000 | pbcopy` hands Squads a clean paste. In Squads:
+  `admin sweep-house | pbcopy` hands Squads a clean paste. In Squads:
   Transaction Builder, Add instruction, Import base58 encoded tx, paste, simulate, then collect
   approvals and execute. `start-game` and `start-jackpot` are admin-gated too and go through
   the same path. The transaction carries a blockhash that expires in about a minute;
   re-run the command for a fresh one if the paste took too long. `pause`, `pause-game`,
-  `pause-jackpot`, `fund-jackpot`,
-  `fund-yield`, `principal-out` and `emergency-crank` never go through Squads: the first three
-  are permissionless or dual-signer by design, and `principal-out` is read-only, so none of them
-  has to wait on multisig approval, which matters most for `pause` in an incident.
+  `pause-jackpot`, `fund-jackpot` and `emergency-crank` never go through Squads: they are
+  permissionless or dual-signer by design, so none of them has to wait on multisig approval,
+  which matters most for `pause` in an incident. `grant-tickets` is not a chain transaction at
+  all. It signs a message with `--keypair`, a wallet listed in the backend's `OPS_WALLETS`, and
+  posts it to the backend, which books the ledger row.
 
-`scripts/deploy.sh mainnet` always signs the program upgrade itself with a Ledger
+`scripts/deploy.sh mainnet --upgrade` always signs the program upgrade itself with a Ledger
 (`--upgrade-authority usb://ledger`), independent of whichever of the three modes above the admin
 CLI is using for instructions.
 
@@ -220,6 +252,24 @@ positionally: `spl-token create-account <accepted-mint> <new-account-keypair.jso
 bootstrap --admin <squads-vault> --treasury <treasury-address> --buyback-reserve <buyback-address>
 ```
 
+## The venue a Pool pins
+
+`create_pool` sets four venue addresses on the Pool (`klend_program`, `klend_market`,
+`klend_reserve`, `klend_ctoken`). A wrong pin is fixed by a venue change, not an upgrade: propose the
+right venue, wait the 48 hour lock, drain and migrate (`runbook.md`, "Changing a pool's venue"). Bootstrap takes them
+from `KLEND_PROGRAM`, `KLEND_MARKET`, `KLEND_RESERVE` and `KLEND_CTOKEN`. On mainnet each defaults
+to Kamino's USDC reserve on the main market, and `KLEND_CTOKEN` to the pool PDA's ATA of the
+reserve's cToken mint, which bootstrap creates before `create_pool`. Overriding `KLEND_RESERVE`
+there requires `KLEND_CTOKEN` too. Any other cluster has no default and bootstrap names the
+missing variables. `VENUE_KIND` (`klend`, the default, `stub` or `kvault`) is the Pool's venue kind byte,
+0, 1 or 2, stored at `create_pool`; the program refuses a kind its build does not support. On a
+localnet built with `--features test-vrf,test-venue`, `VENUE_KIND=stub` pins the stub venue and
+runs `test_venue_init` (`apps/backend/scripts/bootstrap-localnet.sh` sets it; `KLEND_VENUE=test`
+still works as the old spelling). Bootstrap refuses the stub on mainnet. Bootstrap prints the addresses it created (`POOL_ADDRESS`,
+`PRINCIPAL_VAULT`, `JACKPOT_VAULT`, `TREASURY`, `BUYBACK_RESERVE`) and the four pins
+(`KLEND_PROGRAM`, `KLEND_MARKET`, `KLEND_RESERVE`, `KLEND_CTOKEN`) as the chain recorded them, for a
+second person to check.
+
 ## Moving admin and the upgrade authority to Squads later
 
 Not done yet for this environment split (spec.md "Out of Scope"): a new mainnet pool starts with
@@ -228,8 +278,10 @@ the upgrade authority on a Ledger, and the admin CLI can already print for a Squ
 one yet. The path, when it happens:
 
 1. **Upgrade authority**: `solana program set-upgrade-authority <program-id>
-   --new-upgrade-authority <squads-vault> --upgrade-authority usb://ledger` moves it from the
-   Ledger to the vault.
+   --new-upgrade-authority <squads-vault> --upgrade-authority usb://ledger
+   --skip-new-upgrade-authority-signer-check` moves it from the Ledger to the vault. The flag is
+   needed because a vault cannot sign. From then on `deploy.sh mainnet --upgrade` no longer
+   applies, since it signs with the Ledger.
 2. **Admin role**: the current admin runs `admin propose-admin --key <squads-vault>`, then, with
    `ADMIN_ADDRESS=<squads-vault>` exported, `admin accept-admin`; the CLI prints a base58
    transaction with the vault as the proposed admin, and someone with a signer role in Squads
@@ -245,7 +297,7 @@ one yet. The path, when it happens:
 ## Vercel
 
 Two feature gates live only on the Vercel project, never on chain or in a committed env file:
-`VITE_GATE_GAME` and `VITE_GATE_JACKPOT` (see `CONTEXT.md`, "Feature gate"). Set to `off`, a gate covers
+`VITE_GATE_GAME` and `VITE_GATE_JACKPOT` (see `GLOSSARY.md`, "Feature gate"). Set to `off`, a gate covers
 its feature with a "COMING SOON" card of the same size; unset, or any other value, the feature shows.
 Both are Vite build-time variables, so a change only reaches the site on the next build.
 
@@ -277,6 +329,8 @@ Before a real mainnet deploy:
 - [ ] An uptime monitor polling `GET /alerts` (200 with an empty list when healthy, 503 with the
   active codes otherwise) as the paged URL, not `/healthz` or `/status`; see
   [`docs/ops/incidents.md`](incidents.md) for what to do when a code fires.
+- [ ] Launch order followed: deploy, bootstrap, then `scripts/deploy.sh mainnet handover` (see
+  "Mainnet launch order").
 - [ ] The mainnet program keypair backed up offline before its first deploy. After that, only the
   upgrade authority (the Ledger) matters, but losing the keypair before the first deploy loses
   the program ID.
@@ -300,15 +354,16 @@ solana-verify verify-from-repo \
   <repo-url> --commit-hash <deployed sha> -- --features mainnet
 
 solana-verify remote submit-job \
-  --program-id <program id for the env> [--uploader <key>] -- --features mainnet
+  --program-id <program id for the env> --uploader <upgrade authority address>
 ```
 
 `<repo-url>` is `git remote get-url origin`, converted from SSH to HTTPS if needed; set
-`VERIFY_REPO_URL` to override it. `--uploader` is only added when `VERIFY_UPLOADER_KEYPAIR` is
-set; left unset, `solana-verify` falls back to its own default (the locally configured keypair).
-`verify` works for any env, not only mainnet, but only mainnet is built with `solana-verify build`
-(dev and staging use a plain `anchor build`), so it is the one whose deployed bytecode is actually
-reproducible this way.
+`VERIFY_REPO_URL` to override it. `remote submit-job` takes only `--program-id` and `--uploader`
+(no cargo arguments, no cluster), and it only runs for mainnet; `verify` skips it for other envs.
+`--uploader` is an address, read from the program's on-chain upgrade authority unless
+`VERIFY_UPLOADER` is set. `verify-from-repo` works for any env, but only mainnet is built with
+`solana-verify build` (dev and staging use a plain `anchor build`), so it is the one whose deployed
+bytecode is actually reproducible this way.
 
 If the repo stays private, run `solana-verify build -- --features mainnet` (`deploy.sh` already
 does this for a mainnet build) plus `solana-verify get-executable-hash` locally, and publish the

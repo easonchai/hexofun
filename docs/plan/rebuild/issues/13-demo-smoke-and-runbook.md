@@ -1,6 +1,6 @@
 # 13 Demo smoke test and runbook
 
-Status: blocked
+Status: superseded: CLI and runbook parts done, the demo run replaced by the staging and mainnet tickets
 Type: task
 Blocked by: 12
 

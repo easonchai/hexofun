@@ -4,48 +4,33 @@ import {
   type OnModuleDestroy,
   type OnModuleInit,
 } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
 import { EventParser } from "@anchor-lang/core";
-import type { Epoch, Player, Prisma, Round } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { Epoch, Player } from "@prisma/client";
 import { PublicKey, type ConfirmedSignatureInfo } from "@solana/web3.js";
 import bs58 from "bs58";
 
 import { ensureReferralCode } from "../api/referral-code";
 import {
   applyReferralEvent,
-  isQualified,
   type ReferralPrincipalEvent,
   type ReferralQualificationState,
 } from "../api/referral";
-import {
-  computeBonuses,
-  REFERRAL_BONUS_BASIS_CAP,
-  remainingGrantCap,
-  splitShares,
-  type ReferrerBonusInput,
-  type ShareWeight,
-} from "../api/referral-bonus";
 import { ChainService } from "../chain/chain.service";
 import { rpcStatus } from "../chain/rpc-fallback";
-import type { HexVaultEnv } from "../config/env";
+import { bookBatch, checkLedgerIfDue, LEDGER_TRANSACTION } from "../ledger/ledger-store";
 import { PrismaService } from "../prisma/prisma.service";
 import {
-  closedRound,
   decodeEventLogs,
   epochRow,
-  LIVE_ROUND_STATUSES,
   playerRow,
   poolRow,
-  positionRow,
-  registrationWeight,
-  roundRow,
-  settledPosition,
+  venueProposalRow,
   type DecodedEpoch,
   type DecodedEvent,
   type DecodedPlayer,
   type DecodedPool,
-  type DecodedPosition,
-  type DecodedRound,
+  type DecodedVenueProposal,
 } from "./decode";
 
 /** What a log-triggered read expects at an address, plus anything the row
@@ -53,9 +38,8 @@ import {
 type WantedAccount =
   | { kind: "pool" }
   | { kind: "epoch" }
-  | { kind: "round" }
   | { kind: "player" }
-  | { kind: "position"; roundId: bigint };
+  | { kind: "venueProposal" };
 
 /** One string field of a decoded event, or undefined when the event has no
  *  such field. `jsonify` renders every pubkey and u64 as a string. */
@@ -77,7 +61,10 @@ function eventBool(event: DecodedEvent, key: string): boolean | undefined {
 
 /**
  * The Principal-changing events ticket 07's `Referral.aboveSince` tracker
- * needs, paired with their owner, in the batch's own emission order (a dip
+ * needs (live yield settles inside the money instructions. Principal falls when
+ * a pending deposit refunds, which WithdrawRequested reports as `refunded`, and
+ * when a queued withdrawal pays, which Withdrawn reports as the Principal left),
+ * paired with their owner, in the batch's own emission order (a dip
  * and a restore in one batch must be applied as two separate crossings, not
  * collapsed into one net delta). JackpotPaid only counts when `compounded`:
  * a House win never compounds, and an uncompounded win pays a token account
@@ -97,13 +84,15 @@ function referralPrincipalEvents(
       }
     } else if (event.name === "WithdrawRequested") {
       const owner = eventField(event, "owner");
-      if (owner !== undefined && amount !== undefined) {
-        result.push({ owner, event: { kind: "WithdrawRequested", amount: BigInt(amount) } });
+      const refunded = eventField(event, "refunded");
+      if (owner !== undefined && refunded !== undefined) {
+        result.push({ owner, event: { kind: "WithdrawRequested", refunded: BigInt(refunded) } });
       }
-    } else if (event.name === "YieldCredited") {
+    } else if (event.name === "Withdrawn") {
       const owner = eventField(event, "owner");
-      if (owner !== undefined && amount !== undefined) {
-        result.push({ owner, event: { kind: "YieldCredited", amount: BigInt(amount) } });
+      const principal = eventField(event, "principal");
+      if (owner !== undefined && principal !== undefined) {
+        result.push({ owner, event: { kind: "Withdrawn", principal: BigInt(principal) } });
       }
     } else if (event.name === "JackpotPaid" && eventBool(event, "compounded") === true) {
       // JackpotPaid names its player `winner`, not `owner` (see refreshFromLogs).
@@ -136,6 +125,21 @@ const V2_UNSUPPORTED_RESET_MS = 60 * 60 * 1000;
 // so a long outage no longer loses anything older than one page.
 const SIGNATURE_PAGE = 1_000;
 
+/** The Yield index history keeps at most one point a minute (spec "Backend"). */
+const YIELD_INDEX_MIN_GAP_S = 60n;
+
+/** How far `getProgramAccountsV2`'s index can run behind its own
+ *  `context.slot` (measured 2026-09-14 on devnet: 33 to 59 slots). */
+const SWEEP_INDEX_LAG = 60n;
+const lagged = (slot: bigint): bigint => (slot > SWEEP_INDEX_LAG ? slot - SWEEP_INDEX_LAG : 0n);
+
+/** The line Solana writes into a transaction's log when it passes the 10 KB cap. */
+const LOG_TRUNCATED = "Log truncated";
+/** `getMultipleAccounts` takes at most 100 keys. */
+const ACCOUNTS_PER_READ = 100;
+/** Apply order for a refresh: the Pool first, since the rest reference it (ADR 0016). */
+const KIND_ORDER: WantedAccount["kind"][] = ["pool", "venueProposal", "epoch", "player"];
+
 const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 
 // Anchor's `Program` runs the IDL through `convertIdlToCamelCase` before it
@@ -144,9 +148,8 @@ const nowSeconds = (): bigint => BigInt(Math.floor(Date.now() / 1000));
 const ACCOUNT = {
   pool: "pool",
   epoch: "epoch",
-  round: "round",
   player: "player",
-  position: "position",
+  venueProposal: "venueProposal",
 } as const;
 
 /** One transaction's finalized logs, the unit both ingest paths hand over. */
@@ -248,9 +251,9 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * the entry is dropped once a sweep has caught up past it.
    */
   private freshWrites = new Map<string, bigint>();
-  /** Ticket 08's qualify hold period, read once at construction like every
-   *  other env-derived constant this service uses. */
-  private readonly referralQualifySeconds: number;
+  /** The Pool's `house` pin. It is fixed at create_pool, so one read serves
+   *  the process; `set_operator` moves the House's owner but not this address. */
+  private housePin: PublicKey | undefined;
   /** The Active pool's address (the `POOL_ID` PDA). Every pool-scoped row
    *  this service reads or writes is filtered or keyed by it, so a retired
    *  pool's rows in the same database are never read as current (ADR 0016). */
@@ -259,10 +262,8 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly chain: ChainService,
-    config: ConfigService<HexVaultEnv, true>,
   ) {
     this.parser = new EventParser(this.chain.programId, this.chain.program.coder);
-    this.referralQualifySeconds = config.get("REFERRAL_QUALIFY_SECONDS", { infer: true });
     this.activePool = this.chain.poolAddress().toBase58();
   }
 
@@ -289,306 +290,9 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     return this.prisma.player.findMany({ where: { poolAddress: this.activePool } });
   }
 
-  /** The round the operator may still act on, newest first. */
-  getOpenRound(): Promise<Round | null> {
-    return this.prisma.round.findFirst({
-      where: { poolAddress: this.activePool, status: { in: LIVE_ROUND_STATUSES } },
-      orderBy: { id: "desc" },
-    });
-  }
-
   getEpoch(id: bigint): Promise<Epoch | null> {
     return this.prisma.epoch.findUnique({
       where: { poolAddress_id: { poolAddress: this.activePool, id } },
-    });
-  }
-
-  /** Owners the operator still owes a `register` for this ended epoch. */
-  async playersToRegister(epochId: bigint): Promise<string[]> {
-    const epoch = await this.getEpoch(epochId);
-    if (!epoch) return [];
-    const players = await this.prisma.player.findMany({
-      where: { poolAddress: this.activePool, regEpoch: { not: epochId } },
-    });
-    return players
-      .filter((player) => registrationWeight(player, epoch) > 0n)
-      .map((player) => player.owner);
-  }
-
-  /**
-   * Positions still on chain whose Round is Settled, Forfeited or Voided,
-   * across every such Round, so still worth a `settle_position`. Position has
-   * no Prisma relation to Round (just its id), so this is two queries.
-   */
-  async unsettledPositions(): Promise<{ address: string; owner: string; roundId: bigint }[]> {
-    const terminalRounds = await this.prisma.round.findMany({
-      where: { poolAddress: this.activePool, status: { notIn: LIVE_ROUND_STATUSES } },
-      select: { id: true },
-    });
-    if (terminalRounds.length === 0) return [];
-    return this.prisma.position.findMany({
-      where: {
-        poolAddress: this.activePool,
-        roundId: { in: terminalRounds.map((round) => round.id) },
-      },
-      select: { address: true, owner: true, roundId: true },
-    });
-  }
-
-  /**
-   * Terminal Rounds (Settled, Forfeited, Voided) with no Position left on
-   * them and not yet marked closed (ops-and-envs ticket 08): what
-   * `close_round` may still reclaim rent from. Two queries for the same
-   * reason as `unsettledPositions`: Position has no Prisma relation to
-   * Round. Oldest id first, so a long backlog drains in order.
-   */
-  async roundsToClose(): Promise<bigint[]> {
-    const rounds = await this.prisma.round.findMany({
-      where: { poolAddress: this.activePool, status: { notIn: LIVE_ROUND_STATUSES }, closed: false },
-      select: { id: true },
-      orderBy: { id: "asc" },
-    });
-    if (rounds.length === 0) return [];
-    const busyRounds = await this.prisma.position.findMany({
-      where: { poolAddress: this.activePool, roundId: { in: rounds.map((round) => round.id) } },
-      select: { roundId: true },
-      distinct: ["roundId"],
-    });
-    const busy = new Set(busyRounds.map((position) => position.roundId));
-    return rounds.map((round) => round.id).filter((id) => !busy.has(id));
-  }
-
-  /**
-   * Ticket 08's daily bonus job. Every wallet that refers at least one other
-   * wallet is a candidate; one it computes and records once for `epochId`
-   * (via `createMany({ skipDuplicates: true })`, so a referrer newly
-   * discovered on a later tick still gets a row, but an already-recorded one
-   * keeps its original amount rather than drifting as the day goes on), then
-   * hands back whatever is still unsent and not already granted on chain,
-   * re-clamped against the freshest Player data first (see the loop below).
-   */
-  async referralGrantsDue(epochId: bigint): Promise<{ referrer: string; amount: bigint }[]> {
-    const poolAddress = this.activePool;
-    const pool = await this.prisma.pool.findUnique({ where: { address: poolAddress } });
-    if (!pool) return [];
-
-    // Referral is wallet-level and outlives any one pool; everything the
-    // bonus is computed against below (Player, ReferralGrant) is the Active
-    // pool's only, so a referee with no Player here counts for nothing
-    // after a cutover (ADR 0016).
-    const referrals = await this.prisma.referral.findMany({
-      select: { referee: true, referrer: true, principal: true, aboveSince: true },
-    });
-    if (referrals.length === 0) return [];
-    const byReferrer = new Map<
-      string,
-      { referee: string; principal: bigint; aboveSince: bigint | null }[]
-    >();
-    for (const row of referrals) {
-      const list = byReferrer.get(row.referrer) ?? [];
-      list.push({ referee: row.referee, principal: row.principal, aboveSince: row.aboveSince });
-      byReferrer.set(row.referrer, list);
-    }
-
-    const referrerPlayers = await this.prisma.player.findMany({
-      where: { poolAddress, owner: { in: [...byReferrer.keys()] } },
-      select: { owner: true, principal: true, bonusEpoch: true, bonusGranted: true },
-    });
-    const playerByOwner = new Map(referrerPlayers.map((player) => [player.owner, player]));
-    const now = nowSeconds();
-
-    // Skip referrers with no Player or a Principal of 0: the operator cap on
-    // grant_tickets would refuse them anyway (docs/plan/hexo-referrals
-    // ticket 08's own instruction). alreadyGrantedToday mirrors the same
-    // lazy reset the program applies to bonus_granted: a stale bonusEpoch
-    // means today's counter has not actually been touched yet, so it reads
-    // as 0 rather than whatever a previous epoch left behind.
-    // referral-page ticket 05: each referrer's qualified referees, weighted
-    // by their own basis (the same min(Principal, REFERRAL_BONUS_BASIS_CAP)
-    // computeBonuses sums for the rate), for splitShares to divide their
-    // grant across below.
-    const qualifiedRefereesByReferrer = new Map<string, ShareWeight[]>();
-    const inputs: ReferrerBonusInput[] = [...byReferrer].map(([referrer, refs]) => {
-      const player = playerByOwner.get(referrer);
-      const qualified = refs.filter((ref) =>
-        isQualified(ref.aboveSince, now, this.referralQualifySeconds),
-      );
-      qualifiedRefereesByReferrer.set(
-        referrer,
-        qualified.map((ref) => ({
-          referee: ref.referee,
-          weight: ref.principal < REFERRAL_BONUS_BASIS_CAP ? ref.principal : REFERRAL_BONUS_BASIS_CAP,
-        })),
-      );
-      return {
-        referrer,
-        principal: player?.principal ?? 0n,
-        alreadyGrantedToday: player?.bonusEpoch === epochId ? player.bonusGranted : 0n,
-        qualifiedReferralPrincipals: qualified.map((ref) => ref.principal),
-      };
-    });
-
-    // beta-launch-fixes ticket 11: the pool-wide cap is shared across the
-    // whole epoch, so a referrer who first qualifies late in the day is
-    // scaled against the headroom earlier grants already used rather than
-    // the full cap recomputed fresh — which used to compute an amount the
-    // on-chain call then refused outright once summed with what earlier
-    // grants this epoch had already spent.
-    const recordedThisEpoch = await this.prisma.referralGrant.findMany({
-      where: { poolAddress, epochId },
-      select: { referrer: true, amount: true },
-    });
-    const alreadyGrantedThisEpoch = recordedThisEpoch.reduce(
-      (sum, grant) => sum + grant.amount,
-      0n,
-    );
-    const recordedReferrers = new Set(recordedThisEpoch.map((grant) => grant.referrer));
-    // Already-recorded referrers keep their frozen amount (see the
-    // `uncapped` comment below); only referrers with no row yet this epoch
-    // are candidates for a fresh computation against the headroom.
-    const newInputs = inputs.filter((input) => !recordedReferrers.has(input.referrer));
-
-    const bonuses = computeBonuses(
-      newInputs,
-      pool.totalPrincipal,
-      pool.bonusCapBps,
-      alreadyGrantedThisEpoch,
-    );
-    if (bonuses.length > 0) {
-      await this.prisma.$transaction(async (tx) => {
-        // referral-page ticket 05: shares are written in the same
-        // transaction as the grant, with the same idempotency — only for a
-        // referrer whose ReferralGrant row is new this tick, so a referrer
-        // already recorded (whose amount is frozen the same way, see the
-        // comment on `uncapped` below) does not get its shares re-derived
-        // from qualified referees that may have changed since.
-        const already = await tx.referralGrant.findMany({
-          where: { poolAddress, epochId, referrer: { in: bonuses.map((bonus) => bonus.referrer) } },
-          select: { referrer: true },
-        });
-        const alreadyWritten = new Set(already.map((row) => row.referrer));
-
-        // skipDuplicates keys on (poolAddress, epochId, referrer): epoch ids
-        // restart on every pool, so without poolAddress a retired pool's
-        // epoch-1 row would silently swallow this one (ADR 0016).
-        await tx.referralGrant.createMany({
-          data: bonuses.map((bonus) => ({
-            poolAddress,
-            epochId,
-            referrer: bonus.referrer,
-            amount: bonus.amount,
-            // referral-page ticket 04: written once here, like amount/
-            // qualifiedCount/rateBps, and never touched by the re-clamp loop
-            // below — it is defined as what the referrer would get without
-            // their own Principal moving, so a later Principal change has
-            // nothing to re-derive it from.
-            uncapped: bonus.uncapped,
-            qualifiedCount: bonus.qualifiedCount,
-            rateBps: bonus.rateBps,
-          })),
-          skipDuplicates: true,
-        });
-
-        const shareRows = bonuses
-          .filter((bonus) => !alreadyWritten.has(bonus.referrer))
-          .flatMap((bonus) =>
-            splitShares(bonus.amount, qualifiedRefereesByReferrer.get(bonus.referrer) ?? []).map(
-              (share) => ({
-                poolAddress,
-                epochId,
-                referrer: bonus.referrer,
-                referee: share.referee,
-                amount: share.amount,
-              }),
-            ),
-          );
-        if (shareRows.length > 0) {
-          await tx.referralGrantShare.createMany({ data: shareRows, skipDuplicates: true });
-        }
-      });
-    }
-
-    // ticket 11: a deterministic order, so a batch built from this list is
-    // the same set on a retry regardless of Postgres's own row order.
-    const pending = await this.prisma.referralGrant.findMany({
-      where: { poolAddress, epochId, txSig: null },
-      select: { referrer: true, amount: true },
-      orderBy: { referrer: "asc" },
-    });
-
-    // Re-clamp every already-recorded grant against the freshest Player
-    // data: a referrer's Principal can move (a withdrawal) in the ticks
-    // between when their row was written and when a batch actually sends
-    // it. A stale amount above their current headroom would fail on chain
-    // every tick forever, wedging every other referrer batched alongside
-    // them (the exact failure the atomic-batch ponytail note in tick.ts
-    // warns about), so the amount actually handed back, and the row
-    // recording it, always reflect the latest Principal.
-    const due: { referrer: string; amount: bigint }[] = [];
-    const changed: { referrer: string; amount: bigint }[] = [];
-    for (const grant of pending) {
-      const player = playerByOwner.get(grant.referrer);
-      if (player?.bonusEpoch === epochId) continue; // already granted on chain
-      const cap = remainingGrantCap(player?.principal ?? 0n, 0n);
-      const amount = grant.amount < cap ? grant.amount : cap;
-      // Persisted even when it clamps all the way to 0, so a referrer whose
-      // Principal has left entirely does not leave a stale positive amount
-      // sitting on the row (ticket 11 reads this as "today's bonus").
-      if (amount !== grant.amount) changed.push({ referrer: grant.referrer, amount });
-      if (amount <= 0n) continue;
-      due.push({ referrer: grant.referrer, amount });
-    }
-    if (changed.length > 0) {
-      await this.prisma.$transaction(async (tx) => {
-        for (const grant of changed) {
-          await tx.referralGrant.update({
-            where: {
-              poolAddress_epochId_referrer: { poolAddress, epochId, referrer: grant.referrer },
-            },
-            data: { amount: grant.amount },
-          });
-          // referral-page ticket 05: rescale this referrer's shares off
-          // their own existing amounts as the weight (they already sum to
-          // the grant's old amount), so a shrink keeps the same proportions
-          // and the shares stay exactly summed to the re-clamped amount,
-          // without re-deriving them from referee Principal data that may
-          // have moved again since they were written.
-          const shares = await tx.referralGrantShare.findMany({
-            where: { poolAddress, epochId, referrer: grant.referrer },
-            select: { referee: true, amount: true },
-          });
-          if (shares.length === 0) continue;
-          const rescaled = splitShares(
-            grant.amount,
-            shares.map((share) => ({ referee: share.referee, weight: share.amount })),
-          );
-          for (const share of rescaled) {
-            await tx.referralGrantShare.update({
-              where: {
-                poolAddress_epochId_referrer_referee: {
-                  poolAddress,
-                  epochId,
-                  referrer: grant.referrer,
-                  referee: share.referee,
-                },
-              },
-              data: { amount: share.amount },
-            });
-          }
-        }
-      });
-    }
-    return due;
-  }
-
-  async markReferralGrantsSent(
-    epochId: bigint,
-    referrers: readonly string[],
-    txSig: string,
-  ): Promise<void> {
-    await this.prisma.referralGrant.updateMany({
-      where: { poolAddress: this.activePool, epochId, referrer: { in: [...referrers] } },
-      data: { txSig },
     });
   }
 
@@ -599,11 +303,12 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     this.ticking = true;
     try {
       // Sync first: its full walk upserts the Active pool's Pool row, which
-      // every Event, Epoch, Round, Player, Position and Cursor row written
+      // every Event, Epoch, Player and Cursor row written
       // after it references by foreign key (ADR 0016). On a brand-new pool
       // that walk is what creates the row at all.
       await this.requestSync();
       await this.catchUpEvents();
+      await checkLedgerIfDue(this.prisma, this.activePool, nowSeconds());
       await this.prisma.cursor.upsert({
         where: { poolAddress: this.activePool },
         create: { poolAddress: this.activePool, updatedAt: nowSeconds() },
@@ -652,54 +357,43 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   /**
    * Re-reads exactly the accounts one confirmed transaction touched.
    *
-   * Most of them are named by the transaction's own events. Two instructions
-   * emit none — `request_round_randomness` moves the open Round, and
-   * `close_registration` moves the epoch that just ended — so the open Round
-   * and the two epochs either side of the pool's cursor are asked for every
-   * time rather than derived from an event that is not there. That is four
-   * addresses on a quiet transaction and a handful on a busy one, all in one
-   * call.
+   * Most of them are named by the transaction's own events. `request_draw`
+   * emits none on its usual path and moves the epoch that just ended, so the two
+   * epochs either side of the pool's cursor are asked for every time rather
+   * than derived from an event that is not there. That is three addresses on a
+   * quiet transaction and a handful on a busy one, all in one call.
    */
   private async refreshFromLogs(logs: string[], slot: bigint): Promise<void> {
     // The Pool goes in first: `wanted` is applied in insertion order, so its
     // row lands before the rows below that reference it (ADR 0016).
     const wanted = new Map<string, WantedAccount>();
     wanted.set(this.activePool, { kind: "pool" });
+    // Every pool instruction can open, replace or close the proposal, and a
+    // close leaves no account to read, so it is asked for every time.
+    wanted.set(this.chain.venueProposalAddress().toBase58(), { kind: "venueProposal" });
 
-    const [pool, openRound] = await Promise.all([
-      this.prisma.pool.findUnique({ where: { address: this.activePool } }),
-      this.getOpenRound(),
-    ]);
+    const pool = await this.prisma.pool.findUnique({ where: { address: this.activePool } });
     const currentEpochId = pool?.currentEpochId ?? 0n;
     for (const epochId of [currentEpochId, currentEpochId - 1n]) {
       if (epochId > 0n) {
         wanted.set(this.chain.epochAddress(epochId).toBase58(), { kind: "epoch" });
       }
     }
-    if (openRound) {
-      wanted.set(this.chain.roundAddress(openRound.id).toBase58(), { kind: "round" });
-    }
 
     for (const event of decodeEventLogs(this.parser, logs)) {
       const epochId = eventField(event, "epochId");
-      const roundId = eventField(event, "roundId");
       // JackpotPaid names its player `winner`; every other event says `owner`.
       const owner = eventField(event, "owner") ?? eventField(event, "winner");
       if (epochId !== undefined) {
         wanted.set(this.chain.epochAddress(BigInt(epochId)).toBase58(), { kind: "epoch" });
       }
-      if (roundId !== undefined) {
-        wanted.set(this.chain.roundAddress(BigInt(roundId)).toBase58(), { kind: "round" });
-      }
       if (owner !== undefined) {
         wanted.set(this.chain.playerAddress(new PublicKey(owner)).toBase58(), { kind: "player" });
       }
-      if (roundId !== undefined && owner !== undefined) {
-        const round = this.chain.roundAddress(BigInt(roundId));
-        wanted.set(this.chain.positionAddress(round, new PublicKey(owner)).toBase58(), {
-          kind: "position",
-          roundId: BigInt(roundId),
-        });
+      // set_operator rewrites the House's owner and names no wallet in its
+      // event, so the House is asked for by its pin. The Pool is already first.
+      if (event.name === "OperatorChanged") {
+        wanted.set((await this.houseAddress()).toBase58(), { kind: "player" });
       }
     }
 
@@ -714,10 +408,10 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Writes one account read by `refreshFromLogs`. A Position is the only
-   * account this program closes, so it is the only one whose absence means
-   * "gone"; anything else missing is a read that raced its own transaction,
-   * and the next log or sweep brings it in.
+   * Writes one account read by `refreshFromLogs`. The venue proposal is the
+   * only account this program closes, so it is the only one whose absence
+   * means "gone"; anything else missing is a read that raced its own
+   * transaction, and the next log or sweep brings it in.
    */
   private async applyAccount(
     address: string,
@@ -728,16 +422,29 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     const coder = this.chain.program.coder.accounts;
     const pubkey = new PublicKey(address);
     if (data === undefined) {
-      if (wanted.kind !== "position") return;
-      await this.prisma.position.deleteMany({ where: { poolAddress: this.activePool, address } });
+      if (wanted.kind !== "venueProposal") return;
+      // Closed by `cancel_venue`: absence is the fact.
+      await this.prisma.venueProposal.deleteMany({ where: { poolAddress: this.activePool } });
       this.freshWrites.set(address, slot);
       return;
     }
     const poolAddress = this.activePool;
     switch (wanted.kind) {
       case "pool": {
-        const row = poolRow(pubkey, coder.decode<DecodedPool>(ACCOUNT.pool, data), slot);
+        const pool = coder.decode<DecodedPool>(ACCOUNT.pool, data);
+        this.housePin = pool.house;
+        const row = poolRow(pubkey, pool, slot);
         await this.prisma.pool.upsert({ where: { address: row.address }, create: row, update: row });
+        await this.mirrorLiveYield(row, pool);
+        break;
+      }
+      case "venueProposal": {
+        const row = venueProposalRow(
+          coder.decode<DecodedVenueProposal>(ACCOUNT.venueProposal, data),
+          poolAddress,
+          slot,
+        );
+        await this.prisma.venueProposal.upsert({ where: { poolAddress }, create: row, update: row });
         break;
       }
       case "epoch": {
@@ -749,44 +456,75 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         });
         break;
       }
-      case "round": {
-        const row = roundRow(coder.decode<DecodedRound>(ACCOUNT.round, data), poolAddress);
-        await this.prisma.round.upsert({
-          where: { poolAddress_id: { poolAddress, id: row.id } },
-          create: row,
-          update: row,
-        });
-        break;
-      }
       case "player": {
-        const row = playerRow(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress);
-        await this.prisma.player.upsert({
-          where: { poolAddress_owner: { poolAddress, owner: row.owner } },
-          create: row,
-          update: row,
-        });
-        break;
-      }
-      case "position": {
-        const row = positionRow(
-          pubkey,
-          coder.decode<DecodedPosition>(ACCOUNT.position, data),
-          wanted.roundId,
-          poolAddress,
+        await this.prisma.$transaction(
+          this.playerWrites(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress, slot),
         );
-        await this.prisma.position.upsert({
-          where: { address: row.address },
-          create: row,
-          update: row,
-        });
         break;
       }
     }
     this.freshWrites.set(address, slot);
   }
 
+  /** The writes that mirror one Player account. The House keeps its address
+   *  when `set_operator` changes its owner, and the row is keyed by owner, so
+   *  the row under the old owner goes and the new one is written. */
+  private playerWrites(account: DecodedPlayer, poolAddress: string, slot: bigint) {
+    const row = playerRow(account, poolAddress, slot);
+    const upsert = this.prisma.player.upsert({
+      where: { poolAddress_owner: { poolAddress, owner: row.owner } },
+      create: row,
+      update: row,
+    });
+    if (!account.isHouse) return [upsert];
+    return [
+      this.prisma.player.deleteMany({ where: { poolAddress, isHouse: true, owner: { not: row.owner } } }),
+      upsert,
+    ];
+  }
+
+  /** True when `pubkey` is where the program keeps `account`: the owner's seed
+   *  address, or the Pool's House pin (a rotated House is not at its owner's seed). */
+  private isPlayerAddress(pubkey: PublicKey, account: DecodedPlayer, pool: PublicKey): boolean {
+    return (
+      pubkey.equals(this.chain.playerAddress(account.owner, pool)) ||
+      (this.housePin !== undefined && pubkey.equals(this.housePin))
+    );
+  }
+
+  private async houseAddress(): Promise<PublicKey> {
+    if (this.housePin === undefined) {
+      const [info] = await this.chain.connection.getMultipleAccountsInfo([this.chain.poolAddress()]);
+      if (!info) throw new Error("pool account is not on chain, so its House pin is unknown");
+      this.housePin = this.chain.program.coder.accounts.decode<DecodedPool>(ACCOUNT.pool, info.data).house;
+    }
+    return this.housePin;
+  }
+
+  /**
+   * What a changed Pool implies besides its own row (ticket 14). One Yield
+   * index point, at most one a minute, stamped with the pool's own sync time.
+   */
+  private async mirrorLiveYield(row: Prisma.PoolCreateInput, pool: DecodedPool): Promise<void> {
+    const poolAddress = row.address;
+    const at = BigInt(pool.lastSyncAt.toString());
+    if (at > 0n) {
+      const latest = await this.prisma.yieldIndexPoint.findFirst({
+        where: { poolAddress },
+        orderBy: { at: "desc" },
+      });
+      if (latest === null || at >= latest.at + YIELD_INDEX_MIN_GAP_S) {
+        await this.prisma.yieldIndexPoint.createMany({
+          data: [{ poolAddress, at, yieldIndex: pool.yieldIndex.toString() }],
+          skipDuplicates: true,
+        });
+      }
+    }
+  }
+
   /** True when the log path already wrote this address from a slot the
-   *  sweep's snapshot predates, so the sweep's row is a step backwards. */
+   *  sweep's snapshot predates, so the sweep's row is a step backwards.
+   *  `sweepSlot` is the snapshot slot less the index lag (audit-2026-10-09 05). */
   private behindLogPath(pubkey: PublicKey, sweepSlot: bigint): boolean {
     const written = this.freshWrites.get(pubkey.toBase58());
     return written !== undefined && written > sweepSlot;
@@ -816,19 +554,11 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * by Anchor discriminator locally, then one Prisma transaction per type.
    *
    * Every account is checked against the PDA it must live at for the
-   * configured pool. Epoch, Round and Player carry no pool field on chain,
+   * configured pool. Epoch and Player carry no pool field on chain,
    * and the walk returns every pool the program owns, so this is what keeps
    * a sibling pool's accounts from being written under the Active pool's
    * address (ADR 0016).
    *
-   * A closed Position never appears here to begin with on an incremental
-   * walk (an absent account looks identical to an unchanged one), so a
-   * settled Position is not detected by its absence any more: the
-   * `PositionSettled` event `persist()` ingests removes the row instead, the
-   * moment it lands, sweep or no sweep. A full walk still deletes by absence
-   * as a second guard, which is the only guard on an RPC without V2; a
-   * missing Round account gets the same absence-based backstop, marked
-   * closed rather than deleted (ticket 06).
    */
   async syncAccounts(): Promise<void> {
     const pool = this.chain.poolAddress();
@@ -837,9 +567,14 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       this.lastSyncedSlot === undefined ||
       this.v2Unsupported ||
       Date.now() - this.lastFullWalkAt >= FULL_WALK_INTERVAL_MS;
-    const { slot, accounts } = await this.fetchAll(fullWalk ? undefined : this.lastSyncedSlot);
+    // The V2 index runs behind its own `context.slot`, so an account that changed
+    // inside the lag window is not in this walk's result. Asking from the lagged
+    // slot picks it up on the next sweep.
+    const { slot, accounts } = await this.fetchAll(fullWalk || this.lastSyncedSlot === undefined ? undefined : lagged(this.lastSyncedSlot));
+    const sweepSlot = lagged(slot);
 
     const poolsSeen = accounts.get<DecodedPool>(ACCOUNT.pool).filter(({ pubkey }) => pubkey.equals(pool));
+    if (poolsSeen[0]) this.housePin = poolsSeen[0].account.house;
     // An incremental walk legitimately reports nothing when the Pool has not
     // changed; only a full walk finding it missing means misconfiguration.
     if (fullWalk && poolsSeen.length === 0) {
@@ -848,7 +583,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // Every write below skips an account the log path has already written
     // from a newer slot than this walk's snapshot: the V2 index runs behind
     // the chain, so without this a sweep would undo the live path's work.
-    const pools = poolsSeen.filter(({ pubkey }) => !this.behindLogPath(pubkey, slot));
+    const pools = poolsSeen.filter(({ pubkey }) => !this.behindLogPath(pubkey, sweepSlot));
     await this.prisma.$transaction(
       pools
         .map(({ pubkey, account }) => {
@@ -860,6 +595,25 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           });
         }),
     );
+    for (const { pubkey, account } of pools) {
+      await this.mirrorLiveYield(poolRow(pubkey, account, slot), account);
+    }
+
+    // The proposal exists only while open, so a full walk that does not see it
+    // deletes the row; an incremental walk
+    // cannot tell absent from unchanged and only upserts.
+    const proposalAddress = this.chain.venueProposalAddress();
+    if (!this.behindLogPath(proposalAddress, sweepSlot)) {
+      const proposal = accounts
+        .get<DecodedVenueProposal>(ACCOUNT.venueProposal)
+        .find(({ pubkey }) => pubkey.equals(proposalAddress));
+      if (proposal) {
+        const row = venueProposalRow(proposal.account, poolAddress, slot);
+        await this.prisma.venueProposal.upsert({ where: { poolAddress }, create: row, update: row });
+      } else if (fullWalk) {
+        await this.prisma.venueProposal.deleteMany({ where: { poolAddress } });
+      }
+    }
 
     const epochs = accounts.get<DecodedEpoch>(ACCOUNT.epoch);
     await this.prisma.$transaction(
@@ -867,7 +621,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         .filter(
           ({ pubkey, account }) =>
             pubkey.equals(this.chain.epochAddress(BigInt(account.epochId.toString()), pool)) &&
-            !this.behindLogPath(pubkey, slot),
+            !this.behindLogPath(pubkey, sweepSlot),
         )
         .map(({ account }) => {
           const row = epochRow(account, poolAddress);
@@ -879,70 +633,18 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         }),
     );
 
-    const rounds = accounts.get<DecodedRound>(ACCOUNT.round).filter(({ pubkey, account }) =>
-      pubkey.equals(this.chain.roundAddress(BigInt(account.roundId.toString()), pool)),
-    );
-    // Filtered at the write, not above: `roundIds` below needs every round
-    // this walk saw, whether or not its row is the one being written.
-    await this.prisma.$transaction(
-      rounds
-        .filter(({ pubkey }) => !this.behindLogPath(pubkey, slot))
-        .map(({ account }) => {
-          const row = roundRow(account, poolAddress);
-          return this.prisma.round.upsert({
-            where: { poolAddress_id: { poolAddress, id: row.id } },
-            create: row,
-            update: row,
-          });
-        }),
-    );
-    // A full walk sees when a Round account is gone (`close_round` reclaimed
-    // its rent); an incremental walk cannot, the same reason it cannot see a
-    // gone Position (absence looks identical to unchanged). Marked closed and
-    // kept, not deleted, matching ops-and-envs ticket 08 and the `closed`
-    // column's own docs: the row keeps its last mirrored state. This is the
-    // backstop for a missed `RoundClosed` event, same as the Position delete
-    // below is the backstop for a missed `PositionSettled` (ticket 06).
-    if (fullWalk) {
-      const liveRoundIds = rounds.map(({ account }) => BigInt(account.roundId.toString()));
-      // Scoped to the Active pool: a retired pool's rounds are absent from
-      // this walk too, but they are not this walk's to mark (ADR 0016).
-      const stillOpen = await this.prisma.round.findMany({
-        where: { poolAddress, id: { notIn: liveRoundIds }, closed: false },
-        select: { id: true },
-      });
-      // The same `behindLogPath` guard as the upsert above, keyed by the
-      // round's own address rather than the id Postgres keys it by: a round
-      // just opened after this walk's stale snapshot (the V2 index runs 13
-      // to 24 seconds behind, see `fetchAll`) is not in `liveRoundIds` either,
-      // and must not be marked closed for that reason alone.
-      const toClose = stillOpen
-        .map((round) => round.id)
-        .filter((id) => !this.behindLogPath(this.chain.roundAddress(id, pool), slot));
-      if (toClose.length > 0) {
-        await this.prisma.round.updateMany({
-          where: { poolAddress, id: { in: toClose } },
-          data: { closed: true },
-        });
-      }
-    }
-
     const players = accounts.get<DecodedPlayer>(ACCOUNT.player);
     await this.prisma.$transaction(
       players
         .filter(
           ({ pubkey, account }) =>
-            pubkey.equals(this.chain.playerAddress(account.owner, pool)) &&
-            !this.behindLogPath(pubkey, slot),
+            this.isPlayerAddress(pubkey, account, pool) && !this.behindLogPath(pubkey, sweepSlot),
         )
-        .map(({ account }) => {
-          const row = playerRow(account, poolAddress);
-          return this.prisma.player.upsert({
-            where: { poolAddress_owner: { poolAddress, owner: row.owner } },
-            create: row,
-            update: row,
-          });
-        }),
+        // Mainnet-readiness-fixes 17: the V2 index runs behind `slot`, and
+        // a referral bind uses this slot as its seed, skipping the events
+        // at or before it. Stamping it lower means a lagged event is
+        // applied rather than skipped.
+        .flatMap(({ account }) => this.playerWrites(account, poolAddress, sweepSlot)),
     );
 
     // beta-launch-fixes ticket 08: a websocket gap can miss a
@@ -964,10 +666,17 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       if (referrals.length > 0) {
         // Active pool only: a referee with no Player here yet keeps the
         // Principal their last event left (spec's "Referral job" decision).
-        const referralPlayers = await this.prisma.player.findMany({
-          where: { poolAddress, owner: { in: referrals.map((referral) => referral.referee) } },
-          select: { owner: true, principal: true },
-        });
+        // Chunked: one `in` list past 32,767 ids fails the statement.
+        const referees = referrals.map((referral) => referral.referee);
+        const referralPlayers: { owner: string; principal: bigint }[] = [];
+        for (let i = 0; i < referees.length; i += 10_000) {
+          referralPlayers.push(
+            ...(await this.prisma.player.findMany({
+              where: { poolAddress, owner: { in: referees.slice(i, i + 10_000) } },
+              select: { owner: true, principal: true },
+            })),
+          );
+        }
         const principalByOwner = new Map(
           referralPlayers.map((player) => [player.owner, player.principal]),
         );
@@ -995,47 +704,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Position stores its round's address, not its id, so the ids come from
-    // the rounds decoded a moment ago. Rounds are never closed, so a position
-    // of this pool always finds its round here.
-    const roundIds = new Map(
-      rounds.map(({ pubkey, account }) => [pubkey.toBase58(), BigInt(account.roundId.toString())]),
-    );
-    const positions = accounts.get<DecodedPosition>(ACCOUNT.position).flatMap(
-      ({ pubkey, account }) => {
-        const roundId = roundIds.get(account.round.toBase58());
-        if (roundId === undefined) return [];
-        if (!pubkey.equals(this.chain.positionAddress(account.round, account.owner))) return [];
-        return [positionRow(pubkey, account, roundId, poolAddress)];
-      },
-    );
-    const live = positions.map((row) => row.address);
-    await this.prisma.$transaction([
-      ...positions
-        .filter((row) => !this.behindLogPath(new PublicKey(row.address), slot))
-        .map((row) =>
-          this.prisma.position.upsert({
-            where: { address: row.address },
-            create: row,
-            update: row,
-          }),
-        ),
-      // A full walk does see that a closed account is gone, so it stays a
-      // second guard behind the `PositionSettled` event. An incremental walk
-      // cannot: there, absence only means unchanged. A Position bought since
-      // this walk's snapshot is not in `live` either, so the log path's
-      // addresses are spared the same way its rows are.
-      ...(fullWalk
-        ? [
-            // Scoped like the Round close above: absence from this pool's
-            // walk says nothing about a retired pool's Positions.
-            this.prisma.position.deleteMany({
-              where: { poolAddress, address: { notIn: [...live, ...this.freshWrites.keys()] } },
-            }),
-          ]
-        : []),
-    ]);
-
     // Recorded only once every page of this walk has landed: a page failure
     // above throws before this line, so a partial walk never advances the
     // slot past pages it never read.
@@ -1044,7 +712,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     // The sweep has caught up to everything written at or before its
     // snapshot, so those entries have nothing left to protect.
     for (const [address, written] of this.freshWrites) {
-      if (written <= slot) this.freshWrites.delete(address);
+      if (written <= sweepSlot) this.freshWrites.delete(address);
     }
   }
 
@@ -1127,8 +795,8 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       // with no stickiness, so a flaky primary can serve page 1 and the
       // fallback page 2 of the same walk. The two endpoints can sit at
       // different indexing lag, so the merged pages would not be one
-      // consistent snapshot — exactly what the full walk's absence-based
-      // Position delete and Round close (below) rely on. Pinning the whole
+      // consistent snapshot, which the full walk's absence-based
+      // venue proposal delete relies on. Pinning the whole
       // walk to whichever endpoint served its first page, and aborting (no
       // different than any other mid-walk failure: nothing has been written
       // to Postgres yet) the moment a later page comes from the other one,
@@ -1179,7 +847,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     if (this.v2Unsupported) {
       // ponytail: no changedSinceSlot without V2, so a provider that lacks it
       // pays the full walk on every sweep. syncAccounts keeps absence-based
-      // Position deletion in that mode, which a full walk can still see.
+      // proposal deletion in that mode, which a full walk can still see.
       const { context, value } = await this.chain.connection.getProgramAccounts(
         this.chain.programId,
         { withContext: true },
@@ -1266,19 +934,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       data: event.data as Prisma.InputJsonObject,
       blockTime: batch.blockTime,
     }));
-    // `settle_position` is what actually closes a Position account, whether
-    // its Round settled or was voided, so `PositionSettled` is the one event
-    // that means a row is gone; a batch settling several Positions at once
-    // carries one such event per Position.
-    const closed = events
-      .map((event) => settledPosition(event))
-      .filter((position): position is { owner: string; roundId: bigint } => position !== null);
-    // ops-and-envs ticket 08: `close_round` closed these Round accounts; the
-    // row keeps its last mirrored state (see `closedRound`'s own docs)
-    // instead of being deleted or blanked, so this only flips one flag.
-    const closedRounds = events
-      .map((event) => closedRound(event))
-      .filter((round): round is { id: bigint } => round !== null);
     // ticket 06: every owner this batch saw deposit, deduplicated so two
     // Deposited events for the same wallet in one batch check only once.
     const depositors = [
@@ -1296,15 +951,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
 
     return this.prisma.$transaction(async (tx) => {
       const created = await tx.event.createMany({ data: rows, skipDuplicates: true });
-      for (const { owner, roundId } of closed) {
-        await tx.position.deleteMany({ where: { poolAddress, owner, roundId } });
-      }
-      for (const { id } of closedRounds) {
-        // updateMany, not update: a row this transaction has not seen yet
-        // (an out-of-order replay) is a no-op here, and the next sync or
-        // sweep still upserts the Round itself.
-        await tx.round.updateMany({ where: { poolAddress, id }, data: { closed: true } });
-      }
       for (const owner of depositors) {
         // ADR 0014: a wallet's first deposit gets it a ReferralCode, not a
         // depositor-owned InviteCode; InviteCode.ownerWallet is now
@@ -1332,9 +978,15 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           existing.map((row) => [row.referee, { principal: row.principal, aboveSince: row.aboveSince }]),
         );
         const blockTime = batch.blockTime ?? nowSeconds();
+        const seedSlots = new Map(existing.map((row) => [row.referee, row.seedSlot]));
         for (const { owner, event } of referralEvents) {
           const current = state.get(owner);
           if (current === undefined) continue; // not a referee
+          // The bind seeded principal from a Player mirror read at this slot
+          // or later, so an event at or before it is already in the seed
+          // (mainnet-readiness-fixes 11).
+          const seedSlot = seedSlots.get(owner) ?? 0n;
+          if (seedSlot > 0n && batch.slot <= seedSlot) continue;
           state.set(owner, applyReferralEvent(current, event, blockTime));
         }
         for (const [referee, next] of state) {
@@ -1343,6 +995,17 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
             data: { principal: next.principal, aboveSince: next.aboveSince },
           });
         }
+      }
+      if (options.advanceCursor && events.length > 0) {
+        // The Ticket ledger takes events only here, in the finalized catch-up's
+        // chain order (the live path stamps a notification slot and can arrive
+        // out of order). The claim makes a replayed transaction a no-op, even
+        // one the live path already stored.
+        const claimed = await tx.event.updateMany({
+          where: { poolAddress, signature: batch.signature, ledgered: false },
+          data: { ledgered: true },
+        });
+        if (claimed.count > 0) await bookBatch(tx, poolAddress, batch.signature, events, batch.blockTime ?? nowSeconds());
       }
       if (options.advanceCursor) {
         const cursor = await tx.cursor.findUnique({ where: { poolAddress } });
@@ -1359,7 +1022,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         }
       }
       return created.count;
-    });
+    }, LEDGER_TRANSACTION); // an EpochBegan snapshots and resets every wallet in this transaction
   }
 
   /**
@@ -1447,8 +1110,87 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       this.noteFailure(`no finalized logs yet for ${info.signature}`);
       return false;
     }
+    if (logs.includes(LOG_TRUNCATED)) {
+      await this.ingestTruncated(info.signature, batch.slot);
+      await this.persist(batch, []); // moves the cursor past it, with no events to store
+      return true;
+    }
     await this.persist({ ...batch, logs }, decodeEventLogs(this.parser, logs));
     return true;
+  }
+
+  /**
+   * A transaction whose log Solana cut off has events nobody can read, so none
+   * are decoded (audit-2026-10-09 06). The accounts it touched are re-read from
+   * chain instead, so the Pool, Epoch and Player mirrors are right, and the
+   * signature is recorded for `/alerts`. The Ticket ledger is not touched: its
+   * side is for an operator to reconcile against the Principal comparison.
+   * Safe to run twice, as the live and catch-up paths both do.
+   */
+  private async ingestTruncated(signature: string, slot: bigint): Promise<void> {
+    const tx = await this.chain.connection.getTransaction(signature, {
+      commitment: "finalized",
+      maxSupportedTransactionVersion: 0,
+    });
+    if (!tx) throw new Error(`no finalized transaction yet for truncated ${signature}`);
+    const loaded = tx.meta?.loadedAddresses;
+    const keys = tx.transaction.message
+      .getAccountKeys(loaded ? { accountKeysFromLookups: loaded } : undefined)
+      .keySegments()
+      .flat();
+    const house = await this.houseAddress();
+    const owned: { address: string; kind: WantedAccount["kind"]; data: Buffer }[] = [];
+    for (let start = 0; start < keys.length; start += ACCOUNTS_PER_READ) {
+      const chunk = keys.slice(start, start + ACCOUNTS_PER_READ);
+      const infos = await this.chain.connection.getMultipleAccountsInfo(chunk);
+      for (const [i, info] of infos.entries()) {
+        // SAFETY: `infos` has one entry per key of `chunk`.
+        const pubkey = chunk[i]!;
+        if (info === null || !info.owner.equals(this.chain.programId)) continue;
+        const kind = this.mirroredKind(pubkey, info.data, house);
+        if (kind !== undefined) owned.push({ address: pubkey.toBase58(), kind, data: info.data });
+      }
+    }
+    owned.sort((a, b) => KIND_ORDER.indexOf(a.kind) - KIND_ORDER.indexOf(b.kind));
+    for (const { address, kind, data } of owned) await this.applyAccount(address, { kind }, data, slot);
+    await this.prisma.truncatedLog.upsert({
+      where: { poolAddress_signature: { poolAddress: this.activePool, signature } },
+      create: { poolAddress: this.activePool, signature, slot },
+      update: {},
+    });
+    this.logger.warn(`log truncated in ${signature}: refreshed ${owned.length} accounts, its events were not read`);
+  }
+
+  /** Which mirrored account `data` is, or undefined for one that is not this pool's own
+   *  (another pool's Epoch or Player, a layout this IDL cannot decode). */
+  private mirroredKind(pubkey: PublicKey, data: Buffer, house: PublicKey): WantedAccount["kind"] | undefined {
+    const coder = this.chain.program.coder.accounts;
+    for (const kind of Object.values(ACCOUNT)) {
+      // SAFETY: the interface types `memcmp` as `any`; BorshAccountsCoder
+      // returns `{ offset: 0, bytes: base58(discriminator) }`.
+      const { bytes } = coder.memcmp(kind) as { bytes: string };
+      const discriminator = Buffer.from(bs58.decode(bytes));
+      if (!data.subarray(0, discriminator.length).equals(discriminator)) continue;
+      try {
+        switch (kind) {
+          case "pool":
+            return pubkey.equals(this.chain.poolAddress()) ? kind : undefined;
+          case "venueProposal":
+            return pubkey.equals(this.chain.venueProposalAddress()) ? kind : undefined;
+          case "epoch": {
+            const epoch = coder.decode<DecodedEpoch>(kind, data);
+            return pubkey.equals(this.chain.epochAddress(BigInt(epoch.epochId.toString()))) ? kind : undefined;
+          }
+          case "player": {
+            const player = coder.decode<DecodedPlayer>(kind, data);
+            return pubkey.equals(this.chain.playerAddress(player.owner)) || pubkey.equals(house) ? kind : undefined;
+          }
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -1477,6 +1219,10 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           // loses nothing: this path never moves the cursor, so catch-up
           // replays it once the sweep has written the Pool.
           if (this.lastSyncedSlot === undefined) return;
+          if (logs.logs.includes(LOG_TRUNCATED)) {
+            await this.ingestTruncated(logs.signature, BigInt(context.slot));
+            return;
+          }
           const events = decodeEventLogs(this.parser, logs.logs);
           if (events.length === 0) return;
           await this.persist(

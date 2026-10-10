@@ -13,7 +13,7 @@ describe("playLock", () => {
     expect(playLock(false, 1n)).toBeNull();
   });
 
-  it("locks on the entries-zero rule when not gated", () => {
+  it("locks on the zero-Tickets rule when not gated", () => {
     expect(playLock(false, 0n)).toEqual({ tip: "Deposit first to play" });
   });
 
@@ -21,7 +21,7 @@ describe("playLock", () => {
     expect(playLock(true, 1n)).toEqual({ tip: "Coming soon" });
   });
 
-  it("the gate wins over the entries lock", () => {
+  it("the gate wins over the zero-Tickets lock", () => {
     expect(playLock(true, 0n)).toEqual({ tip: "Coming soon" });
   });
 });

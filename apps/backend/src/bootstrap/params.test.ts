@@ -1,14 +1,20 @@
-import { Keypair } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
+
+import { KVAULT_PROGRAM_ID, sharesMintAddress } from "../chain/kvault";
 
 import {
   DEFAULT_POOL_PARAMS,
   MAINNET_GENESIS_HASH,
   assertMainnetSafe,
+  assertTokenAccountOwner,
+  buyTicketsPausedFor,
   envInt,
   isoSeconds,
   nextSundayAnchor,
   parsePoolParams,
+  venuePinsFor,
 } from "./params";
 
 const DEVNET_GENESIS_HASH = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
@@ -18,17 +24,8 @@ describe("parsePoolParams", () => {
     expect(parsePoolParams([])).toEqual(DEFAULT_POOL_PARAMS);
   });
 
-  it("defaults round_seconds to 90, with close_buffer safely under it", () => {
-    expect(DEFAULT_POOL_PARAMS.roundSeconds).toBe(90);
-    expect(DEFAULT_POOL_PARAMS.closeBuffer).toBeLessThan(
-      DEFAULT_POOL_PARAMS.roundSeconds,
-    );
-  });
-
   it("overrides only the flags given", () => {
-    // Above the 600s default registration window, which create_pool requires
-    // to be shorter than the epoch, and above a payout timeout shorter than
-    // it too.
+    // Above a payout timeout, which has to be shorter than the epoch.
     expect(
       parsePoolParams(["--epoch-seconds", "1200", "--payout-timeout", "700"]),
     ).toEqual({
@@ -39,39 +36,30 @@ describe("parsePoolParams", () => {
     expect(
       parsePoolParams([
         "--epoch-seconds=1200",
-        "--round-seconds=20",
         "--payout-timeout=700",
       ]),
     ).toEqual({
       ...DEFAULT_POOL_PARAMS,
       epochSeconds: 1200,
-      roundSeconds: 20,
       payoutTimeout: 700,
     });
   });
 
-  it("takes a registration window of zero and a positive payout timeout", () => {
-    expect(
-      parsePoolParams(["--registration-window", "0", "--payout-timeout", "60"]),
-    ).toEqual({
+  it("takes a positive payout timeout", () => {
+    expect(parsePoolParams(["--payout-timeout", "60"])).toEqual({
       ...DEFAULT_POOL_PARAMS,
-      registrationWindow: 0,
       payoutTimeout: 60,
     });
     expect(() => parsePoolParams(["--payout-timeout", "0"])).toThrow(
       /positive/,
     );
-    expect(() => parsePoolParams(["--registration-window=-1"])).toThrow(
-      /non-negative/,
-    );
   });
 
-  it("rejects a registration window that swallows the epoch", () => {
-    // The 600s default window against a 120s epoch: create_pool would fail
-    // with InvalidParameter after the mint and vaults already exist.
-    expect(() =>
-      parsePoolParams(["--epoch-seconds", "120", "--payout-timeout", "60"]),
-    ).toThrow(/registration window/);
+  it("no longer has a registration window", () => {
+    expect(DEFAULT_POOL_PARAMS).not.toHaveProperty("registrationWindow");
+    expect(() => parsePoolParams(["--registration-window", "0"])).toThrow(
+      /usage/,
+    );
   });
 
   it("rejects a payout timeout at or above the epoch length", () => {
@@ -84,13 +72,7 @@ describe("parsePoolParams", () => {
   });
 
   it("rejects values create_pool would reject", () => {
-    expect(() => parsePoolParams(["--round-seconds", "0"])).toThrow(/positive/);
     expect(() => parsePoolParams(["--epoch-seconds", "1.5"])).toThrow(/whole/);
-    // close_buffer is 5, so a 4 second round cannot satisfy
-    // close_buffer < round_seconds.
-    expect(() => parsePoolParams(["--round-seconds", "4"])).toThrow(
-      /close buffer/,
-    );
   });
 
   // game-jackpot-pause ticket 02: paused unless asked.
@@ -103,28 +85,14 @@ describe("parsePoolParams", () => {
     expect(() => parsePoolParams(["--pool-id", "2"])).toThrow(/usage/);
   });
 
-  it("overrides the House cut rate", () => {
-    expect(parsePoolParams(["--house-cut-bps", "0"])).toEqual({
-      ...DEFAULT_POOL_PARAMS,
-      houseCutBps: 0,
-    });
-    expect(parsePoolParams(["--house-cut-bps", "10000"])).toEqual({
-      ...DEFAULT_POOL_PARAMS,
-      houseCutBps: 10_000,
-    });
-  });
-
-  it("rejects a House cut rate outside 0..=10000", () => {
-    // node:util parseArgs only accepts a "-"-leading value via "=" syntax.
-    expect(() => parsePoolParams(["--house-cut-bps=-1"])).toThrow(
-      /0 to 10000/,
-    );
-    expect(() => parsePoolParams(["--house-cut-bps", "10001"])).toThrow(
-      /0 to 10000/,
-    );
-    expect(() => parsePoolParams(["--house-cut-bps", "1.5"])).toThrow(
-      /0 to 10000/,
-    );
+  it("no longer takes the flags for what the program dropped", () => {
+    // Round length and the House cut moved to the backend's Game config
+    // (off-chain-tickets ticket 10).
+    expect(() => parsePoolParams(["--round-seconds", "60"])).toThrow(/usage/);
+    expect(() => parsePoolParams(["--house-cut-bps", "600"])).toThrow(/usage/);
+    for (const key of ["roundSeconds", "closeBuffer", "houseCutBps", "ticketsPerUsdc", "bonusCapBps"]) {
+      expect(DEFAULT_POOL_PARAMS).not.toHaveProperty(key);
+    }
   });
 
   it("takes the two role keys as base58 pubkeys", () => {
@@ -258,6 +226,30 @@ describe("assertMainnetSafe", () => {
   });
 });
 
+describe("assertTokenAccountOwner", () => {
+  const admin = Keypair.generate().publicKey;
+  const stranger = Keypair.generate().publicKey;
+  const account = Keypair.generate().publicKey;
+
+  it("refuses a mainnet account owned by someone else and names the owner", () => {
+    expect(() =>
+      assertTokenAccountOwner(MAINNET_GENESIS_HASH, "treasury", account, stranger, admin),
+    ).toThrow(new RegExp(`--treasury ${account.toBase58()} is owned by ${stranger.toBase58()}`));
+  });
+
+  it("accepts a mainnet account the admin owns", () => {
+    expect(() =>
+      assertTokenAccountOwner(MAINNET_GENESIS_HASH, "buyback-reserve", account, admin, admin),
+    ).not.toThrow();
+  });
+
+  it("does not check other clusters", () => {
+    expect(() =>
+      assertTokenAccountOwner(DEVNET_GENESIS_HASH, "treasury", account, stranger, admin),
+    ).not.toThrow();
+  });
+});
+
 describe("envInt", () => {
   it("takes the fallback when the value is unset or blank", () => {
     expect(envInt("X", undefined, 488)).toBe(488);
@@ -277,10 +269,8 @@ describe("envInt", () => {
 });
 
 describe("DEFAULT_POOL_PARAMS", () => {
-  it("defaults the ticket-economy rates spec.md and ADR 0011 ask for", () => {
+  it("defaults the base rate spec.md and ADR 0011 ask for", () => {
     expect(DEFAULT_POOL_PARAMS.baseRateBps).toBe(488);
-    expect(DEFAULT_POOL_PARAMS.ticketsPerUsdc).toBe(10);
-    expect(DEFAULT_POOL_PARAMS.bonusCapBps).toBe(500);
   });
 });
 
@@ -320,5 +310,125 @@ describe("isoSeconds", () => {
   it("rejects a value Date cannot parse", () => {
     expect(() => isoSeconds("epoch-anchor", "2026-13-01")).toThrow(/ISO 8601/);
     expect(() => isoSeconds("epoch-anchor", "")).toThrow(/ISO 8601/);
+  });
+});
+
+describe("venuePinsFor", () => {
+  const pool = Keypair.generate().publicKey;
+  const programId = Keypair.generate().publicKey;
+  const key = () => Keypair.generate().publicKey.toBase58();
+
+  it("defaults to Kamino's USDC reserve on mainnet, with the pool's cToken ATA", () => {
+    const pins = venuePinsFor(MAINNET_GENESIS_HASH, {}, pool, programId);
+    expect(pins.klendProgram.toBase58()).toBe("KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD");
+    expect(pins.klendMarket.toBase58()).toBe("7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF");
+    expect(pins.klendReserve.toBase58()).toBe("D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59");
+    expect(pins.ctokenMint?.toBase58()).toBe("B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D");
+    expect(pins.klendCtoken.equals(getAssociatedTokenAddressSync(pins.ctokenMint!, pool, true))).toBe(true);
+  });
+
+  it("takes an explicit cToken account as is, without asking bootstrap to create one", () => {
+    const klendCtoken = key();
+    const pins = venuePinsFor(MAINNET_GENESIS_HASH, { KLEND_CTOKEN: klendCtoken }, pool, programId);
+    expect(pins.klendCtoken.toBase58()).toBe(klendCtoken);
+    expect(pins).not.toHaveProperty("ctokenMint");
+  });
+
+  it("makes a mainnet reserve override bring its own cToken account", () => {
+    expect(() =>
+      venuePinsFor(MAINNET_GENESIS_HASH, { KLEND_RESERVE: key() }, pool, programId),
+    ).toThrow(/KLEND_CTOKEN must be set/);
+  });
+
+  it("has no default off mainnet and names every missing variable", () => {
+    expect(() => venuePinsFor(DEVNET_GENESIS_HASH, {}, pool, programId)).toThrow(
+      /KLEND_PROGRAM, KLEND_MARKET, KLEND_RESERVE, KLEND_CTOKEN must be set/,
+    );
+    const env = {
+      KLEND_PROGRAM: key(),
+      KLEND_MARKET: key(),
+      KLEND_RESERVE: key(),
+      KLEND_CTOKEN: key(),
+    };
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, env, pool, programId).klendReserve.toBase58()).toBe(
+      env.KLEND_RESERVE,
+    );
+  });
+
+  it("rejects a value that is not a pubkey", () => {
+    expect(() =>
+      venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_PROGRAM: "nope" }, pool, programId),
+    ).toThrow(/KLEND_PROGRAM must be a base58 pubkey/);
+  });
+
+  it("defaults to the klend kind and reads the kind from VENUE_KIND", () => {
+    const env = { KLEND_PROGRAM: key(), KLEND_MARKET: key(), KLEND_RESERVE: key(), KLEND_CTOKEN: key() };
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, env, pool, programId).kind).toBe(0);
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, { ...env, VENUE_KIND: "klend" }, pool, programId).kind).toBe(0);
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "stub" }, pool, programId).kind).toBe(1);
+    expect(venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId).kind).toBe(1);
+    expect(venuePinsFor(MAINNET_GENESIS_HASH, {}, pool, programId).kind).toBe(0);
+  });
+
+  it("refuses an unknown kind, a contradiction, and the stub kind on mainnet", () => {
+    expect(() => venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "bogus" }, pool, programId)).toThrow(
+      /VENUE_KIND must be/,
+    );
+    expect(() =>
+      venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "klend", KLEND_VENUE: "test" }, pool, programId),
+    ).toThrow(/contradict/);
+    expect(() => venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "stub" }, pool, programId)).toThrow(
+      /VENUE_KIND=stub is refused on mainnet/,
+    );
+  });
+
+  it("pins a kVault: the vault state, its shares mint PDA and the pool's shares ATA", () => {
+    const vault = new PublicKey(key());
+    const pins = venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "kvault", KVAULT_ADDRESS: vault.toBase58() }, pool, programId);
+    expect(pins.kind).toBe(2);
+    expect(pins.klendProgram.equals(KVAULT_PROGRAM_ID)).toBe(true);
+    expect(pins.klendMarket.equals(vault)).toBe(true);
+    const sharesMint = sharesMintAddress(vault);
+    expect(pins.klendReserve.equals(sharesMint)).toBe(true);
+    expect(pins.klendCtoken.equals(getAssociatedTokenAddressSync(sharesMint, pool, true))).toBe(true);
+    // Bootstrap creates the shares account: nothing else does before a deploy.
+    expect(pins.ctokenMint?.equals(sharesMint)).toBe(true);
+  });
+
+  it("has no default vault and ignores the klend variables for a kVault", () => {
+    expect(() => venuePinsFor(MAINNET_GENESIS_HASH, { VENUE_KIND: "kvault" }, pool, programId)).toThrow(
+      /needs KVAULT_ADDRESS/,
+    );
+    const vault = key();
+    const pins = venuePinsFor(DEVNET_GENESIS_HASH, { VENUE_KIND: "kvault", KVAULT_ADDRESS: vault, KLEND_RESERVE: key() }, pool, programId);
+    expect(pins.klendMarket.toBase58()).toBe(vault);
+  });
+
+  it("pins the test-venue stub on KLEND_VENUE=test, never on mainnet", () => {
+    const pins = venuePinsFor(DEVNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId);
+    expect(pins.klendProgram.equals(programId)).toBe(true);
+    expect(pins.klendMarket.equals(pool)).toBe(true);
+    expect(() =>
+      venuePinsFor(MAINNET_GENESIS_HASH, { KLEND_VENUE: "test" }, pool, programId),
+    ).toThrow(/refused on mainnet/);
+  });
+});
+
+describe("buyTicketsPausedFor", () => {
+  it("defaults on for mainnet-beta and off everywhere else", () => {
+    expect(buyTicketsPausedFor(MAINNET_GENESIS_HASH, undefined)).toBe(true);
+    expect(buyTicketsPausedFor(MAINNET_GENESIS_HASH, " ")).toBe(true);
+    expect(buyTicketsPausedFor(DEVNET_GENESIS_HASH, undefined)).toBe(false);
+  });
+
+  it("lets the env value win in either direction", () => {
+    expect(buyTicketsPausedFor(DEVNET_GENESIS_HASH, "true")).toBe(true);
+    expect(buyTicketsPausedFor(MAINNET_GENESIS_HASH, "false")).toBe(false);
+  });
+
+  it("rejects anything else", () => {
+    expect(() => buyTicketsPausedFor(DEVNET_GENESIS_HASH, "yes")).toThrow(
+      /BUY_TICKETS_PAUSED/,
+    );
   });
 });

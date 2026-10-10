@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest";
 import { INVITE_CIRCULATION_CAP, INVITE_REDEEM_GRANT_COUNT } from "../api/invite-code";
 import { DEFAULT_REFERRAL_QUALIFY_SECONDS } from "../api/referral";
 import {
+  DEFAULT_ALERT_IDLE_LOW_S,
   DEFAULT_ALERT_INDEXER_STALE_S,
+  DEFAULT_ALERT_RESERVE_FREE_MIN,
   DEFAULT_ALERT_TICK_STALE_S,
   DEFAULT_OPERATOR_SOL_WARN,
   DEFAULT_RPC_TIMEOUT_MS,
@@ -44,6 +46,25 @@ describe("validateEnv", () => {
 
   it("names the mint by its new name when neither is set", () => {
     expect(() => validateEnv(base)).toThrow(/ACCEPTED_MINT/);
+  });
+
+  // ADR 0019: the Sparring player is off unless SPARRING_ENABLED says so, and
+  // a keypair in the env does not turn it on by itself.
+  it("keeps the Sparring player off when SPARRING_ENABLED is unset or empty", () => {
+    const withKey = { ...base, ACCEPTED_MINT: MINT, SPARRING_KEYPAIR: "x" };
+    expect(validateEnv(withKey).SPARRING_ENABLED).toBe(false);
+    expect(validateEnv({ ...withKey, SPARRING_ENABLED: "" }).SPARRING_ENABLED).toBe(false);
+    expect(validateEnv({ ...withKey, SPARRING_ENABLED: "false" }).SPARRING_ENABLED).toBe(false);
+  });
+
+  it("turns the Sparring player on only for an explicit true", () => {
+    expect(validateEnv({ ...base, ACCEPTED_MINT: MINT, SPARRING_ENABLED: "true" }).SPARRING_ENABLED).toBe(true);
+  });
+
+  it("refuses a SPARRING_ENABLED that is neither true nor false", () => {
+    expect(() => validateEnv({ ...base, ACCEPTED_MINT: MINT, SPARRING_ENABLED: "yes" })).toThrow(
+      /SPARRING_ENABLED must be true or false/,
+    );
   });
 
   it("defaults the operator SOL warning", () => {
@@ -148,6 +169,27 @@ describe("validateEnv", () => {
     expect(() =>
       validateEnv({ ...base, ACCEPTED_MINT: MINT, ALERT_INDEXER_STALE_S: "1.5" }),
     ).toThrow(/ALERT_INDEXER_STALE_S/);
+  });
+
+  // Yield-claimer ticket 14: the free idle and reserve liquidity thresholds.
+  it("defaults the live-yield alert thresholds and fails the boot on a bad one", () => {
+    const env = validateEnv({ ...base, ACCEPTED_MINT: MINT });
+    expect(env.ALERT_IDLE_LOW_S).toBe(DEFAULT_ALERT_IDLE_LOW_S);
+    expect(env.ALERT_RESERVE_FREE_MIN).toBe(DEFAULT_ALERT_RESERVE_FREE_MIN);
+    const set = validateEnv({
+      ...base,
+      ACCEPTED_MINT: MINT,
+      ALERT_IDLE_LOW_S: "600",
+      ALERT_RESERVE_FREE_MIN: "5000000",
+    });
+    expect(set.ALERT_IDLE_LOW_S).toBe(600);
+    expect(set.ALERT_RESERVE_FREE_MIN).toBe(5_000_000);
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, ALERT_IDLE_LOW_S: "-1" }),
+    ).toThrow(/ALERT_IDLE_LOW_S/);
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, ALERT_RESERVE_FREE_MIN: "1.5" }),
+    ).toThrow(/ALERT_RESERVE_FREE_MIN/);
   });
 
   // ticket 10: a mainnet stack must never crank a devnet Pool because

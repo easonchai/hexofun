@@ -1,16 +1,15 @@
 /**
- * Ticket 01: phone layout facts that must hold with no wallet and no
- * backend. Runs only on the "phone" Playwright project (see
- * playwright.config.ts's testMatch), so it never runs against desktop
- * chromium.
+ * Ticket 01: phone layout facts that must hold with no real backend. Runs
+ * only on the "phone" Playwright project (see playwright.config.ts's
+ * testMatch), so it never runs against desktop chromium.
  *
- * Verified by hand before writing this file: the arena (36 tiles + the
- * hexpot ticker) renders with no backend and no wallet connected. The
- * dev-server-only /status and /feed calls fail (no backend running), but
- * nothing in the render path awaits them, so the board is up regardless.
- * This spec does not need the demo spec's local stack.
+ * The app mounts only past the invite gate, so `test` from ./admitted loads
+ * each page with the dev burner connected and an idle mocked backend. The
+ * arena (36 tiles + the hexpot ticker) renders from that; no live stack.
  */
-import { expect, test, type Page } from "playwright/test";
+import { expect, type Page } from "playwright/test";
+
+import { test } from "./admitted";
 
 /** Ticket 01: Tiles 1, 6, 7, 12, 13, 18, 19, 24, 25, 30, 31, 36 (display
  * numbers), zero-indexed as tile-{n} testids. */
@@ -44,9 +43,9 @@ async function assertNoHorizontalOverflow(page: Page): Promise<void> {
  *
  * - MINE is deliberately exactly one viewport tall once the bet panel moves
  *   into the drawer (ticket 02). There is nothing below its fold to reach.
- * - The other tabs render into `.screen-vault`, which is absolutely
- *   positioned over the split container and scrolls internally. Their
- *   content never contributes to document height.
+ * - The other tabs, ABOUT's `.about` among them, are absolutely positioned
+ *   over the split container and scroll internally. Their content never
+ *   contributes to document height.
  *
  * What the shell fix has to guarantee is that the split container still gets
  * a real height under 960px, so that internal scroller has room. If `.app`
@@ -54,7 +53,7 @@ async function assertNoHorizontalOverflow(page: Page): Promise<void> {
  */
 async function assertLongTabContentIsReachable(page: Page): Promise<void> {
   await page.goto("/#about");
-  const screen = page.locator(".screen-vault");
+  const screen = page.locator(".about");
   await expect(screen).toBeVisible();
   const scrolled = await screen.evaluate((el) => {
     if (el.scrollHeight <= el.clientHeight) return null;

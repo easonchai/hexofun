@@ -34,6 +34,7 @@ import {
 
 import { identifyWallet, resetIdentity, track } from "./analytics.js";
 import { CLUSTER, RPC_URL, SIGNING_CHAIN } from "./chain.js";
+import type { SignInInput, SignInOutput } from "./session.js";
 
 export type WalletMode = "privy" | "standard";
 
@@ -61,6 +62,12 @@ export interface GameSigner {
    * `POST /access/redeem`. Unset until a wallet is connected.
    */
   signMessage: ((message: Uint8Array) => Promise<Uint8Array>) | undefined;
+  /**
+   * Sign In With Solana, for wallets whose adapter offers it (Phantom and
+   * Solflare through wallet-standard). The session delegation prefers it over
+   * `signMessage`. Unset for Privy and the dev burner.
+   */
+  signIn?: ((input: SignInInput) => Promise<SignInOutput>) | undefined;
   /**
    * Signs, sends and confirms in one step, returning the base58 signature.
    * Set only for the Privy embedded wallet, where Privy's own send path is
@@ -379,7 +386,7 @@ function usePrivySigner(): GameSigner {
 }
 
 function useStandardSigner(): GameSigner {
-  const { publicKey, wallet, connected, connecting, select } = useWallet();
+  const { publicKey, wallet, connected, connecting, select, signIn } = useWallet();
   const { setVisible } = useWalletModal();
 
   const adapter = wallet?.adapter as unknown as
@@ -407,6 +414,16 @@ function useStandardSigner(): GameSigner {
     },
     signTransaction: adapter?.signTransaction?.bind(wallet!.adapter),
     signMessage: adapter?.signMessage?.bind(wallet!.adapter),
+    signIn: signIn
+      ? async (input) => {
+          const out = await signIn(input);
+          return {
+            address: out.account.address,
+            signedMessage: out.signedMessage,
+            signature: out.signature,
+          };
+        }
+      : undefined,
   };
 }
 

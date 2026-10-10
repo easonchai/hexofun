@@ -5,6 +5,7 @@ import {
 } from "@nestjs/platform-fastify";
 import { ConfigService } from "@nestjs/config";
 import helmet from "@fastify/helmet";
+import { Connection } from "@solana/web3.js";
 
 import { AppModule } from "./app.module";
 import { runBootGuards } from "./boot-guard";
@@ -33,13 +34,16 @@ async function bootstrap(): Promise<void> {
   // on this program are fine, ADR 0016).
   const chain = app.get(ChainService);
   const prisma = app.get(PrismaService);
+  const fallbackUrl = config.get("RPC_FALLBACK_URL", { infer: true });
   await runBootGuards({
+    ...(fallbackUrl && { fallbackGenesisHash: () => new Connection(fallbackUrl, "confirmed").getGenesisHash() }),
     connection: chain.connection,
     program: chain.program,
     programId: chain.programId,
     poolAddress: chain.poolAddress(),
     acceptedMint: config.get("ACCEPTED_MINT", { infer: true }),
     cluster: config.get("CLUSTER", { infer: true }),
+    env: process.env,
     mirroredPoolRows: () => prisma.pool.findMany({ select: { address: true, poolId: true } }),
   });
 

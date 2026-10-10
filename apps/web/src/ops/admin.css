@@ -1,0 +1,86 @@
+/* Admin actions panel. Spans both columns like the rate chart. */
+.ops-panel[data-testid="panel-admin"] {
+  grid-column: 1 / -1;
+}
+
+.ops-admin-form button,
+.ops-admin-prepared button {
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+.ops-admin-form {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--divider);
+}
+
+.ops-admin-form h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.ops-admin-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.ops-admin-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.ops-admin-form input {
+  min-height: 40px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.ops-admin-diff {
+  width: 100%;
+  margin: 8px 0;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.ops-admin-diff th,
+.ops-admin-diff td {
+  text-align: left;
+  padding: 4px 8px 4px 0;
+  overflow-wrap: anywhere;
+}
+
+/* The snapshot check's verdict: green only on a three-way match, red on any disagreement. */
+.ops-verdict {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--ops-amber);
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ops-verdict[data-verdict="match"] {
+  --ops-ok: #2f8f4e;
+  border-color: var(--ops-ok);
+  color: var(--ops-ok);
+}
+
+.ops-verdict[data-verdict="mismatch"] {
+  border-color: var(--danger-line);
+  background: var(--danger-soft);
+  color: var(--danger-text);
+}
+
+.ops-admin-prepared textarea {
+  width: 100%;
+  font-family: monospace;
+  font-size: 11px;
+  margin: 8px 0;
+  box-sizing: border-box;
+}

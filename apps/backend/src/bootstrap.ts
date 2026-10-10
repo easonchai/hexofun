@@ -30,18 +30,26 @@ import {
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import bs58 from "bs58";
+import { VENUE_KIND } from "./chain/venue-kind";
 
 import {
   assertMainnetSafe,
+  assertTokenAccountOwner,
+  buyTicketsPausedFor,
+  expectedVenuePins,
   parsePoolParams,
+  venuePinsFor,
   type PoolParams,
+  type VenuePins,
 } from "./bootstrap/params";
+import { assertPoolMatchesExpected } from "./boot-guard";
 import { loadIdl } from "./chain/idl";
 import {
   jackpotVaultAddress,
   playerAddress,
   poolAddress,
   principalVaultAddress,
+  programDataAddress,
 } from "./chain/pda";
 
 /** spec.md §2.5. Pinned on the Pool; the localnet test-vrf build ignores it. */
@@ -58,8 +66,14 @@ interface PoolAccount {
   acceptedMint: PublicKey;
   treasury: PublicKey;
   buybackReserve: PublicKey;
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
+  venueKind: number;
   gamePaused: boolean;
   jackpotPaused: boolean;
+  buyTicketsPaused: boolean;
 }
 
 const log = (message: string): void => {
@@ -204,6 +218,7 @@ async function ensureExplicitTokenAccount(
   flag: string,
   address: PublicKey,
   mint: PublicKey,
+  ownerCheck: { genesisHash: string; admin: PublicKey },
 ): Promise<PublicKey> {
   const account = await getAccount(connection, address).catch(
     (cause: unknown) => {
@@ -218,6 +233,13 @@ async function ensureExplicitTokenAccount(
       `--${flag} ${address.toBase58()} holds mint ${account.mint.toBase58()}, expected ${mint.toBase58()}`,
     );
   }
+  assertTokenAccountOwner(
+    ownerCheck.genesisHash,
+    flag,
+    address,
+    account.owner,
+    ownerCheck.admin,
+  );
   return address;
 }
 
@@ -230,6 +252,7 @@ async function createPool(
   mint: PublicKey,
   treasury: PublicKey,
   buybackReserve: PublicKey,
+  venue: VenuePins,
   params: PoolParams,
 ): Promise<void> {
   // The methods namespace of a generically typed Idl is an index signature,
@@ -248,20 +271,18 @@ async function createPool(
     vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
     epochSeconds: new BN(params.epochSeconds),
     epochAnchor: new BN(params.epochAnchor),
-    roundSeconds: new BN(params.roundSeconds),
-    closeBuffer: new BN(params.closeBuffer),
     vrfTimeout: new BN(params.vrfTimeout),
     minDeposit: new BN(params.minDeposit.toString()),
-    houseCutBps: params.houseCutBps,
     minJackpot: new BN(params.minJackpot.toString()),
-    registrationWindow: new BN(params.registrationWindow),
     payoutTimeout: new BN(params.payoutTimeout),
     baseRateBps: params.baseRateBps,
-    ticketsPerUsdc: params.ticketsPerUsdc,
-    bonusCapBps: params.bonusCapBps,
+    venueKind: venue.kind,
   })
     .accountsPartial({
+      // create_pool takes only the program's upgrade authority as payer, so
+      // bootstrap runs with the deploy key (mainnet-readiness-fixes 06).
       payer: payer.publicKey,
+      programData: programDataAddress(program.programId),
       pool,
       acceptedMint: mint,
       principalVault: principalVaultAddress(program.programId, pool),
@@ -269,13 +290,17 @@ async function createPool(
       house: playerAddress(program.programId, pool, roles.operator),
       treasury,
       buybackReserve,
+      klendProgram: venue.klendProgram,
+      klendMarket: venue.klendMarket,
+      klendReserve: venue.klendReserve,
+      klendCtoken: venue.klendCtoken,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })
     .signers([payer])
     .rpc();
   log(
-    `created pool ${pool.toBase58()} (epoch ${params.epochSeconds}s, round ${params.roundSeconds}s)`,
+    `created pool ${pool.toBase58()} (epoch ${params.epochSeconds}s)`,
   );
   // Print the grid the anchor produces, so a mistyped anchor is obvious now
   // rather than a week later when the draws land at the wrong hour.
@@ -290,6 +315,35 @@ async function createPool(
   for (const k of [0, 1, 2]) {
     log(`  boundary ${k + 1} ${stamp(next + k * period)}`);
   }
+}
+
+/** `VENUE_KIND=stub`: creates the stub reserve and vault `venuePinsFor` pinned. */
+async function initTestVenue(
+  program: Program<Idl>,
+  payer: Keypair,
+  pool: PublicKey,
+  mint: PublicKey,
+  venue: VenuePins,
+): Promise<void> {
+  const testVenueInit = program.methods.testVenueInit;
+  if (!testVenueInit) {
+    throw new Error(
+      "the IDL has no test_venue_init instruction; point HEXVAULT_IDL_PATH at a test-venue build's IDL",
+    );
+  }
+  await testVenueInit()
+    .accountsPartial({
+      payer: payer.publicKey,
+      pool,
+      acceptedMint: mint,
+      reserve: venue.klendReserve,
+      venueVault: venue.klendCtoken,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([payer])
+    .rpc();
+  log("initialised the test venue");
 }
 
 /**
@@ -326,6 +380,35 @@ async function startPool(
       .rpc();
     log(`started the ${feature}`);
   }
+}
+
+/**
+ * yield-claimer ticket 11: sets the Bought Tickets switch, admin only on
+ * chain. Reads the pool first, so a re-run sends nothing twice.
+ */
+async function pauseBuyTickets(
+  program: Program<Idl>,
+  admin: Keypair,
+  pool: PublicKey,
+): Promise<void> {
+  const setBuyTicketsPause = program.methods.setBuyTicketsPause;
+  if (!setBuyTicketsPause) {
+    throw new Error(
+      "the IDL has no set_buy_tickets_pause instruction; run `pnpm --filter @hexvault/backend sync-idl`",
+    );
+  }
+  const info = await program.provider.connection.getAccountInfo(pool);
+  if (!info) throw new Error(`pool ${pool.toBase58()} not found after create_pool`);
+  const state = program.coder.accounts.decode<PoolAccount>("pool", info.data);
+  if (state.buyTicketsPaused) {
+    log("Bought Tickets already paused");
+    return;
+  }
+  await setBuyTicketsPause(true)
+    .accountsPartial({ admin: admin.publicKey, pool })
+    .signers([admin])
+    .rpc();
+  log("paused Bought Tickets");
 }
 
 async function main(): Promise<void> {
@@ -428,15 +511,29 @@ async function main(): Promise<void> {
 
   // An existing pool has already recorded which mint and which token accounts
   // it accepts, so those win over anything this run would otherwise derive.
-  if (
-    existing &&
-    envMint &&
-    !existing.acceptedMint.equals(new PublicKey(envMint))
-  ) {
-    throw new Error(
-      `pool ${pool.toBase58()} accepts ${existing.acceptedMint.toBase58()}, but ACCEPTED_MINT is ${envMint}`,
+  // But anyone can call create_pool on a program that does not yet protect it
+  // (mainnet-readiness-fixes 06), so an existing pool must also match every
+  // admin, treasury, buyback reserve, mint and venue pin this run was given,
+  // or it may be someone else's.
+  if (existing) {
+    assertPoolMatchesExpected(
+      pool,
+      existing,
+      {
+        admin: explicitAdmin,
+        treasury: params.treasury,
+        buybackReserve: params.buybackReserve,
+        acceptedMint: envMint ? new PublicKey(envMint) : undefined,
+        venue: expectedVenuePins(genesisHash, process.env, pool, programId),
+      },
+      "the flags and env",
     );
   }
+  // Read before anything is created, like the mainnet guard: a venue the env
+  // does not name costs nothing here and a mint and two accounts later.
+  const venue = existing
+    ? null
+    : venuePinsFor(genesisHash, process.env, pool, programId);
   const mint = existing
     ? existing.acceptedMint
     : await step("resolving the accepted mint", () =>
@@ -460,7 +557,10 @@ async function main(): Promise<void> {
     ? existing.treasury
     : params.treasury
       ? await step("checking --treasury", () =>
-          ensureExplicitTokenAccount(connection, "treasury", params.treasury!, mint),
+          ensureExplicitTokenAccount(connection, "treasury", params.treasury!, mint, {
+            genesisHash,
+            admin: roles.admin,
+          }),
         )
       : await step("creating the treasury", () =>
           ensureSeededTokenAccount(
@@ -480,6 +580,7 @@ async function main(): Promise<void> {
             "buyback-reserve",
             params.buybackReserve!,
             mint,
+            { genesisHash, admin: roles.admin },
           ),
         )
       : await step("creating the buyback reserve", () =>
@@ -496,9 +597,17 @@ async function main(): Promise<void> {
     throw new Error("treasury and buyback reserve must differ");
   }
 
-  if (existing) {
+  if (!venue) {
     log(`pool ${pool.toBase58()} already exists`);
   } else {
+    // The pool's cToken account is its ATA of the reserve's cToken mint, and
+    // nothing else creates it before the first deploy.
+    if (venue.ctokenMint) {
+      const ctokenMint = venue.ctokenMint;
+      await step("creating the pool's cToken account", () =>
+        getOrCreateAssociatedTokenAccount(connection, authority, ctokenMint, pool, true),
+      );
+    }
     await step("calling create_pool", () =>
       createPool(
         program,
@@ -509,9 +618,28 @@ async function main(): Promise<void> {
         mint,
         treasury,
         buybackReserve,
+        venue,
         params,
       ),
     );
+    if (venue.kind === VENUE_KIND.stub) {
+      await step("initialising the test venue", () =>
+        initTestVenue(program, authority, pool, mint, venue),
+      );
+    }
+  }
+  // yield-claimer ticket 11: Bought Tickets ship paused on mainnet. Before
+  // the game starts, so no Ticket is sold in between.
+  if (buyTicketsPausedFor(genesisHash, process.env.BUY_TICKETS_PAUSED)) {
+    if (roles.admin.equals(authority.publicKey)) {
+      await step("pausing Bought Tickets", () =>
+        pauseBuyTickets(program, authority, pool),
+      );
+    } else {
+      log(
+        `warning: Bought Tickets are still on; admin ${roles.admin.toBase58()} must send set_buy_tickets_pause(true) before launch`,
+      );
+    }
   }
   if (params.start) {
     await step("starting the jackpot and the game", () =>
@@ -529,6 +657,14 @@ async function main(): Promise<void> {
     async () => (await getMint(connection, mint)).mintAuthority,
   );
 
+  // What the chain pinned, not what this run asked for, so the venue can be
+  // checked by a second person (yield-claimer ticket 17).
+  const pinned = await step("reading the pool back", async () => {
+    const info = await connection.getAccountInfo(pool);
+    if (!info) throw new Error(`pool ${pool.toBase58()} not found`);
+    return program.coder.accounts.decode<PoolAccount>("pool", info.data);
+  });
+
   process.stdout.write(
     [
       `ACCEPTED_MINT=${mint.toBase58()}`,
@@ -541,6 +677,10 @@ async function main(): Promise<void> {
       `TREASURY=${treasury.toBase58()}`,
       `BUYBACK_RESERVE=${buybackReserve.toBase58()}`,
       `AUTHORITY_ATA=${authorityAta.toBase58()}`,
+      `KLEND_PROGRAM=${pinned.klendProgram.toBase58()}`,
+      `KLEND_MARKET=${pinned.klendMarket.toBase58()}`,
+      `KLEND_RESERVE=${pinned.klendReserve.toBase58()}`,
+      `KLEND_CTOKEN=${pinned.klendCtoken.toBase58()}`,
       "",
     ].join("\n"),
   );

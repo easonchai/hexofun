@@ -86,8 +86,6 @@ function toRow(
         tileLabel: field(data, "forfeited") === "true" ? "no winner" : "settled",
         roundId: field(data, "roundId", "round_id"),
       };
-    case "registered":
-      return { key, who, action: "registered", tileLabel: "daily draw" };
     case "jackpotPaid":
       return {
         key,

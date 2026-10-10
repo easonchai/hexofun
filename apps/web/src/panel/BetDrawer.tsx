@@ -18,11 +18,18 @@ const TABS: { id: PanelTab; label: string }[] = [
   { id: "lastwin", label: "Last win" },
 ];
 
+/** Betting session state for the footer (off-chain-tickets ticket 15). */
+export type DrawerSession = {
+  busy: boolean;
+  error: string | null;
+};
+
 type Props = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   soundOn: boolean;
   onToggleSound: () => void;
+  session: DrawerSession;
   children: (tab: PanelTab) => ReactNode;
 };
 
@@ -31,6 +38,7 @@ export function BetDrawer({
   onOpenChange,
   soundOn,
   onToggleSound,
+  session,
   children,
 }: Props) {
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -92,6 +100,15 @@ export function BetDrawer({
                 <SoundIcon on={soundOn} />
               </button>
             </div>
+            {session.busy || session.error ? (
+              <p
+                className={`session-status${session.error ? " err" : ""}`}
+                data-testid="session-status"
+                role="status"
+              >
+                {session.busy ? "Confirm the session in your wallet." : session.error}
+              </p>
+            ) : null}
           </div>
         </Drawer.Content>
       </Drawer.Portal>

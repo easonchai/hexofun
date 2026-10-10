@@ -1,6 +1,7 @@
 // Custody invariants: deposit and withdrawal bounds, the epoch lock on a
-// payout, the admin's principal pulls, pause semantics, and the per-pool
-// vault seeds (spec §2.3 "Custody", §2.4 invariants 1-4, ADR 0009/0010).
+// payout, pause semantics, and the per-pool vault seeds (spec §2.3
+// "Custody", §2.4 invariants 1-4). `admin_withdraw` and its tests went with
+// the live-yield layout rewrite (yield-claimer ticket 04, ADR 0017).
 //
 // Each test airdrops, mints, and confirms several transactions against a
 // real localnet validator, so the default 5s vitest timeout is too tight.
@@ -11,35 +12,35 @@ import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import {
   createAccount,
   createMint,
-  getAssociatedTokenAddressSync,
   getOrCreateAssociatedTokenAccount,
   mintTo,
-  transfer,
   TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
+  assertSolvent,
   DEVNET_VRF_NETWORK_STATE,
   DEVNET_VRF_TREASURY,
   epochPda,
+  FILLER,
   findEvent,
-  fulfillRandomness,
   jackpotVaultPda,
   nextPoolId,
-  onChainNowSeconds,
   playerPda,
+  refundAccounts,
   poolPda,
   principalVaultPda,
   program,
-  randomnessFor,
   randomnessPda,
   retryUntilOk,
-  roundPda,
   setupPool,
   sleepUntilOnChain,
+  snapshotOf,
   testNonce,
+  venueAccountsFor,
   vrfSeed,
   type PoolCtx,
+  PROGRAM_DATA,
 } from "./helpers/hx.js";
 
 const TIMEOUT = 30_000;
@@ -53,6 +54,7 @@ function depositAccounts(pool: PoolCtx, owner: Awaited<ReturnType<PoolCtx["funde
     acceptedMint: pool.mint,
     ownerToken: owner.tokenAccount,
     principalVault: pool.principalVault,
+    ...pool.venue,
     tokenProgram: TOKEN_PROGRAM_ID,
     systemProgram: SystemProgram.programId,
   };
@@ -60,85 +62,69 @@ function depositAccounts(pool: PoolCtx, owner: Awaited<ReturnType<PoolCtx["funde
 
 type Wallet = Awaited<ReturnType<PoolCtx["fundedWallet"]>>;
 
+/** Awaits one instruction, then checks the solvency invariant (ticket 06):
+ *  every instruction this suite runs through a helper must leave it holding. */
+async function thenSolvent(pool: PoolCtx, tx: Promise<string>): Promise<string> {
+  const signature = await tx;
+  await assertSolvent(pool);
+  return signature;
+}
+
 async function deposit(pool: PoolCtx, owner: Wallet, amount: bigint) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .deposit(new BN(amount.toString()))
     .accountsPartial(depositAccounts(pool, owner))
     .signers([owner.keypair])
-    .rpc();
+    .rpc(),
+  );
 }
 
 /** Books the withdrawal. No token accounts: nothing moves here. */
 async function requestWithdraw(pool: PoolCtx, owner: Wallet, amount: bigint) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .requestWithdraw(new BN(amount.toString()))
     .accountsPartial({
       owner: owner.keypair.publicKey,
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
+      ...pool.venue,
+      ...refundAccounts(pool, owner),
     })
     .signers([owner.keypair])
-    .rpc();
+    .rpc(),
+  );
 }
 
 /** Pays a matured request. Signed by nobody; the test wallet just pays fees. */
 async function processWithdraw(pool: PoolCtx, owner: Wallet) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .processWithdraw()
     .accountsPartial({
       pool: pool.pool,
       player: playerPda(pool.pool, owner.keypair.publicKey),
+      owner: null,
       acceptedMint: pool.mint,
       ownerToken: owner.tokenAccount,
       principalVault: pool.principalVault,
       tokenProgram: TOKEN_PROGRAM_ID,
+      ...pool.venue,
     })
-    .rpc();
-}
-
-async function adminWithdraw(pool: PoolCtx, adminToken: PublicKey, amount: bigint) {
-  return program.methods
-    .adminWithdraw(new BN(amount.toString()))
-    .accountsPartial({
-      admin: pool.admin.publicKey,
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      adminToken,
-      principalVault: pool.principalVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .signers([pool.admin])
-    .rpc();
-}
-
-/** The admin's ATA for the accepted mint, created if it is not there yet. */
-async function adminAta(pool: PoolCtx): Promise<PublicKey> {
-  return (
-    await getOrCreateAssociatedTokenAccount(
-      program.provider.connection,
-      pool.operator,
-      pool.mint,
-      pool.admin.publicKey,
-    )
-  ).address;
-}
-
-/** Returning principal is a plain SPL transfer; the program has no part in it. */
-async function returnPrincipal(pool: PoolCtx, from: PublicKey, amount: bigint) {
-  return transfer(
-    program.provider.connection,
-    pool.admin,
-    from,
-    pool.principalVault,
-    pool.admin,
-    amount,
+    .rpc(),
   );
 }
 
 /** `currentEpochId` is `pool.currentEpochId` *before* this call. */
 async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
   const twoBehindId = currentEpochId > 0n ? currentEpochId - 1n : 0n;
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .beginEpoch()
     .accountsPartial({
       operator: pool.operator.publicKey,
@@ -146,63 +132,88 @@ async function beginEpoch(pool: PoolCtx, currentEpochId: bigint) {
       currentEpoch: epochPda(pool.pool, currentEpochId),
       epochTwoBehind: epochPda(pool.pool, twoBehindId),
       newEpoch: epochPda(pool.pool, currentEpochId + 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
-    .rpc();
+    .rpc(),
+  );
 }
 
 const vaultBalance = async (account: PublicKey): Promise<bigint> =>
   BigInt((await program.provider.connection.getTokenAccountBalance(account)).value.amount);
 
 async function setPause(pool: PoolCtx, paused: boolean) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .setPause(paused)
     .accountsPartial({ signer: pool.admin.publicKey, pool: pool.pool })
     .signers([pool.admin])
-    .rpc();
+    .rpc(),
+  );
 }
 
 type Feature = "Game" | "Jackpot";
 
 async function setFeaturePause(pool: PoolCtx, signer: Keypair, feature: Feature, paused: boolean) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .setFeaturePause(feature === "Game" ? { game: {} } : { jackpot: {} }, paused)
     .accountsPartial({ signer: signer.publicKey, pool: pool.pool })
     .signers([signer])
-    .rpc();
+    .rpc(),
+  );
 }
 
 async function shutdown(pool: PoolCtx) {
-  return program.methods
+  return thenSolvent(
+    pool,
+    program.methods
     .shutdown()
     .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool })
     .signers([pool.admin])
-    .rpc();
+    .rpc(),
+  );
 }
 
 describe("custody", () => {
   it(
-    "deposit mints equal principal and entries",
+    "deposit raises principal and the pending deposit, and emits the Player's post-state",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
 
       await deposit(pool, owner, 4_000_000n);
+      const signature = await deposit(pool, owner, 1_000_000n);
 
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      expect(player.principal.toString()).toBe("4000000");
-      expect(player.entries.toString()).toBe("4000000");
+      // Principal includes the pending amount, which earns Tickets from the
+      // next epoch (ADR 0020). Epoch 0 has not ended, so it is still pending.
+      expect(player.principal.toString()).toBe("5000000");
+      const event = await findEvent<{ amount: BN; principal: BN; yieldIndex: BN }>(
+        signature,
+        "deposited",
+      );
+      expect(event?.amount.toString()).toBe("1000000");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
+      expect(player.pendingDeposit.toString()).toBe("5000000");
+      expect(player.pendingDepositEpoch.toString()).toBe("0");
     },
     TIMEOUT,
   );
 
   it(
-    "request_withdraw enforces the principal bound and moves nothing",
+    "request_withdraw enforces the principal bound, and a request on active Principal moves nothing",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 3_000_000n);
+      // The first begin_epoch has no end to wait for. The deposit is active
+      // Principal after it, so a request queues instead of refunding.
+      await beginEpoch(pool, 0n);
       const walletBefore = await vaultBalance(owner.tokenAccount);
 
       await expect(requestWithdraw(pool, owner, 3_000_001n)).rejects.toThrow(
@@ -212,20 +223,27 @@ describe("custody", () => {
 
       const signature = await requestWithdraw(pool, owner, 3_000_000n);
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      expect(player.principal.toString()).toBe("0");
-      expect(player.entries.toString()).toBe("0");
+      // The queued amount stays in Principal until it pays.
+      expect(player.principal.toString()).toBe("3000000");
       expect(player.pendingWithdraw.toString()).toBe("3000000");
 
-      const event = await findEvent<{ amount: BN; pending: BN; pendingEpoch: BN }>(
-        signature,
-        "withdrawRequested",
-      );
+      const event = await findEvent<{
+        amount: BN;
+        pending: BN;
+        pendingEpoch: BN;
+        refunded: BN;
+        principal: BN;
+        yieldIndex: BN;
+      }>(signature, "withdrawRequested");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
       expect(event?.amount.toString()).toBe("3000000");
       expect(event?.pending.toString()).toBe("3000000");
-      expect(event?.pendingEpoch.toString()).toBe("0");
+      expect(event?.pendingEpoch.toString()).toBe("1");
+      expect(event?.refunded.toString()).toBe("0");
 
       // The USDC has not moved: it is still in the vault and not in the
-      // wallet, which is the whole point of splitting the instruction.
+      // wallet, which is the whole point of queueing.
       expect(await vaultBalance(owner.tokenAccount)).toBe(walletBefore);
       expect(await vaultBalance(pool.principalVault)).toBe(3_000_000n);
       expect((await program.account.pool.fetch(pool.pool)).pendingWithdrawals.toString()).toBe(
@@ -236,18 +254,22 @@ describe("custody", () => {
   );
 
   it(
-    "request_withdraw works while the pool is paused",
+    "request_withdraw works while the pool is paused, for the refund and for the queue",
     async () => {
       const pool = await setupPool();
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 2_000_000n);
+      await beginEpoch(pool, 0n);
+      await deposit(pool, owner, 1_000_000n); // pending
 
       await setPause(pool, true);
-      await requestWithdraw(pool, owner, 1_000_000n);
+      // 1.5M asked: the 1M pending deposit refunds and 0.5M queues.
+      await requestWithdraw(pool, owner, 1_500_000n);
 
       const player = await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey));
-      expect(player.principal.toString()).toBe("1000000");
-      expect(player.pendingWithdraw.toString()).toBe("1000000");
+      expect(player.principal.toString()).toBe("2000000");
+      expect(player.pendingDeposit.toString()).toBe("0");
+      expect(player.pendingWithdraw.toString()).toBe("500000");
     },
     TIMEOUT,
   );
@@ -289,6 +311,7 @@ describe("custody", () => {
             acceptedMint: pool.mint,
             ownerToken: operatorAta.address,
             principalVault: pool.principalVault,
+            ...pool.venue,
             tokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
           })
@@ -331,18 +354,19 @@ describe("custody", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n); // epoch 1
       await deposit(pool, owner, 4_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is active
 
       await requestWithdraw(pool, owner, 1_500_000n);
       expect(
         (await program.account.player.fetch(playerPda(pool.pool, owner.keypair.publicKey)))
           .pendingEpoch.toString(),
-      ).toBe("1");
+      ).toBe("2");
 
       // Same epoch: the money is still lent out as far as the program knows.
       await expect(processWithdraw(pool, owner)).rejects.toThrow(/WithdrawalNotDue/);
 
       const before = await vaultBalance(owner.tokenAccount);
-      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2
+      await retryUntilOk(() => beginEpoch(pool, 2n)); // epoch 3
       const signature = await processWithdraw(pool, owner);
 
       expect((await vaultBalance(owner.tokenAccount)) - before).toBe(1_500_000n);
@@ -353,8 +377,13 @@ describe("custody", () => {
       expect(poolAccount.pendingWithdrawals.toString()).toBe("0");
       expect(poolAccount.totalPrincipal.toString()).toBe("2500000");
 
-      const event = await findEvent<{ amount: BN }>(signature, "withdrawn");
+      const event = await findEvent<{ amount: BN; principal: BN; yieldIndex: BN }>(
+        signature,
+        "withdrawn",
+      );
       expect(event?.amount.toString()).toBe("1500000");
+      expect(event?.principal.toString()).toBe(player.principal.toString());
+      expect(event?.yieldIndex.toString()).toBe(player.yieldIndex.toString());
 
       // Nothing left to push.
       await expect(processWithdraw(pool, owner)).rejects.toThrow(/NothingPending/);
@@ -369,6 +398,7 @@ describe("custody", () => {
       const owner = await pool.fundedWallet(10_000_000n);
       await beginEpoch(pool, 0n);
       await deposit(pool, owner, 4_000_000n);
+      await retryUntilOk(() => beginEpoch(pool, 1n)); // epoch 2: the deposit is active
 
       await requestWithdraw(pool, owner, 1_000_000n);
       const second = await requestWithdraw(pool, owner, 500_000n);
@@ -377,7 +407,7 @@ describe("custody", () => {
       ).toBe("1500000");
 
       const before = await vaultBalance(owner.tokenAccount);
-      await retryUntilOk(() => beginEpoch(pool, 1n));
+      await retryUntilOk(() => beginEpoch(pool, 2n));
       await processWithdraw(pool, owner);
 
       expect((await vaultBalance(owner.tokenAccount)) - before).toBe(1_500_000n);
@@ -389,53 +419,27 @@ describe("custody", () => {
     TIMEOUT,
   );
 
-  it(
-    "a short vault fails the payout and changes nothing, then pays once the principal is back",
-    async () => {
-      const pool = await setupPool({ epochSeconds: 5 });
-      const owner = await pool.fundedWallet(10_000_000n);
-      await beginEpoch(pool, 0n);
-      await deposit(pool, owner, 4_000_000n);
-
-      // The admin lends the whole vault out before anyone asks for it back.
-      const admin = await adminAta(pool);
-      await adminWithdraw(pool, admin, 4_000_000n);
-      await requestWithdraw(pool, owner, 3_000_000n);
-      await retryUntilOk(() => beginEpoch(pool, 1n));
-
-      await expect(processWithdraw(pool, owner)).rejects.toThrow(/InsufficientVaultLiquidity/);
-      const stillPending = await program.account.player.fetch(
-        playerPda(pool.pool, owner.keypair.publicKey),
-      );
-      expect(stillPending.pendingWithdraw.toString()).toBe("3000000");
-      expect((await program.account.pool.fetch(pool.pool)).pendingWithdrawals.toString()).toBe(
-        "3000000",
-      );
-
-      const before = await vaultBalance(owner.tokenAccount);
-      await returnPrincipal(pool, admin, 4_000_000n);
-      await processWithdraw(pool, owner);
-
-      expect((await vaultBalance(owner.tokenAccount)) - before).toBe(3_000_000n);
-      expect(await vaultBalance(pool.principalVault)).toBe(1_000_000n);
-    },
-    TIMEOUT,
-  );
+  // The short-vault payout case ("fails, changes nothing, pays once the
+  // USDC is back") needed USDC to leave the vault, which `admin_withdraw`
+  // did. It now deploys to the test venue and recalls: see "makes a Pending
+  // withdrawal the vault could not cover payable" in 07-recall-harvest.test.ts.
 
   it(
     "a stalled operator cannot freeze a request: it matures on its own clock",
     async () => {
-      // `begin_epoch` is never called here, so `current_epoch_id` stays 0 and
-      // the epoch-boundary rule can never fire. Only the elapsed time can.
+      // `begin_epoch` is called once, so the deposit is active, and never again,
+      // so `current_epoch_id` stays 1 and the epoch-boundary rule can never
+      // fire. Only the elapsed time can.
       const pool = await setupPool({ epochSeconds: 5 });
       const owner = await pool.fundedWallet(10_000_000n);
       await deposit(pool, owner, 4_000_000n);
+      await beginEpoch(pool, 0n);
       await requestWithdraw(pool, owner, 2_000_000n);
 
       const player = await program.account.player.fetch(
         playerPda(pool.pool, owner.keypair.publicKey),
       );
-      expect(player.pendingEpoch.toString()).toBe("0");
+      expect(player.pendingEpoch.toString()).toBe("1");
       await expect(processWithdraw(pool, owner)).rejects.toThrow(/WithdrawalNotDue/);
 
       const before = await vaultBalance(owner.tokenAccount);
@@ -443,161 +447,31 @@ describe("custody", () => {
       await processWithdraw(pool, owner);
 
       expect((await vaultBalance(owner.tokenAccount)) - before).toBe(2_000_000n);
-      expect((await program.account.pool.fetch(pool.pool)).currentEpochId.toString()).toBe("0");
+      expect((await program.account.pool.fetch(pool.pool)).currentEpochId.toString()).toBe("1");
     },
     TIMEOUT,
   );
 
-  // --- Deployed principal (ADR 0010).
-
-  it(
-    "admin_withdraw refuses to strand a pending withdrawal",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 5_000_000n);
-      await requestWithdraw(pool, owner, 3_000_000n);
-      const admin = await adminAta(pool);
-
-      // In the vault, but spoken for by the pending request.
-      await expect(adminWithdraw(pool, admin, 2_000_001n)).rejects.toThrow(
-        /BelowPendingWithdrawals/,
-      );
-      // Not in the vault at all, which is a different failure.
-      await expect(adminWithdraw(pool, admin, 5_000_001n)).rejects.toThrow(
-        /InsufficientVaultLiquidity/,
-      );
-      await expect(adminWithdraw(pool, admin, 0n)).rejects.toThrow(/ZeroAmount/);
-
-      const signature = await adminWithdraw(pool, admin, 2_000_000n);
-      expect(await vaultBalance(admin)).toBe(2_000_000n);
-      expect(await vaultBalance(pool.principalVault)).toBe(3_000_000n);
-      const event = await findEvent<{ amount: BN; vaultRemaining: BN }>(
-        signature,
-        "principalDeployed",
-      );
-      expect(event?.amount.toString()).toBe("2000000");
-      expect(event?.vaultRemaining.toString()).toBe("3000000");
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "admin_withdraw refuses a destination that is not the admin's ATA",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 5_000_000n);
-
-      // Right mint, wrong owner: the operator's treasury account.
-      await expect(adminWithdraw(pool, pool.treasury, 1_000_000n)).rejects.toThrow(
-        /InvalidAdminTokenAccount/,
-      );
-
-      // Right mint and right owner, but a plain account at some other
-      // address rather than the one `get_associated_token_address` derives.
-      const notTheAta = await createAccount(
-        program.provider.connection,
-        pool.operator,
-        pool.mint,
-        pool.admin.publicKey,
-        Keypair.generate(),
-      );
-      await expect(adminWithdraw(pool, notTheAta, 1_000_000n)).rejects.toThrow(
-        /InvalidAdminTokenAccount/,
-      );
-
-      // The derived address does work.
-      const admin = await adminAta(pool);
-      expect(admin.toBase58()).toBe(
-        getAssociatedTokenAddressSync(pool.mint, pool.admin.publicKey).toBase58(),
-      );
-      await adminWithdraw(pool, admin, 1_000_000n);
-      expect(await vaultBalance(admin)).toBe(1_000_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "pulling principal out and putting it back leaves total_principal alone",
-    async () => {
-      const pool = await setupPool();
-      const owner = await pool.fundedWallet(10_000_000n);
-      await deposit(pool, owner, 5_000_000n);
-      const admin = await adminAta(pool);
-
-      await adminWithdraw(pool, admin, 4_000_000n);
-      expect((await program.account.pool.fetch(pool.pool)).totalPrincipal.toString()).toBe(
-        "5000000",
-      );
-      // Deployed principal is derived, never stored.
-      expect(5_000_000n - (await vaultBalance(pool.principalVault))).toBe(4_000_000n);
-
-      // The yield comes home with it; the extra is the admin's to route to
-      // the jackpot, and it changes no depositor's claim.
-      await returnPrincipal(pool, admin, 4_000_000n);
-      expect((await program.account.pool.fetch(pool.pool)).totalPrincipal.toString()).toBe(
-        "5000000",
-      );
-      expect(await vaultBalance(pool.principalVault)).toBe(5_000_000n);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "vault balance + deployed == total_principal + pending across a sequence",
-    async () => {
-      const pool = await setupPool();
-      const alice = await pool.fundedWallet(10_000_000n);
-      const bob = await pool.fundedWallet(10_000_000n);
-      const admin = await adminAta(pool);
-
-      await deposit(pool, alice, 4_000_000n);
-      await deposit(pool, bob, 6_000_000n);
-      await requestWithdraw(pool, alice, 1_000_000n);
-      await adminWithdraw(pool, admin, 2_000_000n);
-      await returnPrincipal(pool, admin, 500_000n);
-
-      const poolAccount = await program.account.pool.fetch(pool.pool);
-      const vault = await vaultBalance(pool.principalVault);
-      const totalPrincipal = BigInt(poolAccount.totalPrincipal.toString());
-      const pending = BigInt(poolAccount.pendingWithdrawals.toString());
-      const deployed = totalPrincipal + pending - vault;
-
-      expect(totalPrincipal).toBe(9_000_000n);
-      expect(pending).toBe(1_000_000n);
-      expect(vault).toBe(8_500_000n);
-      expect(deployed).toBe(1_500_000n);
-      // And that is exactly what is sitting in the admin's own account.
-      expect(await vaultBalance(admin)).toBe(deployed);
-    },
-    TIMEOUT,
-  );
+  // `admin_withdraw`'s own tests (pending-withdrawal guard, ATA-only
+  // destination, deployed principal derived from the vault) went with the
+  // instruction. Ticket 05's solvency check replaces the last one.
 });
 
 // --- Roles (ticket 01) ---------------------------------------------------
 //
 // Anchor deserializes every account before it runs a single constraint, so
-// the matrix needs Epoch 1 and Round 1 to exist or the wrong signer is
-// masked by AccountNotInitialized. `rolePool` opens both; the accounts after
-// them in each struct are never read, so any address fills those slots.
-
-const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
+// the matrix needs Epoch 1 to exist or the wrong signer is masked by
+// AccountNotInitialized. `rolePool` opens it; the accounts after it in each
+// struct are never read, so any address fills those slots.
 
 const NO_PARAMS = {
   epochSeconds: null,
   epochAnchor: null,
-  roundSeconds: null,
-  closeBuffer: null,
   vrfTimeout: null,
   minDeposit: null,
-  houseCutBps: null,
   minJackpot: null,
-  registrationWindow: null,
   payoutTimeout: null,
   baseRateBps: null,
-  ticketsPerUsdc: null,
-  bonusCapBps: null,
 };
 
 /** A funded throwaway key. The `init` accounts on the operator-gated
@@ -613,9 +487,9 @@ async function fundedKey(): Promise<Keypair> {
   return keypair;
 }
 
-/** A pool with Epoch 1 open and Round 1 created, both by the real operator. */
+/** A pool with Epoch 1 open, begun by the real operator. */
 async function rolePool(): Promise<PoolCtx> {
-  const pool = await setupPool({ roundSeconds: 60 });
+  const pool = await setupPool();
   await program.methods
     .beginEpoch()
     .accountsPartial({
@@ -624,19 +498,7 @@ async function rolePool(): Promise<PoolCtx> {
       currentEpoch: epochPda(pool.pool, 0n),
       epochTwoBehind: epochPda(pool.pool, 0n),
       newEpoch: epochPda(pool.pool, 1n),
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([pool.operator])
-    .rpc();
-
-  const startsAt = await onChainNowSeconds();
-  await program.methods
-    .createRound(new BN(startsAt), new BN(startsAt + 60))
-    .accountsPartial({
-      operator: pool.operator.publicKey,
-      pool: pool.pool,
-      currentEpoch: epochPda(pool.pool, 1n),
-      round: roundPda(pool.pool, 1n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     })
     .signers([pool.operator])
@@ -647,47 +509,49 @@ async function rolePool(): Promise<PoolCtx> {
 /**
  * Every operator-gated instruction, built with `signer` in the operator slot.
  *
- * `settle_round`, `void_round`, `draw` and `rollover_epoch` are deliberately
- * absent (production-hardening ticket 01): they take any `caller`, so an
- * operator that stops cranking cannot withhold a fulfilled result or leave a
- * timed-out request stuck. Their permissionless behavior is covered by the
- * "settle_round, void_round, draw and rollover_epoch accept any caller" test
- * below and by tests/03-epochs.test.ts's `payout` coverage.
+ * `draw`, `payout` and `rollover_epoch` are deliberately absent
+ * (production-hardening ticket 01, off-chain-tickets ticket 09): they take any
+ * `caller`, so an operator that stops cranking cannot withhold a fulfilled
+ * result, a prize or a timed-out request. Their permissionless behavior is
+ * covered by tests/03-epochs.test.ts.
  */
 function operatorGated(pool: PoolCtx, signer: PublicKey) {
   const epoch = epochPda(pool.pool, 1n);
   const m = program.methods;
+  const snapshot = snapshotOf([{ owner: FILLER, tickets: 1n }]);
   return {
-    // Round 1 is already open, so this one is aimed at the next id.
-    createRound: m.createRound(new BN(0), new BN(60)).accountsPartial({
-      operator: signer,
-      pool: pool.pool,
-      currentEpoch: epoch,
-      round: roundPda(pool.pool, 2n),
-      systemProgram: SystemProgram.programId,
-    }),
     beginEpoch: m.beginEpoch().accountsPartial({
       operator: signer,
       pool: pool.pool,
       currentEpoch: epoch,
       epochTwoBehind: epochPda(pool.pool, 0n),
       newEpoch: epochPda(pool.pool, 2n),
+      ...pool.venue,
       systemProgram: SystemProgram.programId,
     }),
-    closeRegistration: m.closeRegistration(Array.from(testNonce())).accountsPartial({
-      operator: signer,
-      pool: pool.pool,
-      epoch,
-      jackpotVault: pool.jackpotVault,
-      randomness: pool.pool,
-      vrfNetworkState: pool.pool,
-      vrfTreasury: pool.pool,
-      vrfProgram: ORAO_VRF_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    }),
-    // `payout` is deliberately absent: it takes no signer at all, so the
-    // operator cannot veto a winner by sitting out `payout_timeout`. A
-    // stranger paying one successfully is in tests/03-epochs.test.ts.
+    // `request_draw` replaced `close_registration` (ticket 08): operator-only,
+    // since the signer also pays ORAO's fee.
+    requestDraw: m
+      .requestDraw(
+        Array.from(testNonce()),
+        Array.from(snapshot.root),
+        new BN(snapshot.total.toString()),
+        snapshot.depth,
+        snapshot.leafCount,
+      )
+      .accountsPartial({
+        operator: signer,
+        pool: pool.pool,
+        epoch,
+        jackpotVault: pool.jackpotVault,
+        randomness: randomnessPda(
+          vrfSeed(pool.pool, 1n, testNonce(), snapshot.root, snapshot.total),
+        ),
+        vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
+        vrfTreasury: DEVNET_VRF_TREASURY,
+        vrfProgram: new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y"),
+        systemProgram: SystemProgram.programId,
+      }),
   };
 }
 
@@ -702,17 +566,6 @@ function adminGated(pool: PoolCtx, signer: PublicKey) {
     proposeAdmin: m
       .proposeAdmin(Keypair.generate().publicKey)
       .accountsPartial({ admin: signer, pool: pool.pool }),
-    // `adminToken` never has to be the wrong signer's ATA: the `has_one` on
-    // the pool runs before the address constraint, so any live token account
-    // of the accepted mint fills the slot.
-    adminWithdraw: m.adminWithdraw(new BN(1)).accountsPartial({
-      admin: signer,
-      pool: pool.pool,
-      acceptedMint: pool.mint,
-      adminToken: pool.treasury,
-      principalVault: pool.principalVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-    }),
   };
 }
 
@@ -734,6 +587,33 @@ describe("roles", () => {
   );
 
   it(
+    "create_pool writes the layout version and the venue defaults",
+    async () => {
+      const pool = await setupPool();
+
+      const account = await program.account.pool.fetch(pool.pool);
+      expect(account.version).toBe(3);
+      expect(account.yieldFeeBps).toBe(1_000);
+      expect(account.idleFloorBps).toBe(500);
+      expect(account.idleTargetBps).toBe(1_000);
+      expect(account.reserveShareCapBps).toBe(500);
+      expect(account.reserveLiquidityFloorBps).toBe(20_000);
+      expect(account.minVenueMove.toString()).toBe("100000000");
+      expect(account.lossToleranceBps).toBe(1);
+      expect(account.yieldIndex.toString()).toBe("0");
+      expect([account.deployPaused, account.impaired, account.buyTicketsPaused]).toEqual([
+        false,
+        false,
+        false,
+      ]);
+      const house = await program.account.player.fetch(pool.house);
+      expect(house.version).toBe(3);
+      expect(house.principal.toString()).toBe("0");
+    },
+    TIMEOUT,
+  );
+
+  it(
     "every operator-gated instruction rejects the admin and a stranger",
     async () => {
       const pool = await rolePool();
@@ -744,102 +624,6 @@ describe("roles", () => {
           await expect(builder.signers([wrong]).rpc(), name).rejects.toThrow(/ConstraintHasOne/);
         }
       }
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "settle_round and void_round accept any caller, and refuse the wrong precondition regardless of who calls",
-    async () => {
-      // Production-hardening ticket 01: `caller` may be any signer. A
-      // stranger succeeds exactly when the operator would have, and is
-      // refused by the same preconditions (unfulfilled/fulfilled/timeout),
-      // never by who they are.
-      const pool = await setupPool({ roundSeconds: 4, closeBuffer: 1, vrfTimeout: 2 });
-      const stranger = await fundedKey();
-
-      const startsAt = await onChainNowSeconds();
-      const endsAt = startsAt + 4;
-      await program.methods
-        .createRound(new BN(startsAt), new BN(endsAt))
-        .accountsPartial({
-          operator: pool.operator.publicKey,
-          pool: pool.pool,
-          currentEpoch: pool.pool,
-          round: roundPda(pool.pool, 1n),
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([pool.operator])
-        .rpc();
-
-      await sleepUntilOnChain(endsAt);
-
-      const nonce = testNonce();
-      const seed = vrfSeed("round", pool.pool, 1n, nonce);
-      // `request_round_randomness` is permissionless (any `payer`); the
-      // Operator is just the usual caller. A stranger who front-runs it pays
-      // the ORAO fee and still cannot pick the result: one request per
-      // Round, and pre-learning a seed's output makes that request fail.
-      await program.methods
-        .requestRoundRandomness(Array.from(nonce))
-        .accountsPartial({
-          payer: pool.operator.publicKey,
-          pool: pool.pool,
-          round: roundPda(pool.pool, 1n),
-          randomness: randomnessPda(seed),
-          vrfNetworkState: DEVNET_VRF_NETWORK_STATE,
-          vrfTreasury: DEVNET_VRF_TREASURY,
-          vrfProgram: ORAO_VRF_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([pool.operator])
-        .rpc();
-
-      const settleRoundAsStranger = () =>
-        program.methods
-          .settleRound()
-          .accountsPartial({
-            caller: stranger.publicKey,
-            pool: pool.pool,
-            round: roundPda(pool.pool, 1n),
-            randomness: randomnessPda(seed),
-            house: pool.house,
-          })
-          .signers([stranger])
-          .rpc();
-
-      // Unfulfilled: under test-vrf the randomness account doesn't even
-      // exist until test_fulfill creates it (real ORAO would have created a
-      // Pending one at request time), so this reads as InvalidRandomnessAccount
-      // rather than RandomnessNotFulfilled -- refused by the precondition
-      // either way, never by who is calling.
-      await expect(settleRoundAsStranger()).rejects.toThrow(/InvalidRandomnessAccount/);
-
-      const voidRoundAsStranger = () =>
-        program.methods
-          .voidRound()
-          .accountsPartial({
-            caller: stranger.publicKey,
-            pool: pool.pool,
-            round: roundPda(pool.pool, 1n),
-            randomness: randomnessPda(seed),
-          })
-          .signers([stranger])
-          .rpc();
-
-      // Before the vrf_timeout has elapsed: refused by VrfTimeoutNotElapsed.
-      await expect(voidRoundAsStranger()).rejects.toThrow(/VrfTimeoutNotElapsed/);
-
-      await fulfillRandomness(seed, randomnessFor(0));
-
-      // Fulfilled: void is refused even past the timeout.
-      const requested = await program.account.round.fetch(roundPda(pool.pool, 1n));
-      await sleepUntilOnChain(Number(requested.requestedAt.toString()) + 2 + 1);
-      await expect(voidRoundAsStranger()).rejects.toThrow(/RandomnessAlreadyFulfilled/);
-
-      // A stranger succeeds once the precondition holds.
-      await settleRoundAsStranger();
-      expect((await program.account.round.fetch(roundPda(pool.pool, 1n))).status).toBe(3); // Forfeited (no positions)
     },
     TIMEOUT,
   );
@@ -989,6 +773,114 @@ describe("roles", () => {
   );
 
   it(
+    "set_operator refuses the default key and a Player that is not the Pool's House",
+    async () => {
+      const pool = await setupPool();
+      const other = await setupPool();
+      const setOperator = (key: PublicKey, house: PublicKey) =>
+        program.methods
+          .setOperator(key)
+          .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool, house })
+          .signers([pool.admin])
+          .rpc();
+
+      await expect(setOperator(PublicKey.default, pool.house)).rejects.toThrow(/InvalidParameter/);
+      // The other pool's House is a real Player, but not this Pool's pin.
+      await expect(setOperator(Keypair.generate().publicKey, other.house)).rejects.toThrow(
+        /ConstraintHasOne/,
+      );
+
+      const state = await program.account.pool.fetch(pool.pool);
+      expect(state.operator.toBase58()).toBe(pool.operator.publicKey.toBase58());
+      const house = await program.account.player.fetch(pool.house);
+      expect(house.owner.toBase58()).toBe(pool.operator.publicKey.toBase58());
+    },
+    60_000,
+  );
+
+  it(
+    "set_operator hands the House to the new Operator, who can sign for it, and the old key cannot",
+    async () => {
+      const pool = await setupPool();
+      const next = await fundedKey();
+      const nextToken = await createAccount(
+        program.provider.connection,
+        pool.operator,
+        pool.mint,
+        next.publicKey,
+        Keypair.generate(),
+      );
+
+      await program.methods
+        .setOperator(next.publicKey)
+        .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool, house: pool.house })
+        .signers([pool.admin])
+        .rpc();
+
+      // The pin and the address stay; only the stored owner moves.
+      expect((await program.account.pool.fetch(pool.pool)).house.toBase58()).toBe(
+        pool.house.toBase58(),
+      );
+      const house = await program.account.player.fetch(pool.house);
+      expect(house.owner.toBase58()).toBe(next.publicKey.toBase58());
+      expect(house.isHouse).toBe(true);
+
+      const requestOnHouse = (signer: Keypair, ownerToken: PublicKey) =>
+        program.methods
+          .requestWithdraw(new BN(1))
+          .accountsPartial({
+            owner: signer.publicKey,
+            pool: pool.pool,
+            player: pool.house,
+            ...pool.venue,
+            ...refundAccounts(pool, { tokenAccount: ownerToken }),
+          })
+          .signers([signer])
+          .rpc();
+      // The House holds no Principal, so the new Operator gets past the account
+      // checks and stops at the amount; the old key stops at the owner check.
+      await expect(requestOnHouse(next, nextToken)).rejects.toThrow(/InsufficientPrincipal/);
+      const oldToken = await createAccount(
+        program.provider.connection,
+        pool.operator,
+        pool.mint,
+        pool.operator.publicKey,
+        Keypair.generate(),
+      );
+      await expect(requestOnHouse(pool.operator, oldToken)).rejects.toThrow(/Unauthorized/);
+
+      // The same holds for cancel and process: the rotated House passes their
+      // account checks (nothing is queued, since the House holds no Principal
+      // and nothing can queue it), and the old key does not.
+      const cancelOnHouse = (signer: Keypair) =>
+        program.methods
+          .cancelWithdraw()
+          .accountsPartial({ owner: signer.publicKey, pool: pool.pool, player: pool.house })
+          .signers([signer])
+          .rpc();
+      await expect(cancelOnHouse(next)).rejects.toThrow(/NothingPending/);
+      await expect(cancelOnHouse(pool.operator)).rejects.toThrow(/Unauthorized/);
+      await expect(
+        program.methods
+          .processWithdraw()
+          .accountsPartial({
+            pool: pool.pool,
+            player: pool.house,
+            owner: null,
+            acceptedMint: pool.mint,
+            ownerToken: nextToken,
+            principalVault: pool.principalVault,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            ...pool.venue,
+          })
+          .rpc(),
+      ).rejects.toThrow(/NothingPending/);
+      await assertSolvent(pool);
+    },
+    60_000,
+  );
+
+  it(
     "propose_admin then accept_admin hands the role over in two steps",
     async () => {
       const pool = await setupPool();
@@ -1074,9 +966,28 @@ describe("create_pool guards", () => {
       house: playerPda(pool, payer.publicKey),
       treasury,
       buybackReserve,
+      // Pinned unchecked; these cases never reach a sync, so the stub's
+      // accounts need not exist.
+      ...venueAccountsFor(pool),
       tokenProgram,
       systemProgram: SystemProgram.programId,
     };
+  }
+
+  /** `create_pool` paid for by the deploy wallet, which is the upgrade
+   *  authority, so it pays and signs. */
+  async function createPoolWith(
+    p: ReturnType<typeof params>,
+    accounts: ReturnType<typeof createPoolAccounts>,
+  ) {
+    return program.methods
+      .createPool(p)
+      .accountsPartial({
+        ...accounts,
+        payer: program.provider.publicKey,
+        programData: PROGRAM_DATA,
+      })
+      .rpc();
   }
 
   // `admin` and `operator` default to a live key: the program rejects the
@@ -1088,17 +999,12 @@ describe("create_pool guards", () => {
     vrfNetworkState: PublicKey.default,
     epochSeconds: new BN(86_400),
     epochAnchor: new BN(1_789_315_200),
-    roundSeconds: new BN(60),
-    closeBuffer: new BN(5),
     vrfTimeout: new BN(120),
     minDeposit: new BN(1_000_000),
-    houseCutBps: 600,
     minJackpot: new BN(0),
-    registrationWindow: new BN(600),
-    payoutTimeout: new BN(86_400),
+    payoutTimeout: new BN(82_800),
     baseRateBps: 488,
-    ticketsPerUsdc: 10,
-    bonusCapBps: 500,
+    venueKind: 1, // the stub, since this file pins venueAccountsFor
     ...over,
   });
 
@@ -1133,22 +1039,17 @@ describe("create_pool guards", () => {
       const pool = poolPda(poolId);
 
       await expect(
-        program.methods
-          .createPool(
-            params({ poolId: new BN(poolId.toString()), operator: payer.publicKey }),
-          )
-          .accountsPartial(
-            createPoolAccounts(
-              payer,
-              pool,
-              mint,
-              await token(),
-              await token(),
-              TOKEN_2022_PROGRAM_ID,
-            ),
-          )
-          .signers([payer])
-          .rpc(),
+        createPoolWith(
+          params({ poolId: new BN(poolId.toString()), operator: payer.publicKey }),
+          createPoolAccounts(
+            payer,
+            pool,
+            mint,
+            await token(),
+            await token(),
+            TOKEN_2022_PROGRAM_ID,
+          ),
+        ),
       ).rejects.toThrow(/UnsupportedMint/);
     },
     TIMEOUT,
@@ -1168,29 +1069,19 @@ describe("create_pool guards", () => {
         const poolId = nextPoolId();
         const pool = poolPda(poolId);
         const operator = role === "operator" ? PublicKey.default : payer.publicKey;
-        return program.methods
-          .createPool(
-            params({
-              poolId: new BN(poolId.toString()),
-              operator,
-              [role]: PublicKey.default,
-            }),
-          )
-          .accountsPartial({
-            ...createPoolAccounts(
-              payer,
-              pool,
-              mint,
-              treasury,
-              buybackReserve,
-              TOKEN_PROGRAM_ID,
-            ),
+        return createPoolWith(
+          params({
+            poolId: new BN(poolId.toString()),
+            operator,
+            [role]: PublicKey.default,
+          }),
+          {
+            ...createPoolAccounts(payer, pool, mint, treasury, buybackReserve, TOKEN_PROGRAM_ID),
             // Seeded from `params.operator`, so the House address has to
             // follow it or Anchor fails on the seeds before the guard runs.
             house: playerPda(pool, operator),
-          })
-          .signers([payer])
-          .rpc();
+          },
+        );
       };
 
       await expect(attempt("admin")).rejects.toThrow(/InvalidParameter/);
@@ -1200,7 +1091,7 @@ describe("create_pool guards", () => {
   );
 
   it(
-    "rejects a registration window that is not shorter than the epoch",
+    "rejects a zero payout_timeout",
     async () => {
       const payer = await fundedKey();
       const connection = program.provider.connection;
@@ -1209,38 +1100,23 @@ describe("create_pool guards", () => {
         createAccount(connection, payer, mint, payer.publicKey, Keypair.generate());
       const treasury = await token();
       const buybackReserve = await token();
-      const attempt = (registrationWindow: number, payoutTimeout = 86_400) => {
+      const attempt = (payoutTimeout: number) => {
         const poolId = nextPoolId();
         const pool = poolPda(poolId);
-        return program.methods
-          .createPool(
-            params({
-              poolId: new BN(poolId.toString()),
-              operator: payer.publicKey,
-              epochSeconds: new BN(600),
-              registrationWindow: new BN(registrationWindow),
-              payoutTimeout: new BN(payoutTimeout),
-            }),
-          )
-          .accountsPartial(
-            createPoolAccounts(
-              payer,
-              pool,
-              mint,
-              treasury,
-              buybackReserve,
-              TOKEN_PROGRAM_ID,
-            ),
-          )
-          .signers([payer])
-          .rpc();
+        return createPoolWith(
+          params({
+            poolId: new BN(poolId.toString()),
+            operator: payer.publicKey,
+            payoutTimeout: new BN(payoutTimeout),
+          }),
+          createPoolAccounts(payer, pool, mint, treasury, buybackReserve, TOKEN_PROGRAM_ID),
+        );
       };
 
-      await expect(attempt(600)).rejects.toThrow(/InvalidParameter/);
       // Zero would let a Drawn epoch be rolled over in the block it was
       // drawn in, which is what the timeout exists to stop.
-      await expect(attempt(0, 0)).rejects.toThrow(/InvalidParameter/);
-      await attempt(599);
+      await expect(attempt(0)).rejects.toThrow(/InvalidParameter/);
+      await attempt(82_800);
     },
     TIMEOUT,
   );
@@ -1258,54 +1134,14 @@ describe("create_pool guards", () => {
       const poolId = nextPoolId();
       const pool = poolPda(poolId);
 
-      await program.methods
-        .createPool(params({ poolId: new BN(poolId.toString()), operator: payer.publicKey }))
-        .accountsPartial(
-          createPoolAccounts(payer, pool, mint, treasury, buybackReserve, TOKEN_PROGRAM_ID),
-        )
-        .signers([payer])
-        .rpc();
+      await createPoolWith(
+        params({ poolId: new BN(poolId.toString()), operator: payer.publicKey }),
+        createPoolAccounts(payer, pool, mint, treasury, buybackReserve, TOKEN_PROGRAM_ID),
+      );
 
       const account = await program.account.pool.fetch(pool);
       expect(account.gamePaused).toBe(true);
       expect(account.jackpotPaused).toBe(true);
-    },
-    TIMEOUT,
-  );
-
-  it(
-    "set_params rejects a window the epoch cannot hold, whichever field moves",
-    async () => {
-      // payoutTimeout below every epochSeconds this test tries, since
-      // set_params requires payout_timeout < epoch_seconds.
-      const pool = await setupPool({ epochSeconds: 600, registrationWindow: 0, payoutTimeout: 59 });
-      const set = (over: { epochSeconds?: number; registrationWindow?: number }) =>
-        program.methods
-          .setParams({
-            ...NO_PARAMS,
-            epochSeconds:
-              over.epochSeconds === undefined ? null : new BN(over.epochSeconds),
-            registrationWindow:
-              over.registrationWindow === undefined
-                ? null
-                : new BN(over.registrationWindow),
-          })
-          .accountsPartial({ admin: pool.admin.publicKey, pool: pool.pool })
-          .signers([pool.admin])
-          .rpc();
-
-      await expect(set({ registrationWindow: 600 })).rejects.toThrow(
-        /InvalidParameter/,
-      );
-      await set({ registrationWindow: 300 });
-      expect(
-        (await program.account.pool.fetch(pool.pool)).registrationWindow.toString(),
-      ).toBe("300");
-
-      // Shortening the epoch under the window it already has is the same
-      // invariant seen from the other side.
-      await expect(set({ epochSeconds: 300 })).rejects.toThrow(/InvalidParameter/);
-      await set({ epochSeconds: 300, registrationWindow: 60 });
     },
     TIMEOUT,
   );

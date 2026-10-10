@@ -29,6 +29,12 @@ interface FakeLogs {
   signature: string;
 }
 
+/** The slice of a `getTransaction` answer the indexer reads. */
+interface FakeTransaction {
+  meta: { logMessages: string[] };
+  transaction: { message: { getAccountKeys: () => { keySegments: () => PublicKey[][] } } };
+}
+
 export class CountingConnection {
   private readonly calls = new Map<string, number>();
   private readonly lastCallParams = new Map<string, unknown[]>();
@@ -116,14 +122,17 @@ export class CountingConnection {
     return count;
   }
 
+  /** Owner every served account reports; a suite that reads it sets the program id. */
+  accountOwner: PublicKey = PublicKey.default;
+
   getMultipleAccountsInfo(
     keys: PublicKey[],
-  ): Promise<({ data: Buffer } | null)[]> {
+  ): Promise<({ data: Buffer; owner: PublicKey } | null)[]> {
     this.record("getMultipleAccountsInfo");
     return Promise.resolve(
       keys.map((key) => {
         const data = this.accounts.get(key.toBase58());
-        return data ? { data } : null;
+        return data ? { data, owner: this.accountOwner } : null;
       }),
     );
   }
@@ -153,19 +162,20 @@ export class CountingConnection {
    *  long backlog (ticket 06). */
   signaturesForAddress: { signature: string; slot: number; err: unknown; blockTime?: number }[] =
     [];
-  private readonly transactions = new Map<
-    string,
-    { meta: { logMessages: string[] } } | undefined
-  >();
+  private readonly transactions = new Map<string, FakeTransaction | undefined>();
   /** `getTransaction` for a signature configured here resolves after this
    *  many milliseconds instead of immediately, opening a window a test can
    *  fire a live event into (the race `catchUpEvents`'s single-enqueue fix
    *  closes, ticket 13). 0 by default: immediate, like every other fake here. */
   getTransactionDelayMs = 0;
 
-  /** The finalized logs `getTransaction(signature)` answers with. */
-  setTransaction(signature: string, logMessages: string[]): void {
-    this.transactions.set(signature, { meta: { logMessages } });
+  /** The finalized logs `getTransaction(signature)` answers with, and the
+   *  transaction's account key list (empty unless a test needs it). */
+  setTransaction(signature: string, logMessages: string[], keys: PublicKey[] = []): void {
+    this.transactions.set(signature, {
+      meta: { logMessages },
+      transaction: { message: { getAccountKeys: () => ({ keySegments: () => [keys] }) } },
+    });
   }
 
   getSignaturesForAddress(
@@ -188,9 +198,7 @@ export class CountingConnection {
     return Promise.resolve(options?.limit ? page.slice(0, options.limit) : page);
   }
 
-  getTransaction(
-    signature: string,
-  ): Promise<{ meta: { logMessages: string[] } } | null> {
+  getTransaction(signature: string): Promise<FakeTransaction | null> {
     this.record("getTransaction");
     const tx = this.transactions.get(signature) ?? null;
     if (this.getTransactionDelayMs <= 0) return Promise.resolve(tx);

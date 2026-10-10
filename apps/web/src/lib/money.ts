@@ -91,16 +91,63 @@ export function addCapped(current: bigint, step: bigint, cap: bigint | null): bi
 }
 
 /**
- * What `request_withdraw(amount)` does to the two balances: Principal drops
- * by the whole amount, Tickets by min(Tickets, amount). The old
- * `entries >= amount` rule is gone (ADR 0009), so a player who spent every
- * Ticket in the game can still request their whole Principal.
+ * The Vault's withdraw cap: Principal plus the yield the in-transaction Sync
+ * settles first, less what is already queued (ADR 0020). `unsettledYield` is
+ * `/players`' figure off the indexed pool index, which the chain only raises,
+ * so it never overdraws. Undefined (no `/players` answer yet) leaves it out.
  */
-export function previewWithdraw(
-  entries: bigint,
+export function withdrawCap(
+  principal: bigint,
+  unsettledYield: string | undefined,
+  pendingWithdraw: bigint,
+): bigint {
+  const total = principal + BigInt(unsettledYield ?? "0");
+  return total > pendingWithdraw ? total - pendingWithdraw : 0n;
+}
+
+/**
+ * The Vault card's Yield line: the yield earned since the last settle as
+ * two-decimal text, or null (no line) at 0 or while the read is unknown.
+ */
+export function unsettledYieldLine(atomic: string | undefined, decimals: number): string | null {
+  if (atomic === undefined || BigInt(atomic) <= 0n) return null;
+  return formatAtomic2(BigInt(atomic), decimals);
+}
+
+/**
+ * The balance card's EARNINGS line. Null is the backend saying its events lag
+ * the Player row, so any figure would be wrong: a dash, never "+$0.00".
+ */
+export function earningsLine(atomic: string | null, decimals: number): string {
+  return atomic === null ? "—" : `+$${formatMoney2(BigInt(atomic), decimals)}`;
+}
+
+/**
+ * The part of Principal that earns no Ticket yet: the deposit made in
+ * `depositEpoch` while that epoch is still current, nothing once a later one
+ * has begun.
+ */
+export function pendingTickets(
+  pendingDeposit: bigint,
+  depositEpoch: bigint | null,
+  currentEpoch: bigint | null,
+): bigint {
+  const folded = depositEpoch !== null && currentEpoch !== null && depositEpoch < currentEpoch;
+  return folded ? 0n : pendingDeposit;
+}
+
+/**
+ * How `request_withdraw(amount)` splits (ADR 0020). The part up to the pending
+ * deposit never held a Ticket, so it refunds in the same transaction. The rest
+ * queues, stays in today's draw and pays after the epoch ends. Same
+ * `min(amount, pending_deposit)` the program takes.
+ */
+export function splitWithdraw(
   amount: bigint,
-): { entriesAfter: bigint } {
-  return { entriesAfter: entries > amount ? entries - amount : 0n };
+  pendingDeposit: bigint,
+): { payNow: bigint; queued: bigint } {
+  const payNow = amount < pendingDeposit ? amount : pendingDeposit;
+  return { payNow, queued: amount - payNow };
 }
 
 /**
@@ -134,4 +181,25 @@ export function pendingWithdrawal(
   // button would only fail with WithdrawalNotDue.
   const due = shutdown || (currentEpoch !== null && currentEpoch > pendingEpoch);
   return { kind: due ? "due" : "pending", amount, epoch: pendingEpoch };
+}
+
+/**
+ * `cancel_withdraw` only clears the queued flag, so it works until a payout is
+ * in flight. `processing` is the one state where it would race that payout.
+ */
+export const canCancelWithdraw = (p: PendingWithdrawal): boolean =>
+  p.kind === "pending" || p.kind === "due";
+
+/** The program refuses `deposit` while the pool is paused or impaired. */
+export const depositOpen = (paused: boolean, impaired: boolean): boolean => !paused && !impaired;
+
+/**
+ * What `process_withdraw` pays for `amount` while the pool is impaired: the
+ * pool's haircut share, rounded down. `factor` is the API's `haircutFactor`
+ * (0 to 1), null when the pool is whole, which pays the full amount.
+ */
+export function haircutValue(amount: bigint, factor: number | null): bigint {
+  if (factor === null || factor >= 1) return amount;
+  const parts = BigInt(Math.floor(Math.max(factor, 0) * 1_000_000));
+  return (amount * parts) / 1_000_000n;
 }

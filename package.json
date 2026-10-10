@@ -14,7 +14,7 @@
     "check": "pnpm -r --if-present check",
     "lint": "pnpm -r --if-present lint",
     "test:unit": "pnpm -r --if-present test",
-    "format:check": "prettier --check .",
+    "check:sh": "shellcheck -S warning -e SC1007,SC1090 scripts/*.sh apps/*/scripts/*.sh .husky/pre-push",
     "prepare": "husky"
   },
   "devDependencies": {
@@ -31,6 +31,7 @@
     "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "5.0.2",
     "commander": "15.0.0",
+    "drand-client": "1.4.2",
     "fastify": "5.12.1",
     "husky": "9.1.7",
     "pg": "8.23.0",

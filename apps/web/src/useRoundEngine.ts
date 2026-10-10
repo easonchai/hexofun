@@ -1,34 +1,35 @@
 /**
  * The game choreography: maps protocol state onto the designer prototype's
  * phases and animation timeline. This hook adds only time-bound presentation
- * (laser path, dot pops, fly tokens, takeovers). All timings derive from
- * chain time via the chain clock.
+ * (laser path, dot pops, fly tokens, takeovers). The countdown reads the
+ * server clock `clockNow` carries, the one `closeAt` is on.
  *
- * Ticket 07: inputs come from the consolidated `GET /state` poll and the
- * `GET /feed` poll instead of a chain account batch and a log subscription
- * — see `useStatePoll.ts` and `App.tsx`. One consequence: a Round's reveal
- * can now begin up to one poll interval after it actually settles, since the
- * browser learns about it on the next poll rather than the instant a log
- * arrives. That lag is accepted.
+ * Off-chain-tickets ticket 18: the betting phase follows `/state`'s open Round
+ * and the result follows its newest finished one, so a result can land after
+ * the next Round has opened. A reveal can begin up to one poll interval after
+ * the backend settles, since the browser learns on the next poll. That lag is
+ * accepted.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
 
 import { isRowVisible, type RevealHoldState } from "./activityRows.js";
+import { track } from "./analytics.js";
 import {
+  boardResult,
   covers,
   decideReveal,
   displayTile,
-  expectedReward,
-  isRevealed,
   phaseFor,
-  ROUND_OPEN,
+  potOf,
   roundKey,
   secondsLeft,
+  type BoardResult,
   type FeedRow,
+  type OpenRound,
   type Phase,
   type PositionLike,
-  type RoundLike,
+  type ResultRound,
 } from "./engine.js";
 import {
   buildFlyTokens,
@@ -36,7 +37,7 @@ import {
   genPath,
   type LaserPath,
 } from "./arena/geo.js";
-import { formatAtomic2 } from "./lib/money.js";
+import { formatAtomic, formatAtomic2 } from "./lib/money.js";
 import { sfx } from "./sfx.js";
 
 const GEO = computeGeo();
@@ -69,48 +70,56 @@ export interface Takeover {
 
 export interface EngineOutput {
   phase: Phase;
-  /** Seconds until positions close, during "mine"; zero otherwise. */
+  /** Seconds until the open Round closes, during "mine"; zero otherwise. */
   secondsLeft: bigint;
   /** Display numbers 1..36 the user has picked. */
   selected: number[];
   setSelected: (tiles: number[]) => void;
-  /** The round once it has revealed a winning tile; null before that. */
-  settled: RoundLike | null;
+  /** "DRAWING" while a closed Round waits on its beacon; null when the board has a countdown or nothing to say. */
+  result: BoardResult;
   reveal: RevealState | null;
   banner: string | null;
   takeover: Takeover | null;
   dismissTakeover: () => void;
   /** True for 0.85 s when a freshly opened Round's core is fading in. */
   coreEnter: boolean;
-  /** Round pot in Entries, for the stake panel. */
+  /** Open Round pot in Tickets, for the stake panel; 0 on an idle board. */
   pot: bigint;
   lastWin: { tile: number; kind: string } | null;
   /** `input.feed`, with a held row's Round removed until the reveal lands. */
   feed: FeedRow[];
-  /** The user's position in the tracked round, if any. */
-  activePosition: PositionLike | null;
+  /** The user's Position in the open Round, if any. */
+  position: PositionLike | null;
 }
 
 export interface EngineInput {
-  round: RoundLike | null;
-  position: PositionLike | null;
+  /** The open Round; null on an idle board. */
+  open: OpenRound | null;
+  /** The newest Round that is no longer open. */
+  last: ResultRound | null;
+  /** The wallet's Positions in those two Rounds, by Round id. */
+  positions: ReadonlyMap<string, PositionLike>;
   owner: PublicKey | undefined;
-  closeBuffer: bigint;
+  /** Server wall-clock seconds, the clock `open.closeAt` is on. */
   clockNow: bigint | null;
+  /** The wallet's Tickets. A win pays through the ledger in the same poll
+   *  that settles the Round, so its payout is the jump in this number. */
+  tickets: bigint;
   /** Rows from the `GET /feed` poll; a row about the tracked Round's reveal
    *  is held here (see `activityRows.ts` `isRowVisible`) until it lands. */
   feed: FeedRow[];
 }
 
+/** A settled result kept by id, with what the wallet had in it when it landed. */
+interface Remembered {
+  round: ResultRound & { tile: number };
+  position: PositionLike | null;
+  /** Tickets the wallet gained in the poll that settled it. */
+  reward: bigint;
+}
+
 export function useRoundEngine(input: EngineInput): EngineOutput {
-  const {
-    round,
-    position,
-    owner,
-    closeBuffer: buffer,
-    clockNow,
-    feed,
-  } = input;
+  const { open, last, positions, owner, clockNow, tickets, feed } = input;
 
   const [selected, setSelected] = useState<number[]>([]);
   const [reveal, setRevealState] = useState<RevealState | null>(null);
@@ -140,34 +149,42 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
     [],
   );
 
-  // --- Derived phase ----------------------------------------------------------
-  const now = clockNow ?? 0n;
-  const phase = phaseFor(round, now, buffer);
-  const activeSecondsLeft = round ? secondsLeft(round, buffer, now) : 0n;
-
   // --- Round reveal choreography --------------------------------------------
-  // A Round's chain object stops being what `round` returns once the next
-  // Round opens, so the first revealed (Settled or Forfeited) sighting of
-  // each id is kept here, independent of whatever `round` currently is —
+  // `last` moves on to the next finished Round, so the first settled sighting
+  // of each id is kept here, independent of whatever `last` currently is —
   // the source of truth for "is there a result to fire" and "what does it
   // pay". `played` is the set `decideReveal` checks; `revealBusyRef` gates
   // one reveal at a time, queuing a second result behind the 4600 ms clear.
-  const settled = round && isRevealed(round) ? round : null;
-  const rememberedRef = useRef<Map<string, RoundLike>>(new Map());
+  const rememberedRef = useRef<Map<string, Remembered>>(new Map());
   const playedRef = useRef<Set<string>>(new Set());
   const seenAnyRoundRef = useRef(false);
   const revealBusyRef = useRef(false);
+  const ticketsBeforeRef = useRef(tickets);
+
+  // --- Derived phase ----------------------------------------------------------
+  // The next countdown waits for the result to be shown: through the reveal up
+  // to its 4600 ms clear, and for the render between a settled poll and the
+  // effect below starting that reveal (a page opened late never animates it).
+  const now = clockNow ?? 0n;
+  const settledUnplayed =
+    last?.status === "settled" &&
+    last.tile !== null && // the effect below skips a tileless one, so it never plays
+    seenAnyRoundRef.current &&
+    !playedRef.current.has(roundKey(last.roundId));
+  const revealing = (reveal !== null && !reveal.clearing) || settledUnplayed;
+  const phase = phaseFor(open, now, last, revealing);
+  const activeSecondsLeft = phase === "mine" ? secondsLeft(open, now) : 0n;
+  const result = boardResult(phase, open, last, revealing);
 
   const runReveal = useCallback(
-    (target: RoundLike, key: string, onDone: () => void) => {
-      const tileIndex = target.winningTile;
+    ({ round: target, position: own, reward }: Remembered, key: string, onDone: () => void) => {
+      const tileIndex = target.tile;
       if (tileIndex < 0 || tileIndex > 35) {
-        onDone(); // u8::MAX = "unset" guard — nothing to animate, unblock the queue
+        onDone(); // out of range: nothing to animate, unblock the queue
         return;
       }
       const tile = GEO.tiles[tileIndex]!;
 
-      const own = owner ? position : null;
       const won = Boolean(own && covers(own.tiles, tileIndex));
       // Everything from the fire instant on is timed after the build-up.
       const afterFire = (fn: () => void, ms: number): void =>
@@ -226,7 +243,6 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
       }
 
       if (won) {
-        const reward = expectedReward(target, own!);
         afterFire(() => {
           sfx("win");
           setTakeover({
@@ -254,20 +270,20 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
         }, 650);
       }, 4600);
     },
-    [owner, position, later],
+    [later],
   );
 
   /** Oldest remembered-but-unplayed Round ready to fire, or start it now. */
   const pump = useCallback(() => {
     if (revealBusyRef.current) return;
-    let candidate: RoundLike | null = null;
+    let candidate: Remembered | null = null;
     for (const entry of rememberedRef.current.values()) {
-      if (playedRef.current.has(roundKey(entry.roundId))) continue;
-      if (!candidate || entry.roundId < candidate.roundId) candidate = entry;
+      if (playedRef.current.has(roundKey(entry.round.roundId))) continue;
+      if (!candidate || entry.round.roundId < candidate.round.roundId) candidate = entry;
     }
     if (!candidate) return;
-    const key = roundKey(candidate.roundId);
-    if (decideReveal(candidate, playedRef.current) !== "fire") return;
+    const key = roundKey(candidate.round.roundId);
+    if (decideReveal(candidate.round, playedRef.current) !== "fire") return;
     playedRef.current.add(key);
     revealBusyRef.current = true;
     runReveal(candidate, key, () => {
@@ -276,53 +292,64 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
     });
   }, [runReveal]);
 
-  // Remember every revealed Round the chain read shows, once, by id. A Round
-  // already revealed the first time this session ever sees any round (page
-  // opened mid-reveal or later) is marked played without animating it.
+  // Remember every settled Round `/state` shows, once, by id. A Round already
+  // settled the first time this session ever sees any round (page opened
+  // mid-reveal or later) is marked played without animating it.
   useEffect(() => {
-    if (!round) return;
+    if (!open && !last) return;
     const firstRoundSeen = !seenAnyRoundRef.current;
     seenAnyRoundRef.current = true;
-    if (!isRevealed(round)) return;
-    const key = roundKey(round.roundId);
+    if (last?.status !== "settled" || last.tile === null) return;
+    const key = roundKey(last.roundId);
     if (rememberedRef.current.has(key)) return;
-    rememberedRef.current.set(key, round);
+    const position = owner ? (positions.get(key) ?? null) : null;
+    const reward = position && tickets > ticketsBeforeRef.current ? tickets - ticketsBeforeRef.current : 0n;
+    rememberedRef.current.set(key, { round: { ...last, tile: last.tile }, position, reward });
     if (firstRoundSeen) {
       playedRef.current.add(key);
       return;
     }
+    if (position) {
+      track("position_settled", {
+        won: covers(position.tiles, last.tile),
+        reward: Number(formatAtomic(reward, 6)),
+      });
+    }
     pump();
-  }, [round, pump]);
+  }, [open, last, positions, owner, tickets, pump]);
+  // After the effect above, so it still sees the previous poll's balance.
+  useEffect(() => {
+    ticketsBeforeRef.current = tickets;
+  }, [tickets]);
 
   // --- Core fade-in + prime sound when a fresh Round opens --------------------
+  // The picks stay: a player who just bet sees their tiles, and one who did
+  // not can bet the same board again.
   const [coreEnter, setCoreEnter] = useState(false);
   const lastOpenRoundRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!round || round.status !== ROUND_OPEN) return;
-    const key = roundKey(round.roundId);
+    if (!open) return;
+    const key = roundKey(open.roundId);
     if (lastOpenRoundRef.current === key) return;
     const isFirstRoundEver = lastOpenRoundRef.current === null;
     lastOpenRoundRef.current = key;
     if (isFirstRoundEver) return; // no fade-in/chime for the very first Round on load
-    // Last round's picks are stale on a fresh board. Auto-rounds re-select
-    // after it re-deploys, and App's effect runs after this one.
-    setSelected([]);
     sfx("prime");
     setCoreEnter(true);
     later(() => setCoreEnter(false), 850);
-  }, [round, later]);
+  }, [open, later]);
 
-  // --- Tick sound at 3, 2, 1 seconds, driven by the chain clock ---------------
+  // --- Tick sound at 3, 2, 1 seconds, driven by the server clock -------------
   const tickedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!round) return;
+    if (!open) return;
     if (phase !== "mine") return;
     if (activeSecondsLeft < 1n || activeSecondsLeft > 3n) return;
-    const key = `${roundKey(round.roundId)}:${activeSecondsLeft}`;
+    const key = `${roundKey(open.roundId)}:${activeSecondsLeft}`;
     if (tickedRef.current.has(key)) return;
     tickedRef.current.add(key);
     sfx("tick");
-  }, [round, phase, activeSecondsLeft]);
+  }, [open, phase, activeSecondsLeft]);
 
   // --- Activity feed hold: a held row appears with the land ------------------
   // Reuses the choreography state above rather than a parallel copy: a Round
@@ -345,15 +372,15 @@ export function useRoundEngine(input: EngineInput): EngineOutput {
     secondsLeft: activeSecondsLeft,
     selected,
     setSelected,
-    settled,
+    result,
     reveal,
     banner,
     takeover,
     dismissTakeover: () => setTakeover(null),
     coreEnter,
-    pot: round?.pot ?? 0n,
+    pot: potOf(open),
     lastWin,
     feed: visibleFeed,
-    activePosition: owner ? position : null,
+    position: owner && open ? (positions.get(roundKey(open.roundId)) ?? null) : null,
   };
 }

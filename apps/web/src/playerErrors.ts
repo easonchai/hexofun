@@ -3,29 +3,38 @@
  * Ticket 09 (production-hardening): every screen that used to show
  * `error.message` goes through `decodePlayerError` instead, and ticket 08's
  * send helper will hand `decodeErrorCode` the numeric code from its own
- * `failed(code)` result directly. Copy uses the screen's words (CONTEXT.md):
+ * `failed(code)` result directly. Copy uses the screen's words (GLOSSARY.md):
  * "day" not epoch, "Tickets" not entries.
  */
+import type { BetRefusalCode } from "./bet.js";
 import { currentPage, reportError } from "./errorReport.js";
 import { idl } from "./idl.js";
 
 const GENERIC = "Something went wrong. Try again in a moment.";
 
 /** `NothingPending`: the operator's crank already paid this withdrawal. */
-export const NOTHING_PENDING_CODE = 6038;
+export const NOTHING_PENDING_CODE = 6019;
+
+/** `VenueIlliquid`: a refund needs USDC from the lending venue and it cannot pay yet. */
+const VENUE_ILLIQUID_CODE = 6034;
+/** `VenueShortReturn`: the redeem came back short. Same answer for the player. */
+const VENUE_SHORT_RETURN_CODE = 6041;
+
+const REFUND_COPY =
+  "The pool is short on cash and can't refund that deposit yet. Nothing changed on your account. Try again later.";
 
 /** Hand-written copy for the codes players actually run into. */
 const HAND_WRITTEN: Record<number, string> = {
   6001: "The pool is paused right now. Try again once it reopens.", // PoolPaused
   6003: "Enter an amount greater than zero.", // ZeroAmount
-  6005: "You don't have enough Tickets for that.", // InsufficientEntries
-  6012: "This round is closed to new plays. Wait for the next one.", // RoundClosed
-  6036: "The vault is being topped up. Try the payout again in a few minutes.", // InsufficientVaultLiquidity
+  6017: "The vault is being topped up. Try the payout again in a few minutes.", // InsufficientVaultLiquidity
   [NOTHING_PENDING_CODE]: "Already paid out. Refreshing your balance.", // NothingPending
-  6042: "Today's draw hasn't closed registration yet. Try again in a moment.", // RegistrationWindowOpen
-  6051: "This pool is closed. Withdrawals still work; nothing else does.", // PoolShutDown
-  6058: "The game is paused right now. Try again once it restarts.", // GamePaused
-  6059: "The daily draw is paused, so Tickets can't be bought right now.", // JackpotPaused
+  6026: "This pool is closed. Withdrawals still work; nothing else does.", // PoolShutDown
+  6032: "The daily draw is paused, so Tickets can't be bought right now.", // JackpotPaused
+  6045: "The pool's lending rate is a moment out of date. Try again.", // ReserveStale
+  // The refund part of a withdraw request needs the venue when free idle is short.
+  [VENUE_ILLIQUID_CODE]: REFUND_COPY, // VenueIlliquid
+  [VENUE_SHORT_RETURN_CODE]: REFUND_COPY, // VenueShortReturn
 };
 
 const IDL_MESSAGE_BY_CODE = new Map(
@@ -54,7 +63,7 @@ function firstGroup(pattern: RegExp, text: string): string | null {
  * `custom program error: 0x...`. Returns null when none of those show up,
  * e.g. a network error or a wallet rejection.
  */
-function extractCode(text: string): number | null {
+export function extractCode(text: string): number | null {
   const byNumber = firstGroup(/error number:\s*(\d+)/i, text);
   if (byNumber) return Number(byNumber);
   const byCustom = firstGroup(/"custom":\s*(\d+)/i, text);
@@ -100,6 +109,30 @@ export function decodeSendFailure(
     page: currentPage(),
   });
   return decodeErrorCode(result.code ?? -1);
+}
+
+/**
+ * Player copy for each refusal `POST /game/bets` names (off-chain-tickets
+ * ticket 18). The server's own `message` is for logs and curl; the screen's
+ * words are here. `Throttled` and `network` come from the web's own client.
+ */
+const BET_COPY: Record<BetRefusalCode | "Throttled" | "network", string> = {
+  SessionInvalid: "Your betting session ended. Approve a new one to keep playing.",
+  BadSignature: "That bet did not verify. Reload the page and try again.",
+  SeqMismatch: "Your bets got out of order. Try again.",
+  RoundClosed: "This round just closed. Bet again to open the next one.",
+  RoundAlreadyOpen: "A round is already open. Bet again to join it.",
+  RoundOutsideEpoch: "A new round would end after the day does. Wait for the new day's first round.",
+  GamePaused: "The game is paused right now. Try again once it restarts.",
+  BadTiles: "Pick between one tile and the most a bet allows, and stake at least 1 Ticket on each.",
+  InsufficientTickets: "You don't have enough Tickets for that.",
+  PositionExists: "You already have a bet in this round.",
+  Throttled: "Too many bets too fast. Wait a few seconds and try again.",
+  network: "Could not reach the server. Try again.",
+};
+
+export function decodeBetRefusal(code: string): string {
+  return (BET_COPY as Record<string, string | undefined>)[code] ?? GENERIC;
 }
 
 /**

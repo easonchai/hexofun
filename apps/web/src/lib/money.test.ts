@@ -3,13 +3,20 @@ import { describe, expect, it } from "vitest";
 import {
   addCapped,
   clampDecimals,
+  depositOpen,
   formatAddress,
   formatAtomic,
   formatAtomic2,
   formatMoney2,
+  haircutValue,
   parseAtomic,
+  pendingTickets,
+  canCancelWithdraw,
   pendingWithdrawal,
-  previewWithdraw,
+  splitWithdraw,
+  unsettledYieldLine,
+  earningsLine,
+  withdrawCap,
 } from "./money.js";
 
 describe("vault widget math", () => {
@@ -71,19 +78,25 @@ describe("atomic formatting", () => {
 });
 
 describe("withdrawal math", () => {
-  it("takes Tickets down by at most the requested amount", () => {
-    expect(previewWithdraw(5_000_000n, 2_000_000n).entriesAfter).toBe(3_000_000n);
-    // Tickets spent in the game: the request still goes through, and Tickets
-    // floor at zero instead of going negative.
-    expect(previewWithdraw(1_000_000n, 5_000_000n).entriesAfter).toBe(0n);
-    expect(previewWithdraw(0n, 5_000_000n).entriesAfter).toBe(0n);
-  });
-
   it("keeps addresses short for display", () => {
     expect(formatAddress("6aDFSdwXESHF7UXJRCkHogNtUTbDPajmLupsfvzTSGvB")).toBe(
       "6aDF…SGvB",
     );
     expect(formatAddress("short")).toBe("short");
+  });
+});
+
+describe("withdrawCap", () => {
+  it("adds the unsettled yield the Sync will settle, less the queue", () => {
+    expect(withdrawCap(6_875_070_000n, "2397691", 1_000_000n)).toBe(6_876_467_691n);
+  });
+
+  it("falls back to Principal less the queue before /players answers", () => {
+    expect(withdrawCap(6_875_070_000n, undefined, 1_000_000n)).toBe(6_874_070_000n);
+  });
+
+  it("never goes below zero", () => {
+    expect(withdrawCap(5n, "0", 9n)).toBe(0n);
   });
 });
 
@@ -118,6 +131,13 @@ describe("pending withdrawal row", () => {
     });
   });
 
+  it("offers cancel while pending or due, not while processing or empty", () => {
+    expect(canCancelWithdraw(pendingWithdrawal(5n, 7n, 7n, false, false))).toBe(true);
+    expect(canCancelWithdraw(pendingWithdrawal(5n, 7n, 8n, false, false))).toBe(true);
+    expect(canCancelWithdraw(pendingWithdrawal(5n, 7n, 8n, true, false))).toBe(false);
+    expect(canCancelWithdraw(pendingWithdrawal(0n, 7n, 8n, false, false))).toBe(false);
+  });
+
   it("stays pending when the current epoch is unknown", () => {
     // Backend unreachable: offering "pay out now" would only earn a
     // WithdrawalNotDue from the program.
@@ -140,5 +160,82 @@ describe("pending withdrawal row", () => {
       amount: 5_000_000n,
       epoch: 7n,
     });
+  });
+});
+
+// ADR 0020: a deposit earns Tickets from the next epoch. 500 of Principal, 400
+// of it deposited in epoch 4, so 100 Tickets are active in epoch 4.
+describe("unsettledYieldLine", () => {
+  it("shows the yield in dollars, truncated to cents", () => {
+    expect(unsettledYieldLine("73370000", 6)).toBe("73.37");
+    expect(unsettledYieldLine("73379999", 6)).toBe("73.37");
+  });
+
+  it("has no line at 0 or while the read is unknown", () => {
+    expect(unsettledYieldLine("0", 6)).toBeNull();
+    expect(unsettledYieldLine(undefined, 6)).toBeNull();
+  });
+});
+
+describe("earningsLine", () => {
+  it("is a dash while the backend's events lag the Player row, never +$0.00", () => {
+    expect(earningsLine(null, 6)).toBe("—");
+  });
+
+  it("shows a known figure with a plus sign, zero included", () => {
+    expect(earningsLine("0", 6)).toBe("+$0.00");
+    expect(earningsLine("1234560000", 6)).toBe("+$1,234.56");
+  });
+});
+
+describe("tickets and the pending deposit", () => {
+  it("holds the deposit pending and out of Tickets in the epoch it was made", () => {
+    expect(pendingTickets(400n, 4n, 4n)).toBe(400n);
+  });
+
+  it("folds the deposit into Tickets from the next epoch, with no transaction", () => {
+    expect(pendingTickets(400n, 4n, 5n)).toBe(0n);
+  });
+
+  it("reads the row as it is while the epoch is unknown", () => {
+    expect(pendingTickets(400n, 4n, null)).toBe(400n);
+  });
+});
+
+// ADR 0020: the pending deposit refunds now, the rest queues. 400 of Principal
+// is pending in these cases.
+describe("splitWithdraw", () => {
+  it("pays an amount inside the pending deposit now and queues nothing", () => {
+    expect(splitWithdraw(250n, 400n)).toEqual({ payNow: 250n, queued: 0n });
+    expect(splitWithdraw(400n, 400n)).toEqual({ payNow: 400n, queued: 0n });
+  });
+
+  it("queues the whole amount when no deposit is pending", () => {
+    expect(splitWithdraw(250n, 0n)).toEqual({ payNow: 0n, queued: 250n });
+  });
+
+  it("pays the pending part now and queues the rest", () => {
+    expect(splitWithdraw(700n, 400n)).toEqual({ payNow: 400n, queued: 300n });
+  });
+});
+
+describe("depositOpen", () => {
+  it("closes the deposit form while the pool is paused or impaired", () => {
+    expect(depositOpen(false, false)).toBe(true);
+    expect(depositOpen(true, false)).toBe(false);
+    expect(depositOpen(false, true)).toBe(false);
+  });
+});
+
+describe("haircutValue", () => {
+  it("pays the whole amount when the pool is whole", () => {
+    expect(haircutValue(500n, null)).toBe(500n);
+    expect(haircutValue(500n, 1)).toBe(500n);
+  });
+
+  it("pays the haircut share, rounded down", () => {
+    expect(haircutValue(500_000_000n, 0.82)).toBe(410_000_000n);
+    expect(haircutValue(100n, 0.333333)).toBe(33n);
+    expect(haircutValue(500n, 0)).toBe(0n);
   });
 });

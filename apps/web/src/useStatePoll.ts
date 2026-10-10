@@ -4,16 +4,11 @@
  * Runs every 2 s, tightens to 500 ms for 15 s after `kick()` (call once a
  * sent transaction confirms), pauses while the tab is hidden and does one
  * immediate poll on focus.
- *
- * Also carries whichever Round the game screen is tracking: once a Round is
- * seen open, its id rides along on every request (`round=`), so the response
- * keeps returning that Round's full state — winning tile and tile totals
- * included — through settlement, until a newer Round replaces it (see
- * api.service.ts `getState`'s comment for the backend half of this).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchState, type StateDto } from "./api.js";
+import { scoped } from "./useApiPoll.js";
 
 const NORMAL_MS = 2_000;
 const BURST_MS = 500;
@@ -34,15 +29,14 @@ export interface StatePollResult {
 
 /**
  * Only the parts a transaction moves. Chain time and the operator heartbeat
- * change on every poll by themselves, and so do the Player's Weight and odds,
- * which accrue with chain time: comparing those would call a deposit landed
- * one poll after it was sent, whatever the chain did.
+ * change on every poll by themselves, and so do the Player's odds, which move
+ * with every other Player's deposit: comparing those would call a deposit
+ * landed one poll after it was sent, whatever the chain did.
  *
  * Every write the UI can send has to land in here or `pending` never clears:
  * deposit and request_withdraw move `principal`, process_withdraw moves only
- * `pendingWithdraw`, buy_position moves `entries` and `position`, and
- * `register` (the Daily Draw screen's one write) moves `regEpoch` and nothing
- * else. The faucet moves none of them — it mints to
+ * `pendingWithdraw`, and buy_tickets moves `tickets` once the ledger books it. The
+ * faucet moves none of them — it mints to
  * the wallet, which `/state` does not carry — so it refreshes the balance
  * directly instead of arming this watch (see App.tsx `onFunded`).
  */
@@ -50,12 +44,8 @@ export function snapshot(data: StateDto): string {
   const player = data.player;
   return JSON.stringify({
     principal: player?.principal ?? null,
-    entries: player?.entries ?? null,
+    tickets: player?.tickets ?? null,
     pendingWithdraw: player?.pendingWithdraw ?? null,
-    regEpoch: player?.regEpoch ?? null,
-    position: data.position,
-    round: data.round,
-    openRound: data.openRound,
     // Ticket 05: null before the pool has ever had an Epoch.
     jackpot: data.currentEpoch?.jackpotAmount ?? null,
     totalPrincipal: data.pool.totalPrincipal,
@@ -63,13 +53,16 @@ export function snapshot(data: StateDto): string {
 }
 
 export function useStatePoll(baseUrl: string, owner: string | undefined): StatePollResult {
-  const [data, setData] = useState<StateDto | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Held with its owner: after a wallet switch the previous owner's payload
+  // reads as null until the new owner's first fetch lands.
+  const [heldData, setHeldData] = useState<{ key: unknown; value: StateDto | null } | null>(null);
+  const [heldError, setHeldError] = useState<{ key: unknown; value: string | null } | null>(null);
+  const data = scoped(heldData, owner, null);
+  const error = scoped(heldError, owner, null);
   const [pending, setPending] = useState(false);
   const [stillConfirming, setStillConfirming] = useState(false);
 
   const dataRef = useRef<StateDto | null>(null);
-  const trackedRoundRef = useRef<string | undefined>(undefined);
   const burstUntilRef = useRef(0);
   const watchBaselineRef = useRef<string | null>(null);
   const runRef = useRef<() => void>(() => {});
@@ -87,6 +80,13 @@ export function useStatePoll(baseUrl: string, owner: string | undefined): StateP
     let timer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
 
+    // A new owner starts with no send in flight and nothing to compare against.
+    dataRef.current = null;
+    watchBaselineRef.current = null;
+    burstUntilRef.current = 0;
+    setPending(false);
+    setStillConfirming(false);
+
     const scheduleNext = (): void => {
       if (cancelled) return;
       const inBurst = Date.now() < burstUntilRef.current;
@@ -102,13 +102,12 @@ export function useStatePoll(baseUrl: string, owner: string | undefined): StateP
         timer = null;
       }
       if (document.hidden) return; // resumed by the visibility listener below
-      const result = await fetchState(baseUrl, owner, trackedRoundRef.current, controller.signal);
+      const result = await fetchState(baseUrl, owner, controller.signal);
       if (cancelled) return;
       if (result.ok) {
         dataRef.current = result.data;
-        setData(result.data);
-        setError(null);
-        trackedRoundRef.current = result.data.openRound?.id ?? trackedRoundRef.current;
+        setHeldData({ key: owner, value: result.data });
+        setHeldError({ key: owner, value: null });
         const baseline = watchBaselineRef.current;
         if (baseline !== null) {
           if (snapshot(result.data) !== baseline) {
@@ -120,7 +119,7 @@ export function useStatePoll(baseUrl: string, owner: string | undefined): StateP
           }
         }
       } else {
-        setError(result.reason);
+        setHeldError({ key: owner, value: result.reason });
       }
       scheduleNext();
     };

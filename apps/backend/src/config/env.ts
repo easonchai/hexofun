@@ -2,6 +2,7 @@
 // have none and fail the boot if missing — all of them at once, not one at a
 // time, so a fresh checkout tells you everything it needs in one error.
 import { Logger } from "@nestjs/common";
+import { PublicKey } from "@solana/web3.js";
 
 import { INVITE_CIRCULATION_CAP, INVITE_REDEEM_GRANT_COUNT } from "../api/invite-code";
 import { DEFAULT_REFERRAL_QUALIFY_SECONDS } from "../api/referral";
@@ -51,10 +52,15 @@ export const DEFAULT_ALERT_TICK_STALE_S = 300;
  *  cursor last advanced before it counts as stuck. */
 export const DEFAULT_ALERT_INDEXER_STALE_S = 600;
 
-/** Ticket 07: how young the Indexer cursor has to be for `close_registration`
- *  to trust it. Tighter than `ALERT_INDEXER_STALE_S`, which is about paging
- *  someone; this is about not losing a depositor's Draw and Base yield. */
-export const DEFAULT_REGISTRATION_INDEXER_FRESH_S = 60;
+/** `GET /alerts`' `FREE_IDLE_LOW` threshold (yield-claimer ticket 14): seconds
+ *  free idle may sit under the idle floor before it counts. The Operator
+ *  recalls within a tick or two, so an hour means the recall is not working. */
+export const DEFAULT_ALERT_IDLE_LOW_S = 3600;
+
+/** `GET /alerts`' `RESERVE_LIQUIDITY_LOW` threshold: atomic USDC of free
+ *  liquidity the pinned klend reserve may fall to. 100,000 USDC is a few
+ *  times the pool's own position at the default caps. */
+export const DEFAULT_ALERT_RESERVE_FREE_MIN = 100_000_000_000;
 
 export interface HexVaultEnv {
   DATABASE_URL: string;
@@ -95,9 +101,10 @@ export interface HexVaultEnv {
   ALERT_TICK_STALE_S: number;
   /** `GET /alerts`' `INDEXER_STALE` threshold, in seconds. */
   ALERT_INDEXER_STALE_S: number;
-  /** Ticket 07: how young the Indexer cursor must be, in seconds, for
-   *  `close_registration` to trust it. */
-  REGISTRATION_INDEXER_FRESH_S: number;
+  /** `GET /alerts`' `FREE_IDLE_LOW` threshold, in seconds. */
+  ALERT_IDLE_LOW_S: number;
+  /** `GET /alerts`' `RESERVE_LIQUIDITY_LOW` threshold, atomic USDC. */
+  ALERT_RESERVE_FREE_MIN: number;
   /** Most remaining Invite code uses allowed in circulation before a redeem
    *  stops granting the redeemer codes of its own (invite-code.ts). */
   INVITE_CIRCULATION_CAP: number;
@@ -105,11 +112,18 @@ export interface HexVaultEnv {
   INVITE_REDEEM_GRANT_COUNT: number;
   CORS_ORIGIN: string;
   PORT: string;
-  /** Sparring player secret, base58. Absent switches the Sparring player off. */
+  /** Sparring player secret, base58. The wallet `sparring-setup` funds. */
   SPARRING_KEYPAIR?: string;
+  /** The Sparring player plays only when this is true (ADR 0019). Off by
+   *  default and unset in every production env file, so a keypair left in an
+   *  env cannot start it by itself. */
+  SPARRING_ENABLED: boolean;
   /** Shared secret for `POST /access/invites`, sent as `x-admin-key`. Absent
    *  switches the route off (404). At least 32 characters when set. */
   INVITE_ADMIN_KEY?: string;
+  /** Wallets allowed to call `POST /ops/fast-pause` (ops-console ticket 06),
+   *  canonical base58. Empty switches the route off (404). */
+  OPS_WALLETS?: string[];
   /** Beta-launch-fixes ticket 05: an ISO timestamp holding back the
    *  Operator's first `begin_epoch` while the Pool has no Epoch yet, so
    *  deposits can open days before the first Draw. Absent behaves as before:
@@ -235,6 +249,23 @@ function launchAt(raw: unknown): string | undefined {
   return value;
 }
 
+/** Comma separated public keys. Unset or blank is an empty list; one bad
+ *  entry fails the boot, since a typo would silently lock a teammate out. */
+function opsWallets(raw: unknown): string[] {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return [];
+  return String(raw)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      try {
+        return new PublicKey(entry).toBase58();
+      } catch {
+        throw new Error(`OPS_WALLETS must be comma separated Solana public keys, got "${entry}"`);
+      }
+    });
+}
+
 /** `CLUSTER` must be one of `CLUSTERS`; there is no default, since a wrong
  *  guess is worse than a boot failure. */
 function cluster(raw: unknown): Cluster {
@@ -242,18 +273,15 @@ function cluster(raw: unknown): Cluster {
   throw new Error(`CLUSTER must be one of ${CLUSTERS.join(", ")}, got "${String(raw)}"`);
 }
 
-/** Same shape as `alertTickStaleSeconds`. */
-function registrationIndexerFreshSeconds(raw: unknown): number {
-  if (raw === undefined || raw === null || String(raw).trim() === "") {
-    return DEFAULT_REGISTRATION_INDEXER_FRESH_S;
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(
-      `REGISTRATION_INDEXER_FRESH_S must be a non-negative whole number of seconds, got "${String(raw)}"`,
-    );
-  }
-  return value;
+/** A switch that is off unless spelled `true` or `false` explicitly, so a typo
+ *  such as `ture` fails the boot instead of silently reading as off. Unset
+ *  and the empty string (a compose file's "not configured") are off. */
+function offByDefaultSwitch(key: string, raw: unknown): boolean {
+  if (raw === undefined || raw === null || String(raw).trim() === "") return false;
+  const value = String(raw).trim().toLowerCase();
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${key} must be true or false, got "${String(raw)}"`);
 }
 
 /** Unset or empty takes `fallback`; anything else must be a non-negative
@@ -301,7 +329,12 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     REFERRAL_QUALIFY_SECONDS: referralQualifySeconds(env.REFERRAL_QUALIFY_SECONDS),
     ALERT_TICK_STALE_S: alertTickStaleSeconds(env.ALERT_TICK_STALE_S),
     ALERT_INDEXER_STALE_S: alertIndexerStaleSeconds(env.ALERT_INDEXER_STALE_S),
-    REGISTRATION_INDEXER_FRESH_S: registrationIndexerFreshSeconds(env.REGISTRATION_INDEXER_FRESH_S),
+    ALERT_IDLE_LOW_S: wholeNumber("ALERT_IDLE_LOW_S", env.ALERT_IDLE_LOW_S, DEFAULT_ALERT_IDLE_LOW_S),
+    ALERT_RESERVE_FREE_MIN: wholeNumber(
+      "ALERT_RESERVE_FREE_MIN",
+      env.ALERT_RESERVE_FREE_MIN,
+      DEFAULT_ALERT_RESERVE_FREE_MIN,
+    ),
     INVITE_CIRCULATION_CAP: wholeNumber(
       "INVITE_CIRCULATION_CAP",
       env.INVITE_CIRCULATION_CAP,
@@ -314,6 +347,8 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     ),
     CORS_ORIGIN: String(env.CORS_ORIGIN),
     PORT: String(env.PORT ?? "8080"),
+    OPS_WALLETS: opsWallets(env.OPS_WALLETS),
+    SPARRING_ENABLED: offByDefaultSwitch("SPARRING_ENABLED", env.SPARRING_ENABLED),
     // Spread rather than assigned: under `exactOptionalPropertyTypes` an
     // optional key cannot be set to `undefined`, and "absent" is the switch.
     ...(env.RPC_FALLBACK_URL ? { RPC_FALLBACK_URL: String(env.RPC_FALLBACK_URL) } : {}),

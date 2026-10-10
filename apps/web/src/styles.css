@@ -2015,6 +2015,17 @@ input::placeholder {
   border: 1px solid var(--danger-line);
 }
 
+/* Ledger copy on the PLAY tab: floats over the top of the board so it shows in
+   both the row (desktop) and column (phone) layouts of .main-content-split. */
+.screen-note.ledger-copy {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  width: auto;
+  z-index: 70;
+}
+
 /* Weekly draw's winner list and the Leaderboard table share this row shape. */
 .board-list {
   display: flex;
@@ -2362,8 +2373,21 @@ input::placeholder {
 
   .bet-drawer-toggles {
     display: flex;
+    align-items: center;
     gap: 10px;
     padding: 0 16px;
+  }
+
+  .session-status {
+    margin: 0;
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-text);
+  }
+
+  .session-status.err {
+    color: var(--danger-text);
   }
 }
 
@@ -2808,7 +2832,7 @@ input::placeholder {
 
 .vault-tabs {
   display: flex;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .vault-tab {
@@ -2817,7 +2841,7 @@ input::placeholder {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.3);
   font-family: "Syncopate", sans-serif;
   font-weight: 700;
   font-size: 16px;
@@ -2946,17 +2970,24 @@ input::placeholder {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: #fcfcfc;
+  /* Figma sets the rows group to 75% opacity over #fcfcfc text. */
+  color: rgba(252, 252, 252, 0.75);
   font-family: "Roboto Mono", monospace;
   font-weight: 700;
   font-size: 13px;
   line-height: 1.5;
-  letter-spacing: 0.083em;
 }
 
 .vault-line dt,
 .vault-line dd {
   margin: 0;
+}
+
+/* "6 OCT, 12:00AM" over "(GMT+8)", as in the Figma, and never broken
+   further. */
+.vault-line-when {
+  text-align: right;
+  white-space: pre;
 }
 
 .vault-line-label {
@@ -2985,32 +3016,12 @@ input::placeholder {
   text-transform: none;
 }
 
-/* Pending withdrawal row: state text, and the payout button when it is due. */
-.vault-pending-state {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  text-transform: uppercase;
-}
-
-/* Dim the state label only; the payout button keeps full contrast. */
-.vault-pending-state > span {
-  opacity: 0.75;
-}
-
-.vault-payout {
-  flex: 0 0 auto;
-  height: 26px;
-  padding: 0 10px;
-  font-size: 11px;
-}
-
 .vault-cta {
   height: 43px;
   border: none;
   border-radius: 10px;
   background: var(--brand-lime);
-  color: #07101c;
+  color: var(--brand-navy);
   font-family: "Syncopate", sans-serif;
   font-weight: 700;
   font-size: 16px;
@@ -3185,7 +3196,7 @@ input::placeholder {
   flex-direction: column;
   align-items: center;
   width: min(480px, 100%);
-  padding: 0 16px 16px;
+  padding: 0 16px 32px;
   background: var(--brand-slate);
   border: 1px solid rgba(182, 255, 59, 0.18);
   border-radius: 16px;
@@ -3237,10 +3248,11 @@ input::placeholder {
 
 .deposit-modal-kicker {
   margin: 0;
-  color: rgba(182, 255, 59, 0.6);
+  color: var(--brand-lime);
   font-family: "Roboto Mono", monospace;
-  font-size: 10px;
-  letter-spacing: 0.18em;
+  font-size: 12px;
+  line-height: 15px;
+  letter-spacing: 0.15em;
 }
 
 .deposit-modal-amount {
@@ -3255,14 +3267,16 @@ input::placeholder {
 .deposit-modal-sub {
   margin: 6px 0 32px;
   color: rgba(255, 255, 255, 0.5);
+  font-family: "Inter", sans-serif;
   font-size: 14px;
+  line-height: 21px;
 }
 
 .deposit-modal-sub strong {
   color: var(--brand-white);
 }
 
-.deposit-modal-play {
+.deposit-modal-ok {
   width: 100%;
   font-size: 14px;
   letter-spacing: 0.125em;
@@ -3277,6 +3291,14 @@ input::placeholder {
 
   .deposit-modal-amount {
     font-size: 22px;
+  }
+
+  .deposit-modal {
+    padding-bottom: 20px;
+  }
+
+  .deposit-modal-sub {
+    margin-bottom: 24px;
   }
 }
 
@@ -3425,27 +3447,63 @@ input::placeholder {
   margin: 0;
 }
 
+/* PRINCIPAL and EARNINGS side by side, EARNINGS at the frame's +264 (240 + the
+   24px gap). A wider principal pushes it right; one the card can't hold beside
+   it wraps EARNINGS onto its own line instead of overflowing the card. */
+.dash-balance {
+  margin: 16px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+}
+
+.dash-balance > div:first-child {
+  min-width: 240px;
+}
+
+.dash-balance dt {
+  font-family: "Roboto Mono", monospace;
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 19.5px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.dash-balance dd {
+  margin: 0;
+}
+
 .dash-principal {
   font-family: "Roboto Mono", monospace;
   font-weight: 700;
   font-size: 48px;
-  line-height: 52px;
-  letter-spacing: -0.52px;
+  line-height: 58px;
+  letter-spacing: -2.4px;
   color: var(--brand-white);
   font-variant-numeric: tabular-nums;
-  margin-top: 20px;
+}
+
+.dash-earnings {
+  font-family: "Roboto Mono", monospace;
+  font-weight: 700;
+  font-size: 32px;
+  line-height: 47px;
+  color: var(--brand-lime);
+  font-variant-numeric: tabular-nums;
 }
 
 .dash-card-lines {
-  margin: 12px 0 0;
+  margin: 16px 0 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
+/* Label and figure in the frame's 211px row, the figure flush right. */
 .dash-card-lines > div {
   display: flex;
-  gap: 6px;
+  justify-content: space-between;
+  width: 211px;
   font-family: "Roboto Mono", monospace;
   font-size: 13px;
   line-height: 19.5px;
@@ -3809,6 +3867,33 @@ input::placeholder {
   white-space: nowrap;
 }
 
+/* Queued withdrawal (Figma 698:19769): amber 25% pill, 97x20. */
+.dash-badge-pending {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 4px;
+  height: 20px;
+  padding: 0 18px;
+  border-radius: 16px;
+  background: rgba(255, 201, 64, 0.25);
+  color: #ffc940;
+  font-family: "Roboto Mono", monospace;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.dash-badge-pending svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dash-badge-phone {
+  display: none;
+}
+
 .dash-date {
   font-weight: 400;
   font-size: 11px;
@@ -3844,6 +3929,44 @@ input::placeholder {
 
   .dash-prize {
     font-size: 48px;
+  }
+
+  /* Scaled down like the rest of the card so both figures fit a phone. */
+  .dash-balance {
+    justify-content: space-between;
+    gap: 4px 12px;
+  }
+
+  .dash-balance > div:first-child {
+    min-width: 0;
+  }
+
+  .dash-balance dt {
+    font-size: 11px;
+  }
+
+  .dash-principal {
+    font-size: 34px;
+    line-height: 42px;
+    letter-spacing: -1.6px;
+  }
+
+  .dash-earnings {
+    font-size: 22px;
+    line-height: 42px;
+  }
+
+  .dash-card-lines > div {
+    font-size: 12px;
+  }
+
+  .dash-badge-phone {
+    display: inline-flex;
+    padding: 0 8px;
+  }
+
+  .dash-date-pending {
+    display: none;
   }
 
   /* Syncopate is wide: "+ Deposit More" wraps at 11px+ on a 390px screen. */
@@ -5404,6 +5527,12 @@ input::placeholder {
   .invite-loading svg {
     animation-duration: 6s;
   }
+}
+
+/* SUBMIT opens the wallet-adapter picker on the non-Privy path; it must sit
+   above the gate (adapter default is 1040). */
+.wallet-adapter-modal {
+  z-index: 10000;
 }
 
 .invite-gate {

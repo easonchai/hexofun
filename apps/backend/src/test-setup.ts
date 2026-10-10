@@ -26,6 +26,9 @@ process.env.CLUSTER = "devnet";
 // which breaks the faucet 429 and referral "holding" assertions.
 process.env.FAUCET_INTERVAL_SECONDS = "3600";
 process.env.REFERRAL_QUALIFY_SECONDS = "604800";
+// A bare `new ConfigService({})` falls back to process.env, so a shell
+// OPS_WALLETS turns the "404 with the allowlist unset" checks into 403.
+delete process.env.OPS_WALLETS;
 // Beta-launch-fixes ticket 05: a harmless default so any suite that flips a
 // seeded Pool's currentEpochId to 0 sees `/state`/`/status` carry a launch
 // time, without every other suite (whose Pool already has an Epoch) noticing.

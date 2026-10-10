@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { formatAtomic2, parseAtomic } from "../lib/money.js";
-import type { PositionLike } from "../engine.js";
+import { phaseFor, type OpenRound, type PositionLike, type ResultRound } from "../engine.js";
 import { stakeBarModel } from "./stakeBar.js";
 
 const DECIMALS = 6;
@@ -23,8 +23,8 @@ describe("stakeBarModel — editing state", () => {
     const model = stakeBarModel("0.01", [], null, "mine", DECIMALS);
     expect(model.state).toBe("editing");
     expect(model.tilesSelected).toBe("0");
-    expect(model.entriesPerTile).toBe(formatAtomic2(parseAtomic("0.01", DECIMALS)!, DECIMALS));
-    expect(model.entriesIn).toBe(formatAtomic2(0n, DECIMALS));
+    expect(model.ticketsPerTile).toBe(formatAtomic2(parseAtomic("0.01", DECIMALS)!, DECIMALS));
+    expect(model.ticketsIn).toBe(formatAtomic2(0n, DECIMALS));
     expect(model.label).toBe("DEPLOY");
   });
 
@@ -32,8 +32,8 @@ describe("stakeBarModel — editing state", () => {
     const model = stakeBarModel("0.5", [3], null, "mine", DECIMALS);
     expect(model.state).toBe("editing");
     expect(model.tilesSelected).toBe("1");
-    expect(model.entriesPerTile).toBe("0.50");
-    expect(model.entriesIn).toBe(formatAtomic2(panelTotal("0.5", 1), DECIMALS));
+    expect(model.ticketsPerTile).toBe("0.50");
+    expect(model.ticketsIn).toBe(formatAtomic2(panelTotal("0.5", 1), DECIMALS));
   });
 
   it("shows many tiles selected", () => {
@@ -41,14 +41,14 @@ describe("stakeBarModel — editing state", () => {
     const model = stakeBarModel("2", tiles, null, "mine", DECIMALS);
     expect(model.state).toBe("editing");
     expect(model.tilesSelected).toBe("10");
-    expect(model.entriesIn).toBe(formatAtomic2(panelTotal("2", 10), DECIMALS));
+    expect(model.ticketsIn).toBe(formatAtomic2(panelTotal("2", 10), DECIMALS));
   });
 
   it("matches the panel's existing cost computation exactly", () => {
     const stakeText = "1.234567";
     const tiles = [1, 2, 3, 4, 5];
     const model = stakeBarModel(stakeText, tiles, null, "mine", DECIMALS);
-    expect(model.entriesIn).toBe(
+    expect(model.ticketsIn).toBe(
       formatAtomic2(panelTotal(stakeText, tiles.length), DECIMALS),
     );
   });
@@ -68,41 +68,37 @@ describe("stakeBarModel — placed state", () => {
     const model = stakeBarModel("9", [], active, "mine", DECIMALS);
     expect(model.state).toBe("placed");
     expect(model.tilesSelected).toBe("3");
-    expect(model.entriesPerTile).toBe(formatAtomic2(2_500_000n, DECIMALS));
-    expect(model.entriesIn).toBe(formatAtomic2(7_500_000n, DECIMALS));
-    expect(model.label).toBe("TOP UP");
+    expect(model.ticketsPerTile).toBe(formatAtomic2(2_500_000n, DECIMALS));
+    expect(model.ticketsIn).toBe(formatAtomic2(7_500_000n, DECIMALS));
+    expect(model.label).toBe("BET PLACED");
   });
 
   it("ignores the editing inputs once a Position is confirmed", () => {
     const active = position({ tiles: 1n, stakePerTile: 1_000_000n });
     const model = stakeBarModel("999", [1, 2, 3, 4], active, "mine", DECIMALS);
     expect(model.tilesSelected).toBe("1");
-    expect(model.entriesIn).toBe(formatAtomic2(1_000_000n, DECIMALS));
+    expect(model.ticketsIn).toBe(formatAtomic2(1_000_000n, DECIMALS));
   });
 });
 
-describe("stakeBarModel — closed state (locked, settling, awaiting)", () => {
-  it("shows the locked phase copy and does not invite a bet", () => {
+describe("stakeBarModel — closed state (locked)", () => {
+  it("shows the drawing copy once the Round is past its close", () => {
     const model = stakeBarModel("1", [1, 2], null, "locked", DECIMALS);
     expect(model.state).toBe("closed");
     expect(model.label).toBe("DRAWING…");
   });
 
-  it("shows the settling phase copy", () => {
-    const model = stakeBarModel("1", [1, 2], null, "settling", DECIMALS);
+  it("reads DRAWING… beside a next open Round while the closed one waits on its tile", () => {
+    const next: OpenRound = { roundId: 4n, closeAt: 1_000n, tileTotals: [] };
+    const last: ResultRound = { roundId: 3n, status: "closed", tile: null };
+    const model = stakeBarModel("1", [1], null, phaseFor(next, 10n, last), DECIMALS);
     expect(model.state).toBe("closed");
     expect(model.label).toBe("DRAWING…");
   });
 
-  it("shows the awaiting phase copy", () => {
-    const model = stakeBarModel("1", [1, 2], null, "awaiting", DECIMALS);
-    expect(model.state).toBe("closed");
-    expect(model.label).toBe("AWAITING…");
-  });
-
   it("still surfaces the placed Position's figures once locked", () => {
     const active = position({ tiles: (1n << 1n) | (1n << 2n), stakePerTile: 4n });
-    const model = stakeBarModel("1", [], active, "settling", DECIMALS);
+    const model = stakeBarModel("1", [], active, "locked", DECIMALS);
     expect(model.state).toBe("closed");
     expect(model.tilesSelected).toBe("2");
     expect(model.label).toBe("DRAWING…");

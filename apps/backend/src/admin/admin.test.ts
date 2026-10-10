@@ -11,6 +11,7 @@
 import {
   AnchorProvider,
   BN,
+  BorshInstructionCoder,
   Program,
   Wallet,
   type Idl,
@@ -18,6 +19,7 @@ import {
 import {
   ACCOUNT_SIZE,
   AccountLayout,
+  getAssociatedTokenAddressSync,
   MINT_SIZE,
   MintLayout,
   TOKEN_PROGRAM_ID,
@@ -63,6 +65,12 @@ const program = new Program(
 
 const bn = (value: bigint | number): BN => new BN(value.toString());
 
+// `program.coder.instruction` is typed as the bare `InstructionCoder`, which
+// has no `decode`; the real object is this class. It reads the IDL's own
+// snake_case names.
+const decodeInstruction = (data: Buffer | undefined) =>
+  new BorshInstructionCoder(idl).decode(data as Buffer);
+
 const poolFields = {
   poolId: bn(1),
   admin: Keypair.generate().publicKey,
@@ -76,8 +84,6 @@ const poolFields = {
   vrfNetworkState: Keypair.generate().publicKey,
   epochSeconds: bn(86_400),
   epochAnchor: bn(1_789_315_200),
-  roundSeconds: bn(60),
-  closeBuffer: bn(5),
   vrfTimeout: bn(120),
   minDeposit: bn(1_000_000),
   paused: false,
@@ -86,9 +92,6 @@ const poolFields = {
   currentEpochEndsAt: bn(0),
   previousEpochStart: bn(0),
   previousEpochEndsAt: bn(0),
-  nextRoundId: bn(1),
-  openRoundId: bn(0),
-  carryPot: bn(0),
   totalPrincipal: bn(0),
   bump: 255,
   principalVaultBump: 254,
@@ -374,91 +377,20 @@ describe("admin run", () => {
     expect(stderr.length).toBeGreaterThan(0);
   });
 
-  it("fund-yield in local mode signs and funds the principal vault, not the jackpot vault", async () => {
-    const { chain, sent } = await harness();
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "fund-yield", amount: 12_000_000n }, chain, mode),
-    );
-
-    expect(sent).toHaveLength(1);
-    expect(stdout).toEqual([]);
-    expect(stderr[0]).toMatch(/^signature /);
-    expect(stderr.join("\n")).toContain("yield budget funded with 12000000 atomic units");
-  });
-
-  it("grant-tickets in local mode signs with the loaded key as the admin path", async () => {
-    const { chain, sent } = await harness();
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-    const owner = Keypair.generate().publicKey;
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "grant-tickets", owner, amount: 500n }, chain, mode),
-    );
-
-    expect(sent).toHaveLength(1);
-    expect(stdout).toEqual([]);
-    expect(stderr.join("\n")).toContain(`grant 500 tickets to ${owner.toBase58()} (admin path, uncapped)`);
-  });
-
-  it("grant-tickets in multisig mode prints one base58 transaction signed by the multisig vault", async () => {
-    const { chain, sent } = await harness();
-    const multisigVault = Keypair.generate().publicKey;
-    const mode: AdminMode = { signer: multisigVault, multisig: true };
-    const owner = Keypair.generate().publicKey;
-
-    const { stdout } = await capture(() =>
-      run({ kind: "grant-tickets", owner, amount: 500n }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toHaveLength(1);
-    const tx = Transaction.from(bs58.decode(stdout[0] as string));
-    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
-    expect(
-      tx.instructions[0]?.keys.some(
-        (key) => key.isSigner && key.pubkey.equals(multisigVault),
-      ),
-    ).toBe(true);
-  });
-
-  it("set-params in local mode carries the base yield and ticket-economy flags", async () => {
+  it("set-params in local mode carries the base yield flag", async () => {
     const { chain, sent } = await harness();
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
 
     await run(
       {
         kind: "set-params",
-        params: { baseRateBps: 488, ticketsPerUsdc: 10, bonusCapBps: 500 },
+        params: { baseRateBps: 488 },
       },
       chain,
       mode,
     );
 
     expect(sent).toHaveLength(1);
-  });
-
-  it("withdraw-principal in multisig mode prints one line carrying both instructions", async () => {
-    const { chain, sent } = await harness();
-    const multisigVault = Keypair.generate().publicKey;
-    const mode: AdminMode = { signer: multisigVault, multisig: true };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "withdraw-principal", amount: "12.5" }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toHaveLength(1);
-    const tx = Transaction.from(bs58.decode(stdout[0] as string));
-    // The destination ATA does not exist yet, so its idempotent creation
-    // rides along in front of admin_withdraw.
-    expect(tx.instructions).toHaveLength(2);
-    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
-    // 12.5 USDC against the mint's six decimals, in the summary on stderr.
-    expect(stderr.join("\n")).toContain("12500000 atomic");
-    // No part of the human-readable summary leaked into the paste.
-    expect(stdout[0]).not.toContain(" ");
   });
 
   it("unpause with a Ledger signer sends through the Ledger, not chain.send (ticket 09)", async () => {
@@ -496,6 +428,164 @@ describe("admin run", () => {
     ).rejects.toThrow(/transaction .* failed/);
   });
 
+  // venue-switch ticket 03: local, Ledger and multisig modes.
+  const proposeVenue = {
+    kind: "propose-venue" as const,
+    venueKind: 0,
+    program: Keypair.generate().publicKey,
+    market: Keypair.generate().publicKey,
+    reserve: Keypair.generate().publicKey,
+    ctoken: Keypair.generate().publicKey,
+  };
+  const proposalPda = PublicKey.findProgramAddressSync(
+    [Buffer.from("venue_proposal"), POOL.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+
+  it("propose-venue and cancel-venue sign locally and carry the proposal PDA", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    const { stdout } = await capture(async () => {
+      await run(proposeVenue, chain, mode);
+      await run({ kind: "cancel-venue" }, chain, mode);
+    });
+
+    expect(stdout).toEqual([]);
+    expect(sent).toHaveLength(2);
+    const propose = decodeInstruction(sent[0]?.[0]?.data);
+    expect(propose?.name).toBe("propose_venue");
+    expect(sent[0]?.[0]?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
+    expect(decodeInstruction(sent[1]?.[0]?.data)?.name).toBe("cancel_venue");
+    expect(sent[1]?.[0]?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
+  });
+
+  it("set-operator names the Pool's House so the program can hand it to the new Operator", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+    const key = Keypair.generate().publicKey;
+
+    await capture(() => run({ kind: "set-operator", key }, chain, mode));
+
+    const ix = sent[0]?.[0];
+    expect(decodeInstruction(ix?.data)?.name).toBe("set_operator");
+    const keys = ix?.keys.map((k) => k.pubkey.toBase58());
+    expect(keys).toContain(poolFields.house.toBase58());
+  });
+
+  it("propose-venue and cancel-venue in multisig mode print one transaction signed by the vault", async () => {
+    const { chain, sent } = await harness();
+    const vault = Keypair.generate().publicKey;
+    const mode: AdminMode = { signer: vault, multisig: true };
+    for (const command of [proposeVenue, { kind: "cancel-venue" as const }]) {
+      const { stdout } = await capture(() => run(command, chain, mode));
+      expect(stdout).toHaveLength(1);
+      const tx = Transaction.from(bs58.decode(stdout[0] as string));
+      expect(tx.feePayer?.equals(vault)).toBe(true);
+      expect(tx.instructions[0]?.keys.some((k) => k.isSigner && k.pubkey.equals(vault))).toBe(true);
+    }
+    expect(sent).toEqual([]);
+  });
+
+  it("propose-venue and cancel-venue with a Ledger send through it", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const ledgerKeypair = Keypair.generate();
+    const mode: AdminMode = { signer: ledgerKeypair.publicKey, multisig: false };
+    await capture(async () => {
+      await run(proposeVenue, chain, mode, fakeLedger(ledgerKeypair));
+      await run({ kind: "cancel-venue" }, chain, mode, fakeLedger(ledgerKeypair));
+    });
+    expect(sent).toEqual([]);
+    expect(rawSent).toHaveLength(2);
+  });
+
+  // venue-switch ticket 04: the deploy pause and the drain are one transaction.
+  it("drain-venue signs locally and sends the deploy pause with the drain in one transaction", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "drain-venue", amount: 1_500_000n }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    const [pause, drain] = sent[0] ?? [];
+    expect(decodeInstruction(pause?.data)).toMatchObject({ name: "set_deploy_pause" });
+    const decoded = decodeInstruction(drain?.data) as { name: string; data: { amount: BN } };
+    expect(decoded.name).toBe("drain_venue");
+    expect(decoded.data.amount.toString()).toBe("1500000");
+    expect(drain?.keys.some((k) => k.isSigner && k.pubkey.equals(mode.signer))).toBe(true);
+    expect(drain?.keys.map((k) => k.pubkey.toBase58())).toContain(proposalPda.toBase58());
+  });
+
+  it("drain-venue in multisig mode prints one transaction carrying both instructions, signed by the vault", async () => {
+    const { chain, sent } = await harness();
+    const vault = Keypair.generate().publicKey;
+    const mode: AdminMode = { signer: vault, multisig: true };
+
+    const { stdout } = await capture(() => run({ kind: "drain-venue", amount: 7n }, chain, mode));
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(vault)).toBe(true);
+    expect(tx.instructions.map((ix) => decodeInstruction(ix.data)?.name)).toEqual([
+      "set_deploy_pause",
+      "drain_venue",
+    ]);
+    expect(tx.instructions[1]?.keys.some((k) => k.isSigner && k.pubkey.equals(vault))).toBe(true);
+  });
+
+  it("drain-venue with a Ledger sends both instructions through it", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const ledgerKeypair = Keypair.generate();
+    const mode: AdminMode = { signer: ledgerKeypair.publicKey, multisig: false };
+    await capture(() =>
+      run({ kind: "drain-venue", amount: 7n }, chain, mode, fakeLedger(ledgerKeypair)),
+    );
+    expect(sent).toEqual([]);
+    expect(rawSent).toHaveLength(1);
+  });
+
+  // venue-switch ticket 05: permissionless, so any signer only pays the fee.
+  it("migrate-venue signs locally and names the proposal, the Admin who gets the rent and the old pins", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "migrate-venue" }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    const ix = sent[0]?.[0];
+    expect(decodeInstruction(ix?.data)?.name).toBe("migrate_venue");
+    const keys = ix?.keys.map((k) => k.pubkey.toBase58()) ?? [];
+    expect(keys).toContain(proposalPda.toBase58());
+    expect(keys).toContain(poolFields.admin.toBase58());
+    // Permissionless: the signer is not among the instruction's signers.
+    expect(ix?.keys.some((k) => k.isSigner)).toBe(false);
+  });
+
+  it("migrate-venue in multisig mode prints one transaction paid by the vault, and with a Ledger sends through it", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const vault = Keypair.generate().publicKey;
+    const { stdout } = await capture(() =>
+      run({ kind: "migrate-venue" }, chain, { signer: vault, multisig: true }),
+    );
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(vault)).toBe(true);
+    expect(decodeInstruction(tx.instructions[0]?.data)?.name).toBe("migrate_venue");
+
+    const ledgerKeypair = Keypair.generate();
+    await capture(() =>
+      run(
+        { kind: "migrate-venue" },
+        chain,
+        { signer: ledgerKeypair.publicKey, multisig: false },
+        fakeLedger(ledgerKeypair),
+      ),
+    );
+    expect(sent).toEqual([]);
+    expect(rawSent).toHaveLength(1);
+  });
+
   // game-jackpot-pause ticket 02.
   it("pause-game signs locally with the loaded key", async () => {
     const { chain, sent } = await harness();
@@ -505,6 +595,57 @@ describe("admin run", () => {
 
     expect(sent).toHaveLength(1);
     expect(stderr).toContain("game paused");
+  });
+
+  // yield-claimer ticket 10.
+  it("pause-deploy signs locally with the loaded key, the operator's included", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    const { stderr } = await capture(() => run({ kind: "pause-deploy" }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    expect(stderr).toContain("deploy paused");
+  });
+
+  // fork-run-fixes ticket 04: the operator key still signs and sends when
+  // ADMIN_ADDRESS is the multisig, so the CLI must not say nothing is sent.
+  it("pause-deploy in multisig mode signs with the loaded key and does not say nothing will be sent", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: Keypair.generate().publicKey, multisig: true };
+
+    const { stdout, stderr } = await capture(() => run({ kind: "pause-deploy" }, chain, mode));
+
+    expect(sent).toHaveLength(1);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual(["signature signature", "deploy paused"]);
+  });
+
+  it("start-deploy refuses an operator signer before sending", async () => {
+    const { chain, sent, rawSent } = await harness();
+    const mode: AdminMode = { signer: poolFields.operator, multisig: false };
+
+    await expect(
+      capture(() => run({ kind: "start-deploy" }, chain, mode)),
+    ).rejects.toThrow(/start-deploy is admin only: .* is the operator/);
+    expect(sent).toEqual([]);
+    expect(rawSent).toEqual([]);
+  });
+
+  it("start-deploy in multisig mode prints one base58 transaction signed by the admin", async () => {
+    const multisigVault = Keypair.generate().publicKey;
+    const { chain, sent } = await harness({ pool: { admin: multisigVault } });
+    const mode: AdminMode = { signer: multisigVault, multisig: true };
+
+    const { stdout, stderr } = await capture(() => run({ kind: "start-deploy" }, chain, mode));
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+    expect(stderr).toContain(
+      `admin is ${multisigVault.toBase58()}, not the loaded key: nothing will be sent`,
+    );
   });
 
   it("start-jackpot refuses an operator signer before sending", async () => {
@@ -546,82 +687,6 @@ describe("admin run", () => {
     expect(rawSent).toHaveLength(1);
   });
 
-  it("principal-out reads the pool and vault and sends nothing", async () => {
-    const { chain, sent } = await harness({
-      pool: {
-        totalPrincipal: new BN(3_000_000),
-        pendingWithdrawals: new BN(250_000),
-        yieldBudget: new BN(100_000),
-      },
-      vaultBalance: 1_000_000n,
-    });
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "principal-out" }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toEqual([]);
-    // 3,000,000 + 250,000 + 100,000 - 1,000,000.
-    expect(stderr.join("\n")).toContain("principal_out=2350000");
-  });
-
-  it("return-principal in local mode transfers from the admin's own ATA and prints before/after", async () => {
-    const { chain, sent } = await harness({
-      pool: {
-        totalPrincipal: new BN(3_000_000),
-        pendingWithdrawals: new BN(250_000),
-        yieldBudget: new BN(100_000),
-      },
-      vaultBalance: 1_000_000n,
-    });
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "return-principal", amount: "1" }, chain, mode),
-    );
-
-    expect(sent).toHaveLength(1);
-    // Just the transfer: the admin's own source ATA is assumed to already
-    // exist, same as fundJackpot/fundYield's own source reads.
-    expect(sent[0]).toHaveLength(1);
-    expect(stdout).toEqual([]);
-    const lines = stderr.join("\n");
-    expect(lines).toContain("1000000 atomic");
-    expect(lines).toMatch(/before:.*principal_out=2350000/);
-    expect(lines).toMatch(/after:.*principal_out=2350000/);
-  });
-
-  it("return-principal's transfer names the pool's own principal vault and accepted mint, never a substitute account", async () => {
-    const { chain, sent } = await harness({ vaultBalance: 1_000_000n });
-    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
-
-    await run({ kind: "return-principal", amount: "1" }, chain, mode);
-
-    const keys = sent[0]?.[0]?.keys.map((k) => k.pubkey.toBase58()) ?? [];
-    expect(keys).toContain(principalVaultAddress(PROGRAM_ID, POOL).toBase58());
-    expect(keys).toContain(MINT.toBase58());
-    // Not the jackpot vault: return-principal only ever moves principal.
-    expect(keys).not.toContain(jackpotVaultAddress(PROGRAM_ID, POOL).toBase58());
-  });
-
-  it("return-principal in multisig mode prints principal-out before, not after", async () => {
-    const { chain, sent } = await harness({ vaultBalance: 1_000_000n });
-    const multisigVault = Keypair.generate().publicKey;
-    const mode: AdminMode = { signer: multisigVault, multisig: true };
-
-    const { stdout, stderr } = await capture(() =>
-      run({ kind: "return-principal", amount: "1" }, chain, mode),
-    );
-
-    expect(sent).toEqual([]);
-    expect(stdout).toHaveLength(1);
-    const lines = stderr.join("\n");
-    expect(lines).toContain("before:");
-    expect(lines).not.toContain("after:");
-  });
-
   it("shutdown refuses unless --confirm matches the configured pool, irreversible or not", async () => {
     const { chain, sent } = await harness();
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
@@ -646,7 +711,8 @@ describe("admin run", () => {
     const { chain, sent } = await harness({
       players: [
         { owner: alice, principal: 1_000_000n, pendingWithdraw: 0n },
-        { owner: bob, principal: 0n, pendingWithdraw: 500_000n },
+        // A queued withdrawal is inside Principal, so Bob's 500,000 is all of it.
+        { owner: bob, principal: 500_000n, pendingWithdraw: 500_000n },
       ],
     });
     const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
@@ -703,13 +769,12 @@ describe("admin run", () => {
     expect(stderr.join("\n")).toContain("paid 1, skipped 0");
   });
 
-  it("emergency-crank stops at the first InsufficientVault and prints principal-out", async () => {
+  it("emergency-crank stops at the first InsufficientVault and prints the vault balance", async () => {
     const alice = Keypair.generate().publicKey;
     const { chain, sent } = await harness({
       pool: {
         totalPrincipal: new BN(1_000_000),
         pendingWithdrawals: new BN(0),
-        yieldBudget: new BN(0),
       },
       vaultBalance: 500_000n,
       players: [{ owner: alice, principal: 1_000_000n, pendingWithdraw: 0n }],
@@ -726,7 +791,7 @@ describe("admin run", () => {
     expect(sent).toEqual([]);
     const lines = stderr.join("\n");
     expect(lines).toContain("insufficient vault");
-    expect(lines).toContain("principal_out=500000");
+    expect(lines).toContain("principal vault holds 500000");
     expect(lines).toContain("paid 0, skipped 1");
   });
 
@@ -744,6 +809,116 @@ describe("admin run", () => {
     );
     expect(multisig.sent).toEqual([]);
     expect(stdout).toHaveLength(1);
+  });
+
+  // mainnet-review-fixes ticket 05.
+  it("start-buy-tickets sends set_buy_tickets_pause(false) and pause-buy-tickets sends true", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "start-buy-tickets" }, chain, mode));
+    await capture(() => run({ kind: "pause-buy-tickets" }, chain, mode));
+
+    expect(sent.map((batch) => decodeInstruction(batch[0]?.data))).toEqual([
+      { name: "set_buy_tickets_pause", data: { paused: false } },
+      { name: "set_buy_tickets_pause", data: { paused: true } },
+    ]);
+    expect(sent[0]?.[0]?.keys.find((key) => key.isSigner)?.pubkey.equals(mode.signer)).toBe(true);
+  });
+
+  it("set-venue-params sends only the fields given, the rest null", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() =>
+      run(
+        {
+          kind: "set-venue-params",
+          params: { idleFloorBps: 0, minVenueMove: 5_000_000n },
+        },
+        chain,
+        mode,
+      ),
+    );
+
+    const decoded = decodeInstruction(sent[0]?.[0]?.data) as {
+      name: string;
+      data: { params: Record<string, BN | number | null> };
+    };
+    expect(decoded.name).toBe("set_venue_params");
+    const { params } = decoded.data;
+    expect(params.idle_floor_bps).toBe(0);
+    expect(params.min_venue_move?.toString()).toBe("5000000");
+    for (const field of [
+      "yield_fee_bps",
+      "idle_target_bps",
+      "reserve_share_cap_bps",
+      "reserve_liquidity_floor_bps",
+      "loss_tolerance_bps",
+    ]) {
+      expect(params[field]).toBeNull();
+    }
+  });
+
+  it("set-treasury-accounts in multisig mode prints one transaction naming both accounts", async () => {
+    const { chain, sent } = await harness();
+    const multisigVault = Keypair.generate().publicKey;
+    const mode: AdminMode = { signer: multisigVault, multisig: true };
+    const treasury = Keypair.generate().publicKey;
+    const buybackReserve = Keypair.generate().publicKey;
+
+    const { stdout } = await capture(() =>
+      run({ kind: "set-treasury-accounts", treasury, buybackReserve }, chain, mode),
+    );
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+    const keys = tx.instructions[0]?.keys ?? [];
+    expect(keys.some((key) => key.isSigner && key.pubkey.equals(multisigVault))).toBe(true);
+    expect(keys.some((key) => key.pubkey.equals(treasury))).toBe(true);
+    expect(keys.some((key) => key.pubkey.equals(buybackReserve))).toBe(true);
+  });
+
+  it("cover-deficit in local mode pays from the loaded key's own USDC account", async () => {
+    const { chain, sent } = await harness();
+    const mode: AdminMode = { signer: chain.keypair.publicKey, multisig: false };
+
+    await capture(() => run({ kind: "cover-deficit", amount: 2_000_000n }, chain, mode));
+
+    const ix = sent[0]?.[0] as TransactionInstruction;
+    const decoded = decodeInstruction(ix.data) as { name: string; data: { amount: BN } };
+    expect(decoded.name).toBe("cover_deficit");
+    expect(decoded.data.amount.toString()).toBe("2000000");
+    expect(ix.keys.find((key) => key.isSigner)?.pubkey.equals(mode.signer)).toBe(true);
+    expect(
+      ix.keys.some((key) =>
+        key.pubkey.equals(getAssociatedTokenAddressSync(MINT, mode.signer)),
+      ),
+    ).toBe(true);
+  });
+
+  it("cover-deficit in multisig mode prints one transaction paid by the multisig vault", async () => {
+    const { chain, sent } = await harness();
+    // A PDA stands in for the Squads vault: its token account owner is off the curve.
+    const [multisigVault] = PublicKey.findProgramAddressSync([Buffer.from("vault")], PROGRAM_ID);
+    const mode: AdminMode = { signer: multisigVault, multisig: true };
+
+    const { stdout } = await capture(() =>
+      run({ kind: "cover-deficit", amount: 2_000_000n }, chain, mode),
+    );
+
+    expect(sent).toEqual([]);
+    expect(stdout).toHaveLength(1);
+    const tx = Transaction.from(bs58.decode(stdout[0] as string));
+    expect(tx.feePayer?.equals(multisigVault)).toBe(true);
+    expect(
+      tx.instructions[0]?.keys.some(
+        (key) =>
+          key.pubkey.equals(getAssociatedTokenAddressSync(MINT, multisigVault, true)),
+      ),
+    ).toBe(true);
   });
 });
 

@@ -1,8 +1,11 @@
 // The pool parameters bootstrap passes to `create_pool`, and the two CLI
 // flags that override them. Split out of bootstrap.ts so a unit test can
 // import it without the script's chain calls running on import.
+import { KVAULT_PROGRAM_ID, sharesMintAddress } from "../chain/kvault";
+import { VENUE_KIND } from "../chain/venue-kind";
 import { parseArgs } from "node:util";
 
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey } from "@solana/web3.js";
 
 export interface PoolParams {
@@ -19,31 +22,17 @@ export interface PoolParams {
   readonly epochSeconds: number;
   /** Unix seconds. Fixes the phase of the `anchor + k * epochSeconds` grid. */
   readonly epochAnchor: number;
-  readonly roundSeconds: number;
-  readonly closeBuffer: number;
   readonly vrfTimeout: number;
   readonly minDeposit: bigint;
-  /** Basis points of every settled round pot credited to the House, 0..=10_000. */
-  readonly houseCutBps: number;
   /** Atomic units. An epoch closing with less than this in the jackpot vault
    * rolls over instead of paying out dust. */
   readonly minJackpot: bigint;
-  /** Seconds past an epoch's end before `close_registration` is allowed, so
-   * late registrants are never drawn past. 0 <= this < epochSeconds. */
-  readonly registrationWindow: number;
   /** Seconds a Drawn epoch waits for its payout before it may roll over
    * unpaid. */
   readonly payoutTimeout: number;
-  /** Base yield's APR on time-weighted Principal, in basis points. Env
-   *  override BASE_RATE_BPS. */
+  /** Ceiling on the depositors' share of venue yield, as an APR on
+   *  `total_principal` in basis points. Env override BASE_RATE_BPS. */
   readonly baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. Env override
-   *  TICKETS_PER_USDC. */
-  readonly ticketsPerUsdc: number;
-  /** Share of `total_principal`, in basis points, an operator
-   * `grant_tickets` call may credit pool-wide per epoch. Env override
-   * BONUS_CAP_BPS. */
-  readonly bonusCapBps: number;
   /** game-jackpot-pause ticket 02: a new pool starts with the game and the
    *  jackpot paused. `--start` turns both off right after create_pool, for
    *  localnet and dev. Needs the signer to be the admin. */
@@ -68,9 +57,8 @@ export function nextSundayAnchor(now: Date): number {
 }
 
 /**
- * A numeric env override with a fallback, shared by BASE_RATE_BPS,
- * TICKETS_PER_USDC and BONUS_CAP_BPS (ADR 0011): a bad value fails bootstrap
- * immediately instead of silently keeping whatever was typed. Unset or empty
+ * A numeric env override with a fallback, used by BASE_RATE_BPS (ADR 0011):
+ * a bad value fails bootstrap immediately instead of silently keeping whatever was typed. Unset or empty
  * takes the fallback. Pure, like `env.ts`'s `solWarn`: the caller reads
  * `process.env` and hands the raw value in, so this is testable without
  * touching the environment.
@@ -88,13 +76,10 @@ export function envInt(label: string, raw: string | undefined, fallback: number)
 export const DEFAULT_POOL_PARAMS: PoolParams = {
   epochSeconds: 86_400,
   epochAnchor: nextSundayAnchor(new Date()),
-  roundSeconds: 90,
-  closeBuffer: 5,
-  vrfTimeout: 120,
+  // Equal to the program's floor, MIN_VRF_TIMEOUT in constants.rs.
+  vrfTimeout: 180,
   minDeposit: 1_000_000n, // 1 hexUSDC at 6 decimals
-  houseCutBps: 600, // 6%, the rate PRD-V2 §5.4 asks for
   minJackpot: 1_000_000n, // 1 hexUSDC at 6 decimals
-  registrationWindow: 600, // 10 minutes for the crank to register everyone
   // A day less an hour before an unpayable winner rolls over. Strictly less
   // than epochSeconds: set_params requires payout_timeout < epoch_seconds
   // (beta-launch-fixes ticket 03), so bootstrap's own defaults have to hold
@@ -102,13 +87,10 @@ export const DEFAULT_POOL_PARAMS: PoolParams = {
   payoutTimeout: 82_800,
   // ~5% APY with daily compounding.
   baseRateBps: envInt("BASE_RATE_BPS", process.env.BASE_RATE_BPS, 488),
-  ticketsPerUsdc: envInt("TICKETS_PER_USDC", process.env.TICKETS_PER_USDC, 10),
-  // 5% of total_principal per epoch.
-  bonusCapBps: envInt("BONUS_CAP_BPS", process.env.BONUS_CAP_BPS, 500),
 };
 
 export const USAGE =
-  "usage: bootstrap [--epoch-seconds N] [--round-seconds N] [--epoch-anchor ISO8601] [--house-cut-bps N] [--min-jackpot USDC] [--registration-window N] [--payout-timeout N] [--admin PUBKEY] [--operator PUBKEY] [--treasury PUBKEY] [--buyback-reserve PUBKEY] [--start]";
+  "usage: bootstrap [--epoch-seconds N] [--epoch-anchor ISO8601] [--min-jackpot USDC] [--payout-timeout N] [--admin PUBKEY] [--operator PUBKEY] [--treasury PUBKEY] [--buyback-reserve PUBKEY] [--start]";
 
 /** mainnet-beta's genesis hash. Every other cluster (devnet, testnet,
  * localnet) keeps today's hot-key convenience defaults. */
@@ -157,6 +139,189 @@ export function assertMainnetSafe(input: MainnetGuardInput): void {
   }
 }
 
+/**
+ * Mainnet only: the Treasury and Buyback reserve are real token accounts that
+ * receive every fee and House win, so a pasted account owned by someone else
+ * would send them to a stranger. The mint check cannot see that. Names the
+ * owner it found so the operator can see whose account it is.
+ */
+export function assertTokenAccountOwner(
+  genesisHash: string,
+  flag: string,
+  address: PublicKey,
+  owner: PublicKey,
+  admin: PublicKey,
+): void {
+  if (genesisHash !== MAINNET_GENESIS_HASH) return;
+  if (!owner.equals(admin)) {
+    throw new Error(
+      `--${flag} ${address.toBase58()} is owned by ${owner.toBase58()}, not by the admin ${admin.toBase58()}; refusing on mainnet`,
+    );
+  }
+}
+
+/**
+ * Whether bootstrap sets the pool's Bought Tickets switch (yield-claimer
+ * ticket 11, ADR 0019). On by default on mainnet-beta, off on every other
+ * cluster; `BUY_TICKETS_PAUSED=true|false` overrides either way, and the
+ * mainnet env template sets it to true. `raw` is the env value, handed in
+ * so this stays pure.
+ */
+export function buyTicketsPausedFor(
+  genesisHash: string,
+  raw: string | undefined,
+): boolean {
+  const value = raw?.trim() ?? "";
+  if (value === "") return genesisHash === MAINNET_GENESIS_HASH;
+  if (value !== "true" && value !== "false") {
+    throw new Error(`BUY_TICKETS_PAUSED must be true or false, got "${raw}"`);
+  }
+  return value === "true";
+}
+
+/** The four accounts `create_pool` pins as the Pool's first venue. `migrate_venue` can repin it later (ADR 0023). */
+export interface VenuePins {
+  readonly klendProgram: PublicKey;
+  readonly klendMarket: PublicKey;
+  readonly klendReserve: PublicKey;
+  readonly klendCtoken: PublicKey;
+  /** The `Pool.venue_kind` byte `create_pool` takes alongside them. */
+  readonly kind: number;
+  /** Set when `klendCtoken` is the Pool's own ATA of this mint, which
+   * bootstrap then has to create: nothing else will before the first deploy. */
+  readonly ctokenMint?: PublicKey;
+}
+
+/** Kamino's USDC reserve on its main market, read 2026-10-04 (yield-claimer
+ * progress-01, tests/fork/klend.fork.ts). `cmint` is the reserve's cToken mint. */
+const MAINNET_KLEND = {
+  KLEND_PROGRAM: "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD",
+  KLEND_MARKET: "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF",
+  KLEND_RESERVE: "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59",
+  cmint: "B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D",
+} as const;
+
+/**
+ * The venue `create_pool` pins (yield-claimer ticket 12). Mainnet defaults to
+ * Kamino's USDC reserve, each of KLEND_PROGRAM, KLEND_MARKET, KLEND_RESERVE and
+ * KLEND_CTOKEN overriding its own; with KLEND_RESERVE set, KLEND_CTOKEN has to
+ * be too, since the cToken account belongs to the reserve. Every other cluster
+ * must name all four, because a wrong pin costs a 48 hour venue change to undo and there
+ * is no safe guess. `VENUE_KIND` (klend, the default, stub or kvault) names the backing;
+ * `stub` pins the `test-venue` build's stub (localnet only, bootstrap then runs
+ * `test_venue_init`), and `KLEND_VENUE=test` is the older spelling of it.
+ * `kvault` pins a Kamino Earn vault: `KVAULT_ADDRESS` (the vault state, required,
+ * no default) and optionally `KVAULT_PROGRAM`; the four KLEND_* variables are
+ * not read.
+ * `env` is handed in so this stays pure.
+ */
+export function venuePinsFor(
+  genesisHash: string,
+  env: Readonly<Record<string, string | undefined>>,
+  pool: PublicKey,
+  programId: PublicKey,
+): VenuePins {
+  const mainnet = genesisHash === MAINNET_GENESIS_HASH;
+  const named = env.VENUE_KIND?.trim().toLowerCase() || undefined;
+  if (named !== undefined && !(named in VENUE_KIND)) {
+    throw new Error(`VENUE_KIND must be ${Object.keys(VENUE_KIND).join(" or ")}, got "${env.VENUE_KIND}"`);
+  }
+  const legacyStub = env.KLEND_VENUE?.trim() === "test";
+  if (legacyStub && named === "klend") {
+    throw new Error("KLEND_VENUE=test and VENUE_KIND=klend contradict each other");
+  }
+  if (legacyStub || named === "stub") {
+    if (mainnet) throw new Error(`${legacyStub ? "KLEND_VENUE=test" : "VENUE_KIND=stub"} is refused on mainnet`);
+    const stub = (seed: string): PublicKey =>
+      PublicKey.findProgramAddressSync([Buffer.from(seed), pool.toBuffer()], programId)[0];
+    return {
+      klendProgram: programId,
+      klendMarket: pool,
+      klendReserve: stub("test-venue-reserve"),
+      klendCtoken: stub("test-venue-vault"),
+      kind: VENUE_KIND.stub,
+    };
+  }
+  const read = (key: string): PublicKey | undefined => {
+    const raw = env[key]?.trim();
+    if (!raw) return undefined;
+    try {
+      return new PublicKey(raw);
+    } catch (cause) {
+      throw new Error(`${key} must be a base58 pubkey, got "${raw}"`, { cause });
+    }
+  };
+  if (named === "kvault") {
+    // The vault is the one input; the shares mint is a PDA of it and the
+    // pool's shares account is the pool's ATA of that mint, which bootstrap
+    // creates. No default vault, even on mainnet: which Earn vault holds the
+    // pool's money is the team's call, and the program checks all four pins
+    // against the vault state either way.
+    const vault = read("KVAULT_ADDRESS");
+    if (!vault) throw new Error("VENUE_KIND=kvault needs KVAULT_ADDRESS, the Earn vault's state account");
+    const program = read("KVAULT_PROGRAM") ?? KVAULT_PROGRAM_ID;
+    const sharesMint = sharesMintAddress(vault, program);
+    return {
+      klendProgram: program,
+      klendMarket: vault,
+      klendReserve: sharesMint,
+      klendCtoken: getAssociatedTokenAddressSync(sharesMint, pool, true),
+      kind: VENUE_KIND.kvault,
+      ctokenMint: sharesMint,
+    };
+  }
+  const klendProgram = read("KLEND_PROGRAM") ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_PROGRAM) : undefined);
+  const klendMarket = read("KLEND_MARKET") ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_MARKET) : undefined);
+  const reserve = read("KLEND_RESERVE");
+  const klendReserve = reserve ?? (mainnet ? new PublicKey(MAINNET_KLEND.KLEND_RESERVE) : undefined);
+  const ctoken = read("KLEND_CTOKEN");
+  const ctokenMint = mainnet && !reserve && !ctoken ? new PublicKey(MAINNET_KLEND.cmint) : undefined;
+  const klendCtoken = ctoken ?? (ctokenMint && getAssociatedTokenAddressSync(ctokenMint, pool, true));
+
+  const missing = Object.entries({
+    KLEND_PROGRAM: klendProgram,
+    KLEND_MARKET: klendMarket,
+    KLEND_RESERVE: klendReserve,
+    KLEND_CTOKEN: klendCtoken,
+  }).filter(([, value]) => !value).map(([key]) => key);
+  if (!klendProgram || !klendMarket || !klendReserve || !klendCtoken) {
+    throw new Error(
+      `${missing.join(", ")} must be set${mainnet ? "" : " off mainnet (or KLEND_VENUE=test on a test-venue localnet)"}`,
+    );
+  }
+  return { klendProgram, klendMarket, klendReserve, klendCtoken, kind: VENUE_KIND.klend, ...(ctokenMint ? { ctokenMint } : {}) };
+}
+
+/** Env keys that name a venue. Any of them set, or mainnet, means the env has a venue to compare. */
+const VENUE_ENV_KEYS = [
+  "VENUE_KIND",
+  "KLEND_VENUE",
+  "KLEND_PROGRAM",
+  "KLEND_MARKET",
+  "KLEND_RESERVE",
+  "KLEND_CTOKEN",
+  "KVAULT_ADDRESS",
+  "KVAULT_PROGRAM",
+] as const;
+
+/**
+ * The venue pins the env names, for comparing against an existing Pool
+ * (mainnet-readiness-fixes 06). `venuePinsFor` throws when a non-mainnet env
+ * names nothing, which is right when a pool is about to be created and wrong
+ * here, so an env with no venue key set gives undefined (nothing to compare).
+ * Mainnet always has an answer: the defaults are Kamino's USDC reserve.
+ */
+export function expectedVenuePins(
+  genesisHash: string,
+  env: Readonly<Record<string, string | undefined>>,
+  pool: PublicKey,
+  programId: PublicKey,
+): VenuePins | undefined {
+  const named = VENUE_ENV_KEYS.some((key) => (env[key]?.trim() ?? "") !== "");
+  if (!named && genesisHash !== MAINNET_GENESIS_HASH) return undefined;
+  return venuePinsFor(genesisHash, env, pool, programId);
+}
+
 /** The accepted mint is 6 decimals on every cluster we run on (bootstrap.ts
  * rejects any other), so whole USDC scales by a constant. */
 const USDC_DECIMALS = 1_000_000n;
@@ -178,23 +343,20 @@ function pubkey(flag: string, raw: string): PublicKey {
   }
 }
 
-/** `min` is 0 for the one flag create_pool lets be zero, the registration
- *  window; every other duration has to be positive. */
-function seconds(flag: string, raw: string, min = 1): number {
+function seconds(flag: string, raw: string): number {
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < min) {
-    const bound = min === 0 ? "non-negative" : "positive";
+  if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(
-      `--${flag} must be a ${bound} whole number of seconds, got "${raw}"`,
+      `--${flag} must be a positive whole number of seconds, got "${raw}"`,
     );
   }
   return value;
 }
 
-/** create_pool and set_params both cap the House cut at 10_000 bps (100%). */
+/** A basis-point rate, 0..=10_000 (100%). */
 export function houseCutBps(flag: string, raw: string): number {
   const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0 || value > 10_000) {
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value > 10_000) {
     throw new Error(
       `--${flag} must be a whole number from 0 to 10000, got "${raw}"`,
     );
@@ -220,11 +382,8 @@ export function isoSeconds(flag: string, raw: string): number {
 export function parsePoolParams(argv: readonly string[]): PoolParams {
   let values: {
     "epoch-seconds"?: string;
-    "round-seconds"?: string;
     "epoch-anchor"?: string;
-    "house-cut-bps"?: string;
     "min-jackpot"?: string;
-    "registration-window"?: string;
     "payout-timeout"?: string;
     admin?: string;
     operator?: string;
@@ -237,11 +396,8 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
       args: [...argv],
       options: {
         "epoch-seconds": { type: "string" },
-        "round-seconds": { type: "string" },
         "epoch-anchor": { type: "string" },
-        "house-cut-bps": { type: "string" },
         "min-jackpot": { type: "string" },
-        "registration-window": { type: "string" },
         "payout-timeout": { type: "string" },
         admin: { type: "string" },
         operator: { type: "string" },
@@ -256,35 +412,18 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
   }
 
   const epochSeconds = values["epoch-seconds"];
-  const roundSeconds = values["round-seconds"];
   const epochAnchor = values["epoch-anchor"];
-  const houseCut = values["house-cut-bps"];
   const params: PoolParams = {
     ...DEFAULT_POOL_PARAMS,
     ...(epochSeconds === undefined
       ? {}
       : { epochSeconds: seconds("epoch-seconds", epochSeconds) }),
-    ...(roundSeconds === undefined
-      ? {}
-      : { roundSeconds: seconds("round-seconds", roundSeconds) }),
     ...(epochAnchor === undefined
       ? {}
       : { epochAnchor: isoSeconds("epoch-anchor", epochAnchor) }),
-    ...(houseCut === undefined
-      ? {}
-      : { houseCutBps: houseCutBps("house-cut-bps", houseCut) }),
     ...(values["min-jackpot"] === undefined
       ? {}
       : { minJackpot: wholeUsdc("min-jackpot", values["min-jackpot"]) }),
-    ...(values["registration-window"] === undefined
-      ? {}
-      : {
-          registrationWindow: seconds(
-            "registration-window",
-            values["registration-window"],
-            0,
-          ),
-        }),
     ...(values["payout-timeout"] === undefined
       ? {}
       : { payoutTimeout: seconds("payout-timeout", values["payout-timeout"]) }),
@@ -305,26 +444,11 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
     ...(values.start === true ? { start: true } : {}),
   };
 
-  // create_pool requires close_buffer < round_seconds, so a too-fast demo
-  // pool fails here with a readable message instead of InvalidParameter
-  // after the mint and both token accounts have already been created.
-  if (params.closeBuffer >= params.roundSeconds) {
-    throw new Error(
-      `--round-seconds must be greater than the ${params.closeBuffer}s close buffer`,
-    );
-  }
   // Treasury and buyback_reserve share (mint, owner) when both are the ATA,
   // so create_pool cannot tell them apart; catch the same-address case here
   // rather than after both accounts have been checked to exist.
   if (params.treasury && params.buybackReserve && params.treasury.equals(params.buybackReserve)) {
     throw new Error("--treasury and --buyback-reserve must differ");
-  }
-  // Same rule, same reason: create_pool requires registration_window <
-  // epoch_seconds, and failing here costs nothing.
-  if (params.registrationWindow >= params.epochSeconds) {
-    throw new Error(
-      `--epoch-seconds must be greater than the ${params.registrationWindow}s registration window`,
-    );
   }
   // set_params requires payout_timeout < epoch_seconds (beta-launch-fixes
   // ticket 03); create_pool doesn't enforce it, but a pool bootstrapped past

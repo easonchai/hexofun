@@ -29,5 +29,9 @@ WORKDIR /repo/apps/backend
 COPY --from=build /repo/node_modules /repo/node_modules
 COPY --from=build /repo/apps/backend /repo/apps/backend
 
+# The node image ships an unprivileged `node` user (uid 1000). Nothing at
+# runtime writes under /repo; files stay root-owned and world-readable.
+USER node
+
 EXPOSE 8080
 CMD ["sh", "-c", "node_modules/.bin/prisma migrate deploy && node dist/main.js"]

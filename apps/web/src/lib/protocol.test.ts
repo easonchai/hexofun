@@ -51,7 +51,7 @@ describe("tile mask parsing", () => {
 describe("state labels", () => {
   it("names every epoch status", () => {
     expect(labelEpochStatus(0)).toBe("Open");
-    expect(labelEpochStatus(1)).toBe("Registering");
+    expect(labelEpochStatus(1)).toBe("Ended");
     expect(labelEpochStatus(2)).toBe("Drawing");
     expect(labelEpochStatus(3)).toBe("Drawn");
     expect(labelEpochStatus(4)).toBe("Paid");
@@ -69,7 +69,7 @@ describe("state labels", () => {
 
   it("accepts the API's decimal strings and passes names through", () => {
     expect(labelRoundStatus("2")).toBe("Settled");
-    expect(labelEpochStatus("1")).toBe("Registering");
-    expect(labelEpochStatus("Registering")).toBe("Registering");
+    expect(labelEpochStatus("1")).toBe("Ended");
+    expect(labelEpochStatus("Ended")).toBe("Ended");
   });
 });

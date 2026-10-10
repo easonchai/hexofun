@@ -15,7 +15,6 @@ import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import { FastifyAdapter } from "@nestjs/platform-fastify";
 import { Test } from "@nestjs/testing";
 import type { Player, Pool } from "@prisma/client";
-import { Prisma } from "@prisma/client";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import request from "supertest";
@@ -25,6 +24,7 @@ import { ChainService } from "../chain/chain.service";
 import { PrismaModule } from "../prisma/prisma.module";
 import { PrismaService } from "../prisma/prisma.service";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
+import { LIVE_PLAYER_DEFAULTS, LIVE_POOL_DEFAULTS } from "../test-utils/live-yield-defaults";
 import { AccessController } from "./access.controller";
 import { accessMessage, INVITE_CIRCULATION_CAP } from "./invite-code";
 import { REFERRAL_QUALIFY_PRINCIPAL } from "./referral";
@@ -74,8 +74,6 @@ const emptyPool = (address: string): Pool => ({
   mint: Keypair.generate().publicKey.toBase58(),
   epochSeconds: 86_400n,
   epochAnchor: 0n,
-  roundSeconds: 60n,
-  closeBuffer: 15n,
   minDeposit: 0n,
   paused: false,
   currentEpochId: 1n,
@@ -84,18 +82,12 @@ const emptyPool = (address: string): Pool => ({
   totalPrincipal: 0n,
   pendingWithdrawals: 0n,
   minJackpot: 0n,
-  carryPot: 0n,
-  houseCutBps: 0,
   baseRateBps: 488,
-  yieldBudget: 0n,
-  ticketsPerUsdc: 1,
-  bonusCapBps: 500,
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
   version: 1,
   shutdown: false,
   gamePaused: false,
   jackpotPaused: false,
+  ...LIVE_POOL_DEFAULTS,
   updatedSlot: 0n,
 });
 
@@ -103,25 +95,14 @@ const emptyPlayer = (owner: string, poolAddress: string = RETIRED_POOL_ADDRESS):
   poolAddress,
   owner,
   principal: 0n,
-  entries: 0n,
-  weightAcc: new Prisma.Decimal(0),
-  lastUpdate: 0n,
   epochId: 0n,
-  frozenWeight: new Prisma.Decimal(0),
-  frozenEpoch: 0n,
-  regEpoch: 0n,
-  regStart: new Prisma.Decimal(0),
-  regEnd: new Prisma.Decimal(0),
   isHouse: false,
   pendingWithdraw: 0n,
   pendingEpoch: 0n,
-  principalAcc: new Prisma.Decimal(0),
-  frozenPrincipalAcc: new Prisma.Decimal(0),
-  yieldEpoch: 0n,
   boughtEpoch: 0n,
   boughtAmount: 0n,
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
+  slot: 0n,
+  ...LIVE_PLAYER_DEFAULTS,
 });
 
 describe.skipIf(!DB_AVAILABLE)("access routes", () => {

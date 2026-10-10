@@ -11,7 +11,7 @@
  * These types were checked against the landed backend (ticket 08:
  * `apps/backend/src/api/`), not just the spec. Four shapes differ from a plain
  * reading of §3.5, and the backend is right in each case: `/pool` names its
- * fields `currentEpoch` and `openRound` and sends the round as a summary,
+ * fields `currentEpoch` and sends no round summary,
  * `/epochs/current` nests progress under `drawing`, `/leaderboard` sends a
  * subset of the Player row, and `odds` is a percentage string, not a fraction.
  */
@@ -93,18 +93,13 @@ export interface PoolDto {
   mint: string;
   epochSeconds: string;
   epochAnchor: string;
-  roundSeconds: string;
-  /** Seconds before a Round's end that Positions close. */
-  closeBuffer: string;
   minDeposit: string;
-  /** Share of a settled round's pot credited to the House, in basis points. */
-  houseCutBps: number;
-  /** Base yield's APR on time-weighted Principal, in basis points (ADR 0011). */
+  /** The ceiling on the depositor share of yield, in basis points. */
   baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. */
-  ticketsPerUsdc: number;
   paused: boolean;
-  /** game-jackpot-pause: no new rounds or positions while true. A new pool
+  /** Venue loss past the tolerance: the balance stops earning and exits take a haircut. */
+  impaired: boolean;
+  /** game-jackpot-pause: no new rounds or bets while true. A new pool
    *  starts with it on. */
   gamePaused: boolean;
   /** game-jackpot-pause: no new epoch, ticket purchase or draw close while
@@ -114,8 +109,20 @@ export interface PoolDto {
   currentEpochEndsAt: string;
   previousEpochEndsAt: string;
   totalPrincipal: string;
-  carryPot: string;
   updatedSlot: string;
+  /** The four pinned venue accounts every Player instruction that syncs
+   *  names. Empty strings on a row not yet indexed. The names are klend's, the meaning follows
+   *  `venueKind`. klend: program, lending market, reserve, the pool's cToken
+   *  account. kVault: the kVault program, the vault state account, the vault's
+   *  shares mint, the pool's token account of the shares mint. Stub: this
+   *  program, the pool, the stub reserve, the stub vault. */
+  klendProgram: string;
+  klendMarket: string;
+  klendReserve: string;
+  klendCtoken: string;
+  /** Which backing the four pins point at: 0 klend, 1 the localnet stub, 2 a
+   *  Kamino Earn vault (kVault). */
+  venueKind: number;
 }
 
 export interface EpochDto {
@@ -123,60 +130,41 @@ export interface EpochDto {
   startsAt: string;
   endsAt: string;
   status: StatusValue;
-  registeredWeight: string;
-  registeredCount: number;
   jackpotAmount: string;
   target: string;
   winner: string | null;
 }
 
-export interface RoundDto {
-  id: string;
-  epochId: string;
-  startsAt: string;
-  endsAt: string;
-  status: StatusValue;
-  pot: string;
-  /** Entries the House took from the pot at settlement; "0" until then. */
-  houseCut: string;
-  /** Null until the round settles. */
-  winningTile: number | null;
-  tileTotals: string[];
-}
-
-/** What `GET /pool` carries for the open round: no tile totals, no winner. */
-export type RoundSummaryDto = Pick<
-  RoundDto,
-  "id" | "epochId" | "startsAt" | "endsAt" | "status" | "pot"
->;
-
 export interface PlayerDto {
   owner: string;
   principal: string;
-  entries: string;
-  weightAcc: string;
-  lastUpdate: string;
+  tickets: string;
   epochId: string;
-  frozenWeight: string;
-  frozenEpoch: string;
-  regEpoch: string;
-  regStart: string;
-  regEnd: string;
   isHouse: boolean;
   /** Requested but unpaid Principal, atomic units. "0" when nothing is pending. */
   pendingWithdraw: string;
   /** Epoch the pending amount was requested in; it pays out after that one ends. */
   pendingEpoch: string;
-  /** weightAcc + entries × (now − lastUpdate). */
-  liveWeight: string;
-  /** Share of the epoch's live weight as a percentage, two decimals: "12.34". */
-  odds: string;
+  /** The Principal deposited in `pendingDepositEpoch`, which earns no Ticket
+   *  until the next epoch. Already inside `principal`. */
+  pendingDeposit: string;
+  pendingDepositEpoch: string;
+  /** The Player's Tickets from the backend's Ticket ledger: what the next
+   *  snapshot counts. Always equal to `tickets`. */
+  weight: string;
+  /** `pendingDeposit` while its epoch is current, "0" once it has folded. */
+  pendingTickets: string;
+  /** The epoch `pendingTickets` start counting in; null with nothing pending. */
+  pendingActivatesEpoch: string | null;
+  /** Share of the draw's Tickets as a percentage, two decimals: "12.34".
+   *  Null while the backend has no total to divide by. */
+  odds: string | null;
 }
 
 /** `GET /leaderboard` sends a subset of the Player row, not the whole thing. */
 export type LeaderboardRowDto = Pick<
   PlayerDto,
-  "owner" | "principal" | "entries" | "isHouse" | "liveWeight" | "odds"
+  "owner" | "principal" | "tickets" | "isHouse" | "weight" | "odds"
 >;
 
 /**
@@ -185,12 +173,18 @@ export type LeaderboardRowDto = Pick<
  * and `grantedToday`; unmodeled here, since nothing in the web app reads them.
  */
 export type PlayerExtrasDto = PlayerDto & {
-  /** What `register` credited this owner in the epoch it last credited. */
-  yieldLastEpoch: string;
-  /** Every Base yield credit this owner has ever received. */
-  yieldToDate: string;
+  /** Yield earned since the last settle, as of the pool's last sync. */
+  unsettledYield: string;
+  /** Yield the open position has earned, settled or not; "0" before any.
+   *  Null while the backend's events lag the Player row. */
+  positionYield: string | null;
+  /** Chain unix seconds of that sync. */
+  syncedAt: string;
   /** USDC still spendable in `buy_tickets` today, capped at Principal. */
   buyAllowanceLeft: string;
+  /** Chain unix seconds the queued withdrawal pays at: the earlier of the
+   *  epoch's end and one epoch length after the request. Null with nothing queued. */
+  pendingMaturesAt: string | null;
 };
 
 /** 404s with a human reason until the wallet has a Player (deposited once). */
@@ -221,8 +215,6 @@ export interface OperatorStateDto {
    *  api.service.ts), never the raw error text. `status.ts` maps it to
    *  generic copy for the pill. */
   lastError: string | null;
-  registeredCount: number | null;
-  registeredTotal: number | null;
 }
 
 export interface StatusDto {
@@ -239,55 +231,67 @@ export interface StatusDto {
   /** Irreversible once true (ops-and-envs ticket 08); false before the pool
    *  is indexed. See `shutdown.ts` for what the web does with this. */
   shutdown: boolean;
-  /** Principal pulled out and not yet returned; null when the pool or the
-   *  vault balance is not known yet. Not surfaced in this app's UI. */
-  principalOut: string | null;
   /** Ticket 05: the deposit-only launch week's `LAUNCH_AT`, ISO, while the
    *  pool has no Epoch yet; null once an Epoch exists or none is configured. */
   launchAt: string | null;
 }
 
+/** A trailing paid rate; `aprBps` is null until two history points exist. */
+export interface TrailingRateDto {
+  aprBps: number | null;
+  windowSeconds: number;
+  shortHistory: boolean;
+}
+
+/** `GET /pool`'s `live` block (yield-claimer ticket 14). Rates are APR in bps. */
+export interface LiveYieldDto {
+  rates: {
+    trailing24h: TrailingRateDto;
+    trailing7d: TrailingRateDto;
+    /** Null while the reserve or the vault is unreadable. */
+    estimatedBps: number | null;
+    /** The most depositors earn: `base_rate_bps`. */
+    ceilingBps: number;
+  };
+  yieldFeeBps: number;
+  /** The on-chain Bought Tickets pause. */
+  buyTicketsPaused: boolean;
+  /** Atomic USDC; null while the vault cannot be read. */
+  freeIdle: string | null;
+  /** While impaired, the share of a withdrawal the pool pays (0 to 1); else null. */
+  haircutFactor: number | null;
+}
+
 export interface PoolSummaryDto {
   pool: PoolDto;
   currentEpoch: EpochDto | null;
-  openRound: RoundSummaryDto | null;
+  live: LiveYieldDto;
 }
 
-/** Registration and draw progress for the epoch that just ended. */
+/** Draw progress for the epoch that just ended. */
 export interface DrawingProgressDto {
   epochId: string;
-  registeredCount: number;
-  eligible: number;
   status: StatusValue;
+  /** Atomic USDC the draw is for; "0" until `request_draw` snapshots it. */
+  jackpotAmount: string;
 }
 
 export type CurrentEpochDto = EpochDto & {
-  /** Null unless the previous epoch is Registering or Drawing. */
+  /** Null unless the previous epoch is Ended or Drawing. */
   drawing: DrawingProgressDto | null;
 };
 
-/** The caller's Position in `GET /state`'s tracked Round; see `StateDto.position`. */
-export interface PositionDto {
-  tiles: string;
-  stakePerTile: string;
-}
-
 /**
- * Ticket 07: `GET /state`, the browser's one poll. `openRound` stays filtered
- * to Open/Requested; `round` is whichever Round the `round=` query asked
- * about, any status, so the browser can keep watching the same Round (and
- * `position` inside it) straight through settlement without a chain read of
- * its own.
+ * Ticket 07: `GET /state`, the browser's one poll. Rounds and Positions left
+ * with the custody-only program (ADR 0025); wave 2 brings Rounds back from
+ * the API.
  */
 export interface StateDto {
   pool: PoolDto;
   /** Ticket 05: null before the Pool has ever had an Epoch (deposit-only
    *  launch week) — see `launchAt` for the countdown target that goes with it. */
   currentEpoch: CurrentEpochDto | null;
-  openRound: RoundSummaryDto | null;
-  round: RoundDto | null;
   player: PlayerDto | null;
-  position: PositionDto | null;
   status: StatusDto;
   /** Chain time as the backend last observed it, extrapolated to now (decimal, unix seconds). */
   chainTime: string;
@@ -304,13 +308,194 @@ export interface StateDto {
    *  only while `currentEpoch` is null; null once an Epoch exists or none is
    *  configured. */
   launchAt: string | null;
+  /** Ticket 18: the id a bet names to open a Round (decimal). */
+  nextRoundId: string;
+  /** The open Round; null on an idle board. */
+  openRound: OpenRoundDto | null;
+  /** The newest Round that is not open, while its result still matters. */
+  lastRound: LastRoundDto | null;
+  /** The owner's Positions in `openRound` and `lastRound`. */
+  positions: PositionDto[];
+  /** Server wall-clock seconds, the clock `openRound.closeAt` is on (decimal). */
+  serverTime: string;
 }
+
+export type RoundStatusDto = "open" | "closed" | "revealed" | "settled" | "voided";
+
+export interface OpenRoundDto {
+  id: string;
+  openAt: string;
+  /** ISO time the engine stops taking bets. */
+  closeAt: string;
+  status: RoundStatusDto;
+  /** Per tile, Tickets staked on it (decimal strings, 36 of them). */
+  tileTotals: string[];
+  /** sha256 of the seed the reveal will publish. */
+  seedCommitment: string;
+}
+
+export interface LastRoundDto {
+  id: string;
+  status: RoundStatusDto;
+  /** Protocol tile 0..35 once settled. */
+  tile: number | null;
+  seedCommitment: string;
+}
+
+export interface PositionDto {
+  roundId: string;
+  /** 36-bit tile mask (decimal), bit n for tile n. */
+  tiles: string;
+  stakePerTile: string;
+}
+
+/** The epoch a permissionless crank would accept right now. */
+export interface StuckItemDto {
+  id: string;
+  status: number;
+}
+
+export type TodoCode =
+  | "DEPLOY_DUE"
+  | "RECALL_DUE"
+  | "HARVEST_DUE"
+  | "WITHDRAWS_DUE"
+  | "STUCK_EPOCH"
+  | "DEFICIT_OPEN"
+  | "VENUE_LOCK_ELAPSED";
+
+/** One action due on the pool. `due` "now" means a person acts; "bot" means the
+ *  Operator does it on its next tick. `amount` is atomic USDC, `id` an
+ *  epoch id, `owner` a wallet; each is set only where the matching button needs it. */
+export interface TodoItem {
+  code: TodoCode;
+  message: string;
+  due: "now" | "bot";
+  amount?: string;
+  owner?: string;
+  id?: string;
+}
+
+/** `GET /ops/summary`: the `/status` payload plus what the Ops console shows.
+ *  Amounts are atomic USDC strings; nulls mean unknown or not indexed. */
+export interface OpsSummaryDto extends StatusDto {
+  pendingWithdrawals: string;
+  /** The principal vault's balance; null when the read failed. */
+  vaultLiquidity: string | null;
+  solvencyMargin: string | null;
+  freeIdle: string | null;
+  freeIdleBps: number | null;
+  freeIdleBelowFloor: boolean | null;
+  reserveUtilizationBps: number | null;
+  reserveFreeLiquidity: string | null;
+  impaired: boolean;
+  deployPaused: boolean;
+  totalPrincipal: string;
+  venueValue: string;
+  feeOwed: string;
+  prizeOwed: string;
+  yieldOwed: string;
+  deficit: string;
+  /** Chain unix seconds of the last Sync; "0" before the pool is indexed. */
+  lastSyncAt: string;
+  admin: string | null;
+  /** The Operator key, which may drain the venue at any time. */
+  operatorKey: string | null;
+  venueParams: {
+    yieldFeeBps: number;
+    idleFloorBps: number;
+    idleTargetBps: number;
+    reserveShareCapBps: number;
+    reserveLiquidityFloorBps: number;
+    minVenueMove: string;
+    lossToleranceBps: number;
+  } | null;
+  /** The venue kind the pool is on now (`VENUE_KIND`); null before it is indexed. */
+  venueKind: number | null;
+  /** The open venue proposal; null when none is open. `proposedAt` and
+   *  `unlocksAt` are chain unix seconds as strings. */
+  venueProposal: {
+    venueKind: number;
+    klendProgram: string;
+    klendMarket: string;
+    klendReserve: string;
+    klendCtoken: string;
+    proposedAt: string;
+    unlocksAt: string;
+  } | null;
+  /** klend's supply rate in bps; null when the reserve cannot be read. */
+  supplyRateBps: number | null;
+  harvestedToTreasury: string;
+  harvestedToJackpot: string;
+  /** Null when the backend's chain read failed: unknown, not clean. */
+  stuck: { epoch: StuckItemDto | null } | null;
+  /** Actions due on the pool; empty before the pool is indexed. */
+  todo: TodoItem[];
+  /** `OPS_WALLETS` as base58: the wallets that may use `POST /ops/fast-pause`. Empty when unset. */
+  fastPauseWallets: string[];
+}
+
+export const fetchOpsSummary = (
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<ApiResult<OpsSummaryDto>> => get<OpsSummaryDto>(baseUrl, "/ops/summary", signal);
 
 export const fetchPoolSummary = (
   baseUrl: string,
   signal?: AbortSignal,
-): Promise<ApiResult<PoolSummaryDto>> =>
-  get<PoolSummaryDto>(baseUrl, "/pool", signal);
+): Promise<ApiResult<PoolSummaryDto>> => get<PoolSummaryDto>(baseUrl, "/pool", signal);
+
+/** One UTC day of `GET /rates/daily`: APR in bps, null for a day with no point. */
+export interface DailyRateDto {
+  /** UTC date, `YYYY-MM-DD`. */
+  day: string;
+  aprBps: number | null;
+}
+
+export const fetchDailyRates = (
+  baseUrl: string,
+  days: number,
+  signal?: AbortSignal,
+): Promise<ApiResult<DailyRateDto[]>> =>
+  get<DailyRateDto[]>(baseUrl, `/rates/daily?days=${days}`, signal);
+
+/** One firing alert from `GET /alerts`. `code` is the backend's AlertCode. */
+export interface AlertDto {
+  code: string;
+  message: string;
+}
+
+/**
+ * `GET /alerts` answers 503 with `{ alerts }` while any alert fires and 200
+ * with an empty list otherwise, so a 503 carrying that body is data, not a
+ * failure. Any other non-200 is a failure.
+ */
+export async function fetchAlerts(
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<ApiResult<AlertDto[]>> {
+  const timeout = withTimeout(signal, FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${baseUrl}/alerts`, {
+      signal: timeout.signal,
+      headers: { accept: "application/json" },
+    });
+    if (!response.ok && response.status !== 503) {
+      return { ok: false, reason: `HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as { alerts?: AlertDto[] };
+    if (!Array.isArray(body.alerts)) return { ok: false, reason: `HTTP ${response.status}` };
+    return { ok: true, data: body.alerts };
+  } catch (error) {
+    if (timeout.timedOut()) return { ok: false, reason: TIMEOUT_MESSAGE };
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : "indexer offline",
+    };
+  } finally {
+    timeout.cancel();
+  }
+}
 
 export const fetchEpochs = (
   baseUrl: string,
@@ -319,19 +504,45 @@ export const fetchEpochs = (
 ): Promise<ApiResult<EpochDto[]>> =>
   get<EpochDto[]>(baseUrl, `/epochs?limit=${limit}`, signal);
 
-export const fetchRounds = (
-  baseUrl: string,
-  limit: number,
-  signal?: AbortSignal,
-): Promise<ApiResult<RoundDto[]>> =>
-  get<RoundDto[]>(baseUrl, `/rounds?limit=${limit}`, signal);
+/** One page of `GET /epochs/:id/snapshot`. 404s until the next epoch has begun. */
+export interface SnapshotPageDto {
+  /** Hex; null for an empty snapshot. */
+  root: string | null;
+  depth: number;
+  leafCount: number;
+  totalTickets: string;
+  /** Wallet-byte order, so the order the tree hashes them in. */
+  leaves: { index: number; owner: string; tickets: string }[];
+  nextIndex: number | null;
+}
 
-export const fetchRound = (
+export const fetchEpochSnapshot = (
   baseUrl: string,
-  roundId: bigint | string,
+  epochId: string,
+  after: number,
   signal?: AbortSignal,
-): Promise<ApiResult<RoundDto>> =>
-  get<RoundDto>(baseUrl, `/rounds/${roundId}`, signal);
+): Promise<ApiResult<SnapshotPageDto>> =>
+  get<SnapshotPageDto>(baseUrl, `/epochs/${epochId}/snapshot?after=${after}`, signal);
+
+/** One `GET /players/:owner/ledger` row; `id`, `epochId` and `delta` are decimal strings. */
+export interface LedgerRowDto {
+  id: string;
+  epochId: string;
+  reason: string;
+  delta: string;
+  ref: string;
+  signer: string | null;
+  signature: string | null;
+  createdAt: string;
+}
+
+export const fetchLedger = (
+  baseUrl: string,
+  owner: string,
+  before: string | null,
+  signal?: AbortSignal,
+): Promise<ApiResult<{ rows: LedgerRowDto[]; nextBefore: string | null }>> =>
+  get(baseUrl, `/players/${owner}/ledger?limit=100${before === null ? "" : `&before=${before}`}`, signal);
 
 export const fetchLeaderboard = (
   baseUrl: string,
@@ -357,44 +568,13 @@ export const fetchFeed = (
     signal,
   );
 
-/** One key per requested owner, 0 rather than a missing key when they played none. */
-export interface PositionCountsDto {
-  counts: Record<string, number>;
-}
-
-/**
- * How many rounds each of `owners` has played, batched: the dashboard asks for
- * a whole table of winners at once. The backend caps the list at 25.
- */
-export const fetchPositionCounts = (
-  baseUrl: string,
-  owners: readonly string[],
-  signal?: AbortSignal,
-): Promise<ApiResult<PositionCountsDto>> =>
-  get<PositionCountsDto>(
-    baseUrl,
-    `/positions/counts?owners=${owners.join(",")}`,
-    signal,
-  );
-
-/**
- * Ticket 07: the one poll every screen reads from (see `useStatePoll.ts`).
- * `round`, when given, names whichever Round the caller wants the full state
- * of, whatever its status — pass the last Round seen open, so the browser
- * keeps watching it straight through settlement.
- */
+/** Ticket 07: the one poll every screen reads from (see `useStatePoll.ts`). */
 export const fetchState = (
   baseUrl: string,
   owner: string | undefined,
-  round: string | undefined,
   signal?: AbortSignal,
-): Promise<ApiResult<StateDto>> => {
-  const params = new URLSearchParams();
-  if (owner) params.set("owner", owner);
-  if (round) params.set("round", round);
-  const query = params.toString();
-  return get<StateDto>(baseUrl, `/state${query ? `?${query}` : ""}`, signal);
-};
+): Promise<ApiResult<StateDto>> =>
+  get<StateDto>(baseUrl, `/state${owner ? `?owner=${encodeURIComponent(owner)}` : ""}`, signal);
 
 export const fetchHealth = (
   baseUrl: string,

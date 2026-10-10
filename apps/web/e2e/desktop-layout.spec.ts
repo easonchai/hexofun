@@ -1,9 +1,11 @@
 /**
  * Ticket 01: proves the mobile media query (max-width: 960px) leaves
- * desktop untouched. Runs on the "chromium" project. No wallet, no backend:
+ * desktop untouched. Runs on the "chromium" project. Burner wallet, mocked backend:
  * same board render this spec's sibling mobile-layout.spec.ts relies on.
  */
-import { expect, test } from "playwright/test";
+import { expect } from "playwright/test";
+
+import { test } from "./admitted";
 
 // Wide and tall enough to clear the pre-existing, unrelated
 // `(min-width: 961px) and (max-height: ...)` short-screen overrides

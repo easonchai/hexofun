@@ -10,6 +10,8 @@ import {
 import {
   PublicKey,
   SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  type AccountMeta,
   type TransactionInstruction,
 } from "@solana/web3.js";
 
@@ -17,26 +19,35 @@ import {
   epochAddress,
   jackpotVaultAddress,
   playerAddress,
-  positionAddress,
   principalVaultAddress,
-  roundAddress,
+  venueProposalAddress,
 } from "../chain/pda";
-import type { EpochState, PoolState, RoundState } from "./chain-state";
-import {
-  ORAO_VRF_PROGRAM_ID,
-  ORAO_VRF_TREASURY,
-  randomNonce,
-  randomnessAddress,
-  vrfSeed,
-} from "./vrf";
+import { kvaultRemaining } from "../chain/kvault";
+import { VENUE_KIND } from "../chain/venue-kind";
+import type { SnapshotCommitment } from "../snapshot/sum-tree";
+import type { WinnerProof } from "../snapshot/epoch-draw";
+import type { EpochState, PoolState } from "./chain-state";
+import { epochSeed, ORAO_VRF_PROGRAM_ID, ORAO_VRF_TREASURY, randomnessAddress } from "./vrf";
 
 const bn = (value: bigint): BN => new BN(value.toString());
 
-/** The two calls this file makes on an Anchor methods builder. */
+/**
+ * What an instruction does at the venue, which decides the remaining accounts
+ * a kVault pool needs: `sync` only values the position, `move` also deposits,
+ * `redeem` may withdraw. klend and the stub take the same accounts for the
+ * last two and none for the first.
+ */
+type VenueUse = "sync" | "move" | "redeem";
+
+/** The calls this file makes on an Anchor methods builder. */
+interface BuiltAccounts {
+  remainingAccounts(accounts: AccountMeta[]): BuiltAccounts;
+  instruction(): Promise<TransactionInstruction>;
+}
+
 interface MethodBuilder {
-  accountsPartial(accounts: Record<string, PublicKey>): {
-    instruction(): Promise<TransactionInstruction>;
-  };
+  /** `null` leaves an optional account out. */
+  accountsPartial(accounts: Record<string, PublicKey | null>): BuiltAccounts;
 }
 
 type MethodFactory = (...args: unknown[]) => MethodBuilder;
@@ -78,14 +89,76 @@ export class OperatorInstructions {
     return epochAddress(this.programId, pool.address, epochId);
   }
 
-  private round(pool: PoolState, roundId: bigint): PublicKey {
-    return roundAddress(this.programId, pool.address, roundId);
-  }
-
   private player(pool: PoolState, owner: PublicKey): PublicKey {
     return playerAddress(this.programId, pool.address, owner);
   }
 
+  /** The four pinned klend addresses an instruction that runs sync names. */
+  private venue(pool: PoolState): Record<string, PublicKey> {
+    return {
+      klendProgram: pool.klendProgram,
+      klendMarket: pool.klendMarket,
+      klendReserve: pool.klendReserve,
+      klendCtoken: pool.klendCtoken,
+    };
+  }
+
+  /**
+   * What a venue deposit or redeem needs beyond the pinned four (klend.rs,
+   * in this order): the lending market authority, the reserve's liquidity
+   * supply vault, the cToken mint and the instructions sysvar. klend derives
+   * the first three from the market and the liquidity mint, so no RPC read is
+   * needed, and the program checks each against the reserve itself
+   * (`KlendAccountMismatch`). The stub kind ignores remaining accounts. The
+   * builder switches on the pool's venue kind, not on which program is pinned.
+   *
+   * A kVault pool (kvault.rs) takes the klend program, every allocation
+   * reserve and market of the vault, then the vault's own accounts and the
+   * source reserve's, all derived from `pool.kvault`, the vault state the
+   * operator read this tick (`chain/kvault.ts`). Every instruction that syncs
+   * needs the reserve and market blocks, because the vault's value is read
+   * from them.
+   */
+  private venueRemaining(pool: PoolState, use: VenueUse = "move"): AccountMeta[] {
+    if (pool.venueKind === VENUE_KIND.stub) return [];
+    if (pool.venueKind === VENUE_KIND.kvault) {
+      // Derived from the vault state the operator read this tick, never from
+      // env: the curator can change the allocation list at any time.
+      if (!pool.kvault) {
+        throw new Error(`pool ${pool.address.toBase58()} is a kVault pool, but its vault was not read`);
+      }
+      return kvaultRemaining(pool.kvault, {
+        valueOnly: use === "sync",
+        ...(use === "redeem" ? { writableMint: pool.acceptedMint } : {}),
+      });
+    }
+    if (use === "sync") return [];
+    if (pool.venueKind !== VENUE_KIND.klend) {
+      throw new Error(`pool ${pool.address.toBase58()} has venue kind ${pool.venueKind}, which this operator cannot build accounts for`);
+    }
+    const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
+      PublicKey.findProgramAddressSync(
+        seeds.map((seed) => (typeof seed === "string" ? Buffer.from(seed) : seed.toBuffer())),
+        pool.klendProgram,
+      )[0];
+    const meta = (pubkey: PublicKey, isWritable: boolean): AccountMeta => ({
+      pubkey,
+      isSigner: false,
+      isWritable,
+    });
+    return [
+      meta(derive("lma", pool.klendMarket), false),
+      meta(derive("reserve_liq_supply", pool.klendMarket, pool.acceptedMint), true),
+      meta(derive("reserve_coll_mint", pool.klendMarket, pool.acceptedMint), true),
+      meta(SYSVAR_INSTRUCTIONS_PUBKEY, false),
+    ];
+  }
+
+  /**
+   * `begin_epoch` syncs the venue first, so `EpochBegan` carries the Yield
+   * index the Ticket reset prices unsettled yield at: it takes the pinned
+   * venue accounts and the sync's remaining accounts, like `process_withdraw`.
+   */
   async beginEpoch(pool: PoolState): Promise<TransactionInstruction[]> {
     // `current_epoch` does not exist before the first epoch; the program skips
     // it in that case, but the address still has to be supplied.
@@ -101,57 +174,19 @@ export class OperatorInstructions {
           currentEpoch: this.epoch(pool, pool.currentEpochId),
           epochTwoBehind: this.epoch(pool, twoBehindId),
           newEpoch: this.epoch(pool, pool.currentEpochId + 1n),
+          ...this.venue(pool),
           systemProgram: SystemProgram.programId,
         })
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }
 
-  async register(
-    pool: PoolState,
-    epochId: bigint,
-    owners: readonly PublicKey[],
-  ): Promise<TransactionInstruction[]> {
-    return Promise.all(
-      owners.map((owner) =>
-        this.method("register")
-          .accountsPartial({
-            pool: pool.address,
-            epoch: this.epoch(pool, epochId),
-            player: this.player(pool, owner),
-          })
-          .instruction(),
-      ),
-    );
-  }
-
-  /**
-   * Step 3b (docs/plan/hexo-referrals ticket 08): one `grant_tickets` per
-   * referrer, batched into one transaction the way `register` batches
-   * owners. Signed by the operator, so every grant is capped on chain per
-   * Player per day at their own Principal and pool-wide at `bonus_cap_bps`
-   * of `total_principal` (`grant_tickets`' operator path).
-   */
-  async grantTickets(
-    pool: PoolState,
-    grants: readonly { referrer: string; amount: bigint }[],
-  ): Promise<TransactionInstruction[]> {
-    return Promise.all(
-      grants.map((grant) =>
-        this.method("grantTickets", bn(grant.amount))
-          .accountsPartial({
-            signer: this.operator,
-            pool: pool.address,
-            player: this.player(pool, new PublicKey(grant.referrer)),
-          })
-          .instruction(),
-      ),
-    );
-  }
-
   /**
    * Step 6b: pay one batch of due withdrawal requests. `process_withdraw`
-   * takes no signer, so the operator is here only as the fee payer and as
+   * syncs and settles, so it names the venue accounts. The optional
+   * owner signer is left out (the tick sends none while the pool is impaired,
+   * the only time the program wants it), so the operator is here only as the fee payer and as
    * the payer of the owner token accounts it creates. Each payout is
    * preceded by an idempotent ATA creation: the program transfers to a
    * token account of the accepted mint owned by `player.owner`, and a
@@ -178,11 +213,15 @@ export class OperatorInstructions {
             .accountsPartial({
               pool: pool.address,
               player: this.player(pool, owner),
+              // Null, not omitted: the client would fill the operator in.
+              owner: null,
               acceptedMint: pool.acceptedMint,
               ownerToken,
               principalVault,
+              ...this.venue(pool),
               tokenProgram: TOKEN_PROGRAM_ID,
             })
+            .remainingAccounts(this.venueRemaining(pool, "sync"))
             .instruction(),
         ];
       }),
@@ -191,31 +230,41 @@ export class OperatorInstructions {
   }
 
   /**
-   * Step 4's tail: the epoch draws on whatever the jackpot vault holds. A
-   * fresh nonce is generated per call and mixed into the seed
-   * (beta-launch-fixes ticket 02), so the randomness address is derived here
-   * rather than read back off the Epoch, and is unknowable before this call.
+   * Commits the Epoch snapshot (root, total, depth, leaf count) and asks for
+   * the draw's randomness. The nonce is the epoch's stored one, mixed into the
+   * seed with the root and total, so the randomness address is derived here and
+   * is unknowable before the request lands. An empty snapshot commits zeros,
+   * which the program rolls over without spending the request.
    */
-  async closeRegistration(
+  async requestDraw(
     pool: PoolState,
     epochId: bigint,
+    nonce: Uint8Array,
+    snapshot: SnapshotCommitment,
   ): Promise<TransactionInstruction[]> {
-    const nonce = randomNonce();
-    const close = await this.method("closeRegistration", Array.from(nonce))
-      .accountsPartial({
-        operator: this.operator,
-        pool: pool.address,
-        epoch: this.epoch(pool, epochId),
-        jackpotVault: jackpotVaultAddress(this.programId, pool.address),
-        randomness: this.randomnessFor(vrfSeed("epoch", pool.address, epochId, nonce)),
-        vrfNetworkState: pool.vrfNetworkState,
-        vrfTreasury: ORAO_VRF_TREASURY,
-        vrfProgram: ORAO_VRF_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .instruction();
-
-    return [close];
+    const seed = epochSeed(pool.address, epochId, nonce, snapshot.root, snapshot.total);
+    return [
+      await this.method(
+        "requestDraw",
+        Array.from(nonce),
+        Array.from(snapshot.root),
+        bn(snapshot.total),
+        snapshot.depth,
+        snapshot.leafCount,
+      )
+        .accountsPartial({
+          operator: this.operator,
+          pool: pool.address,
+          epoch: this.epoch(pool, epochId),
+          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
+          randomness: this.randomnessFor(seed),
+          vrfNetworkState: pool.vrfNetworkState,
+          vrfTreasury: ORAO_VRF_TREASURY,
+          vrfProgram: ORAO_VRF_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .instruction(),
+    ];
   }
 
   /** Permissionless (production-hardening ticket 01): the operator still
@@ -253,178 +302,172 @@ export class OperatorInstructions {
   }
 
   /**
-   * Permissionless: the instruction takes no signer, so the operator is here
-   * only as the fee payer. A non-House winner needs no token account of
-   * their own any more (docs/plan/hexo-referrals ticket 02): the prize
-   * compounds into `principal_vault` and the winner's Principal instead of
-   * being paid to a token account, so there is nothing to create first.
+   * Permissionless: `caller` only pays the fee, because the proof is what
+   * authorises the payment. The winner's Player comes from the leaf's wallet;
+   * a non-House prize compounds into the principal vault, so there is no token
+   * account to create. It syncs the venue first, like `begin_epoch`.
    */
   async payout(
     pool: PoolState,
     epochId: bigint,
-    winner: PublicKey,
+    proof: Pick<WinnerProof, "index" | "owner" | "tickets" | "siblings">,
   ): Promise<TransactionInstruction[]> {
     return [
-      await this.method("payout")
+      await this.method(
+        "payout",
+        proof.index,
+        bn(proof.tickets),
+        proof.siblings.map(({ hash, sum }) => ({ hash: Array.from(hash), sum: bn(sum) })),
+      )
         .accountsPartial({
+          caller: this.operator,
           pool: pool.address,
           acceptedMint: pool.acceptedMint,
           epoch: this.epoch(pool, epochId),
-          winner: this.player(pool, winner),
+          // The House's leaf owner is the current Operator (`set_operator` rewrites
+          // it), but its address keeps the first Operator's seed.
+          winner: new PublicKey(proof.owner).equals(pool.operator)
+            ? pool.house
+            : this.player(pool, new PublicKey(proof.owner)),
           jackpotVault: jackpotVaultAddress(this.programId, pool.address),
           principalVault: principalVaultAddress(this.programId, pool.address),
           treasury: pool.treasury,
           buybackReserve: pool.buybackReserve,
+          ...this.venue(pool),
           tokenProgram: TOKEN_PROGRAM_ID,
         })
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }
 
   /**
-   * A fresh nonce is generated per call and mixed into the seed
-   * (beta-launch-fixes ticket 02), so the randomness address is derived here
-   * from `round.roundId` rather than read back off `round.vrfSeed` (still
-   * `[0; 32]` before the first successful request), and is unknowable before
-   * this call.
+   * The three venue cranks (yield-claimer ticket 13) are permissionless: the
+   * operator is only the fee payer. Each syncs first, and the klend backing
+   * refreshes its own reserve by CPI, so no refresh instruction goes in front.
+   * `amount` is atomic USDC.
    */
-  async requestRoundRandomness(
-    pool: PoolState,
-    round: RoundState,
-  ): Promise<TransactionInstruction[]> {
-    const nonce = randomNonce();
+  async deployToVenue(pool: PoolState, amount: bigint): Promise<TransactionInstruction[]> {
     return [
-      await this.method("requestRoundRandomness", Array.from(nonce))
+      await this.method("deployToVenue", bn(amount))
         .accountsPartial({
-          payer: this.operator,
           pool: pool.address,
-          round: this.round(pool, round.roundId),
-          randomness: this.randomnessFor(vrfSeed("round", pool.address, round.roundId, nonce)),
-          vrfNetworkState: pool.vrfNetworkState,
-          vrfTreasury: ORAO_VRF_TREASURY,
-          vrfProgram: ORAO_VRF_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          // Usually absent on chain; the program refuses a deploy while it exists.
+          venueProposal: venueProposalAddress(this.programId, pool.address),
+          tokenProgram: TOKEN_PROGRAM_ID,
         })
+        .remainingAccounts(this.venueRemaining(pool))
         .instruction(),
     ];
   }
 
-  /** Permissionless (production-hardening ticket 01): first account is
-   *  `caller`, not `operator`; `house` still pins to `pool.house`. */
-  async settleRound(pool: PoolState, round: RoundState): Promise<TransactionInstruction[]> {
+  async recall(pool: PoolState, amount: bigint): Promise<TransactionInstruction[]> {
     return [
-      await this.method("settleRound")
+      await this.method("recall", bn(amount))
         .accountsPartial({
-          caller: this.operator,
           pool: pool.address,
-          round: this.round(pool, round.roundId),
-          randomness: this.randomnessFor(round.vrfSeed),
-          house: pool.house,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          tokenProgram: TOKEN_PROGRAM_ID,
         })
+        .remainingAccounts(this.venueRemaining(pool, "redeem"))
         .instruction(),
     ];
   }
 
   /**
-   * Takes the Round rather than its id: the program checks the randomness
-   * account against the round's own seed before it will void. Permissionless
-   * (production-hardening ticket 01): first account is `caller`, not
-   * `operator`.
+   * `drain_venue` (venue-switch ticket 04): brings `amount` home from the
+   * venue to the principal vault. `signer` is the Operator for the tick's
+   * crank and the Admin for the CLI; the program lets either in at any time
+   * and anyone while a proposal is open.
    */
-  async voidRound(pool: PoolState, round: RoundState): Promise<TransactionInstruction[]> {
-    return [
-      await this.method("voidRound")
-        .accountsPartial({
-          caller: this.operator,
-          pool: pool.address,
-          round: this.round(pool, round.roundId),
-          randomness: this.randomnessFor(round.vrfSeed),
-        })
-        .instruction(),
-    ];
-  }
-
-  async settlePositions(
+  async drainVenue(
     pool: PoolState,
-    roundId: bigint,
-    positions: readonly { address: string; owner: string }[],
+    amount: bigint,
+    signer: PublicKey = this.operator,
   ): Promise<TransactionInstruction[]> {
-    const round = this.round(pool, roundId);
-    return Promise.all(
-      positions.map((position) => {
-        const owner = new PublicKey(position.owner);
-        return this.method("settlePosition")
-          .accountsPartial({
-            pool: pool.address,
-            round,
-            player: this.player(pool, owner),
-            owner,
-            position: new PublicKey(position.address),
-          })
-          .instruction();
-      }),
-    );
-  }
-
-  /**
-   * Permissionless, and the only builder here whose signer is not the
-   * operator: the Sparring player buys for itself, so the owner is passed in
-   * and `ChainService.send` gets its keypair.
-   */
-  async buyPosition(
-    pool: PoolState,
-    roundId: bigint,
-    owner: PublicKey,
-    tiles: bigint,
-    stakePerTile: bigint,
-  ): Promise<TransactionInstruction[]> {
-    const round = this.round(pool, roundId);
     return [
-      await this.method("buyPosition", bn(tiles), bn(stakePerTile))
+      await this.method("drainVenue", bn(amount))
         .accountsPartial({
-          owner,
+          signer,
           pool: pool.address,
-          player: this.player(pool, owner),
-          round,
-          position: positionAddress(this.programId, round, owner),
-          systemProgram: SystemProgram.programId,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          venueProposal: venueProposalAddress(this.programId, pool.address),
+          tokenProgram: TOKEN_PROGRAM_ID,
         })
+        .remainingAccounts(this.venueRemaining(pool, "redeem"))
         .instruction(),
     ];
   }
 
   /**
-   * Permissionless (ops-and-envs ticket 08): reclaims a terminal Round's
-   * rent for the operator once nothing settled on it is still owed. The
-   * operator is both the fee payer and the rent destination, so it is
-   * passed once for both roles.
+   * `migrate_venue` (venue-switch ticket 05): permissionless, so the operator
+   * only pays the fee. `pool` is the pool as it reads BEFORE the migration:
+   * the sync inside it values the old venue, so the four pins and the extras
+   * are the old ones. The proposal closes into `pool.admin`, who paid its rent.
    */
-  async closeRound(pool: PoolState, roundId: bigint): Promise<TransactionInstruction[]> {
+  async migrateVenue(pool: PoolState): Promise<TransactionInstruction[]> {
     return [
-      await this.method("closeRound")
+      await this.method("migrateVenue")
         .accountsPartial({
           pool: pool.address,
-          operator: this.operator,
-          round: this.round(pool, roundId),
+          admin: pool.admin,
+          proposal: venueProposalAddress(this.programId, pool.address),
+          ...this.venue(pool),
         })
+        .remainingAccounts(this.venueRemaining(pool, "sync"))
         .instruction(),
     ];
   }
 
-  async createRound(
-    pool: PoolState,
-    startsAt: bigint,
-    endsAt: bigint,
-  ): Promise<TransactionInstruction[]> {
+  /**
+   * Fast pause (ops-console ticket 06). The Operator may only turn a switch
+   * on, so these three hardcode `true`: no argument can pass `false`.
+   */
+  async setPauseOn(pool: PublicKey): Promise<TransactionInstruction> {
+    return this.method("setPause", true)
+      .accountsPartial({ signer: this.operator, pool })
+      .instruction();
+  }
+
+  async setFeaturePauseOn(
+    pool: PublicKey,
+    feature: "game" | "jackpot",
+  ): Promise<TransactionInstruction> {
+    // Anchor encodes a unit enum variant as `{ variantName: {} }`.
+    const variant = feature === "game" ? { game: {} } : { jackpot: {} };
+    return this.method("setFeaturePause", variant, true)
+      .accountsPartial({ signer: this.operator, pool })
+      .instruction();
+  }
+
+  async setDeployPauseOn(pool: PublicKey): Promise<TransactionInstruction> {
+    return this.method("setDeployPause", true)
+      .accountsPartial({ signer: this.operator, pool })
+      .instruction();
+  }
+
+  /** Pays the fee owed to `pool.treasury` and the prize share owed to the
+   *  jackpot vault. */
+  async harvest(pool: PoolState): Promise<TransactionInstruction[]> {
     return [
-      await this.method("createRound", bn(startsAt), bn(endsAt))
+      await this.method("harvest")
         .accountsPartial({
-          operator: this.operator,
           pool: pool.address,
-          currentEpoch: this.epoch(pool, pool.currentEpochId),
-          round: this.round(pool, pool.nextRoundId),
-          systemProgram: SystemProgram.programId,
+          principalVault: principalVaultAddress(this.programId, pool.address),
+          jackpotVault: jackpotVaultAddress(this.programId, pool.address),
+          treasury: pool.treasury,
+          acceptedMint: pool.acceptedMint,
+          ...this.venue(pool),
+          tokenProgram: TOKEN_PROGRAM_ID,
         })
+        .remainingAccounts(this.venueRemaining(pool, "redeem"))
         .instruction(),
     ];
   }

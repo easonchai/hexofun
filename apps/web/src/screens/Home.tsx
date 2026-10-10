@@ -1,20 +1,25 @@
 /**
  * HOME tab: the Figma "Landing" frame. Today's prize (the yield the pool
  * earned this epoch, the same current-Epoch value DAILY DRAW labels
- * "Prize") as a whole-dollar hero, a DD:HH:MM:SS clock to `endsAt`, the
- * last few prizes paid, and one button that jumps to the VAULT tab.
+ * "Prize") as a whole-dollar hero, a DD:HH:MM:SS clock to `endsAt`, and
+ * one button that jumps to the VAULT tab.
  *
  * Ticket 07: `currentEpoch` comes from App's one `GET /state` poll instead
- * of a duplicate `/epochs/current` poll of its own. Epoch history is list
- * data, so it keeps its own slower poll here, as on the other screens.
+ * of a duplicate `/epochs/current` poll of its own.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
-import { apiBaseUrl, fetchEpochs, type CurrentEpochDto, type EpochDto } from "../api.js";
+import type { CurrentEpochDto } from "../api.js";
 import { JACKPOT_GATED } from "../chain.js";
 import { dhmsParts } from "../engine.js";
-import { launchCountdown, launchCountdownLabel, prizeCardState } from "../launch.js";
-import { useApiPoll } from "../useApiPoll.js";
+import {
+  isDrawing,
+  launchCountdown,
+  launchCountdownLabel,
+  prizeCardState,
+  prizeShown,
+  showsNextDrawLabel,
+} from "../launch.js";
 
 export interface HomeProps {
   /** Chain clock seconds, for the draw countdown. */
@@ -36,10 +41,6 @@ export function wholeDollars(atomic: string): string {
 }
 
 const CLOCK_LABELS = ["DAYS", "HRS", "MIN", "SEC"] as const;
-
-/** Rollovers leave `winner: null`, so look back further than the three shown. */
-const EPOCH_LOOKBACK = 20;
-const PRIZES_SHOWN = 3;
 
 /** Hand-traced from the Figma glyph row: star, square, target, cross, frame, plus. */
 const GLYPHS = [
@@ -136,19 +137,6 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
       ? launchCountdownLabel(launchCountdown(JACKPOT_GATED ? null : launchAt, now))
       : null;
 
-  const loadEpochs = useCallback(
-    (signal: AbortSignal) => fetchEpochs(apiBaseUrl(), EPOCH_LOOKBACK, signal),
-    [],
-  );
-  const epochs = useApiPoll(loadEpochs, 10_000);
-  const paid = useMemo(
-    () =>
-      (epochs.data ?? [])
-        .filter((row: EpochDto) => row.winner !== null)
-        .slice(0, PRIZES_SHOWN),
-    [epochs.data],
-  );
-
   return (
     <div className="home" data-testid="home-screen">
       {/* Pre-dithered coin ring (scripts/dither-video.mjs). Without autoplay the poster stays. */}
@@ -169,7 +157,7 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
           <Star />
         </div>
         <div className="home-amount" data-testid="home-prize">
-          {currentEpoch ? wholeDollars(currentEpoch.jackpotAmount) : "$—"}
+          {currentEpoch ? wholeDollars(prizeShown(currentEpoch)) : "$—"}
         </div>
         <p className="home-tagline">
           Save your <em>money</em>, play your <em>luck</em>
@@ -177,7 +165,11 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
       </div>
 
       <div className="home-clock">
-        <div className="home-clock-label">DAILY PRIZE DRAW · NEXT DRAW IN</div>
+        <div className="home-clock-label">
+          {showsNextDrawLabel(cardState, drawing, remaining)
+            ? "DAILY PRIZE DRAW · NEXT DRAW IN"
+            : "DAILY PRIZE DRAW"}
+        </div>
         {cardState === "launch" ? (
           <div className="home-drawing" data-testid="home-launch-countdown">
             {launchLabel}
@@ -186,7 +178,7 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
           <div className="home-drawing" data-testid="home-draw-paused">
             DRAW PAUSED
           </div>
-        ) : drawing || (remaining !== null && remaining <= 0n) ? (
+        ) : isDrawing(drawing, remaining) ? (
           <div className="home-drawing" data-testid="home-drawing">
             DRAWING…
           </div>
@@ -214,17 +206,6 @@ export function Home({ now, currentEpoch, launchAt, jackpotPaused, onDeposit }: 
         </button>
         <GlyphRow />
       </div>
-
-      {paid.length > 0 ? (
-        <div className="home-footer" data-testid="home-last-prizes">
-          <span>LAST PRIZES</span>
-          {paid.map((row) => (
-            <span key={row.id}>
-              DAY #{row.id} {wholeDollars(row.jackpotAmount)}
-            </span>
-          ))}
-        </div>
-      ) : null}
 
       <div className="home-footer">
         <span>NO-LOSS</span>

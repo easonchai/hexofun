@@ -1,0 +1,316 @@
+/**
+ * The seven permissionless cranks as instructions, built in the browser. The
+ * account lists mirror the backend's `OperatorInstructions`
+ * (apps/backend/src/operator/instructions.ts): every account is passed
+ * explicitly, so building costs no RPC read. The pool and the stuck epoch are
+ * read from the chain once, at click time, by the `load*` helpers.
+ */
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
+import {
+  PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  type AccountMeta,
+  type AddressLookupTableAccount,
+  type Connection,
+  type TransactionInstruction,
+} from "@solana/web3.js";
+
+import {
+  accountOf,
+  bn,
+  epochAddress,
+  jackpotVaultAddress,
+  method,
+  playerAddress,
+  POOL_ID,
+  poolAddress,
+  principalVaultAddress,
+  venueProposalAddress,
+  VENUE_KIND,
+  type HexVaultProgram,
+} from "../chain.js";
+import { fetchKvaultView, kvaultRemaining, type KvaultView } from "../kvault.js";
+import { parseAtomic } from "../lib/money.js";
+import { USDC_DECIMALS } from "./format.js";
+
+/** What the venue cranks need from the Pool account. */
+export interface VenuePool {
+  address: PublicKey;
+  /** Gets the venue proposal's rent back when `migrate_venue` closes it. */
+  admin: PublicKey;
+  acceptedMint: PublicKey;
+  treasury: PublicKey;
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
+  /** Which backing the four pins point at (`VENUE_KIND`). */
+  venueKind: number;
+  /** A kVault pool only: the vault as read at click time, and its lookup
+   *  table, which the transaction needs to be v0 (`useSendTx.send`). */
+  kvault?: KvaultView;
+  lookupTables?: AddressLookupTableAccount[];
+}
+
+/** What an instruction does at a kVault: `sync` only values the position,
+ *  `move` also deposits, `redeem` may withdraw. klend ignores it. */
+type VenueUse = "sync" | "move" | "redeem";
+
+/** An epoch's randomness request seed, read off its account. */
+export interface EpochSeed {
+  epochId: bigint;
+  vrfSeed: Uint8Array;
+}
+
+/** USDC text to base units. Null for blank, zero, negative or sub-micro input. */
+export function parseUsdcAmount(text: string): bigint | null {
+  const atomic = parseAtomic(text, USDC_DECIMALS);
+  return atomic !== null && atomic > 0n ? atomic : null;
+}
+
+/** ORAO VRF v2 (programs/hex_vault/src/vrf.rs); same constant the backend uses. */
+const ORAO_VRF_PROGRAM_ID = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
+
+/**
+ * Where the program expects the randomness account: ORAO's request PDA, or a
+ * PDA of this program in a `test-vrf` build (the IDL then has `test_fulfill`).
+ */
+function randomnessFor(program: HexVaultProgram, seed: Uint8Array): PublicKey {
+  const testVrf = program.idl.instructions.some(
+    (ix) => ix.name === "testFulfill" || ix.name === "test_fulfill",
+  );
+  const [prefix, owner] = testVrf
+    ? ["test-vrf", program.programId]
+    : ["orao-vrf-randomness-request", ORAO_VRF_PROGRAM_ID];
+  return PublicKey.findProgramAddressSync([Buffer.from(prefix), Buffer.from(seed)], owner)[0];
+}
+
+/** The calls this file makes on an Anchor builder. */
+interface Built {
+  remainingAccounts(accounts: AccountMeta[]): Built;
+  instruction(): Promise<TransactionInstruction>;
+}
+const build = (
+  program: HexVaultProgram,
+  name: string,
+  accounts: Record<string, PublicKey | null>,
+  args: unknown[] = [],
+  remaining: AccountMeta[] = [],
+): Promise<TransactionInstruction> => {
+  // SAFETY: the web's TxBuilder type omits accountsPartial, which every Anchor builder has.
+  const builder = method(program, name)(...args) as unknown as {
+    accountsPartial(a: Record<string, PublicKey | null>): Built;
+  };
+  return builder.accountsPartial(accounts).remainingAccounts(remaining).instruction();
+};
+
+const venue = (pool: VenuePool) => ({
+  klendProgram: pool.klendProgram,
+  klendMarket: pool.klendMarket,
+  klendReserve: pool.klendReserve,
+  klendCtoken: pool.klendCtoken,
+});
+
+/**
+ * Beyond the pinned four a venue deposit or redeem needs the market authority,
+ * the reserve's liquidity supply, the cToken mint and the instructions
+ * sysvar. Chosen by the pool's `venueKind`, like backend `venueRemaining`: the
+ * `test-venue` stub takes none, and a kind this build does not know throws
+ * rather than guess an account list.
+ */
+function venueRemaining(pool: VenuePool, use: VenueUse = "move"): AccountMeta[] {
+  if (pool.venueKind === VENUE_KIND.stub) return [];
+  if (pool.venueKind === VENUE_KIND.kvault) {
+    if (!pool.kvault) throw new Error("a kVault pool needs its vault read first (loadPool)");
+    return kvaultRemaining(pool.kvault, {
+      valueOnly: use === "sync",
+      ...(use === "redeem" ? { writableMint: pool.acceptedMint } : {}),
+    });
+  }
+  if (pool.venueKind !== VENUE_KIND.klend) {
+    throw new Error(`unsupported venue kind ${pool.venueKind}`);
+  }
+  const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
+    PublicKey.findProgramAddressSync(
+      seeds.map((s) => (typeof s === "string" ? Buffer.from(s) : s.toBuffer())),
+      pool.klendProgram,
+    )[0];
+  const meta = (pubkey: PublicKey, isWritable: boolean): AccountMeta => ({
+    pubkey,
+    isSigner: false,
+    isWritable,
+  });
+  return [
+    meta(derive("lma", pool.klendMarket), false),
+    meta(derive("reserve_liq_supply", pool.klendMarket, pool.acceptedMint), true),
+    meta(derive("reserve_coll_mint", pool.klendMarket, pool.acceptedMint), true),
+    meta(SYSVAR_INSTRUCTIONS_PUBKEY, false),
+  ];
+}
+
+const principalAccounts = (pool: VenuePool) => ({
+  pool: pool.address,
+  principalVault: principalVaultAddress(pool.address),
+  acceptedMint: pool.acceptedMint,
+  ...venue(pool),
+  tokenProgram: TOKEN_PROGRAM_ID,
+});
+
+export const deployToVenue = (program: HexVaultProgram, pool: VenuePool, amount: bigint) =>
+  build(
+    program,
+    "deployToVenue",
+    // Usually absent on chain; the program refuses a deploy while it exists.
+    { ...principalAccounts(pool), venueProposal: venueProposalAddress(pool.address) },
+    [bn(amount)],
+    venueRemaining(pool),
+  );
+
+export const recall = (program: HexVaultProgram, pool: VenuePool, amount: bigint) =>
+  build(program, "recall", principalAccounts(pool), [bn(amount)], venueRemaining(pool, "redeem"));
+
+/**
+ * `drain_venue` (venue-switch ticket 04): brings `amount` home from the venue
+ * to the principal vault. The connected wallet signs; the program lets the
+ * Admin and the Operator in always and anyone while a proposal is open.
+ */
+export const drainVenue = (
+  program: HexVaultProgram,
+  pool: VenuePool,
+  signer: PublicKey,
+  amount: bigint,
+) =>
+  build(
+    program,
+    "drainVenue",
+    { signer, ...principalAccounts(pool), venueProposal: venueProposalAddress(pool.address) },
+    [bn(amount)],
+    venueRemaining(pool, "redeem"),
+  );
+
+/**
+ * `migrate_venue` (venue-switch ticket 05): permissionless, so the wallet only
+ * pays the fee. `pool` is read before the migration; the pins and extras are
+ * the OLD venue's, which the sync inside values.
+ */
+export const migrateVenue = (program: HexVaultProgram, pool: VenuePool) =>
+  build(
+    program,
+    "migrateVenue",
+    {
+      pool: pool.address,
+      admin: pool.admin,
+      proposal: venueProposalAddress(pool.address),
+      ...venue(pool),
+    },
+    [],
+    venueRemaining(pool, "sync"),
+  );
+
+export const harvest = (program: HexVaultProgram, pool: VenuePool) =>
+  build(
+    program,
+    "harvest",
+    {
+      ...principalAccounts(pool),
+      jackpotVault: jackpotVaultAddress(pool.address),
+      treasury: pool.treasury,
+    },
+    [],
+    venueRemaining(pool, "redeem"),
+  );
+
+/** Pays `amount` from the payer's own USDC account; the program caps it at the deficit. */
+export const coverDeficit = (
+  program: HexVaultProgram,
+  pool: VenuePool,
+  payer: PublicKey,
+  amount: bigint = 1n,
+) =>
+  build(
+    program,
+    "coverDeficit",
+    {
+      payer,
+      payerToken: getAssociatedTokenAddressSync(pool.acceptedMint, payer),
+      ...principalAccounts(pool),
+    },
+    [bn(amount)],
+    venueRemaining(pool, "sync"),
+  );
+
+/**
+ * Pays one Player's due withdrawal. The program wants no owner signer (it
+ * needs one only while the pool is impaired, when the owner pays for their own
+ * haircut), so `owner: null`. An idempotent ATA create goes first, paid by the
+ * connected wallet, so a Player who closed their account does not block it.
+ */
+export async function processWithdraw(
+  program: HexVaultProgram,
+  pool: VenuePool,
+  payer: PublicKey,
+  owner: PublicKey,
+): Promise<TransactionInstruction[]> {
+  const ownerToken = getAssociatedTokenAddressSync(pool.acceptedMint, owner);
+  return [
+    createAssociatedTokenAccountIdempotentInstruction(payer, ownerToken, owner, pool.acceptedMint),
+    await build(program, "processWithdraw", {
+      pool: pool.address,
+      player: playerAddress(pool.address, owner),
+      owner: null,
+      acceptedMint: pool.acceptedMint,
+      ownerToken,
+      principalVault: principalVaultAddress(pool.address),
+      ...venue(pool),
+      tokenProgram: TOKEN_PROGRAM_ID,
+    }, [], pool.venueKind === VENUE_KIND.kvault ? venueRemaining(pool, "sync") : []),
+  ];
+}
+
+export const rolloverEpoch = (program: HexVaultProgram, pool: VenuePool, caller: PublicKey, epoch: EpochSeed) =>
+  build(program, "rolloverEpoch", {
+    caller,
+    pool: pool.address,
+    epoch: epochAddress(pool.address, epoch.epochId),
+    randomness: randomnessFor(program, epoch.vrfSeed),
+  });
+
+// Chain reads, once per click.
+
+const asKey = (value: unknown): PublicKey => new PublicKey(value as PublicKey);
+
+/** The Pool account as the venue cranks need it. */
+export async function loadPool(program: HexVaultProgram): Promise<VenuePool> {
+  const address = poolAddress(POOL_ID);
+  const a = (await accountOf(program, "pool").fetch(address)) as Record<string, unknown>;
+  const pool: VenuePool = {
+    address,
+    admin: asKey(a.admin),
+    acceptedMint: asKey(a.acceptedMint),
+    treasury: asKey(a.treasury),
+    klendProgram: asKey(a.klendProgram),
+    klendMarket: asKey(a.klendMarket),
+    klendReserve: asKey(a.klendReserve),
+    klendCtoken: asKey(a.klendCtoken),
+    venueKind: Number(a.venueKind),
+  };
+  if (pool.venueKind !== VENUE_KIND.kvault) return pool;
+  // The curator can change the allocation list at any time, so the vault is
+  // read now and never cached.
+  const connection = (program.provider as { connection: Connection }).connection;
+  const kvault = await fetchKvaultView(connection, pool.klendMarket, pool.klendProgram);
+  const { value } = await connection.getAddressLookupTable(kvault.lookupTable);
+  if (!value) throw new Error(`lookup table ${kvault.lookupTable.toBase58()} does not exist`);
+  return { ...pool, kvault, lookupTables: [value] };
+}
+
+const seedOf = (value: unknown): Uint8Array => Uint8Array.from(value as ArrayLike<number>);
+
+export async function loadEpochSeed(program: HexVaultProgram, epochId: bigint): Promise<EpochSeed> {
+  const a = (await accountOf(program, "epoch").fetch(epochAddress(poolAddress(POOL_ID), epochId))) as Record<string, unknown>;
+  return { epochId, vrfSeed: seedOf(a.vrfSeed) };
+}

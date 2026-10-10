@@ -62,6 +62,11 @@ solana-keygen new --no-bip39-passphrase --silent --outfile "$work/authority.json
 authority=$(solana-keygen pubkey "$work/authority.json")
 solana --url "$rpc" airdrop 10 "$authority" --keypair "$wallet" >/dev/null
 echo "authority $authority"
+# create_pool takes only the upgrade authority as payer, and bootstrap pays with
+# this key, so hand it the program the way the mainnet launch does.
+solana --url "$rpc" program set-upgrade-authority "$program_id" \
+  --keypair "$wallet" --upgrade-authority "$wallet" \
+  --new-upgrade-authority "$authority" --skip-new-upgrade-authority-signer-check >/dev/null
 
 cd "$backend"
 OPERATOR_KEYPAIR=$(node -e "
@@ -73,6 +78,11 @@ export OPERATOR_KEYPAIR
 export RPC_URL="$rpc"
 export PROGRAM_ID="$program_id"
 export POOL_ID="${POOL_ID:-1}"
+# Needs a program built with `--features test-vrf,test-venue` (what
+# tests/run-local.sh builds): the stub venue is what create_pool pins here, and
+# the committed IDL snapshot has no test_venue_init, so read the built one.
+export VENUE_KIND=stub
+export HEXVAULT_IDL_PATH="$root/target/idl/hex_vault.json"
 
 echo
 echo "=== run 1 (fresh cluster) ==="

@@ -30,14 +30,16 @@ Copy `.env.example` to `.env.local` and adjust. The five variables are
 
 ## Rules baked into the code
 
-- `src/read.ts` owns the Pool, the connected wallet's Player and the open Round,
-  re-read from chain every 2 s and immediately on a `RoundSettled` log. The API
-  is a cache and its absence shows as a banner, never a crash.
+- `GET /state` (`src/useStatePoll.ts`) is the one poll for the Pool, Epoch and
+  the connected wallet's Player. `src/read.ts` reads only the wallet's own
+  token balance from the chain. The API's absence shows as a banner, never a
+  crash.
 - Amounts are bigint atomic units; formatting and parsing happen in
   `src/lib/money.ts` with no float in the path.
-- Placing a position always shows Entries in, Entries after and withdrawable
-  after before the button can be pressed.
-- `withdrawable = min(Principal, Entries)`, the same rule the program enforces
-  on `withdraw`.
+- Rounds and Positions are not on chain any more (ADR 0025). The PLAY tab reads
+  the open and last Round off `GET /state` and sends a bet as a message the
+  session key signs (`src/bet.ts`, `POST /game/bets`); no chain read or
+  transaction is in the game path. `VITE_GATE_GAME=off` still covers it with
+  the Coming soon card, as a launch switch.
 - Transactions are built directly from the IDL (`src/actions.ts`). The Anchor
-  client camelCases the IDL, so `buy_position` is reached as `buyPosition`.
+  client camelCases the IDL, so `buy_tickets` is reached as `buyTickets`.

@@ -1,7 +1,9 @@
 // One-off admin CLI: set-params, pause, unpause, pause-game, pause-jackpot,
-// start-game, start-jackpot, fund-jackpot, fund-yield,
-// grant-tickets, withdraw-principal, set-operator, propose-admin,
-// accept-admin, create-invite, void-round, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
+// start-game, start-jackpot, pause-deploy, start-deploy, pause-buy-tickets,
+// start-buy-tickets, set-venue-params, set-treasury-accounts, cover-deficit,
+// fund-jackpot, set-operator,
+// propose-admin, accept-admin, propose-venue, cancel-venue, drain-venue, migrate-venue, create-invite, grant-tickets, shutdown, emergency-crank,
+// sweep-house, rollover-epoch. Same shape as ../bootstrap.ts (plain tsx script, no command
 // framework, argument parsing split into its own file for a chain-free unit
 // test) but this pool already exists, so unlike bootstrap this reuses
 // ChainService and the same full .env the backend itself runs on, instead of
@@ -23,13 +25,13 @@ import { ConfigService } from "@nestjs/config";
 import { PrismaClient } from "@prisma/client";
 import {
   createAssociatedTokenAccountIdempotentInstruction,
-  createTransferCheckedInstruction,
   getAccount,
   getAssociatedTokenAddressSync,
-  getMint,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
+  type AccountMeta,
+  type AddressLookupTableAccount,
   Connection,
   PublicKey,
   Transaction,
@@ -37,26 +39,28 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 
-import { principalOut } from "../api/api.service";
 import { generateInviteCode } from "../api/invite-code";
 import { ChainService } from "../chain/chain.service";
+import { fetchKvaultView, kvaultRemaining } from "../chain/kvault";
+import { poolAddress, venueProposalAddress } from "../chain/pda";
+import { VENUE_KIND } from "../chain/venue-kind";
 import { rpcStatus, withRpcFallback } from "../chain/rpc-fallback";
 import type { HexVaultEnv } from "../config/env";
 import { validateEnv } from "../config/env";
 import {
   decodeEpoch,
   decodePool,
-  decodeRound,
   type PoolState,
 } from "../operator/chain-state";
+import { OperatorInstructions } from "../operator/instructions";
 import { randomnessAddress } from "../operator/vrf";
 import {
-  atomicUsdc,
-  checkRegistrationWindow,
   parseAdminCommand,
   type AdminCommand,
   type SetParamsInput,
+  type SetVenueParamsInput,
 } from "./args";
+import { grantTickets, loadKeypairFile } from "./grant";
 import {
   checkLedgerAddress,
   ledgerSigner,
@@ -78,7 +82,10 @@ const log = (message: string): void => {
  * three plain calls this file makes.
  */
 interface MethodBuilder {
-  accountsPartial(accounts: Record<string, PublicKey>): {
+  accountsPartial(accounts: Record<string, PublicKey | null>): {
+    remainingAccounts(accounts: AccountMeta[]): {
+      instruction(): Promise<TransactionInstruction>;
+    };
     instruction(): Promise<TransactionInstruction>;
   };
 }
@@ -96,18 +103,7 @@ function method(chain: ChainService, name: string, ...args: unknown[]): MethodBu
   return factory(...args);
 }
 
-/**
- * `PoolState` (operator/chain-state.ts) is scoped to what the tick needs,
- * so `principal-out`'s two other inputs are decoded a second time off the
- * same already-fetched bytes, rather than widening a type built for a
- * different job (and every operator test fixture along with it).
- */
-interface AdminPoolState extends PoolState {
-  readonly pendingWithdrawals: bigint;
-  readonly yieldBudget: bigint;
-}
-
-async function readPool(chain: ChainService): Promise<AdminPoolState> {
+async function readPool(chain: ChainService): Promise<PoolState> {
   const address = chain.poolAddress();
   const info = await chain.connection.getAccountInfo(address);
   if (!info) {
@@ -115,39 +111,28 @@ async function readPool(chain: ChainService): Promise<AdminPoolState> {
       `pool ${address.toBase58()} not found on this cluster; has bootstrap run?`,
     );
   }
-  const pool = decodePool(chain.program, address, info.data);
-  const raw = chain.program.coder.accounts.decode<{ pendingWithdrawals: BN; yieldBudget: BN }>(
-    "pool",
-    info.data,
-  );
-  return {
-    ...pool,
-    pendingWithdrawals: BigInt(raw.pendingWithdrawals.toString()),
-    yieldBudget: BigInt(raw.yieldBudget.toString()),
-  };
+  return decodePool(chain.program, address, info.data);
 }
 
-/** Reads the principal vault's live balance and logs `principal-out`'s four
- *  inputs and result under `label`. Shared by `principal-out`,
- *  `return-principal` (before and after) and `emergency-crank` (on stop). */
-async function logPrincipalOut(
+/**
+ * A kVault pool's venue instructions name too many accounts for a legacy
+ * transaction (venue-switch ticket 06), so they go as v0 with the vault's
+ * lookup table. This reads the pool, its vault and the table. Any other pool
+ * gets no tables.
+ */
+async function readVenuePool(
   chain: ChainService,
-  pool: AdminPoolState,
-  label: string,
-): Promise<bigint> {
-  const vault = chain.principalVaultAddress(pool.address);
-  const { amount } = await getAccount(chain.connection, vault);
-  const out = principalOut({
-    totalPrincipal: pool.totalPrincipal,
-    pendingWithdrawals: pool.pendingWithdrawals,
-    yieldBudget: pool.yieldBudget,
-    vaultAmount: amount,
-  });
-  log(
-    `${label}: total_principal=${pool.totalPrincipal} pending_withdrawals=${pool.pendingWithdrawals} ` +
-      `yield_budget=${pool.yieldBudget} vault=${amount} principal_out=${out}`,
+): Promise<{ pool: PoolState; tables: AddressLookupTableAccount[] }> {
+  const decoded = await readPool(chain);
+  if (decoded.venueKind !== VENUE_KIND.kvault) return { pool: decoded, tables: [] };
+  const kvault = await fetchKvaultView(
+    chain.connection,
+    decoded.klendMarket,
+    decoded.klendProgram,
   );
-  return out;
+  const { value } = await chain.connection.getAddressLookupTable(kvault.lookupTable);
+  if (!value) throw new Error(`lookup table ${kvault.lookupTable.toBase58()} does not exist`);
+  return { pool: { ...decoded, kvault }, tables: [value] };
 }
 
 /**
@@ -162,11 +147,18 @@ async function submit(
   instructions: TransactionInstruction[],
   summary: string,
   ledger?: AdminSigner,
+  tables: readonly AddressLookupTableAccount[] = [],
 ): Promise<void> {
+  if (tables.length > 0 && (mode.multisig || ledger)) {
+    // The Ledger and Squads paths build legacy transactions.
+    throw new Error(
+      "this kVault pool's transaction needs v0 with the vault's lookup table, which the Ledger and Squads paths cannot build yet; run it with the Admin or Operator key loaded locally",
+    );
+  }
   if (!mode.multisig) {
     const signature = ledger
       ? await sendWithLedger(chain, ledger, instructions)
-      : await chain.send(instructions);
+      : await chain.send(instructions, chain.keypair, tables);
     log(`signature ${signature}`);
     log(summary);
     return;
@@ -176,6 +168,9 @@ async function submit(
   // a few slots behind, and Squads simulates the import against its own.
   const { blockhash } = await chain.connection.getLatestBlockhash("finalized");
   process.stdout.write(`${encodeForSquads(instructions, mode.signer, blockhash)}\n`);
+  // Said here, not in main(): only the commands that reach this branch send
+  // nothing. `pause` and the other local-signing commands send in multisig mode too.
+  log(`admin is ${mode.signer.toBase58()}, not the loaded key: nothing will be sent`);
   log(summary);
   log(
     `unsigned, signer and fee payer ${mode.signer.toBase58()}; paste into Squads' "Import base58 encoded tx" now, the blockhash expires in about a minute`,
@@ -271,6 +266,141 @@ async function startFeature(
   await submit(chain, mode, [ix], `start the ${feature}`, ledger);
 }
 
+// yield-claimer ticket 10: `set_deploy_pause` has `set_pause`'s role rule.
+// Pausing signs locally with whichever key is loaded (the Operator's too, the
+// 3am stop for a venue in trouble), and resuming is admin only, so it goes
+// through `submit` and a wrong key is refused before it costs a fee.
+async function pauseDeploy(chain: ChainService): Promise<void> {
+  const ix = await method(chain, "setDeployPause", true)
+    .accountsPartial({ signer: chain.keypair.publicKey, pool: chain.poolAddress() })
+    .instruction();
+  log(`signature ${await chain.send([ix])}`);
+  log("deploy paused");
+}
+
+async function startDeploy(
+  chain: ChainService,
+  mode: AdminMode,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const pool = await readPool(chain);
+  if (!mode.signer.equals(pool.admin)) {
+    const role = mode.signer.equals(pool.operator) ? "the operator" : "not the admin";
+    throw new Error(
+      `start-deploy is admin only: ${mode.signer.toBase58()} is ${role} of pool ${pool.address.toBase58()}; refusing before sending`,
+    );
+  }
+  const ix = await method(chain, "setDeployPause", false)
+    .accountsPartial({ signer: mode.signer, pool: chain.poolAddress() })
+    .instruction();
+  await submit(chain, mode, [ix], "resume deploying to the venue", ledger);
+}
+
+// `set_buy_tickets_pause` is Admin only in both directions (ADR 0019), so both
+// go through `submit`. Bootstrap sets it on mainnet; this clears it.
+async function setBuyTicketsPause(
+  chain: ChainService,
+  mode: AdminMode,
+  paused: boolean,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const ix = await method(chain, "setBuyTicketsPause", paused)
+    .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
+    .instruction();
+  await submit(
+    chain,
+    mode,
+    [ix],
+    paused ? "pause buying tickets" : "resume buying tickets",
+    ledger,
+  );
+}
+
+/** Only the fields given are sent; the program leaves a `null` one alone. */
+async function setVenueParams(
+  chain: ChainService,
+  mode: AdminMode,
+  params: SetVenueParamsInput,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const ix = await method(chain, "setVenueParams", {
+    yieldFeeBps: params.yieldFeeBps ?? null,
+    idleFloorBps: params.idleFloorBps ?? null,
+    idleTargetBps: params.idleTargetBps ?? null,
+    reserveShareCapBps: params.reserveShareCapBps ?? null,
+    reserveLiquidityFloorBps: params.reserveLiquidityFloorBps ?? null,
+    minVenueMove:
+      params.minVenueMove === undefined ? null : new BN(params.minVenueMove.toString()),
+    lossToleranceBps: params.lossToleranceBps ?? null,
+  })
+    .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
+    .instruction();
+  await submit(chain, mode, [ix], "set venue params", ledger);
+}
+
+async function setTreasuryAccounts(
+  chain: ChainService,
+  mode: AdminMode,
+  treasury: PublicKey,
+  buybackReserve: PublicKey,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const pool = await readPool(chain);
+  const ix = await method(chain, "setTreasuryAccounts")
+    .accountsPartial({
+      admin: mode.signer,
+      pool: pool.address,
+      acceptedMint: pool.acceptedMint,
+      treasury,
+      buybackReserve,
+    })
+    .instruction();
+  await submit(
+    chain,
+    mode,
+    [ix],
+    `set the treasury to ${treasury.toBase58()} and the buyback reserve to ${buybackReserve.toBase58()}`,
+    ledger,
+  );
+}
+
+/**
+ * Not Admin-gated in the program: the signer pays from its own USDC account,
+ * so this goes through `submit` for the multisig's sake but takes whichever
+ * key signs. The program moves at most the deficit, so `amount` may overshoot.
+ */
+async function coverDeficit(
+  chain: ChainService,
+  mode: AdminMode,
+  amount: bigint,
+  ledger?: AdminSigner,
+): Promise<void> {
+  const pool = await readPool(chain);
+  // A Squads vault is a PDA, so its ATA owner is off the curve.
+  const payerToken = getAssociatedTokenAddressSync(pool.acceptedMint, mode.signer, true);
+  const ix = await method(chain, "coverDeficit", new BN(amount.toString()))
+    .accountsPartial({
+      payer: mode.signer,
+      pool: pool.address,
+      principalVault: chain.principalVaultAddress(pool.address),
+      acceptedMint: pool.acceptedMint,
+      payerToken,
+      klendProgram: pool.klendProgram,
+      klendMarket: pool.klendMarket,
+      klendReserve: pool.klendReserve,
+      klendCtoken: pool.klendCtoken,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .instruction();
+  await submit(
+    chain,
+    mode,
+    [ix],
+    `cover the deficit with up to ${amount} atomic units from ${payerToken.toBase58()}`,
+    ledger,
+  );
+}
+
 function bnOrNull(value: number | undefined): BN | null {
   return value === undefined ? null : new BN(value);
 }
@@ -281,30 +411,15 @@ async function setParams(
   params: SetParamsInput,
   ledger?: AdminSigner,
 ): Promise<void> {
-  // args.ts already compared the window against --epoch-seconds when both
-  // were given; with only the window, the epoch it has to beat is the
-  // pool's, and the program would reject it with InvalidParameter.
-  if (params.registrationWindow !== undefined && params.epochSeconds === undefined) {
-    checkRegistrationWindow(
-      params.registrationWindow,
-      Number((await readPool(chain)).epochSeconds),
-    );
-  }
   const ix = await method(chain, "setParams", {
     epochSeconds: bnOrNull(params.epochSeconds),
     epochAnchor: bnOrNull(params.epochAnchor),
-    roundSeconds: bnOrNull(params.roundSeconds),
-    closeBuffer: bnOrNull(params.closeBuffer),
     vrfTimeout: bnOrNull(params.vrfTimeout),
     minDeposit: params.minDeposit === undefined ? null : new BN(params.minDeposit.toString()),
-    houseCutBps: params.houseCutBps === undefined ? null : params.houseCutBps,
     minJackpot:
       params.minJackpot === undefined ? null : new BN(params.minJackpot.toString()),
-    registrationWindow: bnOrNull(params.registrationWindow),
     payoutTimeout: bnOrNull(params.payoutTimeout),
     baseRateBps: params.baseRateBps ?? null,
-    ticketsPerUsdc: params.ticketsPerUsdc ?? null,
-    bonusCapBps: params.bonusCapBps ?? null,
   })
     .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
     .instruction();
@@ -312,7 +427,7 @@ async function setParams(
     chain,
     mode,
     [ix],
-    "set params (epoch/round changes apply to the next epoch/round, not the open one)",
+    "set params (epoch changes apply to the next epoch, not the open one)",
     ledger,
   );
 }
@@ -337,154 +452,6 @@ async function fundJackpot(chain: ChainService, amount: bigint): Promise<void> {
     .instruction();
   log(`signature ${await chain.send([ix])}`);
   log(`jackpot funded with ${amount} atomic units from ${source.toBase58()}`);
-}
-
-/**
- * Tops up `Pool.yield_budget` with real USDC, same shape as `fundJackpot`
- * (permissionless, signs locally with whatever key is loaded) but into
- * `principal_vault` instead of the jackpot vault.
- */
-async function fundYield(chain: ChainService, amount: bigint): Promise<void> {
-  const pool = await readPool(chain);
-  const source = getAssociatedTokenAddressSync(pool.acceptedMint, chain.keypair.publicKey);
-  const ix = await method(chain, "fundYield", new BN(amount.toString()))
-    .accountsPartial({
-      sourceAuthority: chain.keypair.publicKey,
-      pool: pool.address,
-      acceptedMint: pool.acceptedMint,
-      source,
-      principalVault: chain.principalVaultAddress(pool.address),
-      tokenProgram: TOKEN_PROGRAM_ID,
-    })
-    .instruction();
-  log(`signature ${await chain.send([ix])}`);
-  log(`yield budget funded with ${amount} atomic units from ${source.toBase58()}`);
-}
-
-/**
- * The admin path of `grant_tickets`: uncapped, for the rare manual fix. The
- * referral job (docs/plan/hexo-referrals ticket 08) is the only intended
- * caller of the operator path, which signs with the operator key directly
- * through `OperatorInstructions` rather than this CLI.
- */
-async function grantTickets(
-  chain: ChainService,
-  mode: AdminMode,
-  owner: PublicKey,
-  amount: bigint,
-  ledger?: AdminSigner,
-): Promise<void> {
-  const ix = await method(chain, "grantTickets", new BN(amount.toString()))
-    .accountsPartial({
-      signer: mode.signer,
-      pool: chain.poolAddress(),
-      player: chain.playerAddress(owner),
-    })
-    .instruction();
-  await submit(
-    chain,
-    mode,
-    [ix],
-    `grant ${amount} tickets to ${owner.toBase58()} (admin path, uncapped)`,
-    ledger,
-  );
-}
-
-/**
- * Moves principal out of the vault to the admin's associated token account,
- * which the program checks by address. The amount is scaled by the mint's
- * own decimals rather than an assumed six, because this is the one command
- * that moves depositors' money.
- */
-async function withdrawPrincipal(
-  chain: ChainService,
-  mode: AdminMode,
-  amount: string,
-  ledger?: AdminSigner,
-): Promise<void> {
-  const pool = await readPool(chain);
-  const { decimals } = await getMint(chain.connection, pool.acceptedMint);
-  const atomic = atomicUsdc(amount, decimals);
-  // Off-curve is allowed on purpose: a Squads vault is a PDA, and its ATA
-  // derives the same way.
-  const adminToken = getAssociatedTokenAddressSync(pool.acceptedMint, mode.signer, true);
-
-  const instructions: TransactionInstruction[] = [];
-  if ((await chain.connection.getAccountInfo(adminToken)) === null) {
-    instructions.push(
-      createAssociatedTokenAccountIdempotentInstruction(
-        mode.signer,
-        adminToken,
-        mode.signer,
-        pool.acceptedMint,
-      ),
-    );
-  }
-  instructions.push(
-    await method(chain, "adminWithdraw", new BN(atomic.toString()))
-      .accountsPartial({
-        admin: mode.signer,
-        pool: pool.address,
-        acceptedMint: pool.acceptedMint,
-        adminToken,
-        principalVault: chain.principalVaultAddress(pool.address),
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .instruction(),
-  );
-  await submit(
-    chain,
-    mode,
-    instructions,
-    `withdraw ${amount} USDC (${atomic} atomic) of principal to ${adminToken.toBase58()}`,
-    ledger,
-  );
-}
-
-/** Read-only: prints the same figure `/status` reports, and its inputs. */
-async function principalOutCommand(chain: ChainService): Promise<void> {
-  const pool = await readPool(chain);
-  await logPrincipalOut(chain, pool, "principal out");
-}
-
-/**
- * Plain SPL transfer from the admin's own ATA into the principal vault
- * (spec.md "Out of Scope": no on-chain `admin_return`, return is a transfer
- * plus this figure). Prints `principal-out` before, and once a local send
- * has actually landed, after; a multisig print has nothing to re-read yet.
- */
-async function returnPrincipal(
-  chain: ChainService,
-  mode: AdminMode,
-  amount: string,
-  ledger?: AdminSigner,
-): Promise<void> {
-  const pool = await readPool(chain);
-  await logPrincipalOut(chain, pool, "before");
-  const { decimals } = await getMint(chain.connection, pool.acceptedMint);
-  const atomic = atomicUsdc(amount, decimals);
-  // Off-curve is allowed on purpose, same reason as withdraw-principal's own
-  // adminToken: a Squads vault is a PDA, and its ATA derives the same way.
-  const adminToken = getAssociatedTokenAddressSync(pool.acceptedMint, mode.signer, true);
-  const principalVault = chain.principalVaultAddress(pool.address);
-  const ix = createTransferCheckedInstruction(
-    adminToken,
-    pool.acceptedMint,
-    principalVault,
-    mode.signer,
-    atomic,
-    decimals,
-    [],
-    TOKEN_PROGRAM_ID,
-  );
-  await submit(
-    chain,
-    mode,
-    [ix],
-    `return ${amount} USDC (${atomic} atomic) of principal from ${adminToken.toBase58()} to the principal vault`,
-    ledger,
-  );
-  if (!mode.multisig) await logPrincipalOut(chain, pool, "after");
 }
 
 /**
@@ -545,7 +512,8 @@ async function playersOwedABalance(chain: ChainService): Promise<CrankPlayer[]> 
     if (raw.isHouse) continue; // exits through sweep-house instead
     const principal = BigInt(raw.principal.toString());
     const pendingWithdraw = BigInt(raw.pendingWithdraw.toString());
-    if (principal + pendingWithdraw <= 0n) continue;
+    // A queued withdrawal is part of Principal until it pays (ADR 0020).
+    if (principal <= 0n) continue;
     players.push({ address: pubkey, owner: raw.owner, principal, pendingWithdraw });
   }
   return players;
@@ -561,7 +529,10 @@ async function playersOwedABalance(chain: ChainService): Promise<CrankPlayer[]> 
  * than sending every remaining batch into the same wall.
  */
 async function emergencyCrank(chain: ChainService, batchSize: number): Promise<void> {
-  const pool = await readPool(chain);
+  const { pool, tables } = await readVenuePool(chain);
+  // `emergency_withdraw` syncs the venue first: a kVault pool's value is read
+  // from every allocation's reserve and market (fork-run-fixes 10).
+  const remaining = pool.kvault ? kvaultRemaining(pool.kvault, { valueOnly: true }) : [];
   const players = await playersOwedABalance(chain);
   if (players.length === 0) {
     log("no Player owes a balance; nothing to crank");
@@ -585,17 +556,23 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
           .accountsPartial({
             pool: pool.address,
             player: player.address,
-            owner: player.owner,
+            // Null, not omitted: the client would fill the fee payer in.
+            owner: null,
             acceptedMint: pool.acceptedMint,
             ownerToken,
             principalVault,
+            klendProgram: pool.klendProgram,
+            klendMarket: pool.klendMarket,
+            klendReserve: pool.klendReserve,
+            klendCtoken: pool.klendCtoken,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
+          .remainingAccounts(remaining)
           .instruction(),
       );
     }
     try {
-      const signature = await chain.send(instructions);
+      const signature = await chain.send(instructions, chain.keypair, tables);
       paid += batch.length;
       log(`signature ${signature}`);
       log(`paid ${batch.map((player) => player.owner.toBase58()).join(", ")}`);
@@ -603,7 +580,8 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
       if ((cause instanceof Error ? cause.message : "") !== "InsufficientVault") throw cause;
       const skipped = players.length - paid;
       log(`insufficient vault: stopped before this batch of ${batch.length}; ${skipped} player(s) still owed`);
-      await logPrincipalOut(chain, pool, "principal out");
+      const { amount } = await getAccount(chain.connection, principalVault);
+      log(`principal vault holds ${amount}; recall the venue position if it is not all home`);
       log(`emergency-crank done: paid ${paid}, skipped ${skipped}`);
       return;
     }
@@ -612,7 +590,7 @@ async function emergencyCrank(chain: ChainService, batchSize: number): Promise<v
 }
 
 /** Admin-only, only valid once the pool is shut down (spec.md "sweep_house"):
- *  moves the whole jackpot and any unspent yield budget to treasury. */
+ *  moves the jackpot vault's unreserved balance to treasury. */
 async function sweepHouse(
   chain: ChainService,
   mode: AdminMode,
@@ -625,7 +603,6 @@ async function sweepHouse(
       pool: pool.address,
       acceptedMint: pool.acceptedMint,
       jackpotVault: chain.jackpotVaultAddress(pool.address),
-      principalVault: chain.principalVaultAddress(pool.address),
       treasury: pool.treasury,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
@@ -634,7 +611,7 @@ async function sweepHouse(
     chain,
     mode,
     [ix],
-    `sweep the jackpot and any unspent yield budget to treasury ${pool.treasury.toBase58()}`,
+    `sweep the unreserved jackpot to treasury ${pool.treasury.toBase58()}`,
     ledger,
   );
 }
@@ -646,32 +623,13 @@ function isTestVrf(chain: ChainService): boolean {
 }
 
 /**
- * Permissionless stuck-state exits (mainnet readiness 2026-09-28, blocker 4).
- * Both sign locally with the loaded key like `emergency-crank`: the program
+ * Permissionless stuck-state exit (mainnet readiness 2026-09-28, blocker 4).
+ * Signs locally with the loaded key like `emergency-crank`: the program
  * takes any `caller` and enforces the deadline itself, so a too-early call
  * fails with `VrfTimeoutNotElapsed` / `PayoutTimeoutNotElapsed` rather than
  * doing anything. The randomness account is derived from the stored seed
  * and may not exist; the program allows that.
  */
-async function voidRound(chain: ChainService, roundId: bigint): Promise<void> {
-  const pool = await readPool(chain);
-  const address = chain.roundAddress(roundId, pool.address);
-  const info = await chain.connection.getAccountInfo(address);
-  if (!info) throw new Error(`round ${roundId} (${address.toBase58()}) not found`);
-  const round = decodeRound(chain.program, info.data);
-  const ix = await method(chain, "voidRound")
-    .accountsPartial({
-      caller: chain.keypair.publicKey,
-      pool: pool.address,
-      round: address,
-      randomness: randomnessAddress(chain.programId, round.vrfSeed, isTestVrf(chain)),
-    })
-    .instruction();
-  const signature = await chain.send([ix]);
-  log(`signature ${signature}`);
-  log(`voided round ${roundId} (status was ${round.status})`);
-}
-
 async function rolloverEpoch(chain: ChainService, epochId: bigint): Promise<void> {
   const pool = await readPool(chain);
   const address = chain.epochAddress(epochId, pool.address);
@@ -758,19 +716,32 @@ export async function run(
       return startFeature(chain, mode, "game", ledger);
     case "start-jackpot":
       return startFeature(chain, mode, "jackpot", ledger);
+    case "pause-deploy":
+      return pauseDeploy(chain);
+    case "start-deploy":
+      return startDeploy(chain, mode, ledger);
+    case "pause-buy-tickets":
+      return setBuyTicketsPause(chain, mode, true, ledger);
+    case "start-buy-tickets":
+      return setBuyTicketsPause(chain, mode, false, ledger);
+    case "set-venue-params":
+      return setVenueParams(chain, mode, command.params, ledger);
+    case "set-treasury-accounts":
+      return setTreasuryAccounts(chain, mode, command.treasury, command.buybackReserve, ledger);
+    case "cover-deficit":
+      return coverDeficit(chain, mode, command.amount, ledger);
     case "set-params":
       return setParams(chain, mode, command.params, ledger);
     case "fund-jackpot":
       return fundJackpot(chain, command.amount);
-    case "fund-yield":
-      return fundYield(chain, command.amount);
-    case "grant-tickets":
-      return grantTickets(chain, mode, command.owner, command.amount, ledger);
-    case "withdraw-principal":
-      return withdrawPrincipal(chain, mode, command.amount, ledger);
     case "set-operator": {
+      const pool = await readPool(chain);
       const ix = await method(chain, "setOperator", command.key)
-        .accountsPartial({ admin: mode.signer, pool: chain.poolAddress() })
+        .accountsPartial({
+          admin: mode.signer,
+          pool: chain.poolAddress(),
+          house: pool.house,
+        })
         .instruction();
       return submit(
         chain,
@@ -792,6 +763,96 @@ export async function run(
         ledger,
       );
     }
+    // venue-switch ticket 03. The admin signs and pays the proposal's rent on
+    // the first proposal, so on mainnet the multisig vault needs a little SOL.
+    case "propose-venue": {
+      const ix = await method(
+        chain,
+        "proposeVenue",
+        {
+          venueKind: command.venueKind,
+          klendProgram: command.program,
+          klendMarket: command.market,
+          klendReserve: command.reserve,
+          klendCtoken: command.ctoken,
+        },
+      )
+        .accountsPartial({
+          admin: mode.signer,
+          pool: chain.poolAddress(),
+          proposal: venueProposalAddress(chain.programId, chain.poolAddress()),
+        })
+        // A kVault proposal passes its four pins so the program can check
+        // them against the vault state.
+        .remainingAccounts(
+          command.venueKind === VENUE_KIND.kvault
+            ? [command.program, command.market, command.reserve, command.ctoken].map(
+                (pubkey) => ({ pubkey, isSigner: false, isWritable: false }),
+              )
+            : [],
+        )
+        .instruction();
+      return submit(
+        chain,
+        mode,
+        [ix],
+        `propose venue kind ${command.venueKind} (reserve ${command.reserve.toBase58()}); deploys stop until cancel-venue or the migration, and the 48 hour lock restarts`,
+        ledger,
+      );
+    }
+    // venue-switch ticket 04. The deploy pause rides in the same transaction,
+    // before the drain, so the Operator's crank cannot put the USDC back.
+    // Whichever of Admin or Operator signs, both may do both.
+    case "drain-venue": {
+      const { pool, tables } = await readVenuePool(chain);
+      const instructions = new OperatorInstructions(
+        chain.program,
+        chain.programId,
+        mode.signer,
+        false,
+      );
+      const pause = await method(chain, "setDeployPause", true)
+        .accountsPartial({ signer: mode.signer, pool: pool.address })
+        .instruction();
+      const drain = await instructions.drainVenue(pool, command.amount, mode.signer);
+      return submit(
+        chain,
+        mode,
+        [pause, ...drain],
+        `pause deploys and drain ${command.amount} atomic units from the venue into the principal vault; start-deploy resumes deploys`,
+        ledger,
+        tables,
+      );
+    }
+    // venue-switch ticket 05. Permissionless: the signer only pays the fee.
+    // The proposal's rent goes to the pool's Admin, not to the signer.
+    case "migrate-venue": {
+      const { pool, tables } = await readVenuePool(chain);
+      const instructions = new OperatorInstructions(
+        chain.program,
+        chain.programId,
+        mode.signer,
+        false,
+      );
+      return submit(
+        chain,
+        mode,
+        await instructions.migrateVenue(pool),
+        "migrate the pool to the proposed venue; the program checks the lock and the old position, and refuses by name if either is not ready",
+        ledger,
+        tables,
+      );
+    }
+    case "cancel-venue": {
+      const ix = await method(chain, "cancelVenue")
+        .accountsPartial({
+          admin: mode.signer,
+          pool: chain.poolAddress(),
+          proposal: venueProposalAddress(chain.programId, chain.poolAddress()),
+        })
+        .instruction();
+      return submit(chain, mode, [ix], "cancel the open venue proposal; deploys resume", ledger);
+    }
     // Signed by the pending admin, which is whoever is taking the pool over:
     // the loaded key when a person is, ADMIN_ADDRESS when the multisig is.
     case "accept-admin": {
@@ -806,18 +867,12 @@ export async function run(
         ledger,
       );
     }
-    case "principal-out":
-      return principalOutCommand(chain);
-    case "return-principal":
-      return returnPrincipal(chain, mode, command.amount, ledger);
     case "shutdown":
       return shutdownCommand(chain, mode, command.confirm, ledger);
     case "emergency-crank":
       return emergencyCrank(chain, command.batch);
     case "sweep-house":
       return sweepHouse(chain, mode, ledger);
-    case "void-round":
-      return voidRound(chain, command.roundId);
     case "rollover-epoch":
       return rolloverEpoch(chain, command.epochId);
   }
@@ -843,6 +898,15 @@ export async function main(): Promise<void> {
     return;
   }
 
+  // Touches no chain either: it signs with a keypair file and asks the backend.
+  if (command.kind === "grant-tickets") {
+    await grantTickets(command, loadKeypairFile(command.keypair), {
+      pool: poolAddress(new PublicKey(env.PROGRAM_ID), BigInt(env.POOL_ID)).toBase58(),
+      backendUrl: command.backend ?? `http://127.0.0.1:${env.PORT}`,
+    });
+    return;
+  }
+
   const primary = new Connection(env.RPC_URL, "confirmed");
   const fallback = env.RPC_FALLBACK_URL
     ? new Connection(env.RPC_FALLBACK_URL, "confirmed")
@@ -865,9 +929,6 @@ export async function main(): Promise<void> {
   );
   if (ledger) {
     log(`admin signer is the Ledger at ${ledger.publicKey.toBase58()}`);
-  }
-  if (mode.multisig) {
-    log(`admin is ${mode.signer.toBase58()}, not the loaded key: nothing will be sent`);
   }
 
   await run(command, chain, mode, ledger);

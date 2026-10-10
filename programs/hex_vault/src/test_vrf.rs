@@ -1,7 +1,7 @@
 //! Localnet stand-in for ORAO VRF, compiled only under `test-vrf`.
 //!
 //! Fabricates a fulfilled `RandomnessV2` account at the address
-//! [`crate::vrf::randomness_address`] expects, so round and epoch settlement
+//! [`crate::vrf::randomness_address`] expects, so the epoch draw
 //! can be tested end to end with no ORAO program deployed.
 
 use anchor_lang::prelude::*;
