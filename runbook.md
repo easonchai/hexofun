@@ -721,3 +721,31 @@
 
   Rollback: unset `SOLAMI_WEBHOOK_SECRET`, recreate the backend (the route answers 404 and the Indexer is back on
   `onLogs` plus the walk), then delete the webhook in the dashboard so Solami stops retrying into a 404.
+
+  Beam
+
+  Mainnet only. With `BEAM_KEYPAIR` set, every transaction the operator key signs carries a tip transfer to one of
+  Solami's tip addresses and goes to Beam (`beam.solami.dev:11000`, QUIC) before the RPC. If Beam throws, the same
+  bytes go through `sendRawTransaction`; the 2-second rebroadcast always uses the RPC. The admin CLI's Ledger sends
+  and Sparring player sends never use Beam.
+
+    1. In the Solami dashboard create a "swQoS key". It is a keypair; paste its base58 secret into apps/backend/.env as
+       `BEAM_KEYPAIR`. Beam authenticates by a client certificate built from it, so it is a secret like
+       `OPERATOR_KEYPAIR`.
+    2. `BEAM_TIP_LAMPORTS` is optional: default and minimum 100000 (0.0001 SOL, Solami's floor). The operator wallet
+       pays it on every send.
+    3. Recreate the backend. `/status` shows `beam: { enabled, sent, landed }` counted since boot (`null` when off).
+       A send whose Beam submit failed logs `Beam submit failed ...; sending <sig> through the RPC`.
+    4. Where a signature landed, with no auth:
+
+         curl -s https://api.solami.dev/swqos/tx/<signature>
+
+       It answers `is_landed`, `landed_via_jito`, `region`, `tip_lamports`, `first_seen_ms`, `forwarded_ms`.
+
+  The QUIC client (`@matrixai/quic`) is a native module with glibc builds only. The backend image is
+  node:22-alpine (musl), where it does not load: the backend then logs `BEAM_KEYPAIR is set but the QUIC module does
+  not load here; Beam stays off` at boot, `/status` shows `beam: null`, and no tip is paid. Beam needs the image on a
+  glibc base such as node:22-bookworm-slim first; a probe on 2026-10-10 loaded it there and not on alpine, with or
+  without gcompat.
+
+  Rollback: unset `BEAM_KEYPAIR` and recreate the backend. Sends go back to `sendRawTransaction` with no tip.

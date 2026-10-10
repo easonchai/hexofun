@@ -856,6 +856,8 @@ export class ApiService {
       // solami-index 09: slot of the newest Solami webhook delivery this
       // process took; null with the route off or nothing delivered yet.
       webhookLastSlot: webhookLastSlot(),
+      // Solami ticket 08: in-memory Beam send counts since boot, null when off.
+      beam: this.chain.beam?.status() ?? null,
     };
   }
 

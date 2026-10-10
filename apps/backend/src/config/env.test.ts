@@ -272,3 +272,26 @@ describe("validateEnv", () => {
     ).toThrow(/INVITE_REDEEM_GRANT_COUNT/);
   });
 });
+
+// Solami ticket 08: Beam is off unless BEAM_KEYPAIR is set.
+describe("Beam env", () => {
+  it("is off by default, and on with a keypair and the floor tip", () => {
+    const off = validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_TIP_LAMPORTS: "5" });
+    expect(off.BEAM_KEYPAIR).toBeUndefined();
+    expect(off.BEAM_TIP_LAMPORTS).toBeUndefined();
+    const secret = bs58.encode(Keypair.generate().secretKey);
+    const on = validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_KEYPAIR: secret });
+    expect(on.BEAM_KEYPAIR).toBe(secret);
+    expect(on.BEAM_TIP_LAMPORTS).toBe(100_000);
+  });
+
+  it("fails the boot on a bad keypair without echoing it, and on a tip under the floor", () => {
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_KEYPAIR: "not-a-real-secret-0OIl" }),
+    ).toThrow(/^BEAM_KEYPAIR must be a base58 64-byte secret key$/);
+    const secret = bs58.encode(Keypair.generate().secretKey);
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_KEYPAIR: secret, BEAM_TIP_LAMPORTS: "99999" }),
+    ).toThrow(/BEAM_TIP_LAMPORTS/);
+  });
+});

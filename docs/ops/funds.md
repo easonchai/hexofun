@@ -51,6 +51,8 @@ solana transfer <operator-pubkey> 1 --url <cluster>
 `GET /healthz` reports `operatorSol` and turns `degraded` below `OPERATOR_SOL_WARN` (default
 0.5 SOL); alert on that field rather than waiting for cranks to start failing.
 
+With Beam on (`BEAM_KEYPAIR`, runbook "Beam"), every operator send also pays a `BEAM_TIP_LAMPORTS` tip, 0.0001 SOL by default, from this wallet.
+
 ## SOL costs
 
 Measured 2026-10-09 on a surf fork at `20ba7f1` (program 830,696 B, `opt-level = "s"`). The fork

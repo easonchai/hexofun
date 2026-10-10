@@ -130,7 +130,7 @@ function isFailoverWorthy(error: unknown): boolean {
  *  settled by then. web3.js takes no per-call timeout, so an RPC that
  *  accepts the connection and then says nothing would otherwise hold a call
  *  open with no ceiling. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const expiry = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);

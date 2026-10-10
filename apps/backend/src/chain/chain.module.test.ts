@@ -6,6 +6,8 @@ import {
   Connection,
   Keypair,
   PublicKey,
+  SystemInstruction,
+  SystemProgram,
   Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
@@ -19,6 +21,7 @@ import {
   type HexVaultEnv,
 } from "../config/env";
 import { CountingConnection } from "../test-utils/counting-connection";
+import { BeamSender, type BeamTransport } from "./beam";
 import { ChainModule, primaryConnection } from "./chain.module";
 import {
   CONFIRM_TIMEOUT_MS,
@@ -67,7 +70,7 @@ describe("ChainService.send", () => {
   // `getLatestBlockhash`/`sendRawTransaction`/confirmation are all faked.
   const noop = [new TransactionInstruction({ programId: PublicKey.default, keys: [], data: Buffer.alloc(0) })];
 
-  function chainWith(connection: CountingConnection): ChainService {
+  function chainWith(connection: CountingConnection, beam: BeamSender | null = null): ChainService {
     const env: Partial<HexVaultEnv> = {
       OPERATOR_KEYPAIR: bs58.encode(Keypair.generate().secretKey),
       POOL_ID: "1",
@@ -78,7 +81,7 @@ describe("ChainService.send", () => {
     const config = {
       get: (key: keyof HexVaultEnv) => env[key],
     } as unknown as ConfigService<HexVaultEnv, true>;
-    return new ChainService(connection as unknown as Connection, config);
+    return new ChainService(connection as unknown as Connection, config, beam);
   }
 
   it("confirms off the signature subscription: two RPC calls, no block-height polling", async () => {
@@ -347,6 +350,117 @@ describe("ChainService.send", () => {
       await chain.send(noop);
 
       expect(sentPriceInstruction(connection)).toBe(DEFAULT_PRIORITY_FEE_MAX_MICROLAMPORTS);
+    });
+  });
+
+  // Solami ticket 08: with Beam configured, `send` tips and submits through
+  // Beam first; the RPC is the fallback and keeps the rebroadcast loop.
+  describe("Beam", () => {
+    const TIP = Keypair.generate().publicKey;
+
+    /** Records every submit; throws `failWith` when set. */
+    class RecordingBeamTransport implements BeamTransport {
+      readonly submitted: Uint8Array[] = [];
+      failWith: Error | undefined;
+      async submit(raw: Uint8Array): Promise<void> {
+        this.submitted.push(raw);
+        if (this.failWith) throw this.failWith;
+      }
+    }
+
+    function beamWith(
+      transport: BeamTransport,
+      fetchTips: () => Promise<unknown> = async () => [TIP.toBase58()],
+    ): BeamSender {
+      return new BeamSender(transport, 100_000, 10_000, fetchTips);
+    }
+
+    /** The System Program transfers in a sent transaction's bytes. `noop`
+     *  targets the System Program too (its id is `PublicKey.default`), with
+     *  no accounts, so that is what tells it apart. */
+    function transfersIn(raw: Uint8Array) {
+      return Transaction.from(raw)
+        .instructions.filter((ix) => ix.programId.equals(SystemProgram.programId) && ix.keys.length > 0)
+        .map((ix) => SystemInstruction.decodeTransfer(ix));
+    }
+
+    it("tips, submits through Beam first, and the RPC only rebroadcasts the same bytes", async () => {
+      vi.useFakeTimers();
+      try {
+        const connection = new CountingConnection();
+        const transport = new RecordingBeamTransport();
+        const chain = chainWith(connection, beamWith(transport));
+
+        const sent = chain.send(noop);
+        await vi.advanceTimersByTimeAsync(REBROADCAST_INTERVAL_MS + 50);
+        await expect(sent).resolves.toBeDefined();
+
+        expect(transport.submitted).toHaveLength(1);
+        const beamed = transport.submitted[0] as Uint8Array;
+        const [tip] = transfersIn(beamed);
+        expect(tip?.toPubkey.equals(TIP)).toBe(true);
+        expect(tip?.fromPubkey.equals(chain.keypair.publicKey)).toBe(true);
+        expect(tip?.lamports).toBe(100_000n);
+        // The one RPC send is the rebroadcast, carrying Beam's exact bytes.
+        expect(connection.callsTo("sendRawTransaction")).toBe(1);
+        expect(Buffer.from(connection.lastParams("sendRawTransaction")?.[0] as Buffer)).toEqual(
+          Buffer.from(beamed),
+        );
+        expect(chain.beam?.status()).toEqual({ enabled: true, sent: 1, landed: 1 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a Beam failure falls back to sendRawTransaction and the transaction still confirms", async () => {
+      const connection = new CountingConnection();
+      const transport = new RecordingBeamTransport();
+      transport.failWith = new Error("connection refused");
+      const chain = chainWith(connection, beamWith(transport));
+
+      await expect(chain.send(noop)).resolves.toBeDefined();
+
+      expect(transport.submitted).toHaveLength(1);
+      expect(connection.callsTo("sendRawTransaction")).toBe(1);
+      expect(transfersIn(connection.lastParams("sendRawTransaction")?.[0] as Buffer)).toHaveLength(1);
+      expect(chain.beam?.status()).toEqual({ enabled: true, sent: 0, landed: 0 });
+    });
+
+    it("with no tip address known, the send skips Beam and goes through the RPC untipped", async () => {
+      const connection = new CountingConnection();
+      const transport = new RecordingBeamTransport();
+      const chain = chainWith(
+        connection,
+        beamWith(transport, async () => {
+          throw new Error("offline");
+        }),
+      );
+
+      await expect(chain.send(noop)).resolves.toBeDefined();
+
+      expect(transport.submitted).toHaveLength(0);
+      expect(transfersIn(connection.lastParams("sendRawTransaction")?.[0] as Buffer)).toHaveLength(0);
+    });
+
+    it("a send signed by another key (the Sparring player) is not tipped", async () => {
+      const connection = new CountingConnection();
+      const transport = new RecordingBeamTransport();
+      const chain = chainWith(connection, beamWith(transport));
+
+      await chain.send(noop, Keypair.generate());
+
+      expect(transport.submitted).toHaveLength(0);
+      expect(transfersIn(connection.lastParams("sendRawTransaction")?.[0] as Buffer)).toHaveLength(0);
+    });
+
+    it("Beam off: no tip and no Beam status", async () => {
+      const connection = new CountingConnection();
+      const chain = chainWith(connection);
+
+      await chain.send(noop);
+
+      expect(chain.beam).toBeNull();
+      expect(transfersIn(connection.lastParams("sendRawTransaction")?.[0] as Buffer)).toHaveLength(0);
     });
   });
 });

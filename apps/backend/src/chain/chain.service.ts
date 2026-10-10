@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   AnchorError,
@@ -24,6 +24,7 @@ import {
 import bs58 from "bs58";
 
 import type { HexVaultEnv } from "../config/env";
+import { BEAM_SENDER, type BeamSender } from "./beam";
 import { loadIdl } from "./idl";
 import {
   epochAddress,
@@ -117,6 +118,9 @@ export class ChainService {
   constructor(
     @Inject(SOLANA_CONNECTION) connection: Connection,
     config: ConfigService<HexVaultEnv, true>,
+    /** Solami ticket 08: set only when `BEAM_KEYPAIR` is. The admin CLI and
+     *  the localnet suites build this service without it. */
+    @Optional() @Inject(BEAM_SENDER) readonly beam: BeamSender | null = null,
   ) {
     this.connection = connection;
     this.keypair = Keypair.fromSecretKey(
@@ -209,10 +213,14 @@ export class ChainService {
     try {
       const { blockhash, lastValidBlockHeight } =
         await this.connection.getLatestBlockhash("finalized");
+      const tip = await this.beamTip(signer);
+      const all = tip ? [...instructions, tip] : instructions;
       const [microLamports, computeUnits] = await Promise.all([
+        // Priced over the program's own accounts: the tip address changes
+        // per send and would defeat the fee cache.
         this.priorityFeeMicroLamports(writableAccountsOf(instructions)),
         this.computeUnitLimit(
-          instructions,
+          all,
           signer.publicKey,
           blockhash,
           lastValidBlockHeight,
@@ -232,7 +240,7 @@ export class ChainService {
           new TransactionMessage({
             payerKey: signer.publicKey,
             recentBlockhash: blockhash,
-            instructions: [...budgetInstructions, ...instructions],
+            instructions: [...budgetInstructions, ...all],
           }).compileToV0Message([...lookupTables]),
         );
         versioned.sign([signer]);
@@ -243,6 +251,7 @@ export class ChainService {
           versionedSignature,
           lastValidBlockHeight,
           hooks,
+          tip !== undefined,
         );
         return versionedSignature;
       }
@@ -250,11 +259,11 @@ export class ChainService {
         blockhash,
         lastValidBlockHeight,
         feePayer: signer.publicKey,
-      }).add(...budgetInstructions, ...instructions);
+      }).add(...budgetInstructions, ...all);
       tx.sign(signer);
       // SAFETY: sign() has just filled the fee payer's signature slot.
       const signature = bs58.encode(tx.signature as Buffer);
-      await this.sendSigned(tx.serialize(), signature, lastValidBlockHeight, hooks);
+      await this.sendSigned(tx.serialize(), signature, lastValidBlockHeight, hooks, tip !== undefined);
       return signature;
     } catch (cause) {
       throw this.mapSendError(cause);
@@ -267,21 +276,38 @@ export class ChainService {
    * Ledger path, which signs its own way, calls this directly so it lands
    * through the same subscription-and-rebroadcast loop rather than its own
    * confirmation logic.
+   *
+   * `viaBeam` (Solami ticket 08, set by `send` when it attached a tip)
+   * submits through Beam first and falls through to `sendRawTransaction`
+   * if Beam throws. The rebroadcast loop stays on the RPC either way: the
+   * bytes are identical. The Ledger path leaves it off: no tip, plain RPC.
    */
   async sendSigned(
     raw: Uint8Array,
     signature: string,
     lastValidBlockHeight: number,
     hooks?: SendHooks,
+    viaBeam = false,
   ): Promise<void> {
     // Subscribe before sending. The RPC only notifies a signature that lands
     // after the subscription opens, so one that confirms first never would.
     const watch = this.watchSignature(signature);
+    let beamed = false;
     try {
-      await this.connection.sendRawTransaction(raw, {
-        maxRetries: 0,
-        preflightCommitment: "confirmed",
-      });
+      if (viaBeam && this.beam) {
+        try {
+          await this.beam.submit(raw);
+          beamed = true;
+        } catch (cause) {
+          this.logger.warn(`${errorChain(cause)}; sending ${signature} through the RPC`);
+        }
+      }
+      if (!beamed) {
+        await this.connection.sendRawTransaction(raw, {
+          maxRetries: 0,
+          preflightCommitment: "confirmed",
+        });
+      }
     } catch (cause) {
       watch.cancel();
       throw cause;
@@ -289,10 +315,24 @@ export class ChainService {
     await hooks?.onSent(signature);
     try {
       await this.confirm(raw, signature, watch, lastValidBlockHeight);
+      if (beamed) this.beam?.recordLanded();
     } catch (cause) {
       // A pending transaction keeps its recorded signature: it may still land.
       if (!(cause instanceof TxPendingError)) await hooks?.onDropped(signature);
       throw cause;
+    }
+  }
+
+  /** The Beam tip for an operator-signed send, or undefined when Beam is off,
+   *  the signer is someone else (the Sparring player), or no tip address is
+   *  known: the send then goes through the RPC with no tip. */
+  private async beamTip(signer: Keypair): Promise<TransactionInstruction | undefined> {
+    if (!this.beam || !signer.publicKey.equals(this.keypair.publicKey)) return undefined;
+    try {
+      return await this.beam.tipInstruction(signer.publicKey);
+    } catch (cause) {
+      this.logger.warn(`${errorChain(cause)}; sending through the RPC without a tip`);
+      return undefined;
     }
   }
 
@@ -536,6 +576,16 @@ function customErrorCode(err: unknown): number | undefined {
   if (typeof detail !== "object" || detail === null || !("Custom" in detail)) return undefined;
   const code = (detail as { Custom: unknown }).Custom;
   return typeof code === "number" ? code : undefined;
+}
+
+/** `error`'s message followed by each cause's, joined with ": ". */
+function errorChain(error: unknown): string {
+  const messages: string[] = [];
+  for (let e: unknown = error; e !== undefined && messages.length < 5; e = (e as { cause?: unknown }).cause) {
+    messages.push(e instanceof Error ? e.message : String(e));
+    if (!(e instanceof Error)) break;
+  }
+  return messages.join(": ");
 }
 
 /** Every writable account across `instructions`, deduplicated — the account

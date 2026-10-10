@@ -31,6 +31,10 @@ process.env.REFERRAL_QUALIFY_SECONDS = "604800";
 delete process.env.OPS_WALLETS;
 // Same for the Solami webhook route's "404 with the secret unset" check.
 delete process.env.SOLAMI_WEBHOOK_SECRET;
+// Solami ticket 08: a shell BEAM_KEYPAIR would send every suite's
+// transactions to the real Beam endpoint.
+delete process.env.BEAM_KEYPAIR;
+delete process.env.BEAM_TIP_LAMPORTS;
 // Beta-launch-fixes ticket 05: a harmless default so any suite that flips a
 // seeded Pool's currentEpochId to 0 sees `/state`/`/status` carry a launch
 // time, without every other suite (whose Pool already has an Epoch) noticing.
