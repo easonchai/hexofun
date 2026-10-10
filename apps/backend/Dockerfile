@@ -2,10 +2,14 @@
 # the sibling apps/*/package.json files that pnpm-workspace.yaml globs):
 #   docker build -f apps/backend/Dockerfile -t hexvault-backend .
 
-FROM node:22-alpine AS build
-# node-hid and usb (Ledger signer, admin CLI only) ship no musl prebuilds, so
-# their install scripts compile from source. The server never loads them.
-RUN apk add --no-cache python3 make g++ linux-headers eudev-dev libusb-dev
+# glibc, not alpine: @matrixai/quic (Beam) ships glibc prebuilds only and does
+# not load on musl, even with gcompat. Its prebuilds cover linux-x64, not arm64.
+FROM node:22-bookworm-slim AS build
+# The toolchain is for node-hid and usb (Ledger signer, admin CLI only) when no
+# prebuild matches; the server never loads them. Prisma reads openssl's version.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 make g++ libudev-dev libusb-1.0-0-dev openssl \
+    && rm -rf /var/lib/apt/lists/*
 # node-gyp otherwise downloads the Node headers from unofficial-builds.nodejs.org
 # on every build, and that fetch has timed out on the VPS. The image already
 # ships them under /usr/local/include/node.
@@ -22,7 +26,9 @@ COPY apps/web/package.json apps/web/package.json
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @hexvault/backend run build
 
-FROM node:22-alpine AS runtime
+FROM node:22-bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+    && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 WORKDIR /repo/apps/backend
 

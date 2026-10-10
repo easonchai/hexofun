@@ -745,11 +745,11 @@
 
        It answers `is_landed`, `landed_via_jito`, `region`, `tip_lamports`, `first_seen_ms`, `forwarded_ms`.
 
-  The QUIC client (`@matrixai/quic`) is a native module with glibc builds only. The backend image is
-  node:22-alpine (musl), where it does not load: the backend then logs `BEAM_KEYPAIR is set but the QUIC module does
-  not load here; Beam stays off` at boot, `/status` shows `beam: null`, and no tip is paid. Beam needs the image on a
-  glibc base such as node:22-bookworm-slim first; a probe on 2026-10-10 loaded it there and not on alpine, with or
-  without gcompat.
+  The QUIC client (`@matrixai/quic`) is a native module with linux-x64 glibc builds only, which is why the backend
+  image is node:22-bookworm-slim and not alpine. On a host it does not load on (an ARM box, or an image built for
+  linux/arm64 on an Apple Silicon Mac), the backend logs `BEAM_KEYPAIR is set but the QUIC module does not load here;
+  Beam stays off` at boot, `/status` shows `beam: null`, and no tip is paid. Check the VPS with `uname -m`: it must
+  say `x86_64`.
 
   Rollback: unset `BEAM_KEYPAIR` and recreate the backend. Sends go back to `sendRawTransaction` with no tip.
 
