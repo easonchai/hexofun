@@ -875,6 +875,21 @@ describe.skipIf(!DB_AVAILABLE)("OperatorService draw steps", () => {
     }
   });
 
+  it("(audit-2026-10-10 03) still runs the referral job on a tick whose request_draw was refused, and reports it", async () => {
+    const { operator, prisma } = await rig(EPOCH_STATUS.ENDED, async () => {
+      throw new Error("VrfRequestRefused");
+    });
+    const referral = vi.spyOn(operator as never, "grantReferralBonuses").mockResolvedValue(undefined as never);
+    try {
+      await operator.runOnce();
+      expect(referral).toHaveBeenCalledTimes(1);
+      const state = await prisma.operatorState.findUniqueOrThrow({ where: { poolAddress: DRAW_POOL_ADDRESS } });
+      expect(state.lastError).toBe("request_draw failed: VrfRequestRefused");
+    } finally {
+      await cleanUp(prisma);
+    }
+  });
+
   it("pays the target's leaf with its proof, and a refused proof is recorded once and not retried", async () => {
     const sent: TransactionInstruction[][] = [];
     const { operator, prisma } = await rig(EPOCH_STATUS.DRAWN, async (instructions) => {

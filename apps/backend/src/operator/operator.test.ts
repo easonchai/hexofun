@@ -175,11 +175,13 @@ interface Recorder {
   ctx: TickContext;
   sent: TransactionInstruction[][];
   warned: string[];
+  debugged: string[];
 }
 
 function context(over: Partial<TickContext> = {}): Recorder {
   const sent: TransactionInstruction[][] = [];
   const warned: string[] = [];
+  const debugged: string[] = [];
   const ctx: TickContext = {
     now: NOW,
     pool: pool(),
@@ -208,9 +210,10 @@ function context(over: Partial<TickContext> = {}): Recorder {
       return "signature";
     },
     warn: (message) => warned.push(message),
+    debug: (message) => debugged.push(message),
     ...over,
   };
-  return { ctx, sent, warned };
+  return { ctx, sent, warned, debugged };
 }
 
 const keysOfIx = (ixs: readonly TransactionInstruction[]): string[] =>
@@ -467,7 +470,7 @@ describe("runTick", () => {
     expect(result.transactions).toBe(0);
   });
 
-  it("5. does not draw once the pool is shut down: draw is refused, even fulfilled", async () => {
+  it("5. draws once the pool is shut down: the program allows it, so a fulfilled epoch is not stranded", async () => {
     const result = await tickLabels({
       pool: pool({ shutdown: true }),
       previousEpoch: epoch({
@@ -477,10 +480,10 @@ describe("runTick", () => {
       }),
       fulfilled: async () => true,
     });
-    expect(result.transactions).toBe(0);
+    expect(result.labels).toEqual(["draw"]);
   });
 
-  it("5. still rolls a shut-down pool's stuck draw over once the timeout elapses", async () => {
+  it("5. draws a fulfilled epoch in shutdown even past the timeout, never a rollover the program refuses", async () => {
     const result = await tickLabels({
       pool: pool({ shutdown: true }),
       previousEpoch: epoch({
@@ -489,6 +492,18 @@ describe("runTick", () => {
         requestedAt: NOW - 121n,
       }),
       fulfilled: async () => true,
+    });
+    expect(result.labels).toEqual(["draw"]);
+  });
+
+  it("5. still rolls a shut-down pool's unfulfilled draw over once the timeout elapses", async () => {
+    const result = await tickLabels({
+      pool: pool({ shutdown: true }),
+      previousEpoch: epoch({
+        epochId: 1n,
+        status: EPOCH_STATUS.DRAWING,
+        requestedAt: NOW - 121n,
+      }),
     });
     expect(result.labels).toEqual(["rollover_epoch"]);
   });
@@ -679,7 +694,24 @@ describe("runTick", () => {
       }),
     });
     expect(result.transactions).toBe(0);
-    expect(result.nextWakeAt).toBe(NOW + 20n);
+    expect(result.nextWakeAt).toBe(NOW + 21n);
+  });
+
+  it("(audit-2026-10-10 03) wakes one second after a strict deadline, never at it", async () => {
+    // `now` sits exactly on the deadline: the program's `now >` check is false,
+    // so the tick does nothing, and a wake at `now` would spin until the clock moves.
+    const vrf = await tickLabels({
+      pool: pool({ paused: true }),
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWING, requestedAt: NOW - 120n }),
+    });
+    expect(vrf.transactions).toBe(0);
+    expect(vrf.nextWakeAt).toBe(NOW + 1n);
+
+    const payout = await tickLabels({
+      pool: pool({ paused: true, payoutTimeout: 30n }),
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWN, target: 42n, drawnAt: NOW - 30n }),
+    });
+    expect(payout.nextWakeAt).toBe(NOW + 1n);
   });
 
   it("6. rolls the drawn epoch over once payout_timeout and the drawn-unpaid alert window have both passed", async () => {
@@ -798,9 +830,9 @@ describe("runTick", () => {
       }),
     });
     expect(result.transactions).toBe(0);
-    // vrfTimeout (120n) minus the 70 elapsed seconds beats both the epoch
-    // end and the 60 s safety interval.
-    expect(result.nextWakeAt).toBe(NOW + 50n);
+    // vrfTimeout (120n) minus the 70 elapsed seconds, plus the strict
+    // deadline's one second, beats both the epoch end and the 60 s safety interval.
+    expect(result.nextWakeAt).toBe(NOW + 51n);
   });
 
   it("6b. sizes the shortfall against the batch it tried, not the whole queue", async () => {
@@ -823,17 +855,59 @@ describe("runTick", () => {
     );
   });
 
-  it("6b. (ticket 06) any other failure switches to single-send mode and records the error instead of throwing", async () => {
+  it("6b. (ticket 06) any other program failure switches to single-send mode and records the error instead of throwing", async () => {
     const { ctx } = context({
       duePendingWithdrawals: async () => pending(1),
       send: async () => {
-        throw new Error("blockhash expired");
+        throw new Error("AccountFrozen");
       },
     });
     const outcome = await runTick(ctx);
     expect(outcome.action).toBeNull();
-    expect(outcome.stepError).toMatch(/blockhash expired/);
+    expect(outcome.stepError).toMatch(/AccountFrozen/);
     expect(outcome.withdrawState?.singleMode).toBe(true);
+  });
+
+  it("6b. (audit-2026-10-10 03) a timeout, a pending transaction or a blockhash error counts against nobody and keeps batching", async () => {
+    const [entry] = pending(1);
+    if (entry === undefined) throw new Error("test setup");
+    const transient = [
+      "transaction 5Kx still pending after 30000ms; the blockhash has not expired yet",
+      "blockhash expired",
+      "ETIMEDOUT",
+      "fetch failed",
+    ];
+    let state: WithdrawState | null = null;
+    for (const message of transient) {
+      const { ctx } = context({
+        lastWithdrawState: state,
+        duePendingWithdrawals: async () => [entry],
+        send: async () => {
+          throw new Error(message);
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.stepError).toContain(message);
+      state = outcome.withdrawState ?? state;
+      expect(state?.singleMode).toBe(false);
+      expect(state?.failures.size).toBe(0);
+      expect(state?.skipped.size).toBe(0);
+    }
+
+    // The same owner in single mode: still no count, still not skipped.
+    const single: WithdrawState = { epochId: 2n, singleMode: true, failures: new Map(), skipped: new Set() };
+    for (let i = 0; i < WITHDRAW_FAILURE_LIMIT + 1; i += 1) {
+      const { ctx } = context({
+        lastWithdrawState: single,
+        duePendingWithdrawals: async () => [entry],
+        send: async () => {
+          throw new Error("ETIMEDOUT");
+        },
+      });
+      const outcome = await runTick(ctx);
+      expect(outcome.withdrawState?.failures.size).toBe(0);
+      expect(outcome.withdrawState?.skipped.size).toBe(0);
+    }
   });
 
   it("6b. (audit 04) a NothingPending owner is dropped for the tick and the rest are paid, with no failure counted", async () => {
@@ -927,7 +1001,7 @@ describe("runTick", () => {
       duePendingWithdrawals: async () => owners,
       send: async (ixs) => {
         attempt += 1;
-        if (attempt === 1) throw new Error("some transient failure");
+        if (attempt === 1) throw new Error("AccountFrozen");
         sent.push(ixs);
         return "signature";
       },
@@ -964,7 +1038,7 @@ describe("runTick", () => {
         lastWithdrawState: i === 0 ? { epochId: 2n, singleMode: true, failures: new Map(), skipped: new Set() } : state,
         duePendingWithdrawals: async () => [entry],
         send: async () => {
-          throw new Error("frozen destination");
+          throw new Error("AccountFrozen");
         },
       });
       outcome = await runTick(ctx);
@@ -1769,6 +1843,146 @@ describe("venue cranks (ticket 13)", () => {
     expect(outcome.action).toBeNull();
     expect(outcome.withdrawShortfall).toBe(400n * U);
     expect(outcome.venueState?.failedAt.recall).toBe(NOW);
+  });
+
+  const pending1 = () => [{ owner: Keypair.generate().publicKey.toBase58(), amount: 1_000_000n }];
+
+  it("5. in shutdown the drawn epoch pays, then venue recall and a due withdrawal run on later ticks", async () => {
+    const owed = pending1();
+    const shut = (over: Partial<TickContext>) =>
+      context({
+        pool: venuePool({ shutdown: true, venueValue: 1_000n * U }),
+        principalVaultBalance: async () => 2_000n * U,
+        duePendingWithdrawals: async () => owed,
+        ...over,
+      });
+
+    const draw = shut({
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWING, requestedAt: NOW - 10n }),
+      fulfilled: async () => true,
+    });
+    expect((await runTick(draw.ctx)).action).toBe("draw");
+
+    const pay = shut({
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWN, target: 42n, drawnAt: NOW - 10n }),
+      payoutProof: async (_, target) => proofAt(target),
+    });
+    expect((await runTick(pay.ctx)).action).toBe("payout");
+
+    // Paid: the loop is over, and the tick reaches the cranks and the queue.
+    const recall = shut({ previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.PAID }) });
+    expect((await runTick(recall.ctx)).action).toBe("recall");
+
+    const withdraw = shut({
+      pool: venuePool({ shutdown: true, venueValue: 0n }),
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.PAID }),
+    });
+    expect((await runTick(withdraw.ctx)).action).toBe("process_withdraw");
+  });
+
+  // --- Audit-2026-10-10 03: a refused epoch-loop step never holds the cranks or the queue.
+
+  const refusedSteps: {
+    step: string;
+    over: Partial<TickContext>;
+    pool?: Partial<PoolState>;
+  }[] = [
+    {
+      step: "begin_epoch",
+      over: {
+        currentEpoch: epoch({ endsAt: NOW - 1n }),
+        previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.PAID }),
+      },
+    },
+    {
+      step: "request_draw",
+      over: {
+        previousEpoch: ended(),
+        drawRequest: async () => ({ nonce: NONCE, snapshot: SNAPSHOT }),
+      },
+    },
+    {
+      step: "draw",
+      over: {
+        previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWING, requestedAt: NOW - 10n }),
+        fulfilled: async () => true,
+      },
+    },
+    {
+      step: "rollover_epoch",
+      over: {
+        previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWING, requestedAt: NOW - 121n }),
+      },
+    },
+    {
+      step: "rollover_epoch",
+      over: {
+        previousEpoch: epoch({
+          epochId: 1n,
+          status: EPOCH_STATUS.DRAWN,
+          target: 42n,
+          drawnAt: NOW - 100_000n,
+        }),
+        snapshotMismatchEpoch: 1n,
+      },
+    },
+  ];
+
+  it.each(refusedSteps)(
+    "$step throwing is the step error, and the same tick still cranks the venue and pays a due withdrawal",
+    async ({ step, over }) => {
+      const due = pending1();
+      const sent: TransactionInstruction[][] = [];
+      const { ctx } = context({
+        // Free idle 10,000 against a target of 1,000: a deploy is due.
+        pool: venuePool(),
+        principalVaultBalance: async () => 10_000n * U,
+        duePendingWithdrawals: async () => due,
+        ...over,
+        send: async (ixs) => {
+          if (ixs.some((ix) => label(ix) === step)) throw new Error("VrfRequestRefused");
+          sent.push(ixs);
+          return "signature";
+        },
+      });
+      const outcome = await runTick(ctx);
+
+      // The venue crank lands first and ends the tick; the queue is paid on the next one.
+      expect(outcome.action).toBe("deploy_to_venue");
+      expect(outcome.stepError).toBe(`${step} failed: VrfRequestRefused`);
+
+      const later = context({
+        pool: venuePool(),
+        principalVaultBalance: async () => 100n * U,
+        duePendingWithdrawals: async () => due,
+        ...over,
+        send: async (ixs) => {
+          if (ixs.some((ix) => label(ix) === step)) throw new Error("VrfRequestRefused");
+          sent.push(ixs);
+          return "signature";
+        },
+      });
+      const next = await runTick(later.ctx);
+      expect(next.action).toBe("process_withdraw");
+      expect(next.stepError).toBe(`${step} failed: VrfRequestRefused`);
+    },
+  );
+
+  it("an expected race error on a guarded step stays at debug and the tick still falls through", async () => {
+    const { ctx, debugged } = context({
+      pool: venuePool(),
+      principalVaultBalance: async () => 10_000n * U,
+      previousEpoch: epoch({ epochId: 1n, status: EPOCH_STATUS.DRAWING, requestedAt: NOW - 10n }),
+      fulfilled: async () => true,
+      send: async (ixs) => {
+        if (ixs.some((ix) => label(ix) === "draw")) throw new Error("EpochNotDrawing");
+        return "signature";
+      },
+    });
+    const outcome = await runTick(ctx);
+    expect(outcome.action).toBe("deploy_to_venue");
+    expect(outcome.stepError).toBeUndefined();
+    expect(debugged).toEqual(["draw skipped: EpochNotDrawing"]);
   });
 });
 

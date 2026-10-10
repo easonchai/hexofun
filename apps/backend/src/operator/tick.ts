@@ -209,6 +209,8 @@ export interface TickContext {
   /** Something an operator should read but that is not a failed tick: so far
    *  only a venue crank the program refused, which is retried later. */
   warn(message: string): void;
+  /** An expected race the tick lost (see `EXPECTED_ERRORS`): worth a debug line, no more. */
+  debug(message: string): void;
 }
 
 export interface TickOutcome {
@@ -295,10 +297,12 @@ function nextWakeAt(ctx: TickContext, acted: boolean): bigint {
     if (ctx.venueProposal) candidates.push(venueUnlocksAt(ctx.venueProposal));
   }
   if (previousEpoch?.status === EPOCH_STATUS.DRAWING) {
-    candidates.push(previousEpoch.requestedAt + pool.vrfTimeout);
+    // The program's deadline is strict (`now >` it), so wake one second past
+    // it; at the deadline itself the tick would find nothing to do and spin.
+    candidates.push(previousEpoch.requestedAt + pool.vrfTimeout + 1n);
   }
   if (previousEpoch?.status === EPOCH_STATUS.DRAWN) {
-    candidates.push(previousEpoch.drawnAt + pool.payoutTimeout);
+    candidates.push(previousEpoch.drawnAt + pool.payoutTimeout + 1n);
   }
   // Ticket 05: wake right at the launch time instead of waiting out the
   // safety interval, so the countdown's end is when begin_epoch actually
@@ -367,6 +371,28 @@ async function decide(ctx: TickContext): Promise<Decision> {
     ...(venueChanged ? { venueState } : {}),
   });
 
+  /**
+   * Sends one epoch-loop step (`begin_epoch`, `request_draw`, `draw`,
+   * `rollover_epoch`). True when a transaction landed. A refusal is recorded,
+   * not thrown: the tick falls through to the venue cranks, the withdrawals
+   * and the referral grants, so one refused step never holds them. An
+   * expected race stays at debug and records nothing.
+   */
+  async function attempt(
+    step: string,
+    build: () => Promise<TransactionInstruction[]>,
+  ): Promise<boolean> {
+    try {
+      await ctx.send(await build());
+      return true;
+    } catch (cause) {
+      const message = errorMessage(cause);
+      if (EXPECTED_ERRORS.has(message)) ctx.debug(`${step} skipped: ${message}`);
+      else stepError = stepError ?? `${step} failed: ${message}`;
+      return false;
+    }
+  }
+
   // 3. Begin Epoch: only once the previous Epoch (if any) has actually
   // finished, so no Epoch is ever left two behind. Refused in shutdown, so the
   // epoch loop stops here once the pool is shut down (spec.md "Shutdown").
@@ -386,8 +412,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
     previousEpoch.status === EPOCH_STATUS.PAID ||
     previousEpoch.status === EPOCH_STATUS.ROLLED_OVER;
   if (!pool.shutdown && !pool.jackpotPaused && epochEnded && previousDone) {
-    await ctx.send(await ctx.ix.beginEpoch(pool));
-    return finish({ action: "begin_epoch" });
+    if (await attempt("begin_epoch", () => ctx.ix.beginEpoch(pool))) {
+      return finish({ action: "begin_epoch" });
+    }
   }
 
   // 4. The ended epoch goes to the draw. `request_draw` commits the Epoch
@@ -407,24 +434,27 @@ async function decide(ctx: TickContext): Promise<Decision> {
     if (request === null) {
       snapshotPending = { step: "request_draw", epochId: previousEpoch.epochId };
     } else {
-      await ctx.send(
-        await ctx.ix.requestDraw(pool, previousEpoch.epochId, request.nonce, request.snapshot),
+      const sent = await attempt("request_draw", () =>
+        ctx.ix.requestDraw(pool, previousEpoch.epochId, request.nonce, request.snapshot),
       );
-      return finish({ action: "request_draw" });
+      if (sent) return finish({ action: "request_draw" });
     }
   }
 
-  // 5. Waiting on the draw's randomness. `draw` is refused in shutdown
-  // (ops-and-envs ticket 02); `rollover_epoch` is not, so a Drawing epoch
-  // still moves on past its `vrf_timeout` instead of waiting forever.
+  // 5. Waiting on the draw's randomness. The program's `draw` has no shutdown
+  // check, so a fulfilled Drawing epoch is drawn in shutdown too. Otherwise a
+  // Drawing epoch moves on past its `vrf_timeout` instead of waiting forever.
+  // A refused `draw` falls through without a rollover: the program would
+  // refuse that with RandomnessAlreadyFulfilled.
   if (previousEpoch?.status === EPOCH_STATUS.DRAWING) {
-    if (!pool.shutdown && (await ctx.fulfilled(previousEpoch.vrfSeed))) {
-      await ctx.send(await ctx.ix.draw(pool, previousEpoch));
-      return finish({ action: "draw" });
-    }
-    if (now > previousEpoch.requestedAt + pool.vrfTimeout) {
-      await ctx.send(await ctx.ix.rolloverEpoch(pool, previousEpoch));
-      return finish({ action: "rollover_epoch" });
+    if (await ctx.fulfilled(previousEpoch.vrfSeed)) {
+      if (await attempt("draw", () => ctx.ix.draw(pool, previousEpoch))) {
+        return finish({ action: "draw" });
+      }
+    } else if (now > previousEpoch.requestedAt + pool.vrfTimeout) {
+      if (await attempt("rollover_epoch", () => ctx.ix.rolloverEpoch(pool, previousEpoch))) {
+        return finish({ action: "rollover_epoch" });
+      }
     }
   }
 
@@ -469,8 +499,9 @@ async function decide(ctx: TickContext): Promise<Decision> {
     }
     const alertHasFired = now > previousEpoch.drawnAt + DRAWN_UNPAID_ALERT_SECONDS;
     if (now > previousEpoch.drawnAt + pool.payoutTimeout && alertHasFired) {
-      await ctx.send(await ctx.ix.rolloverEpoch(pool, previousEpoch));
-      return finish({ action: "rollover_epoch" });
+      if (await attempt("rollover_epoch", () => ctx.ix.rolloverEpoch(pool, previousEpoch))) {
+        return finish({ action: "rollover_epoch" });
+      }
     }
   }
 
@@ -629,6 +660,12 @@ async function decide(ctx: TickContext): Promise<Decision> {
           `principal vault holds ${held} against ${owed} of due withdrawals; short by ${withdrawShortfall}`,
         );
         withdrawStateOut = withdrawStateIn;
+      } else if (!isProgramError(message)) {
+        // A timeout, a pending transaction or an expired blockhash says
+        // nothing about the owner: leave the count and the mode alone, and the
+        // next tick sends the same payout again.
+        withdrawStateOut = withdrawStateIn;
+        stepError = stepError ?? `withdrawal send failed, retrying next tick: ${message}`;
       } else if (!withdrawStateIn.singleMode) {
         // First failure of a batch: never blame a specific owner yet, just
         // switch strategy so the next tick isolates the bad one.
@@ -661,6 +698,16 @@ async function decide(ctx: TickContext): Promise<Decision> {
 
   return finish({ ...NOTHING, withdrawShortfall });
 }
+
+/**
+ * Whether a send failed inside the program. `ChainService.mapSendError` turns
+ * those into the bare error name (`NothingPending`), so a program error is a
+ * single CamelCase word; an RPC timeout, `TxPendingError` or an expired
+ * blockhash is a sentence or an `ECONNRESET`-style code. An unmapped program
+ * error still reads `custom program error: 0x...`.
+ */
+const isProgramError = (message: string): boolean =>
+  /^(?:[A-Z][a-z0-9]+)+$/.test(message) || message.includes("custom program error");
 
 /**
  * Program errors that mean "someone already did this" or "not yet". Every one

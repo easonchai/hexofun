@@ -209,8 +209,8 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
       if (ctx.pool.shutdown && !this.shutdownAnnounced) {
         this.shutdownAnnounced = true;
         this.logger.log(
-          "pool is shut down: the epoch loop has stopped; " +
-            "paying an already-drawn epoch and processing withdrawals continue",
+          "pool is shut down: no new epoch begins; " +
+            "drawing and paying an already-requested epoch and processing withdrawals continue",
         );
       }
       const outcome = await runTick(ctx);
@@ -362,6 +362,7 @@ export class OperatorService implements OnModuleInit, OnModuleDestroy {
           ? this.chain.send(instructions)
           : this.chain.send(instructions, undefined, tables),
       warn: (message) => this.logger.warn(message),
+      debug: (message) => this.logger.debug(message),
     };
   }
 

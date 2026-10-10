@@ -151,6 +151,11 @@ Starts with `OPERATOR_FAILING`.
    which is what separates this from `OPERATOR_STALE`; every tick runs, every one errors.
 2. Work the error like "Operator or indexer stall" above once the cause is in hand: an RPC problem, an
    Anchor error naming a bad account or balance, or a bug in the tick itself.
+3. A `begin_epoch failed:`, `request_draw failed:`, `draw failed:` or `rollover_epoch failed:` error
+   is the signal for a stuck Draw step (a refused VRF request, say). The tick records it and carries
+   on, so venue cranks and Pending withdrawals keep flowing while the epoch waits; withdrawals are not
+   held by it. The same error on every tick means the Draw step needs a human, so follow
+   [Epoch stuck without progress](#epoch-no-progress).
 
 <a id="epoch-no-progress"></a>
 <a id="stuck-epoch"></a>
