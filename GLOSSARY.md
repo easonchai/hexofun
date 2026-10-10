@@ -275,6 +275,10 @@ _Avoid_: Cache, backend
 The backend component that mirrors program accounts and finalized events into Postgres. It is the Read model: the browser's only path to learning anything about the protocol.
 _Avoid_: Cache, backend (too broad)
 
+**Subgraph**:
+HexVault's deployment on Solami Index, a second index of the program's on-chain events served as a public GraphQL API. On mainnet the Indexer prefers it as the source for its catch-up walk while it keeps pace with the chain, and falls back to the RPC when it does not. It never feeds the browser.
+_Avoid_: The indexer (that is ours), Solami indexer, GraphQL API (the serving layer, not the thing)
+
 **Pause**:
 A reversible pool state (`Pool.paused`) that stops deposits and bought Tickets on chain, and bets and grants in the backend, while leaving an open Round free to finish: Withdraw, the epoch cranks and `fund_jackpot` all stay open. Either the Admin or the Operator key can set it; only the Admin can unset it, so a stolen hot key can cost a day of rounds but cannot reopen a pool the team has halted.
 _Avoid_: Shutdown (a separate, irreversible state), freeze, halt
