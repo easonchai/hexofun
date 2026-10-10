@@ -752,3 +752,38 @@
   without gcompat.
 
   Rollback: unset `BEAM_KEYPAIR` and recreate the backend. Sends go back to `sendRawTransaction` with no tip.
+
+  Subgraph
+
+  The `hexo` subgraph on Solami Index (Solami tickets 02 to 04, crate in subgraph/). It stores each HexVault transaction's
+  raw log lines plus decoded Event, Pool, Epoch, Wallet and SlotBucket rows, served at
+  `https://api.solami.dev/index/hexo/graphql`; every query needs a Solami key as `Authorization: Bearer`. Mainnet only.
+  Nothing is deployed: on 2026-10-10 the deploy answered `402 subgraph limit reached (0)` until Solami raises the
+  account's quota (Solami ticket 07, item 1b).
+
+    1. Copy .env.solami.example to .env.solami and fill in SOLAMI_API_KEY, SUBGRAPH_PROGRAM_ID (the mainnet program id)
+       and SUBGRAPH_START_SLOT (see the cutover step below).
+    2. `scripts/subgraph.sh deploy --dry-run` builds the wasm and checks the request body without the key or a network call.
+    3. `scripts/subgraph.sh deploy`. Solami's route docs give the success body as `{ "ok": true, "version", "new" }`.
+    4. `scripts/subgraph.sh status` until it prints `status Live`. Before that it says `Validating`, `Migrating` or
+       `Backfilling`; `synced_slot` is the last slot indexed. `scripts/subgraph.sh logs` shows the mapping's own lines,
+       including any event that did not fit its IDL layout.
+
+  The program id is compiled into the wasm, so `build` needs SUBGRAPH_PROGRAM_ID too and a build for one program never
+  indexes another. `build` reruns scripts/subgraph-codegen.mjs from the IDL; commit any change it makes to
+  subgraph/src/generated.rs. A mapping-only fix goes out with `scripts/subgraph.sh redeploy-wasm`, which keeps the
+  version. A schema or manifest change needs a higher `version` in subgraph/subgraph.yaml and a full `deploy`, and
+  Solami reindexes from startSlot, which on the Free tier cannot reach back.
+
+  Mainnet cutover step, keyed on the tier Solami ticket 07 picks:
+
+    Free (live-only, no backfill): before `create_pool`, deploy with SUBGRAPH_START_SLOT set to the current finalized slot
+    (`solana slot --url mainnet-beta --commitment finalized`) and wait for `Live`. Then create the pool. Then set
+    SUBGRAPH_URL=https://api.solami.dev/index/hexo/graphql and SUBGRAPH_API_KEY on the backend (Solami ticket 05) and
+    recreate it.
+
+    Starter or Pro (backfill on): create the pool first, deploy with SUBGRAPH_START_SLOT set to the slot of the
+    `create_pool` transaction, wait for `Live`, then set the two backend variables and recreate the backend.
+
+  Rollback: unset SUBGRAPH_URL and SUBGRAPH_API_KEY and recreate the backend; its catch-up goes back to the RPC walk.
+  `DELETE /index/hexo` with the same bearer key removes the deployment.

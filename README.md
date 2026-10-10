@@ -186,7 +186,8 @@ which Solami products the backend uses, which it rejected, and why.
   transactions to `POST /webhooks/solami`, a second live feed beside `onLogs`. The Indexer dedupes
   by signature, so a transaction that arrives on both is written once. Unset, the route is off.
 - **The `hexo` subgraph**, only if Solami grants this account Index Engine quota. The deploy is
-  refused today with a subgraph limit of 0; ADR 0027 has the details.
+  refused today with a subgraph limit of 0; ADR 0027 has the details. The mapping is built and
+  tested in `subgraph/`, and `scripts/subgraph.sh` deploys it (`runbook.md`, "Subgraph").
 
 To point the backend at your own Solami key, set these in the env file compose hands the
 backend (`ENV_FILE`, `.env` at the repo root by default), then restart it:
