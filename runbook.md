@@ -705,6 +705,9 @@
   A second live feed into the Indexer (Solami ticket 09). Solami pushes each pool transaction to `POST /webhooks/solami`;
   the backend checks the HMAC, then stores the events the same way the `onLogs` socket does, deduplicated by signature.
   The cursor never moves on it, so the RPC catch-up walk still fills any gap. Mainnet only: Solami does not see devnet.
+  Solami delivers before finality (0-1 s after the block, measured 2026-10-10), so the backend answers 200 at once and
+  ingests only after the RPC reports the signature finalized, about 13 s later. One that never finalizes within ~40 s
+  logs `did not finalize` and is left to the walk.
 
     1. Read the Active pool's address: `curl -s https://<API_HOST>/pool | jq -r .pool.address`. Watch the pool, not
        the program id: retired pools share the program (ADR 0016) and their events carry no pool field, so a program-wide
@@ -715,10 +718,10 @@
     3. Put it in the backend's env file on the VPS as `SOLAMI_WEBHOOK_SECRET=<secret>` and recreate the backend
        container (`up -d --force-recreate backend` with that environment's compose flags; a restart does not re-read the
        file). The boot log says `solami webhook route on at POST /webhooks/solami`.
-    4. Confirm it moves: after the next pool transaction, `curl -s https://<API_HOST>/status | jq .webhookLastSlot`
-       shows a slot instead of null. The dashboard's delivery list should show 200s. A 401 there means the secret in the
-       env file does not match; a 400 means the delivery shape differs from the field paths at the top of
-       apps/backend/src/api/webhooks.controller.ts (they await the ticket 09 probe).
+    4. Confirm it moves: about 15 s after the next pool transaction, `curl -s https://<API_HOST>/status | jq
+       .webhookLastSlot` shows a slot instead of null. The dashboard's delivery list should show 200s. A 401 there means
+       the secret in the env file does not match; a 400 means Solami changed the delivery shape away from the field
+       paths at the top of apps/backend/src/api/webhooks.controller.ts.
 
   `webhookLastSlot` is in memory: it reads null again after every restart until the next delivery. It is not an alert.
 
