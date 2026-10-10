@@ -89,6 +89,9 @@ export interface DecodedPool {
   poolId: BN;
   admin: PublicKey;
   operator: PublicKey;
+  /** The House Player's address, pinned at create_pool. `set_operator` rewrites
+   *  its owner but never this address, so it stops matching the owner's seed. */
+  house: PublicKey;
   pendingAdmin: PublicKey;
   acceptedMint: PublicKey;
   pendingWithdrawals: BN;

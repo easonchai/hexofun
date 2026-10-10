@@ -22,6 +22,11 @@ import { loadIdl } from "../chain/idl";
 import { PrismaService } from "../prisma/prisma.service";
 import { CountingConnection } from "../test-utils/counting-connection";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
+import { settleRows } from "../api/round-settle";
+import { VENUE_KIND } from "../chain/venue-kind";
+import { OperatorInstructions } from "../operator/instructions";
+import type { PoolState } from "../operator/chain-state";
+import { winnerProof } from "../snapshot/epoch-draw";
 import { checkLedgerIfDue, countLedgerMismatches, LEDGER_CHECK_INTERVAL_S, principalDrift } from "../ledger/ledger-store";
 import { buildSumTree } from "../snapshot/sum-tree";
 import { decodeEventLogs } from "./decode";
@@ -88,6 +93,7 @@ beforeEach(async () => {
   indexer["v2Unsupported"] = false;
   indexer["v2UnsupportedSince"] = undefined;
   indexer["freshWrites"].clear();
+  indexer["housePin"] = undefined;
   await wipe();
 });
 
@@ -1834,6 +1840,54 @@ describe("truncated transaction logs", () => {
     await fireLive("cut-3");
     expect(await prisma.player.count()).toBe(1);
   });
+
+  // audit-2026-10-10 02
+  it("accepts the rotated House at the Pool's pin", async () => {
+    const house = Keypair.generate().publicKey;
+    await put("pool", chain.poolAddress(), poolAccount({ house }));
+    await put("player", house, playerAccount(STRANGER, { isHouse: true }));
+    connection.setTransaction("cut-4", truncatedLogs("cut-4"), [chain.poolAddress(), house]);
+    await fireLive("cut-4");
+    expect(await prisma.player.findMany()).toMatchObject([{ owner: STRANGER.toBase58(), isHouse: true }]);
+  });
+});
+
+// audit-2026-10-10 02: set_operator rewrites the House's owner and keeps its
+// address, so it no longer sits at its owner's seed address. The Pool's `house`
+// pin is the only thing that names it.
+describe("rotated House", () => {
+  const NEW_OPERATOR = Keypair.generate().publicKey;
+  const HOUSE = Keypair.generate().publicKey;
+  const mirrored = (owner: PublicKey) => ({
+    poolAddress: active(), owner: owner.toBase58(), principal: 0n, epochId: 1n, isHouse: true,
+    pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n,
+  });
+
+  beforeEach(async () => {
+    await seedActivePool();
+    await put("pool", chain.poolAddress(), poolAccount({ operator: NEW_OPERATOR, house: HOUSE }));
+    await put("player", HOUSE, playerAccount(NEW_OPERATOR, { isHouse: true, principal: bn(0) }));
+    // The row the mirror wrote before the rotation, under the first Operator.
+    await prisma.player.create({ data: mirrored(OWNER) });
+  });
+
+  it("the sweep moves the House row to the new owner and still drops a stranger's Player at a non-seed address", async () => {
+    await put("player", Keypair.generate().publicKey, playerAccount(STRANGER));
+    indexer["lastSyncedSlot"] = undefined;
+    await indexer.syncAccounts();
+    expect(await prisma.player.findMany()).toMatchObject([{ owner: NEW_OPERATOR.toBase58(), isHouse: true }]);
+  });
+
+  it("an OperatorChanged log refreshes the Pool and then the House", async () => {
+    const logs = batch("op-1", 200n, [
+      dataLine("OperatorChanged", { pool: chain.poolAddress(), previous: OWNER, operator: NEW_OPERATOR }),
+    ]).logs;
+    await indexer["refreshFromLogs"](logs, 200n);
+    expect(await prisma.pool.findUniqueOrThrow({ where: { address: active() } })).toMatchObject({
+      operator: NEW_OPERATOR.toBase58(),
+    });
+    expect(await prisma.player.findMany()).toMatchObject([{ owner: NEW_OPERATOR.toBase58(), isHouse: true }]);
+  });
 });
 
 // off-chain-tickets 11: the Ticket ledger applies events in the finalized
@@ -1963,6 +2017,49 @@ describe("ticket ledger", () => {
     expect(await rowsOf(house)).toEqual([["house_credit", 50n, 1n], ["reset", -50n, 2n]]);
     expect(await rowsOf(A)).toEqual([]);
     expect(await countLedgerMismatches(prisma, active())).toBe(0);
+  });
+
+  // audit-2026-10-10 02: the House Leaf is under the Operator the House has now.
+  it("a rotated House's Leaf is under the new Operator, and its payout passes the House account", async () => {
+    const house = Keypair.generate().publicKey;
+    await put("pool", chain.poolAddress(), poolAccount({ operator: A, house }));
+    await put("player", house, playerAccount(A, { isHouse: true, principal: bn(0) }));
+    await prisma.player.create({
+      data: {
+        poolAddress: active(), owner: B.toBase58(), principal: 0n, epochId: 1n, isHouse: true,
+        pendingWithdraw: 0n, pendingEpoch: 0n, boughtEpoch: 0n, boughtAmount: 0n,
+      },
+    });
+    indexer["lastSyncedSlot"] = undefined;
+    await indexer.syncAccounts();
+    const mirror = await prisma.player.findFirstOrThrow({ where: { isHouse: true } });
+    expect(mirror.owner).toBe(A.toBase58());
+
+    // A Round nobody covered forfeits its pot to the House, booked as the settle books it.
+    await indexer.ingestLogs(batch("h1", 10n, [began(1)]));
+    const { rows } = settleRows([{ owner: C.toBase58(), tiles: 2n, stakePerTile: 10n, restored: false }], 20, 600, mirror.owner);
+    for (const { owner, reason, delta } of rows) {
+      await prisma.ticketLedger.create({ data: { poolAddress: active(), owner, epochId: 1n, delta, reason, ref: "1" } });
+      await prisma.ticketBalance.upsert({
+        where: key(new PublicKey(owner)),
+        create: { poolAddress: active(), owner, tickets: delta, epochId: 1n },
+        update: { tickets: { increment: delta } },
+      });
+    }
+    await indexer.ingestLogs(batch("h2", 20n, [began(2)]));
+
+    const proof = await winnerProof(prisma, active(), 1n, 0n);
+    expect(proof).toMatchObject({ owner: A.toBase58(), tickets: 10n });
+    // SAFETY: only the fields `payout` reads are set, and a stub venue needs no remaining accounts.
+    const state = {
+      address: chain.poolAddress(), operator: A, house, acceptedMint: STRANGER, treasury: STRANGER,
+      buybackReserve: STRANGER, klendProgram: STRANGER, klendMarket: STRANGER, klendReserve: STRANGER,
+      klendCtoken: STRANGER, venueKind: VENUE_KIND.stub,
+    } as unknown as PoolState;
+    const ix = await new OperatorInstructions(chain.program, PROGRAM_ID, STRANGER, true).payout(state, 1n, proof!);
+    const keys = (ix[0]?.keys ?? []).map((meta) => meta.pubkey.toBase58());
+    expect(keys).toContain(house.toBase58());
+    expect(keys).not.toContain(chain.playerAddress(A).toBase58());
   });
 
   it("books a prize to a non-House winner and nothing for the House", async () => {

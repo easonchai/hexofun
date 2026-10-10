@@ -251,6 +251,9 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * the entry is dropped once a sweep has caught up past it.
    */
   private freshWrites = new Map<string, bigint>();
+  /** The Pool's `house` pin. It is fixed at create_pool, so one read serves
+   *  the process; `set_operator` moves the House's owner but not this address. */
+  private housePin: PublicKey | undefined;
   /** The Active pool's address (the `POOL_ID` PDA). Every pool-scoped row
    *  this service reads or writes is filtered or keyed by it, so a retired
    *  pool's rows in the same database are never read as current (ADR 0016). */
@@ -387,6 +390,11 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       if (owner !== undefined) {
         wanted.set(this.chain.playerAddress(new PublicKey(owner)).toBase58(), { kind: "player" });
       }
+      // set_operator rewrites the House's owner and names no wallet in its
+      // event, so the House is asked for by its pin. The Pool is already first.
+      if (event.name === "OperatorChanged") {
+        wanted.set((await this.houseAddress()).toBase58(), { kind: "player" });
+      }
     }
 
     const addresses = [...wanted.keys()];
@@ -424,6 +432,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     switch (wanted.kind) {
       case "pool": {
         const pool = coder.decode<DecodedPool>(ACCOUNT.pool, data);
+        this.housePin = pool.house;
         const row = poolRow(pubkey, pool, slot);
         await this.prisma.pool.upsert({ where: { address: row.address }, create: row, update: row });
         await this.mirrorLiveYield(row, pool);
@@ -448,16 +457,48 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         break;
       }
       case "player": {
-        const row = playerRow(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress, slot);
-        await this.prisma.player.upsert({
-          where: { poolAddress_owner: { poolAddress, owner: row.owner } },
-          create: row,
-          update: row,
-        });
+        await this.prisma.$transaction(
+          this.playerWrites(coder.decode<DecodedPlayer>(ACCOUNT.player, data), poolAddress, slot),
+        );
         break;
       }
     }
     this.freshWrites.set(address, slot);
+  }
+
+  /** The writes that mirror one Player account. The House keeps its address
+   *  when `set_operator` changes its owner, and the row is keyed by owner, so
+   *  the row under the old owner goes and the new one is written. */
+  private playerWrites(account: DecodedPlayer, poolAddress: string, slot: bigint) {
+    const row = playerRow(account, poolAddress, slot);
+    const upsert = this.prisma.player.upsert({
+      where: { poolAddress_owner: { poolAddress, owner: row.owner } },
+      create: row,
+      update: row,
+    });
+    if (!account.isHouse) return [upsert];
+    return [
+      this.prisma.player.deleteMany({ where: { poolAddress, isHouse: true, owner: { not: row.owner } } }),
+      upsert,
+    ];
+  }
+
+  /** True when `pubkey` is where the program keeps `account`: the owner's seed
+   *  address, or the Pool's House pin (a rotated House is not at its owner's seed). */
+  private isPlayerAddress(pubkey: PublicKey, account: DecodedPlayer, pool: PublicKey): boolean {
+    return (
+      pubkey.equals(this.chain.playerAddress(account.owner, pool)) ||
+      (this.housePin !== undefined && pubkey.equals(this.housePin))
+    );
+  }
+
+  private async houseAddress(): Promise<PublicKey> {
+    if (this.housePin === undefined) {
+      const [info] = await this.chain.connection.getMultipleAccountsInfo([this.chain.poolAddress()]);
+      if (!info) throw new Error("pool account is not on chain, so its House pin is unknown");
+      this.housePin = this.chain.program.coder.accounts.decode<DecodedPool>(ACCOUNT.pool, info.data).house;
+    }
+    return this.housePin;
   }
 
   /**
@@ -533,6 +574,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     const sweepSlot = lagged(slot);
 
     const poolsSeen = accounts.get<DecodedPool>(ACCOUNT.pool).filter(({ pubkey }) => pubkey.equals(pool));
+    if (poolsSeen[0]) this.housePin = poolsSeen[0].account.house;
     // An incremental walk legitimately reports nothing when the Pool has not
     // changed; only a full walk finding it missing means misconfiguration.
     if (fullWalk && poolsSeen.length === 0) {
@@ -596,21 +638,13 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       players
         .filter(
           ({ pubkey, account }) =>
-            pubkey.equals(this.chain.playerAddress(account.owner, pool)) &&
-            !this.behindLogPath(pubkey, sweepSlot),
+            this.isPlayerAddress(pubkey, account, pool) && !this.behindLogPath(pubkey, sweepSlot),
         )
-        .map(({ account }) => {
-          // Mainnet-readiness-fixes 17: the V2 index runs behind `slot`, and
-          // a referral bind uses this slot as its seed, skipping the events
-          // at or before it. Stamping it lower means a lagged event is
-          // applied rather than skipped.
-          const row = playerRow(account, poolAddress, sweepSlot);
-          return this.prisma.player.upsert({
-            where: { poolAddress_owner: { poolAddress, owner: row.owner } },
-            create: row,
-            update: row,
-          });
-        }),
+        // Mainnet-readiness-fixes 17: the V2 index runs behind `slot`, and
+        // a referral bind uses this slot as its seed, skipping the events
+        // at or before it. Stamping it lower means a lagged event is
+        // applied rather than skipped.
+        .flatMap(({ account }) => this.playerWrites(account, poolAddress, sweepSlot)),
     );
 
     // beta-launch-fixes ticket 08: a websocket gap can miss a
@@ -1104,6 +1138,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       .getAccountKeys(loaded ? { accountKeysFromLookups: loaded } : undefined)
       .keySegments()
       .flat();
+    const house = await this.houseAddress();
     const owned: { address: string; kind: WantedAccount["kind"]; data: Buffer }[] = [];
     for (let start = 0; start < keys.length; start += ACCOUNTS_PER_READ) {
       const chunk = keys.slice(start, start + ACCOUNTS_PER_READ);
@@ -1112,7 +1147,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
         // SAFETY: `infos` has one entry per key of `chunk`.
         const pubkey = chunk[i]!;
         if (info === null || !info.owner.equals(this.chain.programId)) continue;
-        const kind = this.mirroredKind(pubkey, info.data);
+        const kind = this.mirroredKind(pubkey, info.data, house);
         if (kind !== undefined) owned.push({ address: pubkey.toBase58(), kind, data: info.data });
       }
     }
@@ -1128,7 +1163,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
 
   /** Which mirrored account `data` is, or undefined for one that is not this pool's own
    *  (another pool's Epoch or Player, a layout this IDL cannot decode). */
-  private mirroredKind(pubkey: PublicKey, data: Buffer): WantedAccount["kind"] | undefined {
+  private mirroredKind(pubkey: PublicKey, data: Buffer, house: PublicKey): WantedAccount["kind"] | undefined {
     const coder = this.chain.program.coder.accounts;
     for (const kind of Object.values(ACCOUNT)) {
       // SAFETY: the interface types `memcmp` as `any`; BorshAccountsCoder
@@ -1148,7 +1183,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
           }
           case "player": {
             const player = coder.decode<DecodedPlayer>(kind, data);
-            return pubkey.equals(this.chain.playerAddress(player.owner)) ? kind : undefined;
+            return pubkey.equals(this.chain.playerAddress(player.owner)) || pubkey.equals(house) ? kind : undefined;
           }
         }
       } catch {

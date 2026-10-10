@@ -443,6 +443,7 @@ function decodedPool(overrides: Partial<DecodedPool> = {}): DecodedPool {
     poolId: new BN(7),
     admin: new PublicKey(OWNER),
     operator: new PublicKey(MINT),
+    house: new PublicKey(OWNER),
     pendingAdmin: PublicKey.default,
     acceptedMint: new PublicKey(MINT),
     pendingWithdrawals: new BN(0),
