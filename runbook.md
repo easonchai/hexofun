@@ -696,3 +696,28 @@
 
   A Round that stays `closed` with a good beacon in hand and an error in the log (`has no House player`, `does not match
   its Positions`) is stuck on that error; it retries every second until the cause is fixed.
+
+  Solami webhook
+
+  A second live feed into the Indexer (Solami ticket 09). Solami pushes each pool transaction to `POST /webhooks/solami`;
+  the backend checks the HMAC, then stores the events the same way the `onLogs` socket does, deduplicated by signature.
+  The cursor never moves on it, so the RPC catch-up walk still fills any gap. Mainnet only: Solami does not see devnet.
+
+    1. Read the Active pool's address: `curl -s https://<API_HOST>/pool | jq -r .pool.address`. Watch the pool, not
+       the program id: retired pools share the program (ADR 0016) and their events carry no pool field, so a program-wide
+       feed would write their events into the Active pool. The `onLogs` socket watches the pool for the same reason.
+    2. In the Solami dashboard, Webhooks, create one: addresses = that pool address, payload Raw, event types empty (all),
+       transaction status Succeeded only, URL `https://<API_HOST>/webhooks/solami`, HTTP push on. Copy the signing secret;
+       Solami shows it once.
+    3. Put it in the backend's env file on the VPS as `SOLAMI_WEBHOOK_SECRET=<secret>` and recreate the backend
+       container (`up -d --force-recreate backend` with that environment's compose flags; a restart does not re-read the
+       file). The boot log says `solami webhook route on at POST /webhooks/solami`.
+    4. Confirm it moves: after the next pool transaction, `curl -s https://<API_HOST>/status | jq .webhookLastSlot`
+       shows a slot instead of null. The dashboard's delivery list should show 200s. A 401 there means the secret in the
+       env file does not match; a 400 means the delivery shape differs from the field paths at the top of
+       apps/backend/src/api/webhooks.controller.ts (they await the ticket 09 probe).
+
+  `webhookLastSlot` is in memory: it reads null again after every restart until the next delivery. It is not an alert.
+
+  Rollback: unset `SOLAMI_WEBHOOK_SECRET`, recreate the backend (the route answers 404 and the Indexer is back on
+  `onLogs` plus the walk), then delete the webhook in the dashboard so Solami stops retrying into a 404.

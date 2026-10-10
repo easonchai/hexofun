@@ -134,6 +134,10 @@ export interface HexVaultEnv {
    *  `begin_epoch` fires on the first tick. Reported on `/state` and
    *  `/status` so the web can render a countdown. */
   LAUNCH_AT?: string;
+  /** Signing secret of the Solami webhook that pushes the program's
+   *  transactions to `POST /webhooks/solami` (solami-index 09). Absent
+   *  switches the route off (404). */
+  SOLAMI_WEBHOOK_SECRET?: string;
 }
 
 /**
@@ -363,5 +367,6 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
       : {}),
     ...(env.INVITE_ADMIN_KEY ? { INVITE_ADMIN_KEY: String(env.INVITE_ADMIN_KEY) } : {}),
     ...(launchAtValue !== undefined ? { LAUNCH_AT: launchAtValue } : {}),
+    ...(env.SOLAMI_WEBHOOK_SECRET ? { SOLAMI_WEBHOOK_SECRET: String(env.SOLAMI_WEBHOOK_SECRET) } : {}),
   };
 }

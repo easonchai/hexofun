@@ -42,6 +42,7 @@ import {
   type TrailingRate,
 } from "./live-yield";
 import { readRoundState } from "./round-state";
+import { webhookLastSlot } from "./webhooks.controller";
 
 /** Mirrors programs/hex_vault/src/constants.rs `epoch_status`. */
 export const EPOCH_OPEN = 0;
@@ -852,6 +853,9 @@ export class ApiService {
       jackpotAmount:
         pool === null || epoch === null ? null : await this.liveJackpot(epoch, pool, false),
       minJackpot: pool?.minJackpot ?? 0n,
+      // solami-index 09: slot of the newest Solami webhook delivery this
+      // process took; null with the route off or nothing delivered yet.
+      webhookLastSlot: webhookLastSlot(),
     };
   }
 

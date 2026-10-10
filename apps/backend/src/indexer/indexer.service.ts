@@ -1212,33 +1212,47 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     this.subscriptionId = this.chain.connection.onLogs(
       this.chain.poolAddress(),
       (logs, context) => {
-        if (logs.err) return;
-        void this.enqueue(async () => {
-          // Before the first sweep lands there may be no Pool row for the
-          // Event's foreign key (a fresh pool, ADR 0016). Dropping the event
-          // loses nothing: this path never moves the cursor, so catch-up
-          // replays it once the sweep has written the Pool.
-          if (this.lastSyncedSlot === undefined) return;
-          if (logs.logs.includes(LOG_TRUNCATED)) {
-            await this.ingestTruncated(logs.signature, BigInt(context.slot));
-            return;
-          }
-          const events = decodeEventLogs(this.parser, logs.logs);
-          if (events.length === 0) return;
-          await this.persist(
-            {
-              signature: logs.signature,
-              slot: BigInt(context.slot),
-              blockTime: this.chain.lastObservedChainTime() ?? null,
-              logs: logs.logs,
-            },
-            events,
-            { advanceCursor: false },
-          );
+        void this.ingestPushed({
+          signature: logs.signature,
+          slot: BigInt(context.slot),
+          logs: logs.logs,
+          err: logs.err,
         }).catch((error: unknown) => this.noteFailure("live log ingest failed", error));
       },
       "finalized",
     );
+  }
+
+  /**
+   * One live transaction, from the `onLogs` socket or the Solami webhook
+   * (solami-index 09). Both feeds share this, so a signature both deliver is
+   * stored once by `persist`, and neither moves the cursor.
+   */
+  ingestPushed(tx: { signature: string; slot: bigint; logs: string[]; err: unknown }): Promise<void> {
+    if (tx.err) return Promise.resolve();
+    return this.enqueue(async () => {
+      // Before the first sweep lands there may be no Pool row for the
+      // Event's foreign key (a fresh pool, ADR 0016). Dropping the event
+      // loses nothing: this path never moves the cursor, so catch-up
+      // replays it once the sweep has written the Pool.
+      if (this.lastSyncedSlot === undefined) return;
+      if (tx.logs.includes(LOG_TRUNCATED)) {
+        await this.ingestTruncated(tx.signature, tx.slot);
+        return;
+      }
+      const events = decodeEventLogs(this.parser, tx.logs);
+      if (events.length === 0) return;
+      await this.persist(
+        {
+          signature: tx.signature,
+          slot: tx.slot,
+          blockTime: this.chain.lastObservedChainTime() ?? null,
+          logs: tx.logs,
+        },
+        events,
+        { advanceCursor: false },
+      );
+    });
   }
 
   /**

@@ -1312,6 +1312,12 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(body.launchAt).toBeNull();
   });
 
+  // solami-index 09: no webhook delivery in this process yet.
+  it("GET /status carries a null webhookLastSlot before any webhook delivery", async () => {
+    const { body } = await http.get("/status").expect(200);
+    expect(body.webhookLastSlot).toBeNull();
+  });
+
   it("GET /status carries the configured launch time before Epoch 1", async () => {
     await prisma.pool.update({ where: { address: POOL_ADDRESS }, data: { currentEpochId: 0n } });
     try {

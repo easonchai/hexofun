@@ -934,6 +934,32 @@ describe("event ingest", () => {
     expect(event.slot).toBe(77n);
   });
 
+  // solami-index 09: the webhook and the socket share `ingestPushed`, so a
+  // signature both deliver is stored once and neither moves the cursor.
+  it("stores a signature the webhook and onLogs both deliver once, without moving the cursor", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    indexer["lastSyncedSlot"] = 100n; // the first sweep has landed
+    indexer["subscribeToLogs"]();
+    const logs = batch("sig-both", 0n, [deposited]).logs;
+
+    await indexer.ingestPushed({ signature: "sig-both", slot: 60n, logs, err: null });
+    connection.fireLogs(chain.poolAddress(), "finalized", { err: null, signature: "sig-both", logs }, 60);
+    await indexer["queue"];
+
+    expect(await prisma.event.count({ where: { signature: "sig-both" } })).toBe(1);
+    expect(await prisma.cursor.findUnique({ where: { poolAddress: active() } })).toBeNull();
+  });
+
+  it("stores nothing from a pushed transaction that failed", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    indexer["lastSyncedSlot"] = 100n;
+    const logs = batch("sig-failed", 0n, [deposited]).logs;
+
+    await indexer.ingestPushed({ signature: "sig-failed", slot: 61n, logs, err: { InstructionError: [0, { Custom: 1 }] } });
+
+    expect(await prisma.event.count({ where: { signature: "sig-failed" } })).toBe(0);
+  });
+
   it("keeps the transaction's own block time on a backfilled event, even with a different chain time observed live", async () => {
     chain.recordChainTime(999_999n);
     expect(await indexer.ingestLogs(batch("sig-backfill", 40n, [deposited]))).toBe(1);
