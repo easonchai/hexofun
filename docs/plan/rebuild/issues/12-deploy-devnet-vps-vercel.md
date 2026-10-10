@@ -1,6 +1,6 @@
 # 12 Deploy: devnet program, Contabo compose, Vercel
 
-Status: ready-for-human
+Status: done (devnet VPS and Vercel live, see docs/ops/environments.md)
 Type: task
 Blocked by: 07, 08, 09, 11
 
