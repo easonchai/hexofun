@@ -306,26 +306,51 @@ describe.skipIf(!DB_AVAILABLE)("reveal and settle", () => {
     expect(await tickets(HOUSE)).toBe(10n);
   });
 
-  it("books only the share for a winner whose stake an EpochBegan reset already returned", async () => {
-    const { alice, bob } = await playRound1();
+  /**
+   * Alice (150 Tickets, Principal 100) and bob (1,000) each stake 50 in Round 1, alice on the winning tile.
+   * EpochBegan then resets both to their basis, 100 and 1,000. Alice's reset changes nothing (150 - 50 = 100)
+   * and so writes no ledger row; bob's writes one. The ledger cursor moves to the new epoch.
+   */
+  async function stakeThenReset(): Promise<{ alice: Player; bob: Player }> {
+    const T = deriveTile(SEED, Buffer.from(BEACONS[32883574]!.signature, "hex"), 1n).tile;
+    const [alice, bob] = [await player(150n), await player(1_000n)];
+    await bet(alice, [T], 50n, 0);
+    await fixSeed(1n);
+    await bet(bob, [(T + 1) % 36], 50n, 5);
     await rounds.closeDue(CLOSE1);
-    // The reset sets Tickets back to the basis (1,000), undoing alice's 20 stake and every stake.
     await prisma.ticketLedger.create({
-      data: { poolAddress: POOL, owner: alice.wallet, epochId: EPOCH + 1n, delta: 20n, reason: "reset", ref: "sig:0" },
+      data: { poolAddress: POOL, owner: bob.wallet, epochId: EPOCH + 1n, delta: 50n, reason: "reset", ref: "sig:0" },
     });
+    await prisma.ticketBalance.updateMany({ where: { poolAddress: POOL }, data: { epochId: EPOCH + 1n } });
     await prisma.ticketBalance.update({
-      where: { poolAddress_owner: { poolAddress: POOL, owner: alice.wallet } },
+      where: { poolAddress_owner: { poolAddress: POOL, owner: bob.wallet } },
       data: { tickets: 1_000n },
     });
     await prisma.cursor.create({ data: { poolAddress: POOL, ledgerEpochId: EPOCH + 1n } });
+    return { alice, bob };
+  }
+
+  it("books only the share for a winner whose stake an EpochBegan reset returned, even with no reset row", async () => {
+    const { alice } = await stakeThenReset();
 
     await rounds.revealDue(beaconTime(32883574));
 
-    expect((await rowsOf("reward")).map((r) => [r.owner, r.delta, r.epochId])).toEqual([
-      [alice.wallet, 14n, EPOCH + 1n],
-      [bob.wallet, 72n, EPOCH + 1n],
-    ]);
-    expect(await tickets(alice.wallet)).toBe(1_014n);
+    // Pot 100, cut 3, so alice's 50 on the winning tile earns 47 and no stake comes back on top.
+    expect((await rowsOf("reward")).map((r) => [r.owner, r.delta, r.epochId])).toEqual([[alice.wallet, 47n, EPOCH + 1n]]);
+    expect(await tickets(alice.wallet)).toBe(147n);
+    expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
+  });
+
+  it("refunds nothing for a Round voided after the reset returned every stake", async () => {
+    const { alice, bob } = await stakeThenReset();
+    rounds.relays = [deadRelay()];
+
+    await rounds.revealDue(new Date(beaconTime(32883574).getTime() + VOID_AFTER_MS));
+
+    expect((await roundOf(1n)).status).toBe("voided");
+    expect(await rowsOf("refund")).toEqual([]);
+    expect(await tickets(alice.wallet)).toBe(100n);
+    expect(await tickets(bob.wallet)).toBe(1_000n);
     expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
   });
 
@@ -349,24 +374,6 @@ describe.skipIf(!DB_AVAILABLE)("reveal and settle", () => {
     expect(await rowsOf("house_credit")).toEqual([]);
     expect([await tickets(alice.wallet), await tickets(bob.wallet), await tickets(carol.wallet)]).toEqual([1_000n, 1_000n, 1_000n]);
     expect(await countLedgerMismatches(prisma, POOL)).toBe(0);
-  });
-
-  it("books no refund for a stake a reset already returned when the Round voids", async () => {
-    const { alice, bob } = await playRound1();
-    await rounds.closeDue(CLOSE1);
-    await prisma.ticketLedger.create({
-      data: { poolAddress: POOL, owner: alice.wallet, epochId: EPOCH + 1n, delta: 20n, reason: "reset", ref: "sig:0" },
-    });
-    await prisma.ticketBalance.update({
-      where: { poolAddress_owner: { poolAddress: POOL, owner: alice.wallet } },
-      data: { tickets: 1_000n },
-    });
-    rounds.relays = [deadRelay()];
-    await rounds.revealDue(new Date(beaconTime(32883574).getTime() + VOID_AFTER_MS));
-
-    expect((await rowsOf("refund")).map((r) => r.owner)).not.toContain(alice.wallet);
-    expect(await tickets(alice.wallet)).toBe(1_000n);
-    expect(await tickets(bob.wallet)).toBe(1_000n);
   });
 
   const forged = {

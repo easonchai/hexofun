@@ -227,23 +227,15 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
       throw new Error(`Round ${roundId} pot ${round.pot} does not match its Positions`);
     }
 
-    // A reset booked after a wallet's stake row has already given the stake back (ADR 0020).
-    const owners = placed.map((p) => p.owner);
-    const resetOwners = new Set(
-      (
-        await tx.$queryRaw<{ owner: string }[]>`
-          SELECT DISTINCT s."owner" FROM "TicketLedger" s
-          WHERE s."poolAddress" = ${poolAddress} AND s."owner" = ANY(${owners}::text[]) AND s."reason" = 'stake' AND s."ref" = ${roundId.toString()}
-            AND EXISTS (
-              SELECT 1 FROM "TicketLedger" r
-              WHERE r."poolAddress" = s."poolAddress" AND r."owner" = s."owner" AND r."reason" = 'reset' AND r."id" > s."id")`
-      ).map((row) => row.owner),
-    );
+    // The reset gives every open stake back (ADR 0020), whether or not it wrote a row for the wallet.
+    // Every `stake` row of this Round is booked at `round.epochId`, so a ledger epoch past it means restored.
+    const cursor = await tx.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
+    const restored = cursor !== null && cursor.ledgerEpochId > round.epochId;
     const positions: SettlePosition[] = placed.map((p) => ({
       owner: p.owner,
       tiles: p.tiles,
       stakePerTile: p.stakePerTile,
-      restored: resetOwners.has(p.owner),
+      restored,
     }));
 
     let rows: SettleRow[];
@@ -271,7 +263,6 @@ export class RoundsService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const cursor = await tx.cursor.findUnique({ where: { poolAddress }, select: { ledgerEpochId: true } });
     const epochId = cursor !== null && cursor.ledgerEpochId > 0n ? cursor.ledgerEpochId : round.epochId;
     for (const { owner, reason, delta } of rows) {
       if (delta === 0n) continue;
