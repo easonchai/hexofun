@@ -1,6 +1,6 @@
 /**
- * Ticket 02: stake bar + bet drawer facts that must hold with no wallet and
- * no backend (same render path mobile-layout.phone.spec.ts relies on — see
+ * Ticket 02: stake bar + bet drawer facts that must hold with the burner wallet and
+ * a mocked backend (same render path mobile-layout.phone.spec.ts relies on — see
  * that file's header comment). Runs only on the "phone" Playwright project
  * (see playwright.config.ts's testMatch).
  *
@@ -10,14 +10,16 @@
  * every lookup below that could match either instance is scoped through
  * `page.getByTestId("bet-drawer")` first.
  */
-import { expect, test, type Page } from "playwright/test";
+import { expect, type Page } from "playwright/test";
+
+import { test } from "./admitted";
 
 async function openDrawer(page: Page): Promise<void> {
   await page.getByTestId("stake-bar").click();
   await expect(page.getByTestId("bet-drawer")).toBeVisible();
 }
 
-test.describe("phone stake bar and bet drawer, no wallet, no backend", () => {
+test.describe("phone stake bar and bet drawer, mocked backend", () => {
   test("the control panel is hidden until the stake bar is tapped", async ({
     page,
   }) => {

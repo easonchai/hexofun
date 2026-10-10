@@ -119,8 +119,7 @@ export function bonusRateView(
   };
 }
 
-/** Tickets share USDC's atomic scale (money.ts, useBuyTickets.ts's
- *  `ticketsFromUsdc`): 6 decimals. The Referral's Bonus card shows whole
+/** Tickets share USDC's atomic scale (money.ts): 6 decimals. The Referral's Bonus card shows whole
  *  Tickets only (ticket 04), so this truncates rather than rounds. */
 const TICKET_DECIMALS = 1_000_000n;
 

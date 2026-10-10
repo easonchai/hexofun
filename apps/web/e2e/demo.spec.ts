@@ -1,12 +1,14 @@
 /**
- * PRD §9 demo loop, end to end: faucet, deposit, play a round, settle, and
- * request a withdrawal. See docs/product-requirements.md §9.
+ * PRD §9 demo loop, end to end: faucet, deposit and withdraw. See
+ * docs/product-requirements.md §9. The play and settle steps left with the
+ * Rounds (ADR 0025); wave 2 ticket 18 brings them back through the API.
  *
- * The withdrawal stops at the request (ADR 0009): `process_withdraw` cannot
- * go through until the epoch the request landed in has ended, which is a day
- * on a normal pool, so this asserts the pending row instead of waiting for
- * the cash. The "pay out now" button and the payout itself are covered by
- * the program's localnet suite, which can cross an epoch boundary at will.
+ * The withdrawal is one `request_withdraw` (ADR 0020): the part still pending
+ * from today's deposit refunds in the same transaction and any rest queues.
+ * The demo deposits and withdraws on the same day, so the whole amount is a
+ * pending deposit and pays at once. The queued path, its pending row and the
+ * "pay out now" button are covered by the program's localnet suite, which can
+ * cross an epoch boundary at will.
  *
  * Base URL: E2E_BASE_URL, default http://127.0.0.1:5173 (see
  * playwright.config.ts). Ticket 12 has not deployed anything yet, so there is
@@ -31,6 +33,8 @@
  * test mode is decided, add a connectPrivyTestWallet() alongside
  * connectBurnerWallet() and branch on whether VITE_PRIVY_APP_ID is set.
  *
+ * Set E2E_LIVE_STACK=1 once that stack is up; without it the test skips.
+ *
  * Not verified end to end: standing up the local validator, program,
  * backend and frontend together was out of scope for this pass (see ticket
  * 13's `## Comments`). Only `playwright test --list` proved this file
@@ -38,15 +42,14 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
-/** Round length the target pool is running, for the settle-wait budget. Matches spec.md §7's 90s default; override for a faster demo pool (see the runbook's "changing epoch length" recipe, which also covers --round-seconds). */
-const ROUND_SECONDS = Number(process.env.E2E_ROUND_SECONDS ?? 90);
-const VRF_TIMEOUT_SECONDS = Number(process.env.E2E_VRF_TIMEOUT_SECONDS ?? 120);
-/** Generous: a round can void and retry once before ORAO answers. */
-const SETTLE_TIMEOUT_MS = (ROUND_SECONDS + VRF_TIMEOUT_SECONDS + 60) * 1000;
-
 async function connectBurnerWallet(page: Page): Promise<void> {
   await page.goto("/#play");
-  await page.getByTestId("connect-button").click();
+  // The invite gate (AccessGate.tsx) covers the app until a wallet with
+  // access connects; the burner needs an InviteRedemption row in the backend.
+  const gateConnect = page.getByRole("button", { name: /connect wallet/i });
+  const navConnect = page.getByTestId("connect-button");
+  await expect(gateConnect.or(navConnect).first()).toBeVisible({ timeout: 15_000 });
+  await ((await gateConnect.isVisible()) ? gateConnect : navConnect).click();
   // Standard wallet-adapter-react-ui modal. With VITE_BURNER_WALLET=1 and a
   // local RPC (see src/dev-burner.ts's isLocalRpc gate), the burner is the
   // only entry in the list.
@@ -74,16 +77,9 @@ function parseAfterLabel(text: string, label: string): number {
   return Number(match[1]);
 }
 
-/** Clicks a tile until it reports selected. Tiles only respond once an open round is in its "mine" phase (see src/App.tsx's canPick). */
-async function selectTile(page: Page, tileNumber: number): Promise<void> {
-  const tile = page.getByTestId(`tile-${tileNumber}`);
-  await expect(async () => {
-    await tile.click();
-    await expect(tile).toHaveAttribute("data-selected", "1");
-  }).toPass({ timeout: 90_000 });
-}
+test.skip(!process.env.E2E_LIVE_STACK, "needs a live localnet stack (set E2E_LIVE_STACK=1)");
 
-test("faucet, deposit, play a round, settle, request a withdrawal", async ({
+test("faucet, deposit, withdraw", async ({
   page,
 }) => {
   await connectBurnerWallet(page);
@@ -94,12 +90,15 @@ test("faucet, deposit, play a round, settle, request a withdrawal", async ({
   // already holding USDC from a previous run. This does not fix
   // repeatability properly; upgrade path is a fresh keypair per run, or a
   // backend reset endpoint, whichever ticket ends up owning CI for this spec.
-  // The faucet lives in the wallet menu under the address pill.
+  // The faucet lives in the wallet menu under the address pill. A
+  // mainnet-shaped cluster (the surf fork) has none; `scripts/surf.sh fund`
+  // pre-funds the burner there instead.
   await page.getByTestId("connect-button").click();
-  await page.getByTestId("faucet").click();
-  await expect(page.getByTestId("faucet")).toHaveText(/Sent|Faucet in \d+s/, {
-    timeout: 30_000,
-  });
+  const faucet = page.getByTestId("faucet");
+  if (await faucet.isVisible().catch(() => false)) {
+    await faucet.click();
+    await expect(faucet).toHaveText(/Sent|Faucet in \d+s/, { timeout: 30_000 });
+  }
   await page.keyboard.press("Escape");
   // EARN lands on the dashboard; the deposit widget is one hop further in.
   await page.getByTestId("tab-dashboard").click();
@@ -113,73 +112,27 @@ test("faucet, deposit, play a round, settle, request a withdrawal", async ({
   await expect(page.getByTestId("deposit-modal-amount")).toContainText("100.00", {
     timeout: 30_000,
   });
-  await page.getByTestId("deposit-modal-play").click();
+  await page.getByTestId("deposit-modal-ok").click();
   await expect(page.getByTestId("deposit-modal")).toHaveCount(0);
-
-  // 3. Buy a position on 3 tiles.
-  await page.getByTestId("tab-mine").click();
-  const entriesBefore = parseAfterLabel(
-    await page.getByTestId("wallet-entries").innerText(),
-    "Tickets",
-  );
-  await page.getByTestId("stake-input").fill("1");
-  await selectTile(page, 0);
-  await selectTile(page, 1);
-  await selectTile(page, 2);
-  await expect(page.getByTestId("tile-count")).toHaveText("3");
-
-  const deployButton = page.getByTestId("deploy");
-  await expect(deployButton).toBeEnabled({ timeout: 10_000 });
-  await deployButton.click();
-  await expect(page.getByTestId("deploy-note")).toBeVisible({ timeout: 30_000 });
-
-  // 4. Wait for the round to settle, then settle this position.
-  await expect(page.getByTestId("reward-hint")).toBeVisible({
-    timeout: SETTLE_TIMEOUT_MS,
-  });
-  await page.getByTestId("settle-position").click();
-  await expect(page.getByTestId("deploy-note")).toContainText(/settled/i, {
-    timeout: 30_000,
-  });
-
-  // 5. Entries changed (buying a position always spends some, win or lose).
-  const entriesAfter = parseAfterLabel(
-    await page.getByTestId("wallet-entries").innerText(),
-    "Tickets",
-  );
-  expect(entriesAfter).not.toBe(entriesBefore);
 
   // The dashboard's Withdraw button opens the widget already on that tab.
   await page.getByTestId("tab-dashboard").click();
   await page.getByTestId("dash-withdraw").click();
-  // The ceiling is Principal alone now, whatever the game did to Tickets
-  // (ADR 0009). This only checks the number is live and positive.
+  // The ceiling is Principal plus unsettled yield, less anything already queued.
   const shownWithdrawable = parseAfterLabel(
     await page.getByTestId("withdrawable-now").innerText(),
-    "Withdrawable at day end",
+    "Available to withdraw:",
   );
   expect(shownWithdrawable).toBeGreaterThan(0);
 
-  // 6. Request the whole Principal. No USDC moves: the row below books it
-  // as pending against the epoch that has to end first.
+  // 3. Withdraw that much. Today's deposit never held a Ticket, so the form
+  // says it pays now and the USDC lands in the wallet.
   await page.getByTestId("withdraw-input").fill(String(shownWithdrawable));
+  await expect(page.getByTestId("withdraw-expected")).toContainText("Now");
   const withdrawSubmit = page.getByTestId("withdraw-submit");
   await expect(withdrawSubmit).toBeEnabled();
   await withdrawSubmit.click();
-  await expect(page.getByTestId("vault-note")).toContainText(
-    /withdraw requested/i,
-    { timeout: 30_000 },
-  );
-
-  // 7. The pending row shows the amount and says it waits out the day. The
-  // request lands inside the current epoch, so it is never due yet and the
-  // pay-out button must not be offered.
-  const pendingRow = page.getByTestId("pending-withdraw");
-  await expect(pendingRow).toContainText(String(shownWithdrawable), {
+  await expect(page.getByTestId("vault-note")).toContainText(/withdraw requested/i, {
     timeout: 30_000,
   });
-  await expect(page.getByTestId("pending-withdraw-state")).toContainText(
-    /pays out after day #\d+ ends/,
-  );
-  await expect(page.getByTestId("pay-out-now")).toHaveCount(0);
 });

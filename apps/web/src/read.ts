@@ -1,7 +1,7 @@
 /**
  * Ticket 07: the Indexer is the browser's read model now, not a cache in
  * front of an authoritative chain. `GET /state` (see `useStatePoll.ts`) is
- * the only source for Pool, Epoch, Round, Player and Position. The one
+ * the only source for Pool, Epoch and Player. The one
  * surviving direct chain read is the connected wallet's own token balance,
  * below, against the public endpoint on the visitor's own rate-limit
  * budget — nothing else in the browser touches the chain.
@@ -14,28 +14,28 @@ import type { PoolDto } from "./api.js";
 
 /**
  * What `actions.ts` needs to build instructions, and what the screens need to
- * gate the UI. All of it derives from `/state`'s `pool`: `closeBuffer` and
- * `minDeposit` are columns on the mirror (migration
- * 20260914061500_pool_close_buffer_and_min_deposit), so serving this costs
+ * gate the UI. All of it derives from `/state`'s `pool`, so serving this costs
  * no chain read.
  */
 export interface PoolLike {
   address: PublicKey;
   acceptedMint: PublicKey;
-  closeBuffer: bigint;
   minDeposit: bigint;
-  /** Share of a settled round's pot credited to the House, in basis points. */
-  houseCutBps: number;
   paused: boolean;
-  /** One epoch's length in seconds, for the buy-tickets draw-value preview. */
+  /** One epoch's length in seconds. */
   epochSeconds: bigint;
-  /** Base yield's APR on time-weighted Principal, in basis points (ADR 0011). */
+  /** The ceiling on the depositor share of yield, in basis points. */
   baseRateBps: number;
-  /** Tickets credited per USDC spent in `buy_tickets`. */
-  ticketsPerUsdc: number;
   /** Already validated and capped (`safePriorityFee`); the only fee the send
    *  helper (`actions.ts`, ticket 08) ever signs with. */
   priorityFeeMicroLamports: number;
+  /** The four pinned venue accounts: deposit and withdraw name them. */
+  klendProgram: PublicKey;
+  klendMarket: PublicKey;
+  klendReserve: PublicKey;
+  klendCtoken: PublicKey;
+  /** Which backing the four pins point at (`VENUE_KIND`). */
+  venueKind: number;
 }
 
 /**
@@ -87,7 +87,7 @@ export type PoolResult =
  *  one signing code needs; refuses a Pool that does not match what this
  *  build is configured for. */
 export function poolFromDto(
-  dto: PoolDto & { closeBuffer: string; minDeposit: string },
+  dto: PoolDto,
   priorityFeeMicroLamports: number,
   expectedAddress: PublicKey,
 ): PoolResult {
@@ -99,19 +99,26 @@ export function poolFromDto(
     };
   }
   const mint = new PublicKey(dto.mint);
+  // An indexer row from before the live-yield layout has none of these; no
+  // instruction can be built without them.
+  if (!dto.klendProgram || !dto.klendMarket || !dto.klendReserve || !dto.klendCtoken) {
+    return { ok: false, reason: "The pool is not indexed yet. Try again in a moment." };
+  }
   return {
     ok: true,
     pool: {
       address,
       acceptedMint: mint,
-      closeBuffer: BigInt(dto.closeBuffer),
       minDeposit: BigInt(dto.minDeposit),
-      houseCutBps: dto.houseCutBps,
       paused: dto.paused,
       epochSeconds: BigInt(dto.epochSeconds),
       baseRateBps: dto.baseRateBps,
-      ticketsPerUsdc: dto.ticketsPerUsdc,
       priorityFeeMicroLamports: safePriorityFee(priorityFeeMicroLamports),
+      klendProgram: new PublicKey(dto.klendProgram),
+      klendMarket: new PublicKey(dto.klendMarket),
+      klendReserve: new PublicKey(dto.klendReserve),
+      klendCtoken: new PublicKey(dto.klendCtoken),
+      venueKind: dto.venueKind,
     },
   };
 }
@@ -128,10 +135,11 @@ export function poolFromDto(
  *  balance read can throw is unknown, not zero (ticket 15: a stuttering RPC
  *  must never look like an empty wallet and block a deposit as over
  *  balance). Solana's JSON-RPC has no dedicated error code for a missing
- *  token account, only this message text. */
+ *  token account, only this message text: Agave's "could not find account",
+ *  Surfpool's "Account <address> not found". */
 export function isMissingTokenAccount(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /could not find account/i.test(message);
+  return /could not find account|account \w+ not found/i.test(message);
 }
 
 export function useWalletBalance(

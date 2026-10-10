@@ -2,8 +2,11 @@ import { Controller, Get, HttpException, HttpStatus } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 
 import type { HexVaultEnv } from "../config/env";
+import { VENUE_LOCK_SECONDS } from "../chain/venue-kind";
 import { PrismaService } from "../prisma/prisma.service";
+import { MAX_SNAPSHOT_DEPTH } from "../snapshot/sum-tree";
 import { ApiService, EPOCH_OPEN } from "./api.service";
+import { RoundsService } from "./rounds.service";
 
 /** production-hardening ticket 05's codes, kept identical to
  *  docs/ops/incidents.md's playbook headers. */
@@ -14,19 +17,27 @@ export type AlertCode =
   | "RPC_FALLBACK_ACTIVE"
   | "INDEXER_STALE"
   | "WITHDRAW_SHORTFALL"
-  | "ROUND_VOIDED_RECENTLY"
   | "EPOCH_ROLLED_OVER_RECENTLY"
   | "WITHDRAW_OWNERS_SKIPPED"
-  | "REGISTRATION_INDEXER_STALE"
   | "OPERATOR_SOL_READ_FAILED"
   | "OPERATOR_FAILING"
   | "EPOCH_NO_PROGRESS"
   | "DRAWN_UNPAID"
-  | "YIELD_BUDGET_LOW"
   | "SPARRING_SOL_LOW"
   | "JACKPOT_LOW_NEAR_CLOSE"
-  | "PRINCIPAL_OUT_NEAR_CLOSE"
-  | "WITHDRAW_FORECAST_SHORT";
+  | "WITHDRAW_FORECAST_SHORT"
+  | "SOLVENCY_NEGATIVE"
+  | "FREE_IDLE_LOW"
+  | "RESERVE_LIQUIDITY_LOW"
+  | "POOL_IMPAIRED"
+  | "DEPLOY_PAUSED"
+  | "VENUE_PROPOSED"
+  | "PARAMS_CHANGED"
+  | "TICKET_LEDGER_MISMATCH"
+  | "SNAPSHOT_MISMATCH"
+  | "SNAPSHOT_NEAR_CAP"
+  | "EVENT_LOG_TRUNCATED"
+  | "ROUND_SETTLE_FAILED";
 
 export interface Alert {
   code: AlertCode;
@@ -36,7 +47,19 @@ export interface Alert {
 /** Not env-tunable: spec.md's alerts decision only names `OPERATOR_SOL_WARN`,
  *  `ALERT_TICK_STALE_S` and `ALERT_INDEXER_STALE_S` as thresholds. */
 export const RPC_FALLBACK_RECENT_MS = 10 * 60 * 1000;
-export const VOID_OR_ROLLOVER_RECENT_S = 60 * 60;
+export const ROLLOVER_RECENT_S = 60 * 60;
+/** mainnet-readiness-fixes 04: how long `PARAMS_CHANGED` stays up after a
+ *  `ParamsSet` event, long enough for a once-a-minute monitor to page. */
+export const PARAMS_CHANGED_RECENT_S = 60 * 60;
+/** Ticket holders the snapshot can fit, `2^MAX_SNAPSHOT_DEPTH`. Past it the
+ *  cutoff's `buildSumTree` throws and the indexer stops at that `EpochBegan`,
+ *  so `SNAPSHOT_NEAR_CAP` pages at this share of it. */
+export const SNAPSHOT_LEAF_CAP = 2 ** MAX_SNAPSHOT_DEPTH;
+export const SNAPSHOT_NEAR_CAP_SHARE = 0.9;
+/** audit-2026-10-09 06: how long `EVENT_LOG_TRUNCATED` stays up after the
+ *  indexer records a cut-off log. There is no acknowledge path for alerts, so
+ *  the window is the clear; three days outlasts a weekend. */
+export const TRUNCATED_LOG_RECENT_S = 3 * 24 * 60 * 60;
 /** Ticket 09: how long the operator's last error may persist, while ticks
  *  keep running, before OPERATOR_FAILING pages someone. Not env-tunable, for
  *  the same reason as the two constants above. */
@@ -44,6 +67,20 @@ export const OPERATOR_FAILING_SECONDS = 5 * 60;
 /** Ticket 09: "inside the last hour before close" for the jackpot and
  *  principal-out conditions, straight from spec.md's own wording. */
 export const NEAR_CLOSE_SECONDS = 60 * 60;
+/** A negative solvency margin smaller than this is rounding dust from a
+ *  redeem, which the program charges to the fee owed (spec "Sync"). */
+export const SOLVENCY_DUST = 10n;
+
+/** The pool's open venue proposal: the pins it would move the pool to. */
+export interface VenueProposalAlert {
+  venueKind: number;
+  klendProgram: string;
+  klendMarket: string;
+  klendReserve: string;
+  klendCtoken: string;
+  /** Chain unix seconds when the migration may run. */
+  unlocksAt: bigint;
+}
 
 /** Everything `evaluateAlerts` needs, already resolved to plain values so it
  *  stays DB- and chain-free and is cheap to seed from a test. */
@@ -66,13 +103,10 @@ export interface AlertInputs {
   /** OperatorState.withdrawShortfall, already 0n for "never checked" and
    *  "covered" alike (ApiService.getStatus already collapses the two). */
   withdrawShortfall: bigint;
-  roundVoidedRecently: boolean;
   epochRolledOverRecently: boolean;
   /** Ticket 06: OperatorState.withdrawSkippedCount, 0 for "never checked"
    *  and "none skipped" alike. */
   withdrawSkippedCount: number;
-  /** Ticket 07: OperatorState.registrationIndexerStale. */
-  registrationIndexerStale: boolean;
   /** Ticket 09: seconds since the operator's last successful tick, while the
    *  current one is still failing; null when the last tick did not fail
    *  (OperatorState.lastError is null). `Infinity` stands for "never
@@ -82,8 +116,8 @@ export interface AlertInputs {
   epochNoProgress: boolean;
   /** Ticket 09: OperatorState.drawnUnpaid. */
   drawnUnpaid: boolean;
-  /** Ticket 09: ApiService's `yieldBudgetLow`, already computed for /status. */
-  yieldBudgetLow: boolean;
+  /** Off-chain-tickets 12: OperatorState.snapshotMismatch. */
+  snapshotMismatch: boolean;
   /** Ticket 09: null when the sparring player is not configured, or its
    *  balance read failed; both read as "nothing to warn about" the same way
    *  a failed operator SOL read does not itself mean the operator is low. */
@@ -96,17 +130,78 @@ export interface AlertInputs {
   jackpotAmount: bigint | null;
   /** Ticket 09: `Pool.minJackpot`; 0 before a pool is indexed. */
   minJackpot: bigint;
-  /** Ticket 09: `/status`'s `principalOut`; null when unknown. */
-  principalOut: bigint | null;
   /** Ticket 09: `Pool.pendingWithdrawals`, the total still owed. */
   pendingWithdrawals: bigint;
   /** Ticket 09: `/status`'s `vaultLiquidity`; null when the read failed. */
   vaultLiquidity: bigint | null;
+  /** Ticket 14: `/status`'s `solvencyMargin`; null when the vault read failed. */
+  solvencyMargin: bigint | null;
+  /** Seconds free idle has been under the idle floor; null while it is not. */
+  freeIdleLowSeconds: number | null;
+  /** `/status`'s `reserveFreeLiquidity`; null when the reserve is unreadable. */
+  reserveFreeLiquidity: bigint | null;
+  impaired: boolean;
+  deployPaused: boolean;
+  /** The open venue proposal, null when there is none. */
+  venueProposal: VenueProposalAlert | null;
+  /** The newest `ParamsSet` event's values inside the last hour, null when
+   *  there is none. Pool and nothing else is left out, so a new field on the
+   *  event shows up here without a code change. */
+  paramsChanged: Record<string, unknown> | null;
+  /** Wallets whose `TicketBalance` differs from their ledger sum, or whose ledger
+   *  Principal differs from their Player's, at the last nightly check; 0 before
+   *  the first check. */
+  ticketLedgerMismatches: number;
+  /** Wallets holding Tickets now, the next snapshot's leaf count. */
+  ticketHolders: number;
+  /** Signatures of transactions whose log Solana cut off, recorded inside the
+   *  last `TRUNCATED_LOG_RECENT_S`; newest first. */
+  truncatedLogSignatures: string[];
+  /** Closed Rounds the reveal sweep could not settle (audit-2026-10-09 08). */
+  roundSettleFailed: readonly bigint[];
 }
+
+/** `/status`'s operator block, which both the alerts and the ops todo list read. */
+type OperatorStatus = Awaited<ReturnType<ApiService["getStatus"]>>["operator"];
+
+/** The two operator ages `AlertInputs` carries, from `/status`'s operator block. */
+export function operatorAges(
+  operator: OperatorStatus,
+  nowSeconds: number,
+): Pick<AlertInputs, "tickAgeSeconds" | "operatorFailingSeconds"> {
+  const lastTickAt = operator?.lastTickAt;
+  const lastError = operator?.lastError ?? null;
+  const lastSuccessAt = operator?.lastSuccessAt ?? null;
+  return {
+    tickAgeSeconds: lastTickAt == null ? null : nowSeconds - Math.floor(lastTickAt.getTime() / 1000),
+    // Ticket 09: null when the last tick did not fail; Infinity when it
+    // failed but the operator has never once succeeded, which always trips
+    // the threshold rather than reading as "just started failing".
+    operatorFailingSeconds:
+      lastError === null
+        ? null
+        : lastSuccessAt === null
+          ? Number.POSITIVE_INFINITY
+          : nowSeconds - Math.floor(lastSuccessAt.getTime() / 1000),
+  };
+}
+
+export const isOperatorStale = (
+  inputs: Pick<AlertInputs, "shutdown" | "tickAgeSeconds">,
+  tickStaleSeconds: number,
+): boolean =>
+  !inputs.shutdown && inputs.tickAgeSeconds !== null && inputs.tickAgeSeconds > tickStaleSeconds;
+
+export const isOperatorFailing = (inputs: Pick<AlertInputs, "operatorFailingSeconds">): boolean =>
+  inputs.operatorFailingSeconds !== null && inputs.operatorFailingSeconds > OPERATOR_FAILING_SECONDS;
 
 export interface AlertThresholds {
   tickStaleSeconds: number;
   indexerStaleSeconds: number;
+  /** Seconds free idle may stay under the floor. */
+  idleLowSeconds: number;
+  /** Atomic USDC of reserve free liquidity below which `RESERVE_LIQUIDITY_LOW` fires. */
+  reserveFreeMin: bigint;
 }
 
 /**
@@ -130,20 +225,13 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The operator's SOL balance could not be read.",
     });
   }
-  if (
-    !inputs.shutdown &&
-    inputs.tickAgeSeconds !== null &&
-    inputs.tickAgeSeconds > thresholds.tickStaleSeconds
-  ) {
+  if (isOperatorStale(inputs, thresholds.tickStaleSeconds)) {
     alerts.push({
       code: "OPERATOR_STALE",
       message: `The operator has not ticked in over ${thresholds.tickStaleSeconds}s.`,
     });
   }
-  if (
-    inputs.operatorFailingSeconds !== null &&
-    inputs.operatorFailingSeconds > OPERATOR_FAILING_SECONDS
-  ) {
+  if (isOperatorFailing(inputs)) {
     // Distinct from OPERATOR_STALE: ticks are running (a fresh lastTickAt),
     // but every one of them has been failing for a while.
     alerts.push({
@@ -175,9 +263,6 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The principal vault fell short of a pending withdrawal on the last tick.",
     });
   }
-  if (inputs.roundVoidedRecently) {
-    alerts.push({ code: "ROUND_VOIDED_RECENTLY", message: "A round voided in the last hour." });
-  }
   if (inputs.epochRolledOverRecently) {
     alerts.push({
       code: "EPOCH_ROLLED_OVER_RECENTLY",
@@ -188,12 +273,6 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
     alerts.push({
       code: "WITHDRAW_OWNERS_SKIPPED",
       message: `${inputs.withdrawSkippedCount} owner(s) skipped after repeated withdrawal failures this epoch.`,
-    });
-  }
-  if (inputs.registrationIndexerStale) {
-    alerts.push({
-      code: "REGISTRATION_INDEXER_STALE",
-      message: "close_registration is withheld: the indexer cursor is stale or behind the epoch's end.",
     });
   }
   if (inputs.epochNoProgress) {
@@ -208,10 +287,10 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The epoch drew a winner more than a few minutes ago and it is still unpaid.",
     });
   }
-  if (inputs.yieldBudgetLow) {
+  if (inputs.snapshotMismatch) {
     alerts.push({
-      code: "YIELD_BUDGET_LOW",
-      message: "The yield budget is below the cost of one epoch's Base yield.",
+      code: "SNAPSHOT_MISMATCH",
+      message: "The drawn epoch's winner proof does not match the committed snapshot root, and the operator has stopped retrying it.",
     });
   }
   if (inputs.sparringSolLow === true) {
@@ -230,16 +309,79 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
       message: "The jackpot vault is below min_jackpot inside the last hour before close.",
     });
   }
-  if (nearClose && inputs.principalOut !== null && inputs.principalOut > 0n) {
-    alerts.push({
-      code: "PRINCIPAL_OUT_NEAR_CLOSE",
-      message: "Principal is still out of the vault inside the last hour before close.",
-    });
-  }
   if (inputs.vaultLiquidity !== null && inputs.pendingWithdrawals > inputs.vaultLiquidity) {
     alerts.push({
       code: "WITHDRAW_FORECAST_SHORT",
       message: "Due pending withdrawals are forecast to exceed vault liquidity.",
+    });
+  }
+  if (inputs.solvencyMargin !== null && inputs.solvencyMargin < -SOLVENCY_DUST) {
+    alerts.push({
+      code: "SOLVENCY_NEGATIVE",
+      message: "The vault plus the venue position no longer covers every balance.",
+    });
+  }
+  if (inputs.freeIdleLowSeconds !== null && inputs.freeIdleLowSeconds > thresholds.idleLowSeconds) {
+    alerts.push({
+      code: "FREE_IDLE_LOW",
+      message: `Free idle has been under the idle floor for over ${thresholds.idleLowSeconds}s.`,
+    });
+  }
+  if (inputs.reserveFreeLiquidity !== null && inputs.reserveFreeLiquidity < thresholds.reserveFreeMin) {
+    alerts.push({
+      code: "RESERVE_LIQUIDITY_LOW",
+      message: "The klend reserve's free liquidity is under ALERT_RESERVE_FREE_MIN.",
+    });
+  }
+  if (inputs.impaired) {
+    alerts.push({
+      code: "POOL_IMPAIRED",
+      message: "The venue reported a loss: exits pay a haircut and deploy and harvest are refused.",
+    });
+  }
+  if (inputs.deployPaused) {
+    alerts.push({ code: "DEPLOY_PAUSED", message: "Deployment to the venue is paused." });
+  }
+  if (inputs.venueProposal !== null) {
+    const p = inputs.venueProposal;
+    // The 48 hour lock is the window to cancel a proposal nobody expected.
+    alerts.push({
+      code: "VENUE_PROPOSED",
+      message: `A venue proposal is open: kind ${p.venueKind}, klend program ${p.klendProgram}, market ${p.klendMarket}, reserve ${p.klendReserve}, cToken ${p.klendCtoken}; the migration unlocks at unix ${p.unlocksAt}.`,
+    });
+  }
+  if (inputs.paramsChanged !== null) {
+    const values = Object.entries(inputs.paramsChanged)
+      .filter(([key]) => key !== "pool")
+      .map(([key, value]) => `${key}=${String(value)}`)
+      .join(", ");
+    alerts.push({
+      code: "PARAMS_CHANGED",
+      message: `set_params ran in the last hour with: ${values}.`,
+    });
+  }
+  if (inputs.ticketLedgerMismatches > 0) {
+    alerts.push({
+      code: "TICKET_LEDGER_MISMATCH",
+      message: `${inputs.ticketLedgerMismatches} wallets differ from their ledger rows or from their Player's Principal.`,
+    });
+  }
+  if (inputs.roundSettleFailed.length > 0) {
+    alerts.push({
+      code: "ROUND_SETTLE_FAILED",
+      message: `Round ${inputs.roundSettleFailed.join(", ")} could not settle and its stakes stay locked; the sweep retries every second.`,
+    });
+  }
+  if (inputs.ticketHolders >= SNAPSHOT_LEAF_CAP * SNAPSHOT_NEAR_CAP_SHARE) {
+    alerts.push({
+      code: "SNAPSHOT_NEAR_CAP",
+      message: `${inputs.ticketHolders} wallets hold Tickets; the snapshot fits ${SNAPSHOT_LEAF_CAP}, and past that the indexer stops at the next EpochBegan.`,
+    });
+  }
+  if (inputs.truncatedLogSignatures.length > 0) {
+    alerts.push({
+      code: "EVENT_LOG_TRUNCATED",
+      message: `Solana cut off the log of ${inputs.truncatedLogSignatures.join(", ")}, so its events were not read. Reconcile the wallets it touched.`,
     });
   }
   return alerts;
@@ -260,66 +402,92 @@ export function evaluateAlerts(inputs: AlertInputs, thresholds: AlertThresholds)
 export class AlertsController {
   private readonly tickStaleSeconds: number;
   private readonly indexerStaleSeconds: number;
+  private readonly idleLowSeconds: number;
+  private readonly reserveFreeMin: bigint;
+  /**
+   * Wall-clock seconds `/status` first reported free idle under the floor, or
+   * null while it is not. Kept in memory: a restart restarts the clock, which
+   * only delays the alert by one window. ponytail: persist it in
+   * OperatorState if restarts during a real shortfall turn out to matter.
+   */
+  private idleLowSince: number | null = null;
 
   constructor(
     private readonly api: ApiService,
     private readonly prisma: PrismaService,
     config: ConfigService<HexVaultEnv, true>,
+    private readonly rounds: RoundsService,
   ) {
     this.tickStaleSeconds = config.get("ALERT_TICK_STALE_S", { infer: true });
     this.indexerStaleSeconds = config.get("ALERT_INDEXER_STALE_S", { infer: true });
+    this.idleLowSeconds = config.get("ALERT_IDLE_LOW_S", { infer: true });
+    this.reserveFreeMin = BigInt(config.get("ALERT_RESERVE_FREE_MIN", { infer: true }));
   }
 
   @Get("alerts")
   async getAlerts(): Promise<{ alerts: Alert[] }> {
-    const [status, recent] = await Promise.all([
+    const [status, recent, venueProposal, paramsChanged, ledgerCheck, ticketHolders, truncatedLogs] = await Promise.all([
       this.api.getStatus(),
-      this.recentVoidOrRollover(),
+      this.recentRollover(),
+      this.openVenueProposal(),
+      this.recentParamsSet(),
+      this.prisma.ledgerCheck.findUnique({ where: { poolAddress: this.api.poolAddress } }),
+      this.prisma.ticketBalance.count({ where: { poolAddress: this.api.poolAddress, tickets: { gt: 0n } } }),
+      this.prisma.truncatedLog.findMany({
+        where: { poolAddress: this.api.poolAddress, createdAt: { gte: new Date(Date.now() - TRUNCATED_LOG_RECENT_S * 1000) } },
+        orderBy: { createdAt: "desc" },
+        select: { signature: true },
+      }),
     ]);
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const lastTickAt = status.operator?.lastTickAt;
-    const lastError = status.operator?.lastError ?? null;
-    const lastSuccessAt = status.operator?.lastSuccessAt ?? null;
-    // Ticket 09: null when the last tick did not fail; Infinity when it
-    // failed but the operator has never once succeeded, which always trips
-    // the threshold rather than reading as "just started failing".
-    const operatorFailingSeconds =
-      lastError === null
-        ? null
-        : lastSuccessAt === null
-          ? Number.POSITIVE_INFINITY
-          : nowSeconds - Math.floor(lastSuccessAt.getTime() / 1000);
     const secondsToEpochClose =
       status.epochStatus === EPOCH_OPEN && status.epochEndsAt !== null
         ? Number(status.epochEndsAt - BigInt(nowSeconds))
         : null;
+    // A null reading (vault unknown) leaves the clock as it was: a failed read
+    // is not evidence that idle recovered.
+    if (status.freeIdleBelowFloor === false) this.idleLowSince = null;
+    else if (status.freeIdleBelowFloor === true) this.idleLowSince ??= nowSeconds;
+    const freeIdleLowSeconds = this.idleLowSince === null ? null : nowSeconds - this.idleLowSince;
     const alerts = evaluateAlerts(
       {
         operatorSolLow: status.operatorSolLow,
-        tickAgeSeconds: lastTickAt == null ? null : nowSeconds - Math.floor(lastTickAt.getTime() / 1000),
+        ...operatorAges(status.operator, nowSeconds),
         shutdown: status.shutdown,
         rpcOk: status.rpcOk,
         rpcFallbackAgeMs:
           status.rpcFallbackAt === null ? null : Date.now() - status.rpcFallbackAt.getTime(),
         indexerAgeSeconds: status.cursor.ageSeconds,
         withdrawShortfall: status.withdrawShortfall,
-        roundVoidedRecently: recent.roundVoidedRecently,
         epochRolledOverRecently: recent.epochRolledOverRecently,
         withdrawSkippedCount: status.withdrawSkippedCount,
-        registrationIndexerStale: status.registrationIndexerStale,
-        operatorFailingSeconds,
         epochNoProgress: status.operator?.epochNoProgress ?? false,
         drawnUnpaid: status.operator?.drawnUnpaid ?? false,
-        yieldBudgetLow: status.yieldBudgetLow,
+        snapshotMismatch: status.operator?.snapshotMismatch ?? false,
         sparringSolLow: status.sparringSolLow,
         secondsToEpochClose,
         jackpotAmount: status.jackpotAmount,
         minJackpot: status.minJackpot,
-        principalOut: status.principalOut,
         pendingWithdrawals: status.pendingWithdrawals,
         vaultLiquidity: status.vaultLiquidity,
+        solvencyMargin: status.solvencyMargin,
+        freeIdleLowSeconds,
+        reserveFreeLiquidity: status.reserveFreeLiquidity,
+        impaired: status.impaired,
+        deployPaused: status.deployPaused,
+        venueProposal,
+        paramsChanged,
+        ticketLedgerMismatches: ledgerCheck?.mismatches ?? 0,
+        ticketHolders,
+        truncatedLogSignatures: truncatedLogs.map((row) => row.signature),
+        roundSettleFailed: this.rounds.settleFailed(),
       },
-      { tickStaleSeconds: this.tickStaleSeconds, indexerStaleSeconds: this.indexerStaleSeconds },
+      {
+        tickStaleSeconds: this.tickStaleSeconds,
+        indexerStaleSeconds: this.indexerStaleSeconds,
+        idleLowSeconds: this.idleLowSeconds,
+        reserveFreeMin: this.reserveFreeMin,
+      },
     );
     if (alerts.length > 0) {
       // Nest serializes an HttpException's first argument as the body
@@ -330,26 +498,46 @@ export class AlertsController {
     return { alerts };
   }
 
-  /** `RoundVoided`/`EpochRolledOver` are two of `FEED_NAMES` in
-   *  api.service.ts; `decode.ts`'s `declaredName` is what puts them in the
-   *  Event table under those exact names. `distinct` caps this at two rows. */
-  private async recentVoidOrRollover(): Promise<{
-    roundVoidedRecently: boolean;
-    epochRolledOverRecently: boolean;
-  }> {
-    const cutoff = BigInt(Math.floor(Date.now() / 1000) - VOID_OR_ROLLOVER_RECENT_S);
-    const rows = await this.prisma.event.findMany({
-      where: {
-        poolAddress: this.api.poolAddress,
-        name: { in: ["RoundVoided", "EpochRolledOver"] },
-        blockTime: { gte: cutoff },
-      },
-      select: { name: true },
-      distinct: ["name"],
+  /** The `VenueProposal` row the indexer keeps while the account exists:
+   *  `cancel_venue` and the migration delete it, so the alert ends with them. */
+  private async openVenueProposal(): Promise<VenueProposalAlert | null> {
+    const row = await this.prisma.venueProposal.findUnique({
+      where: { poolAddress: this.api.poolAddress },
     });
+    if (row === null) return null;
     return {
-      roundVoidedRecently: rows.some((row) => row.name === "RoundVoided"),
-      epochRolledOverRecently: rows.some((row) => row.name === "EpochRolledOver"),
+      venueKind: row.venueKind,
+      klendProgram: row.klendProgram,
+      klendMarket: row.klendMarket,
+      klendReserve: row.klendReserve,
+      klendCtoken: row.klendCtoken,
+      unlocksAt: row.proposedAt + VENUE_LOCK_SECONDS,
     };
+  }
+
+  /** The newest `ParamsSet` event inside `PARAMS_CHANGED_RECENT_S`, as the
+   *  decoder stored it (`decode.ts`'s camelCased field names). */
+  private async recentParamsSet(): Promise<Record<string, unknown> | null> {
+    const cutoff = BigInt(Math.floor(Date.now() / 1000) - PARAMS_CHANGED_RECENT_S);
+    const row = await this.prisma.event.findFirst({
+      where: { poolAddress: this.api.poolAddress, name: "ParamsSet", blockTime: { gte: cutoff } },
+      orderBy: { slot: "desc" },
+      select: { data: true },
+    });
+    const data = row?.data;
+    return data !== null && typeof data === "object" && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : null;
+  }
+
+  /** `EpochRolledOver` is one of `FEED_NAMES` in api.service.ts; `decode.ts`'s
+   *  `declaredName` is what puts it in the Event table under that exact name. */
+  private async recentRollover(): Promise<{ epochRolledOverRecently: boolean }> {
+    const cutoff = BigInt(Math.floor(Date.now() / 1000) - ROLLOVER_RECENT_S);
+    const row = await this.prisma.event.findFirst({
+      where: { poolAddress: this.api.poolAddress, name: "EpochRolledOver", blockTime: { gte: cutoff } },
+      select: { name: true },
+    });
+    return { epochRolledOverRecently: row !== null };
   }
 }

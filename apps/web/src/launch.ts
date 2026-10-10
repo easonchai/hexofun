@@ -4,6 +4,7 @@
  * is null. No React, no chain I/O, so it is unit-testable on its own — see
  * `engine.ts`'s `dhmsParts` for the same split on the regular draw clock.
  */
+import type { CurrentEpochDto } from "./api.js";
 import { dhmsParts } from "./engine.js";
 
 export interface LaunchCountdown {
@@ -55,4 +56,31 @@ export function prizeCardState(
   if (gated || (!hasEpoch && scheduled)) return "launch";
   if (!hasEpoch) return "live";
   return jackpotPaused ? "paused" : "live";
+}
+
+/**
+ * The prize the cards show. Once `request_draw` snapshots the ended epoch's
+ * prize it is reserved out of the vault, so the new epoch's live figure drops
+ * it; show the drawn-for amount until the draw finishes.
+ */
+export function prizeShown(epoch: Pick<CurrentEpochDto, "jackpotAmount" | "drawing">): string {
+  const drawingFor = epoch.drawing?.jackpotAmount ?? "0";
+  return BigInt(drawingFor) > 0n ? drawingFor : epoch.jackpotAmount;
+}
+
+/** The draw is running: the program says so, or the clock has run out. */
+export function isDrawing(drawing: boolean, remaining: bigint | null): boolean {
+  return drawing || (remaining !== null && remaining <= 0n);
+}
+
+/**
+ * "NEXT DRAW IN" belongs above a countdown: the launch one or the live clock.
+ * DRAWING… and DRAW PAUSED have nothing to count to.
+ */
+export function showsNextDrawLabel(
+  state: PrizeCardState,
+  drawing: boolean,
+  remaining: bigint | null,
+): boolean {
+  return state === "launch" || (state === "live" && !isDrawing(drawing, remaining));
 }

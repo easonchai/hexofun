@@ -15,7 +15,7 @@ datasource db {
 model Pool {
   address             String  @id
   poolId              BigInt
-  /// Squads multisig on mainnet: set_params, unpause, admin_withdraw, set_operator.
+  /// Squads multisig on mainnet: set_params, unpause, set_operator.
   admin               String
   /// The hot crank key the backend signs with.
   operator            String
@@ -24,8 +24,6 @@ model Pool {
   mint                String
   epochSeconds        BigInt
   epochAnchor         BigInt
-  roundSeconds        BigInt
-  closeBuffer         BigInt
   minDeposit          BigInt
   paused              Boolean
   currentEpochId      BigInt
@@ -36,45 +34,63 @@ model Pool {
   pendingWithdrawals  BigInt
   /// An epoch closing under this rolls over instead of paying a token prize.
   minJackpot          BigInt
-  carryPot            BigInt
-  houseCutBps         Int
-  /// Base yield's APR on time-weighted Principal, in basis points.
+  /// The depositors' ceiling rate (APR, basis points). Since the live yield
+  /// index it caps what depositors earn; the prize takes the rest.
   baseRateBps         Int
-  /// USDC in the principal vault earmarked for Base yield, not yet credited.
-  yieldBudget         BigInt
-  /// Tickets credited per USDC spent in `buy_tickets`.
-  ticketsPerUsdc      Int
-  /// Share of totalPrincipal, in basis points, an operator grant_tickets
-  /// call may credit pool-wide per epoch.
-  bonusCapBps         Int
-  /// The epoch bonusGranted is counted against.
-  bonusEpoch          BigInt
-  /// Tickets an operator grant_tickets call has credited pool-wide so far
-  /// in bonusEpoch.
-  bonusGranted        BigInt
   /// Lets a future upgrade migrate an old account lazily (ADR 0013).
   version             Int
   /// Admin-only and irreversible: stops every inflow, the game and the
   /// draw, and lets withdrawals skip the epoch lock.
   shutdown            Boolean
-  /// Game pause: no new Round or Position (game-jackpot-pause).
+  /// Game pause: the backend game engine opens no Round (game-jackpot-pause).
   gamePaused          Boolean @default(false)
-  /// Jackpot pause: no new epoch, ticket purchase, grant or registration
-  /// close (game-jackpot-pause).
+  /// Jackpot pause: no new epoch, no ticket purchase, and an ended
+  /// epoch does not request its draw (game-jackpot-pause).
   jackpotPaused       Boolean @default(false)
+  /// Live yield (yield-claimer tickets 05 to 11). The defaults are what a
+  /// pool row written before this migration reads; the next sync upserts the
+  /// real values.
+  /// The four pinned venue accounts; the names are klend's and the meaning follows venueKind. klend: program, lending market, reserve, the pool's cToken account. kVault: the kVault program, the vault state, the vault's shares mint, the pool's shares token account.
+  klendProgram        String  @default("")
+  klendMarket         String  @default("")
+  klendReserve        String  @default("")
+  klendCtoken         String  @default("")
+  /// Which backing the four pins point at: 0 klend, 1 the localnet stub, 2 a Kamino Earn vault (kVault). A row written before the column reads as klend.
+  venueKind           Int     @default(0)
+  /// Per unit of Principal, scaled by 1e18.
+  yieldIndex          Decimal @default(0) @db.Decimal(40, 0)
+  venueValue          BigInt  @default(0)
+  /// Chain unix seconds of the last on-chain sync.
+  lastSyncAt          BigInt  @default(0)
+  yieldOwed           BigInt  @default(0)
+  feeOwed             BigInt  @default(0)
+  prizeOwed           BigInt  @default(0)
+  /// Jackpot already promised to a Drawing or Drawn epoch that has not paid. The vault holds it; the next draw snapshots the vault minus this.
+  jackpotReserved     BigInt  @default(0)
+  deficit             BigInt  @default(0)
+  yieldFeeBps         Int     @default(0)
+  idleFloorBps        Int     @default(0)
+  idleTargetBps       Int     @default(0)
+  reserveShareCapBps  Int     @default(0)
+  reserveLiquidityFloorBps Int @default(0)
+  minVenueMove        BigInt  @default(0)
+  lossToleranceBps    Int     @default(0)
+  deployPaused        Boolean @default(false)
+  impaired            Boolean @default(false)
+  buyTicketsPaused    Boolean @default(false)
   updatedSlot         BigInt
 
   // Back-relations for the pool-scoped tables (ADR 0016). A Pool row is
   // never deleted, so every child relation is onDelete: Restrict.
   epochs              Epoch[]
-  rounds              Round[]
   players             Player[]
-  positions           Position[]
   events              Event[]
   cursor              Cursor?
   operatorState       OperatorState?
   referralGrants      ReferralGrant[]
   referralGrantShares ReferralGrantShare[]
+  yieldIndexPoints    YieldIndexPoint[]
+  venueProposal       VenueProposal?
 }
 
 // Pool-scoped tables carry poolAddress, the Pool PDA, as part of their key so
@@ -88,36 +104,22 @@ model Epoch {
   startsAt          BigInt
   endsAt            BigInt
   status            Int
-  registeredWeight  Decimal  @db.Decimal(40, 0)
-  registeredCount   Int
   jackpotAmount     BigInt
   target            Decimal  @db.Decimal(40, 0)
   winner            String?
+  /// The Epoch snapshot's Merkle sum tree, taken by the Ticket ledger at the
+  /// next `EpochBegan` (off-chain-tickets 11). Null until then. `snapshotRoot`
+  /// is hex and stays null for an empty snapshot (leafCount 0, totalTickets 0).
+  snapshotRoot      String?
+  snapshotDepth     Int?
+  leafCount         Int?
+  totalTickets      BigInt?
+  /// The `request_draw` nonce the Operator chose, 32 bytes as hex. Written
+  /// before the request is sent and reused on a retry; served on
+  /// `/epochs/:id/draw` only once the request has landed.
+  nonce             String?
 
   // Epoch ids restart at 1 on every pool (ADR 0016).
-  @@id([poolAddress, id])
-}
-
-model Round {
-  poolAddress String
-  pool        Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
-  id          BigInt
-  epochId     BigInt
-  startsAt    BigInt
-  endsAt      BigInt
-  status      Int
-  pot         BigInt
-  houseCut    BigInt
-  winningTile Int?
-  tileTotals  Json
-  /// `close_round` reclaimed this Round's rent and closed the account.
-  /// `roundRow` never carries this field, so mirroring the still-open
-  /// account never resets it back to false once the RoundClosed event has
-  /// set it; the row keeps its last mirrored state instead of being
-  /// deleted or blanked (ops-and-envs ticket 08).
-  closed      Boolean @default(false)
-
-  // Round ids restart at 1 on every pool (ADR 0016).
   @@id([poolAddress, id])
 }
 
@@ -126,56 +128,36 @@ model Player {
   pool         Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
   owner        String
   principal    BigInt
-  entries      BigInt
-  weightAcc    Decimal @db.Decimal(40, 0)
-  lastUpdate   BigInt
   epochId      BigInt
-  frozenWeight Decimal @db.Decimal(40, 0)
-  frozenEpoch  BigInt
-  regEpoch     BigInt
-  regStart     Decimal @db.Decimal(40, 0)
-  regEnd       Decimal @db.Decimal(40, 0)
   isHouse      Boolean
   /// Requested but not yet paid; `process_withdraw` pays it and zeroes it.
   pendingWithdraw BigInt
   /// The epoch the request was made in. It pays once the pool has moved past it.
   pendingEpoch    BigInt
-  /// Σ principal × seconds within epochId. Mirrors weightAcc with Principal
-  /// in place of Entries.
-  principalAcc       Decimal @db.Decimal(40, 0)
-  /// Final principal-seconds for frozenEpoch, set alongside frozenWeight.
-  frozenPrincipalAcc Decimal @db.Decimal(40, 0)
-  /// The epoch Base yield was last credited for.
-  yieldEpoch         BigInt
+  /// Chain unix seconds the pending withdrawal was last requested at. The
+  /// request also matures one epoch length after this.
+  requestedAt     BigInt @default(0)
+  /// The pool's yield index at this Player's last settle, scaled by 1e18.
+  /// Unsettled yield is principal x (pool.yieldIndex - this) / 1e18.
+  yieldIndex         Decimal @default(0) @db.Decimal(40, 0)
+  /// The part of principal deposited in pendingDepositEpoch, which earns no
+  /// Ticket until the next epoch. Already inside principal.
+  pendingDeposit      BigInt @default(0)
+  pendingDepositEpoch BigInt @default(0)
   /// The epoch boughtAmount is counted against.
   boughtEpoch        BigInt
   /// USDC spent in buy_tickets so far in boughtEpoch, capped at principal.
   boughtAmount       BigInt
-  /// The epoch bonusGranted is counted against.
-  bonusEpoch         BigInt
-  /// Tickets an operator grant_tickets call has credited this Player so far
-  /// in bonusEpoch.
-  bonusGranted       BigInt
+  /// The chain slot the mirror row was read at: the log path's notification
+  /// slot or the sweep's snapshot slot. 0 for a row written before this
+  /// column. `bindReferral` copies it to Referral.seedSlot.
+  slot               BigInt @default(0)
 
   // On chain a Player is one wallet's account in one pool (ADR 0016). The
   // owner index serves the two cross-pool "has this wallet ever deposited"
   // checks: the beta gate and the referral apply.
   @@id([poolAddress, owner])
   @@index([owner])
-}
-
-model Position {
-  // The PDA is unique across pools, so it stays the key; poolAddress scopes
-  // reads to the Active pool (ADR 0016).
-  address      String  @id
-  poolAddress  String
-  pool         Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
-  owner        String
-  roundId      BigInt
-  tiles        BigInt
-  stakePerTile BigInt
-
-  @@index([poolAddress, roundId])
 }
 
 // Finalized program events, decoded from `Program data:` logs. The key is
@@ -189,9 +171,34 @@ model Event {
   name        String
   data        Json
   blockTime   BigInt?
+  /// True once the Ticket ledger has applied this event. Only the finalized
+  /// catch-up path applies events, in chain order (off-chain-tickets 11).
+  ledgered    Boolean @default(false)
 
-  @@id([slot, signature, index])
+  // Not keyed on slot: the live path stamps the slot its notification came
+  // in, which a fork (and any RPC that notifies late) reports past the
+  // transaction's own, so a slot in the key stored one event twice.
+  @@id([signature, index])
   @@index([poolAddress, slot])
+  // Also in the database, not expressible here: expression indexes on
+  // (data->>'owner') and (data->>'winner'), migration 20261010200000.
+}
+
+// The pool's open venue proposal (venue-switch ticket 03), one row per pool
+// while the on-chain account exists. `propose_venue` upserts it, `cancel_venue`
+// (and the migration, ticket 05) delete it. The unlock time is proposedAt plus
+// the program's 48 hour lock, which is not stored.
+model VenueProposal {
+  poolAddress  String @id
+  pool         Pool   @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
+  venueKind    Int
+  klendProgram String
+  klendMarket  String
+  klendReserve String
+  klendCtoken  String
+  /// Chain unix seconds of the latest proposal.
+  proposedAt   BigInt
+  updatedSlot  BigInt
 }
 
 // One row per pool: the indexer's signature-catch-up cursor. A new pool has
@@ -205,6 +212,100 @@ model Cursor {
   lastSignature String?
   lastSlot      BigInt?
   updatedAt     BigInt?
+  /// The epoch the Ticket ledger has reached: the newest `EpochBegan` it applied.
+  ledgerEpochId BigInt  @default(0)
+}
+
+// The pool's Yield index over time (yield-claimer ticket 14), one row per pool
+// per minute at most, so a trailing paid rate can be worked out from two rows.
+// `at` is the on-chain sync time the index was stamped with. The program
+// stores no rate.
+model YieldIndexPoint {
+  poolAddress String
+  pool        Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
+  at          BigInt
+  yieldIndex  Decimal @db.Decimal(40, 0)
+
+  @@id([poolAddress, at])
+}
+
+// The Ticket ledger (off-chain-tickets 11, ADR 0025). Append-only: no row is
+// ever updated or deleted. No Pool relation, so the Pool model stays as it is.
+enum TicketReason {
+  reset
+  stake
+  reward
+  refund
+  house_credit
+  prize
+  withdraw
+  buy
+  grant_referral
+  grant_admin
+}
+
+model TicketLedger {
+  id          BigInt       @id @default(autoincrement())
+  poolAddress String
+  owner       String
+  epochId     BigInt
+  delta       BigInt
+  reason      TicketReason
+  /// The event key (`signature:index`), Round id or grant id that caused it.
+  ref         String
+  /// The wallet that signed the request; null for chain-driven rows.
+  signer      String?
+  /// Unique, so a signed grant resent inside its window is refused as a replay.
+  signature   String?      @unique
+  createdAt   DateTime     @default(now())
+
+  @@index([poolAddress, owner])
+}
+
+// One row per wallet, in step with the ledger: `tickets` is the sum of the
+// wallet's ledger deltas. `principal` and `yieldIndex` are the post-state fields
+// of the newest chain event for the wallet.
+model TicketBalance {
+  poolAddress String
+  owner       String
+  tickets     BigInt   @default(0)
+  principal   BigInt   @default(0)
+  yieldIndex  Decimal  @default(0) @db.Decimal(40, 0)
+  epochId     BigInt
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@id([poolAddress, owner])
+}
+
+// Every wallet above zero Tickets at an epoch's cutoff, sorted by wallet
+// bytes. `index` is the leaf's position in the sum tree.
+model EpochSnapshot {
+  poolAddress String
+  epochId     BigInt
+  index       Int
+  owner       String
+  tickets     BigInt
+
+  @@id([poolAddress, epochId, index])
+}
+
+// The newest ledger consistency check, one row per pool.
+model LedgerCheck {
+  poolAddress String @id
+  checkedAt   BigInt
+  mismatches  Int
+}
+
+// A pool transaction whose log Solana cut off (audit-2026-10-09 06). Its events
+// were not read, so the Ticket side is the operator's to reconcile; `/alerts`
+// raises EVENT_LOG_TRUNCATED for a while after `createdAt`.
+model TruncatedLog {
+  poolAddress String
+  signature   String
+  slot        BigInt
+  createdAt   DateTime @default(now())
+
+  @@id([poolAddress, signature])
 }
 
 model FaucetClaim {
@@ -261,18 +362,21 @@ model Referral {
   /// indexer applied here. Not the live Player.principal: see referral.ts's
   /// ReferralQualificationState for why this is tracked independently.
   principal  BigInt  @default(0)
+  /// The Player mirror's slot when `principal` was seeded at bind. The indexer
+  /// skips this referee's events at or before it, since the seed already
+  /// holds them. 0 means no seed to protect.
+  seedSlot   BigInt  @default(0)
 
   @@index([referrer])
 }
 
 // One referrer's computed daily bonus for one epoch (docs/plan/hexo-referrals
-// ticket 08), written before the operator sends grant_tickets. No @id: the
-// unique index is the natural key, and createMany({ skipDuplicates: true })
-// uses it to make writing a referrer's row for an epoch idempotent across
-// restarts. txSig fills in once the batch it was sent in confirms; a null
-// txSig on a row this epoch is a grant still owed. Keyed by pool as well:
-// epoch ids restart on every pool, and skipDuplicates would otherwise drop the
-// new pool's grants silently (ADR 0016).
+// ticket 08). Since off-chain-tickets 22 the operator's job writes it in the
+// same transaction as the referrer's `grant_referral` ledger row, so there is
+// no send to wait for and `txSig` stays null. No @id: the unique index is the
+// natural key and stops a second grant for the epoch. Keyed by pool as well:
+// epoch ids restart on every pool (ADR 0016). The last three columns are the
+// inputs `GET /epochs/:id/referral-grants` publishes.
 model ReferralGrant {
   poolAddress    String
   pool           Pool    @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
@@ -285,23 +389,28 @@ model ReferralGrant {
   uncapped       BigInt
   qualifiedCount Int
   rateBps        Int
+  /// The band's tier number under the Game config row in force at grant time,
+  /// so the grants route never re-derives it from today's tiers.
+  tier           Int     @default(0)
   txSig          String?
+  /// The Referrer's own locked Principal when the grant was computed (the per-Referrer cap).
+  referrerPrincipal BigInt @default(0)
+  /// `total_principal` when computed, and the Game config's `bonusCapBps` in
+  /// force then; the pool-wide cap is their product over 10,000.
+  totalPrincipal BigInt  @default(0)
+  bonusCapBps    Int     @default(0)
 
   @@unique([poolAddress, epochId, referrer])
 }
 
 // One referee's share of one referrer's ReferralGrant, epoch-scoped
 // (referral-page ticket 05). Written by the same referral job, in the same
-// transaction as the ReferralGrant row and with the same idempotency
-// (createMany({ skipDuplicates: true }) against the unique index below, only
-// for a referrer whose ReferralGrant row is new this tick). Split
-// proportional to each qualified referee's own basis (min(Principal,
-// REFERRAL_BONUS_BASIS_CAP)) at grant time, floored, with the leftover
-// atomic units handed out by largest remainder (referral-bonus.ts's
-// `splitShares`), so shares always sum exactly to the grant's `amount`. The
-// indexer's re-clamp loop rescales these the same way, off each row's own
-// existing amount as its weight, whenever a grant's `amount` shrinks after
-// Principal moves. Keyed by pool like ReferralGrant (ADR 0016).
+// transaction as the ReferralGrant row, so a Referrer has shares only if it
+// has a grant. Split proportional to each qualified referee's own basis
+// (min(Principal, REFERRAL_BONUS_BASIS_CAP)) at grant time, floored, with the
+// leftover atomic units handed out by largest remainder (referral-bonus.ts's
+// `splitShares`), so shares always sum exactly to the grant's `amount`. Keyed
+// by pool like ReferralGrant (ADR 0016).
 model ReferralGrantShare {
   poolAddress String
   pool        Pool   @relation(fields: [poolAddress], references: [address], onDelete: Restrict)
@@ -309,6 +418,8 @@ model ReferralGrantShare {
   referrer    String
   referee     String
   amount      BigInt
+  /// The referee's locked Principal when the grant was computed.
+  principal   BigInt @default(0)
 
   @@unique([poolAddress, epochId, referrer, referee])
 }
@@ -326,8 +437,6 @@ model OperatorState {
   nextWakeAt       BigInt?
   lastAction       String?
   lastError        String?
-  registeredCount  Int?
-  registeredTotal  Int?
   /** How much the principal vault was short of the withdrawals due on the
    *  last tick that tried to pay them. 0 when the last try covered them all,
    *  null before any tick has looked. */
@@ -336,17 +445,13 @@ model OperatorState {
    *  after too many consecutive failures. 0 when none have been, null before
    *  any tick has looked. */
   withdrawSkippedCount Int?
-  /** Ticket 07: true on a tick that withheld `close_registration` for a
-   *  stale Indexer cursor; false once a later tick closes normally. Null
-   *  before any tick has ever checked. */
-  registrationIndexerStale Boolean?
   /** Ticket 09: wall-clock unix seconds of the last tick that completed
    *  without an error, so OPERATOR_FAILING can tell "ticks are failing"
    *  from "ticks have stopped" (OPERATOR_STALE covers the latter). Null
    *  before the first successful tick. */
   lastSuccessAt    BigInt?
   /** Ticket 09: true on a tick whose previous epoch missed its expected
-   *  deadline (epoch length + registration window + VRF timeout + slack) to
+   *  deadline (epoch end + VRF timeout + slack) to
    *  reach a terminal status; false once one does. Null before any tick has
    *  ever looked. */
   epochNoProgress  Boolean?
@@ -354,6 +459,10 @@ model OperatorState {
    *  a few minutes ago and still has not been paid; false once it is. Null
    *  before any tick has ever looked. */
   drawnUnpaid      Boolean?
+  /** Off-chain-tickets 12: true while the previous epoch's winner proof was
+   *  refused (or could not be built from the snapshot rows) and the operator
+   *  has stopped retrying it. Null before any tick has ever looked. */
+  snapshotMismatch Boolean?
 }
 
 // beta-launch-fixes ticket 16: decoded send failures and error-boundary
@@ -369,4 +478,115 @@ model ErrorReport {
   wallet    String?
   page      String?
   createdAt DateTime @default(now())
+}
+
+// off-chain-tickets ticket 14: the game's parameters, append-only per pool.
+// The newest row (highest id) is in force. A row with a null signer is the
+// seed written on first run; every later row carries the team wallet's
+// signed message. `signature` is unique so a signed change cannot be replayed
+// after a newer one has landed.
+model GameConfig {
+  id             Int      @id @default(autoincrement())
+  poolAddress    String
+  roundSeconds   Int
+  houseCutBps    Int
+  ticketsPerUsdc Int
+  bonusCapBps    Int
+  /// [{ tier, min, max, rateBps }], highest tier first.
+  referralTiers  Json
+  maxTilesPerBet Int
+  /// Per-grant cap in Tickets on `grant_admin` (audit-2026-10-09 08).
+  maxAdminGrant  Int      @default(10000)
+  signer         String?
+  signature      String?  @unique
+  message        String?
+  createdAt      DateTime @default(now())
+
+  @@index([poolAddress, id])
+}
+
+// off-chain-tickets ticket 15: a wallet's signed delegation of a
+// browser-held session key. One row per delegation; `sessionPubkey` is unique
+// because the web mints a fresh key for every delegation. `message` and
+// `signature` are the wallet's SIWS-shaped text and ed25519 signature, kept
+// verbatim for the published Round record. No relation to Pool, so a Pool
+// cutover leaves the table alone. `nextSeq` is the next bet's seq (ticket 16).
+model Session {
+  id            String    @id @default(uuid())
+  poolAddress   String
+  wallet        String
+  sessionPubkey String    @unique
+  message       String
+  signature     String
+  issuedAt      DateTime
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  nextSeq       Int       @default(0)
+
+  @@index([wallet])
+}
+
+// Single-use nonces for the delegation message. Consumed by deleting the row.
+model SessionNonce {
+  nonce     String   @id
+  expiresAt DateTime
+}
+
+// off-chain-tickets ticket 16: a Round of the off-chain game. No row exists
+// until a bet is accepted. `seedSecret` is the unrevealed seed and is never
+// served; `seed` stays null until reveal (ticket 17), when it takes the same
+// value. `tileTotals` is 36 decimal strings, the Tickets staked on each tile.
+// No relation to Pool, so a Pool cutover leaves the table alone.
+enum RoundStatus {
+  open
+  closed
+  revealed
+  settled
+  voided
+}
+
+model Round {
+  poolAddress    String
+  /// Per pool, from 1, in the order Rounds opened.
+  id             BigInt
+  epochId        BigInt
+  openAt         DateTime
+  closeAt        DateTime
+  status         RoundStatus @default(open)
+  seedCommitment String
+  seedSecret     String
+  seed           String?
+  drandRound     BigInt?
+  drandSignature String?
+  ctr            Int?
+  tile           Int?
+  pot            BigInt      @default(0)
+  houseCut       BigInt?
+  tileTotals     Json
+  /// sha256 of the accepted bets' raw signatures in order, hex; set at close.
+  betListHash    String?
+  configId       Int
+
+  @@id([poolAddress, id])
+  @@index([poolAddress, status])
+}
+
+// One accepted bet. `id` is the accepted order. `tiles` is a 36-bit mask, bit
+// n set for tile n. One Position per wallet per Round is a rule of the engine,
+// not of the table. `signature` is the session key's, base58.
+model Position {
+  id           BigInt   @id @default(autoincrement())
+  poolAddress  String
+  roundId      BigInt
+  owner        String
+  sessionId    String
+  seq          Int
+  tiles        BigInt
+  stakePerTile BigInt
+  message      String
+  signature    String
+  receivedAt   DateTime
+
+  @@index([poolAddress, roundId, id])
+  @@index([poolAddress, roundId, owner])
 }

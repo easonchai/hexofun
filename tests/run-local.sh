@@ -2,14 +2,15 @@
 set -eu
 
 # Program integration tests against an isolated solana-test-validator with the
-# freshly built program deployed as upgradeable.
+# freshly built program deployed as upgradeable (built with test-vrf and
+# test-venue).
 #
 # Set HEXVAULT_RPC_PORT to run several validators side by side (parallel
 # agents, or a second suite while one is already running). Every port the
 # validator binds is derived from it, so two runs never collide.
 #
 # Usage:  tests/run-local.sh [vitest args...]
-#         HEXVAULT_RPC_PORT=8999 tests/run-local.sh tests/02-rounds.test.ts
+#         HEXVAULT_RPC_PORT=8999 tests/run-local.sh tests/03-epochs.test.ts
 
 port="${HEXVAULT_RPC_PORT:-8899}"
 ledger="${TMPDIR:-/tmp}/hexvault-validator-$port-$$"
@@ -52,8 +53,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # `test-vrf` compiles in `test_fulfill`, which fabricates a fulfilled ORAO
-# randomness account. The round and epoch suites cannot settle without it, and
-# the devnet build is a separate explicit `anchor build` with no feature flag.
+# randomness account. The round and epoch suites cannot settle without it.
+# `test-venue` compiles in the stub venue (a rate-driven reserve and USDC vault
+# plus `test_venue_init`, `test_set_venue_rate` and `test_sync`), which every
+# suite's pool fixture needs. The devnet build is a separate explicit
+# `anchor build` with no feature flag.
 #
 # HEXVAULT_SKIP_BUILD=1 reuses whatever is already in target/deploy. Several
 # runs in parallel would otherwise each fight for the same cargo target lock
@@ -63,7 +67,7 @@ if [ "${HEXVAULT_SKIP_BUILD:-}" != "1" ]; then
   if [ -d target/idl ]; then mv target/idl "$target_backup/idl"; fi
   if [ -d target/types ]; then mv target/types "$target_backup/types"; fi
   if [ -f target/deploy/hex_vault.so ]; then mv target/deploy/hex_vault.so "$target_backup/hex_vault.so"; fi
-  anchor build -- --features test-vrf
+  anchor build -- --features test-vrf,test-venue
 fi
 
 solana-test-validator \

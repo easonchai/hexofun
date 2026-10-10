@@ -1,7 +1,7 @@
 import react from "@vitejs/plugin-react";
 import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { defineConfig, loadEnv, type Plugin } from "vite";
+import { defineConfig, loadEnv, type Connect, type Plugin } from "vite";
 
 import { clusterFrom } from "./src/cluster.js";
 import { validateProdEnv } from "./src/env.js";
@@ -22,6 +22,27 @@ const validateCluster: Plugin = {
     clusterFrom(env);
     if (mode === "production") validateProdEnv(env);
   },
+};
+
+/**
+ * Serves the Ops console's second entry (`ops.html`) at `/ops` on the dev and
+ * preview servers, the same mapping vercel.json makes in production.
+ */
+const opsRoute: Plugin = {
+  name: "hexvault:ops-route",
+  configureServer(server) {
+    server.middlewares.use(rewriteOps);
+  },
+  configurePreviewServer(server) {
+    server.middlewares.use(rewriteOps);
+  },
+};
+
+const rewriteOps: Connect.NextHandleFunction = (req, _res, next) => {
+  if (req.url && /^\/ops(\?|$)/.test(req.url)) {
+    req.url = req.url.replace(/^\/ops/, "/ops.html");
+  }
+  next();
 };
 
 /**
@@ -51,7 +72,7 @@ function bufferPackagePath(): string {
 }
 
 export default defineConfig({
-  plugins: [validateCluster, react()],
+  plugins: [validateCluster, opsRoute, react()],
   resolve: {
     alias: {
       buffer: bufferPackagePath(),
@@ -63,5 +84,12 @@ export default defineConfig({
   // Bigint money math and u64 LE encoding need ES2020+.
   build: {
     target: "es2022",
+    // Two pages: the player app and the Ops console, each with its own bundle.
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL("./index.html", import.meta.url)),
+        ops: fileURLToPath(new URL("./ops.html", import.meta.url)),
+      },
+    },
   },
 });

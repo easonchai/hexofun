@@ -1,8 +1,10 @@
 /**
  * ABOUT tab smoke: the page mounts from its hash, the self-playing board
- * renders its 36 tiles, and the FAQ opens natively. No wallet, no backend.
+ * renders its 36 tiles, and the FAQ opens natively. Burner wallet, mocked backend (./admitted).
  */
-import { expect, test } from "playwright/test";
+import { expect } from "playwright/test";
+
+import { test } from "./admitted";
 
 test.use({ viewport: { width: 1280, height: 900 } });
 

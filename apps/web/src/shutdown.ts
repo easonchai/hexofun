@@ -1,8 +1,8 @@
 /**
  * Ticket 11 (ops-and-envs): `Pool.shutdown` is irreversible (spec.md). Once
  * true the program refuses `deposit`, `buy_tickets`, `grant_tickets`,
- * `create_round`, `buy_position`, `begin_epoch`, `close_registration`,
- * `draw` and `fund_yield`, and `process_withdraw` skips the epoch lock so a
+ * `create_round`, `buy_position`, `begin_epoch`
+ * and `draw`, and `process_withdraw` skips the epoch lock so a
  * request and its payout can land in one transaction (custody.rs). This file
  * is the one place that decides what a shut-down pool looks like in the UI,
  * so the banner, the vault and the buy-tickets widget all read the same text

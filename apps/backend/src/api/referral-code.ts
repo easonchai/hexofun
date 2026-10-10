@@ -48,7 +48,9 @@ export async function ensureReferralCode(tx: Prisma.TransactionClient, owner: st
  * from the Active pool's Player right away: a referee already holding 50 USDC
  * starts its 7-day clock now instead of on its next chain event, and a later
  * WithdrawRequested delta applies against the real Principal. No Player, or a
- * Player only in a retired pool (ADR 0016), seeds as 0. Throws Prisma's
+ * Player only in a retired pool (ADR 0016), seeds as 0. The row keeps the
+ * mirror's slot as `seedSlot`: the indexer skips the referee's events at or
+ * before it, because the seed already holds them. Throws Prisma's
  * P2002 when a Referral already exists; callers turn that into a refusal.
  */
 export async function bindReferral(
@@ -60,7 +62,7 @@ export async function bindReferral(
 ): Promise<void> {
   const player = await tx.player.findUnique({
     where: { poolAddress_owner: { poolAddress, owner: referee } },
-    select: { principal: true },
+    select: { principal: true, slot: true },
   });
   const now = nowSeconds();
   const seeded = applyReferralEvent(
@@ -69,6 +71,6 @@ export async function bindReferral(
     now,
   );
   await tx.referral.create({
-    data: { referee, referrer, code, boundAt: now, ...seeded },
+    data: { referee, referrer, code, boundAt: now, ...seeded, seedSlot: player?.slot ?? 0n },
   });
 }

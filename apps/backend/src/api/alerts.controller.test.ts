@@ -4,11 +4,18 @@ import {
   evaluateAlerts,
   NEAR_CLOSE_SECONDS,
   OPERATOR_FAILING_SECONDS,
+  SNAPSHOT_LEAF_CAP,
+  SOLVENCY_DUST,
   type AlertInputs,
   type AlertThresholds,
 } from "./alerts.controller";
 
-const THRESHOLDS: AlertThresholds = { tickStaleSeconds: 300, indexerStaleSeconds: 600 };
+const THRESHOLDS: AlertThresholds = {
+  tickStaleSeconds: 300,
+  indexerStaleSeconds: 600,
+  idleLowSeconds: 3600,
+  reserveFreeMin: 1_000_000n,
+};
 
 /** Every condition off: what a healthy pool reports. */
 const HEALTHY: AlertInputs = {
@@ -19,21 +26,38 @@ const HEALTHY: AlertInputs = {
   rpcFallbackAgeMs: null,
   indexerAgeSeconds: 5,
   withdrawShortfall: 0n,
-  roundVoidedRecently: false,
   epochRolledOverRecently: false,
   withdrawSkippedCount: 0,
-  registrationIndexerStale: false,
   operatorFailingSeconds: null,
   epochNoProgress: false,
   drawnUnpaid: false,
-  yieldBudgetLow: false,
+  snapshotMismatch: false,
   sparringSolLow: false,
   secondsToEpochClose: 7 * 24 * 60 * 60,
   jackpotAmount: 5_000_000n,
   minJackpot: 1_000_000n,
-  principalOut: 0n,
   pendingWithdrawals: 0n,
   vaultLiquidity: 10_000_000n,
+  solvencyMargin: 0n,
+  freeIdleLowSeconds: null,
+  reserveFreeLiquidity: 5_000_000n,
+  impaired: false,
+  deployPaused: false,
+  venueProposal: null,
+  paramsChanged: null,
+  ticketLedgerMismatches: 0,
+  ticketHolders: 12,
+  truncatedLogSignatures: [],
+  roundSettleFailed: [],
+};
+
+const PROPOSAL = {
+  venueKind: 0,
+  klendProgram: "KLendProgram111",
+  klendMarket: "Market111",
+  klendReserve: "Reserve111",
+  klendCtoken: "Ctoken111",
+  unlocksAt: 1_800_172_800n,
 };
 
 describe("evaluateAlerts", () => {
@@ -100,20 +124,8 @@ describe("evaluateAlerts", () => {
     expect(evaluateAlerts({ ...HEALTHY, withdrawShortfall: 0n }, THRESHOLDS)).toEqual([]);
   });
 
-  it("ROUND_VOIDED_RECENTLY and EPOCH_ROLLED_OVER_RECENTLY fire independently", () => {
-    expect(evaluateAlerts({ ...HEALTHY, roundVoidedRecently: true }, THRESHOLDS)).toEqual([
-      { code: "ROUND_VOIDED_RECENTLY", message: expect.any(String) },
-    ]);
+  it("EPOCH_ROLLED_OVER_RECENTLY fires when an epoch rolled over", () => {
     expect(evaluateAlerts({ ...HEALTHY, epochRolledOverRecently: true }, THRESHOLDS)).toEqual([
-      { code: "EPOCH_ROLLED_OVER_RECENTLY", message: expect.any(String) },
-    ]);
-    expect(
-      evaluateAlerts(
-        { ...HEALTHY, roundVoidedRecently: true, epochRolledOverRecently: true },
-        THRESHOLDS,
-      ),
-    ).toEqual([
-      { code: "ROUND_VOIDED_RECENTLY", message: expect.any(String) },
       { code: "EPOCH_ROLLED_OVER_RECENTLY", message: expect.any(String) },
     ]);
   });
@@ -123,12 +135,6 @@ describe("evaluateAlerts", () => {
       { code: "WITHDRAW_OWNERS_SKIPPED", message: expect.stringContaining("2") },
     ]);
     expect(evaluateAlerts({ ...HEALTHY, withdrawSkippedCount: 0 }, THRESHOLDS)).toEqual([]);
-  });
-
-  it("REGISTRATION_INDEXER_STALE fires while close_registration is withheld", () => {
-    expect(evaluateAlerts({ ...HEALTHY, registrationIndexerStale: true }, THRESHOLDS)).toEqual([
-      { code: "REGISTRATION_INDEXER_STALE", message: expect.any(String) },
-    ]);
   });
 
   it("OPERATOR_SOL_READ_FAILED fires on a failed read rather than reading as healthy", () => {
@@ -170,12 +176,6 @@ describe("evaluateAlerts", () => {
     ]);
   });
 
-  it("YIELD_BUDGET_LOW mirrors /status's own yieldBudgetLow figure", () => {
-    expect(evaluateAlerts({ ...HEALTHY, yieldBudgetLow: true }, THRESHOLDS)).toEqual([
-      { code: "YIELD_BUDGET_LOW", message: expect.any(String) },
-    ]);
-  });
-
   it("SPARRING_SOL_LOW fires only on a true reading, not an unknown or disabled one", () => {
     expect(evaluateAlerts({ ...HEALTHY, sparringSolLow: true }, THRESHOLDS)).toEqual([
       { code: "SPARRING_SOL_LOW", message: expect.any(String) },
@@ -205,20 +205,40 @@ describe("evaluateAlerts", () => {
     ).toEqual([]);
   });
 
-  it("PRINCIPAL_OUT_NEAR_CLOSE fires only inside the last hour before close", () => {
-    expect(
-      evaluateAlerts(
-        { ...HEALTHY, secondsToEpochClose: NEAR_CLOSE_SECONDS, principalOut: 1n },
-        THRESHOLDS,
-      ),
-    ).toEqual([{ code: "PRINCIPAL_OUT_NEAR_CLOSE", message: expect.any(String) }]);
-    expect(evaluateAlerts({ ...HEALTHY, principalOut: 1n }, THRESHOLDS)).toEqual([]);
-    expect(
-      evaluateAlerts(
-        { ...HEALTHY, secondsToEpochClose: NEAR_CLOSE_SECONDS, principalOut: null },
-        THRESHOLDS,
-      ),
-    ).toEqual([]);
+  // Yield-claimer ticket 14: the live-yield conditions.
+  it("SOLVENCY_NEGATIVE fires on a negative margin past rounding dust, not on an unknown one", () => {
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: -SOLVENCY_DUST - 1n }, THRESHOLDS)).toEqual([
+      { code: "SOLVENCY_NEGATIVE", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: -SOLVENCY_DUST }, THRESHOLDS)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: 5n }, THRESHOLDS)).toEqual([]);
+    // A failed vault read is not evidence of insolvency.
+    expect(evaluateAlerts({ ...HEALTHY, solvencyMargin: null }, THRESHOLDS)).toEqual([]);
+  });
+
+  it("FREE_IDLE_LOW fires only once free idle has been under the floor longer than the window", () => {
+    expect(evaluateAlerts({ ...HEALTHY, freeIdleLowSeconds: 3601 }, THRESHOLDS)).toEqual([
+      { code: "FREE_IDLE_LOW", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, freeIdleLowSeconds: 3600 }, THRESHOLDS)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, freeIdleLowSeconds: null }, THRESHOLDS)).toEqual([]);
+  });
+
+  it("RESERVE_LIQUIDITY_LOW fires under the set amount, not on an unreadable reserve", () => {
+    expect(evaluateAlerts({ ...HEALTHY, reserveFreeLiquidity: 999_999n }, THRESHOLDS)).toEqual([
+      { code: "RESERVE_LIQUIDITY_LOW", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, reserveFreeLiquidity: 1_000_000n }, THRESHOLDS)).toEqual([]);
+    expect(evaluateAlerts({ ...HEALTHY, reserveFreeLiquidity: null }, THRESHOLDS)).toEqual([]);
+  });
+
+  it("POOL_IMPAIRED and DEPLOY_PAUSED fire while their switch is set", () => {
+    expect(evaluateAlerts({ ...HEALTHY, impaired: true }, THRESHOLDS)).toEqual([
+      { code: "POOL_IMPAIRED", message: expect.any(String) },
+    ]);
+    expect(evaluateAlerts({ ...HEALTHY, deployPaused: true }, THRESHOLDS)).toEqual([
+      { code: "DEPLOY_PAUSED", message: expect.any(String) },
+    ]);
   });
 
   it("WITHDRAW_FORECAST_SHORT fires when the total owed outruns vault liquidity", () => {
@@ -243,6 +263,56 @@ describe("evaluateAlerts", () => {
     ).toEqual([]);
   });
 
+  it("VENUE_PROPOSED names the proposed accounts and the unlock time", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, venueProposal: PROPOSAL }, THRESHOLDS);
+    expect(alert?.code).toBe("VENUE_PROPOSED");
+    expect(alert?.message).toContain("KLendProgram111");
+    expect(alert?.message).toContain("Reserve111");
+    expect(alert?.message).toContain("1800172800");
+  });
+
+  it("PARAMS_CHANGED carries the new values and leaves the pool address out", () => {
+    const [alert] = evaluateAlerts(
+      { ...HEALTHY, paramsChanged: { pool: "PoolAddr", epochSeconds: "604800", baseRateBps: 488 } },
+      THRESHOLDS,
+    );
+    expect(alert?.code).toBe("PARAMS_CHANGED");
+    expect(alert?.message).toContain("epochSeconds=604800");
+    expect(alert?.message).toContain("baseRateBps=488");
+    expect(alert?.message).not.toContain("PoolAddr");
+  });
+
+  it("TICKET_LEDGER_MISMATCH fires on any wallet whose balance differs from its ledger", () => {
+    expect(evaluateAlerts(HEALTHY, THRESHOLDS)).toEqual([]);
+    const [alert] = evaluateAlerts({ ...HEALTHY, ticketLedgerMismatches: 3 }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "TICKET_LEDGER_MISMATCH" });
+    expect(alert?.message).toContain("3 wallets");
+  });
+
+  it("SNAPSHOT_NEAR_CAP fires at 90% of the leaves a snapshot can hold", () => {
+    expect(evaluateAlerts({ ...HEALTHY, ticketHolders: SNAPSHOT_LEAF_CAP * 0.9 - 1 }, THRESHOLDS)).toEqual([]);
+    const [alert] = evaluateAlerts({ ...HEALTHY, ticketHolders: SNAPSHOT_LEAF_CAP * 0.9 }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "SNAPSHOT_NEAR_CAP" });
+    expect(alert?.message).toContain(`${SNAPSHOT_LEAF_CAP}`);
+  });
+
+  it("EVENT_LOG_TRUNCATED names every recorded signature", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, truncatedLogSignatures: ["sigNew", "sigOld"] }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "EVENT_LOG_TRUNCATED" });
+    expect(alert?.message).toContain("sigNew, sigOld");
+  });
+
+  it("SNAPSHOT_MISMATCH fires while the operator holds a refused winner proof", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, snapshotMismatch: true }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "SNAPSHOT_MISMATCH" });
+  });
+
+  it("ROUND_SETTLE_FAILED names each Round the sweep could not settle", () => {
+    const [alert] = evaluateAlerts({ ...HEALTHY, roundSettleFailed: [4n, 9n] }, THRESHOLDS);
+    expect(alert).toMatchObject({ code: "ROUND_SETTLE_FAILED" });
+    expect(alert?.message).toContain("Round 4, 9");
+  });
+
   it("stacks every active condition at once", () => {
     const codes = evaluateAlerts(
       {
@@ -253,21 +323,29 @@ describe("evaluateAlerts", () => {
         rpcFallbackAgeMs: 0,
         indexerAgeSeconds: 601,
         withdrawShortfall: 1n,
-        roundVoidedRecently: true,
         epochRolledOverRecently: true,
         withdrawSkippedCount: 1,
-        registrationIndexerStale: true,
         operatorFailingSeconds: null,
         epochNoProgress: true,
         drawnUnpaid: true,
-        yieldBudgetLow: true,
+        snapshotMismatch: true,
         sparringSolLow: true,
         secondsToEpochClose: NEAR_CLOSE_SECONDS,
         jackpotAmount: 0n,
         minJackpot: 1_000_000n,
-        principalOut: 1n,
         pendingWithdrawals: 2n,
         vaultLiquidity: 1n,
+        solvencyMargin: -100n,
+        freeIdleLowSeconds: 7_200,
+        reserveFreeLiquidity: 0n,
+        impaired: true,
+        deployPaused: true,
+        venueProposal: PROPOSAL,
+        paramsChanged: { pool: "P", epochSeconds: "86400" },
+        ticketLedgerMismatches: 1,
+        ticketHolders: SNAPSHOT_LEAF_CAP,
+        truncatedLogSignatures: ["sig1"],
+        roundSettleFailed: [4n],
       },
       THRESHOLDS,
     ).map((alert) => alert.code);
@@ -278,17 +356,25 @@ describe("evaluateAlerts", () => {
       "RPC_FALLBACK_ACTIVE",
       "INDEXER_STALE",
       "WITHDRAW_SHORTFALL",
-      "ROUND_VOIDED_RECENTLY",
       "EPOCH_ROLLED_OVER_RECENTLY",
       "WITHDRAW_OWNERS_SKIPPED",
-      "REGISTRATION_INDEXER_STALE",
       "EPOCH_NO_PROGRESS",
       "DRAWN_UNPAID",
-      "YIELD_BUDGET_LOW",
+      "SNAPSHOT_MISMATCH",
       "SPARRING_SOL_LOW",
       "JACKPOT_LOW_NEAR_CLOSE",
-      "PRINCIPAL_OUT_NEAR_CLOSE",
       "WITHDRAW_FORECAST_SHORT",
+      "SOLVENCY_NEGATIVE",
+      "FREE_IDLE_LOW",
+      "RESERVE_LIQUIDITY_LOW",
+      "POOL_IMPAIRED",
+      "DEPLOY_PAUSED",
+      "VENUE_PROPOSED",
+      "PARAMS_CHANGED",
+      "TICKET_LEDGER_MISMATCH",
+      "ROUND_SETTLE_FAILED",
+      "SNAPSHOT_NEAR_CAP",
+      "EVENT_LOG_TRUNCATED",
     ]);
   });
 });

@@ -91,7 +91,7 @@ const REFERRAL_FAQ: readonly FaqItem[] = [
   },
   {
     q: "Why doesn't the referral bonus dilute the draw unfairly?",
-    a: "Referral bonus tickets are funded from the overall ticket pool dynamics rather than directly drawn from other participants' shares.\n\nThe overall pot grows alongside the entries, meaning larger prizes for everyone rather than a thinner slice.",
+    a: "Referral bonus tickets are funded from the overall ticket pool dynamics rather than directly drawn from other participants' shares.\n\nThe overall pot grows alongside the tickets, meaning larger prizes for everyone rather than a thinner slice.",
   },
 ] as const;
 

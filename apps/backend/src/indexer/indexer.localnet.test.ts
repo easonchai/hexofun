@@ -30,29 +30,29 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   SystemProgram,
+  type TransactionInstruction,
 } from "@solana/web3.js";
+import type { Prisma } from "@prisma/client";
 import bs58 from "bs58";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ChainService } from "../chain/chain.service";
 import { loadIdl } from "../chain/idl";
+import { deployWallet } from "../chain/deploy-wallet.fixture";
+import { programDataAddress } from "../chain/pda";
+import { DEFAULT_GAME_CONFIG } from "../api/game-config";
+import { decodeEpoch } from "../operator/chain-state";
 import type { HexVaultEnv } from "../config/env";
-import { randomNonce, vrfSeed } from "../operator/vrf";
 import { PrismaService } from "../prisma/prisma.service";
+import { grantReferralBonuses } from "../operator/referral-grants";
 import { IndexerService } from "./indexer.service";
 
 // Pinned at pool creation and forwarded to ORAO. The `test-vrf` build never
-// reads either, so any pubkey would do on localnet; these are the real devnet
-// ones so the setup matches what the operator will send.
+// reads it, so any pubkey would do on localnet; this is the real devnet one so
+// the setup matches what the operator will send.
 const VRF_NETWORK_STATE = new PublicKey("5ER1oENnV4srxYdAynUfRzWeQCPQaqMiAp4VqyMbSqnK");
-const VRF_TREASURY = new PublicKey("9ZTHWWZDpB36UFe1vszf2KEpt83vwi27jDqtHQ7NSXyR");
-const VRF_PROGRAM = new PublicKey("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 
-const ROUND_SECONDS = 15;
 const DEPOSIT = 5_000_000n;
-const STAKE = 1_000_000n;
-/** Bit 0 of the tile mask: the position covers tile 0 and nothing else. */
-const TILE_ZERO = 1n;
 
 /**
  * `Program<Idl>` types every instruction as possibly undefined, because which
@@ -62,19 +62,17 @@ const TILE_ZERO = 1n;
 interface MethodBuilder {
   accountsPartial(accounts: Record<string, PublicKey>): MethodBuilder;
   signers(signers: Keypair[]): MethodBuilder;
+  preInstructions(instructions: TransactionInstruction[]): MethodBuilder;
   rpc(): Promise<string>;
 }
 type Instruction =
   | "createPool"
+  | "testVenueInit"
   | "setFeaturePause"
   | "beginEpoch"
   | "deposit"
-  | "createRound"
-  | "buyPosition"
-  | "requestRoundRandomness"
-  | "testFulfill"
-  | "settleRound"
-  | "settlePosition";
+  | "setBuyTicketsPause"
+  | "buyTickets";
 type Methods = { [K in Instruction]: (...args: unknown[]) => MethodBuilder };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -98,42 +96,19 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
   let prisma: PrismaService;
   let indexer: IndexerService;
 
+  /** The four pinned venue accounts `begin_epoch` syncs against. */
+  let venue: Record<"klendProgram" | "klendMarket" | "klendReserve" | "klendCtoken", PublicKey>;
   const authority = Keypair.generate();
   const depositor = Keypair.generate();
   const poolId = BigInt(Date.now());
 
-  let round: PublicKey;
-  let position: PublicKey;
-  let roundEndsAt: number;
   let startedAt = 0;
-
-  /** The validator's slot-derived clock, which lags wall time under load. */
-  async function chainNow(): Promise<number> {
-    const slot = await connection.getSlot("confirmed");
-    const at = await connection.getBlockTime(slot);
-    if (at === null) throw new Error("validator has no block time yet");
-    return at;
-  }
-
-  async function waitUntil(seconds: number): Promise<void> {
-    for (;;) {
-      const remaining = seconds + 1 - (await chainNow());
-      if (remaining <= 0) return;
-      await sleep(Math.max(300, remaining * 1_000));
-    }
-  }
+  let usdcMint: PublicKey;
+  let depositorToken: PublicKey;
 
   async function airdrop(to: PublicKey, sol: number): Promise<void> {
     const signature = await connection.requestAirdrop(to, sol * LAMPORTS_PER_SOL);
     await connection.confirmTransaction(signature, "confirmed");
-  }
-
-  /** The `test-vrf` stand-in randomness account for a request seed. */
-  function randomnessAddress(seed: Uint8Array): PublicKey {
-    return PublicKey.findProgramAddressSync(
-      [Buffer.from("test-vrf"), Buffer.from(seed)],
-      chain.programId,
-    )[0];
   }
 
   beforeAll(async () => {
@@ -181,6 +156,21 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     );
 
     const pool = chain.poolAddress();
+    // `test-venue` pins this program as klend, the pool as the market and
+    // two PDAs of its own as the reserve and the position's token account.
+    venue = {
+      klendProgram: chain.programId,
+      klendMarket: pool,
+      klendReserve: PublicKey.findProgramAddressSync(
+        [Buffer.from("test-venue-reserve"), pool.toBuffer()],
+        chain.programId,
+      )[0],
+      klendCtoken: PublicKey.findProgramAddressSync(
+        [Buffer.from("test-venue-vault"), pool.toBuffer()],
+        chain.programId,
+      )[0],
+    };
+    const deploy = deployWallet();
     await methods
       .createPool({
         poolId: new BN(poolId.toString()),
@@ -188,29 +178,23 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         admin: authority.publicKey,
         operator: authority.publicKey,
         vrfNetworkState: VRF_NETWORK_STATE,
-        epochSeconds: new BN(3_600),
+        // Short, so the Ticket ledger test below can cross two epoch boundaries.
+        epochSeconds: new BN(45),
         epochAnchor: new BN(Math.floor(Date.now() / 1000)),
-        roundSeconds: new BN(ROUND_SECONDS),
-        closeBuffer: new BN(2),
         vrfTimeout: new BN(5),
         minDeposit: new BN(1_000_000),
-        houseCutBps: 600,
         minJackpot: new BN(1),
-        // No window and a payout timeout far past this run: neither
-        // parameter is what this suite is about, and both would otherwise
-        // change its timing.
-        registrationWindow: new BN(0),
-        payoutTimeout: new BN(86_400),
-        // Base yield and grant-tickets are off (0), same reasoning as the
-        // operator localnet suite: neither is what this suite is about.
-        // `ticketsPerUsdc` only has to be positive to pass `create_pool`'s
-        // own validation.
+        // Under the epoch length, as create_pool requires; nothing here pays out.
+        payoutTimeout: new BN(40),
+        // Base yield is off (0), same reasoning as the operator localnet
+        // suite: it is not what this suite is about.
         baseRateBps: 0,
-        ticketsPerUsdc: 10,
-        bonusCapBps: 0,
+        venueKind: 1, // the stub, which is what these suites pin
       })
       .accountsPartial({
-        payer: authority.publicKey,
+        // The deploy wallet is the upgrade authority, so it pays.
+        payer: deploy.publicKey,
+        programData: programDataAddress(chain.programId),
         pool,
         acceptedMint: mint,
         principalVault: chain.principalVaultAddress(),
@@ -218,12 +202,26 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         house: chain.playerAddress(authority.publicKey),
         treasury,
         buybackReserve,
+        ...venue,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([authority, deploy])
+      .rpc();
+    await methods
+      .testVenueInit()
+      .accountsPartial({
+        payer: authority.publicKey,
+        pool,
+        acceptedMint: mint,
+        reserve: venue.klendReserve,
+        venueVault: venue.klendCtoken,
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
     // game-jackpot-pause ticket 02: create_pool leaves both switches on.
-    for (const feature of ["jackpot", "game"]) {
+    for (const feature of ["jackpot"]) {
       await methods
         .setFeaturePause({ [feature]: {} }, false)
         .accountsPartial({ signer: authority.publicKey, pool })
@@ -236,7 +234,10 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         operator: authority.publicKey,
         pool,
         currentEpoch: chain.epochAddress(0n),
+        epochTwoBehind: chain.epochAddress(0n),
         newEpoch: chain.epochAddress(1n),
+        // begin_epoch syncs the venue first (the stub takes no extra accounts).
+        ...venue,
         systemProgram: SystemProgram.programId,
       })
       .rpc();
@@ -248,8 +249,10 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
       depositor.publicKey,
     );
     await mintTo(connection, authority, mint, ata.address, authority, 10_000_000n);
+    usdcMint = mint;
+    depositorToken = ata.address;
 
-    await methods
+    const depositSignature = await methods
       .deposit(new BN(DEPOSIT.toString()))
       .accountsPartial({
         owner: depositor.publicKey,
@@ -258,35 +261,8 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
         acceptedMint: mint,
         ownerToken: ata.address,
         principalVault: chain.principalVaultAddress(),
+        ...venue,
         tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([depositor])
-      .rpc();
-
-    const startsAt = await chainNow();
-    roundEndsAt = startsAt + ROUND_SECONDS;
-    round = chain.roundAddress(1n);
-    position = chain.positionAddress(round, depositor.publicKey);
-    await methods
-      .createRound(new BN(startsAt), new BN(roundEndsAt))
-      .accountsPartial({
-        operator: authority.publicKey,
-        pool,
-        currentEpoch: chain.epochAddress(1n),
-        round,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    const buySignature = await methods
-      .buyPosition(new BN(TILE_ZERO.toString()), new BN(STAKE.toString()))
-      .accountsPartial({
-        owner: depositor.publicKey,
-        pool,
-        player: chain.playerAddress(depositor.publicKey),
-        round,
-        position,
         systemProgram: SystemProgram.programId,
       })
       .signers([depositor])
@@ -301,7 +277,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     await waitFor(
       "the setup transactions to finalize",
       async () =>
-        (await connection.getSignatureStatus(buySignature)).value
+        (await connection.getSignatureStatus(depositSignature)).value
           ?.confirmationStatus === "finalized",
       90_000,
     );
@@ -310,7 +286,7 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     await prisma.$connect();
     await wipe(prisma);
 
-    indexer = new IndexerService(prisma, chain, config);
+    indexer = new IndexerService(prisma, chain);
     // The real boot path: the boot sweep, the confirmed-log sync trigger and
     // the finalized log subscription.
     indexer.onModuleInit();
@@ -325,117 +301,26 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     }
   });
 
-  it("mirrors the player, the round and the position within 4 s", async () => {
+  it("mirrors the pool, the epoch and the player within 4 s", async () => {
     await waitFor(
-      "the deposit and the round to reach Postgres",
-      async () =>
-        (await prisma.player.count()) > 0 &&
-        (await prisma.round.count()) > 0 &&
-        (await prisma.position.count()) > 0,
+      "the deposit and the epoch to reach Postgres",
+      async () => (await prisma.player.count()) > 0 && (await prisma.epoch.count()) > 0,
       // The boot sweep runs at once; the ticket's 4 s budget covers one RPC round trip.
       4_000 - (Date.now() - startedAt),
     );
     expect(Date.now() - startedAt).toBeLessThan(4_000);
 
     expect(await prisma.player.findMany({ where: { isHouse: false } })).toMatchObject([
-      { owner: depositor.publicKey.toBase58(), principal: DEPOSIT, entries: DEPOSIT - STAKE },
+      { owner: depositor.publicKey.toBase58(), principal: DEPOSIT },
     ]);
-    expect(await prisma.round.findMany()).toMatchObject([
-      { id: 1n, epochId: 1n, status: 0, pot: STAKE, winningTile: null },
-    ]);
-    expect(await prisma.position.findMany()).toMatchObject([
-      {
-        address: position.toBase58(),
-        owner: depositor.publicKey.toBase58(),
-        roundId: 1n,
-        tiles: TILE_ZERO,
-        stakePerTile: STAKE,
-      },
-    ]);
+    expect(await prisma.epoch.findMany()).toMatchObject([{ id: 1n, status: 0 }]);
     expect(await prisma.pool.findMany()).toMatchObject([
       { poolId, totalPrincipal: DEPOSIT, currentEpochId: 1n },
     ]);
   }, 30_000);
 
-  it("drops the Position row once settle_position closes the account", async () => {
-    await waitUntil(roundEndsAt);
-
-    // The seed is unknowable before this call (beta-launch-fixes ticket 02):
-    // it depends on a nonce this test generates fresh, mixed in by the
-    // program, so it cannot be read back off the Round account beforehand
-    // the way it could before the nonce landed.
-    const nonce = randomNonce();
-    const seed = vrfSeed("round", chain.poolAddress(), 1n, nonce);
-    const randomness = randomnessAddress(seed);
-
-    await methods
-      .requestRoundRandomness(Array.from(nonce))
-      .accountsPartial({
-        payer: authority.publicKey,
-        pool: chain.poolAddress(),
-        round,
-        randomness,
-        vrfNetworkState: VRF_NETWORK_STATE,
-        vrfTreasury: VRF_TREASURY,
-        vrfProgram: VRF_PROGRAM,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    // Leading LE u64 zero, so tile 0 wins: the tile this position covers, so
-    // settle_position takes the reward path rather than the empty one.
-    const drawn = new Uint8Array(64).fill(0);
-    await methods
-      .testFulfill(Array.from(seed), Array.from(drawn))
-      .accountsPartial({
-        payer: authority.publicKey,
-        randomness,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    await methods
-      .settleRound()
-      .accountsPartial({
-        caller: authority.publicKey,
-        pool: chain.poolAddress(),
-        round,
-        randomness,
-        house: chain.playerAddress(authority.publicKey),
-      })
-      .rpc();
-
-    await waitFor(
-      "the settled round to reach Postgres",
-      async () =>
-        (
-          await prisma.round.findUnique({
-            where: { poolAddress_id: { poolAddress: chain.poolAddress().toBase58(), id: 1n } },
-          })
-        )?.winningTile === 0,
-      8_000,
-    );
-
-    await methods
-      .settlePosition()
-      .accountsPartial({
-        pool: chain.poolAddress(),
-        round,
-        player: chain.playerAddress(depositor.publicKey),
-        owner: depositor.publicKey,
-        position,
-      })
-      .rpc();
-
-    await waitFor(
-      "the closed Position row to be deleted",
-      async () => (await prisma.position.count()) === 0,
-      8_000,
-    );
-  }, 120_000);
-
-  it("stores the round's finalized events and leaves a cursor behind", async () => {
-    const wanted = ["Deposited", "RoundOpened", "PositionBought", "RoundSettled", "PositionSettled"];
+  it("stores the finalized events and leaves a cursor behind", async () => {
+    const wanted = ["Deposited", "EpochBegan"];
     await waitFor(
       `events ${wanted.join(", ")}`,
       async () => {
@@ -458,20 +343,190 @@ describe.skipIf(process.env.HEXVAULT_INDEXER_LOCALNET !== "1")("indexer on local
     expect(cursor.lastSignature).toBeTruthy();
     expect(cursor.lastSlot).not.toBeNull();
   }, 120_000);
+
+  // off-chain-tickets 11: a deposit in epoch 1 holds no Ticket in epoch 1. The
+  // reset at epoch 2 gives it Tickets, and the snapshot taken when epoch 3
+  // begins lists the wallet with that same count.
+  const owner = (): string => depositor.publicKey.toBase58();
+  const epochEnds = async (id: bigint): Promise<number> => {
+    const info = await connection.getAccountInfo(chain.epochAddress(id));
+    if (!info) throw new Error(`epoch ${id} is not on chain`);
+    return Number(decodeEpoch(chain.program, info.data).endsAt);
+  };
+  // The validator's clock runs at or ahead of wall time, so wall time plus a margin is past the end.
+  const beginEpoch = async (ended: bigint): Promise<void> => {
+    const waitMs = (await epochEnds(ended)) * 1_000 + 3_000 - Date.now();
+    if (waitMs > 0) await sleep(waitMs);
+    await methods
+      .beginEpoch()
+      .accountsPartial({
+        operator: authority.publicKey,
+        pool: chain.poolAddress(),
+        currentEpoch: chain.epochAddress(ended),
+        epochTwoBehind: chain.epochAddress(ended > 1n ? ended - 1n : 0n),
+        newEpoch: chain.epochAddress(ended + 1n),
+        ...venue,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+  };
+  const balance = () =>
+    prisma.ticketBalance.findUnique({
+      where: { poolAddress_owner: { poolAddress: chain.poolAddress().toBase58(), owner: owner() } },
+    });
+  /** Event rows land through the finalized catch-up, which this drives instead of waiting a minute. */
+  const settled = (check: () => Promise<boolean>) => async () => {
+    await indexer.tick();
+    return check();
+  };
+
+  it("books the deposit as Tickets from the next epoch and snapshots the wallet after it", async () => {
+    const pool = chain.poolAddress();
+    await beginEpoch(1n);
+    await waitFor(
+      "the ledger to book the epoch 2 reset",
+      settled(async () => ((await balance())?.epochId ?? 0n) === 2n),
+      150_000,
+    );
+    // Principal plus the yield index's rise between the deposit and the cutoff.
+    const yieldIndexOf = async (where: Prisma.EventWhereInput): Promise<bigint> => {
+      const { data } = await prisma.event.findFirstOrThrow({ where });
+      // SAFETY: an Anchor event always decodes to a struct, stored as a jsonb object.
+      return BigInt((data as Record<string, string>).yieldIndex as string);
+    };
+    const began = await yieldIndexOf({ name: "EpochBegan", data: { path: ["epochId"], equals: "2" } });
+    const deposited = await yieldIndexOf({ name: "Deposited" });
+    const expected = DEPOSIT + (DEPOSIT * (began - deposited)) / 10n ** 18n;
+    expect(await balance()).toMatchObject({ tickets: expected, principal: DEPOSIT, epochId: 2n });
+    expect(await prisma.epochSnapshot.count({ where: { epochId: 1n } })).toBe(0);
+
+    await beginEpoch(2n);
+    await waitFor(
+      "the ledger to snapshot epoch 2",
+      settled(async () => (await prisma.epochSnapshot.count({ where: { epochId: 2n } })) > 0),
+      150_000,
+    );
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 2n } })).toMatchObject([
+      { index: 0, owner: owner(), tickets: expected },
+    ]);
+    expect(await prisma.epoch.findUniqueOrThrow({ where: { poolAddress_id: { poolAddress: pool.toBase58(), id: 2n } } }))
+      .toMatchObject({ leafCount: 1, totalTickets: expected });
+  }, 400_000);
+
+  // off-chain-tickets 24: with the buy pause lifted, USDC paid through
+  // `buy_tickets` lands as Tickets at the Game config rate, and the next
+  // snapshot lists them. The API's `/players/:owner` reads this same balance.
+  it("books a bought Ticket at the Game config rate and snapshots it", async () => {
+    const pool = chain.poolAddress();
+    const BUY = 1_000_000n;
+    const RATE = 7;
+    // The controller seeds this row at boot; the indexer alone does not.
+    await prisma.gameConfig.create({
+      data: {
+        poolAddress: pool.toBase58(),
+        roundSeconds: 60,
+        houseCutBps: 600,
+        ticketsPerUsdc: RATE,
+        bonusCapBps: 500,
+        referralTiers: [],
+        maxTilesPerBet: 36,
+        createdAt: new Date(0),
+      },
+    });
+    const before = (await balance())?.tickets ?? 0n;
+    await methods
+      .setBuyTicketsPause(false)
+      .accountsPartial({ admin: authority.publicKey, pool })
+      .rpc();
+    await methods
+      .buyTickets(new BN(BUY.toString()))
+      .accountsPartial({
+        owner: depositor.publicKey,
+        pool,
+        player: chain.playerAddress(depositor.publicKey),
+        acceptedMint: usdcMint,
+        ownerToken: depositorToken,
+        jackpotVault: chain.jackpotVaultAddress(),
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .signers([depositor])
+      .rpc();
+    await waitFor(
+      "the ledger to book the buy",
+      settled(async () => ((await balance())?.tickets ?? 0n) > before),
+      150_000,
+    );
+    const bought = BUY * BigInt(RATE);
+    expect((await balance())?.tickets).toBe(before + bought);
+    expect(await prisma.ticketLedger.findMany({ where: { owner: owner(), reason: "buy" } })).toMatchObject([
+      { delta: bought },
+    ]);
+
+    await beginEpoch(3n);
+    await waitFor(
+      "the ledger to snapshot epoch 3",
+      settled(async () => (await prisma.epochSnapshot.count({ where: { epochId: 3n } })) > 0),
+      150_000,
+    );
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 3n } })).toMatchObject([
+      { owner: owner(), tickets: before + bought },
+    ]);
+  }, 400_000);
+
+  // off-chain-tickets 22: the Referral bonus the operator's job books in epoch 4
+  // is in the wallet's balance at once and in the snapshot taken when epoch 5 begins.
+  it("books a Referral bonus into the balance and the next snapshot", async () => {
+    const owner = depositor.publicKey.toBase58();
+    const poolAddress = chain.poolAddress().toBase58();
+    const balance = () =>
+      prisma.ticketBalance.findUniqueOrThrow({ where: { poolAddress_owner: { poolAddress, owner } } });
+    // The bought-Tickets test above left the ledger at epoch 4: its reset is booked.
+    expect((await balance()).epochId).toBe(4n);
+    const before = (await balance()).tickets;
+
+    await prisma.gameConfig.create({
+      data: { poolAddress, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps: 500, referralTiers: DEFAULT_GAME_CONFIG.referralTiers, maxTilesPerBet: 36 },
+    });
+    await prisma.referral.create({
+      data: { referee: Keypair.generate().publicKey.toBase58(), referrer: owner, code: "AAAAAA", boundAt: 1n, principal: 100_000_000n, aboveSince: 1n },
+    });
+    expect(
+      await grantReferralBonuses(prisma, { poolAddress, operator: authority.publicKey.toBase58(), now: BigInt(Math.floor(Date.now() / 1000)), qualifySeconds: 0 }),
+    ).toBe(1);
+    // 2% of 100 USDC is 2 USDC; the pool-wide cap, 5% of the pool's 5 USDC, scales it to 0.25 USDC.
+    const bonus = (DEPOSIT * 500n) / 10_000n;
+    expect((await balance()).tickets).toBe(before + bonus);
+
+    await beginEpoch(4n);
+    await waitFor(
+      "the ledger to snapshot epoch 4",
+      settled(async () => (await prisma.epochSnapshot.count({ where: { epochId: 4n } })) > 0),
+      150_000,
+    );
+    expect(await prisma.epochSnapshot.findMany({ where: { epochId: 4n } })).toMatchObject([
+      { owner, tickets: before + bonus },
+    ]);
+  }, 400_000);
 });
 
 async function wipe(prisma: PrismaService): Promise<void> {
   // Pool goes last, after every table that references it (ADR 0016).
   await prisma.$transaction([
     prisma.event.deleteMany(),
+    prisma.ticketLedger.deleteMany(),
+    prisma.ticketBalance.deleteMany(),
+    prisma.epochSnapshot.deleteMany(),
+    prisma.referral.deleteMany(),
+    prisma.gameConfig.deleteMany(),
+    prisma.ledgerCheck.deleteMany(),
     prisma.cursor.deleteMany(),
-    prisma.position.deleteMany(),
     prisma.player.deleteMany(),
-    prisma.round.deleteMany(),
     prisma.epoch.deleteMany(),
+    prisma.gameConfig.deleteMany(),
     prisma.referralGrantShare.deleteMany(),
     prisma.referralGrant.deleteMany(),
     prisma.operatorState.deleteMany(),
+    prisma.yieldIndexPoint.deleteMany(),
     prisma.pool.deleteMany(),
   ]);
 }

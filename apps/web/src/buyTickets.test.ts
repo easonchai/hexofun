@@ -1,38 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { apyFromBaseRateBps, buyDisabledReason, drawValue, ticketsFromUsdc } from "./buyTickets.js";
-
-const EPOCH_SECONDS = 86_400n;
-
-describe("drawValue", () => {
-  it("is worth full face value at the start of the day", () => {
-    expect(drawValue(100n, EPOCH_SECONDS, EPOCH_SECONDS)).toBe(100n);
-  });
-
-  it("is worth half at the middle of the day", () => {
-    expect(drawValue(100n, EPOCH_SECONDS / 2n, EPOCH_SECONDS)).toBe(50n);
-  });
-
-  it("is worth almost nothing in the draw's last minute", () => {
-    expect(drawValue(86_400n, 60n, EPOCH_SECONDS)).toBe(60n);
-  });
-
-  it("clamps a negative seconds-left to zero", () => {
-    expect(drawValue(100n, -5n, EPOCH_SECONDS)).toBe(0n);
-  });
-
-  it("clamps seconds-left over the epoch length", () => {
-    expect(drawValue(100n, EPOCH_SECONDS * 2n, EPOCH_SECONDS)).toBe(100n);
-  });
-
-  it("is zero with no epoch length", () => {
-    expect(drawValue(100n, 100n, 0n)).toBe(0n);
-  });
-});
+import {
+  buyDisabledReason,
+  buyTicketsVisible,
+  pendingDepositNote,
+  ticketsFromUsdc,
+} from "./buyTickets.js";
 
 describe("ticketsFromUsdc", () => {
-  it("multiplies by the pool's tickets-per-USDC rate", () => {
+  it("multiplies by the Game config's tickets-per-USDC rate", () => {
     expect(ticketsFromUsdc(1_000_000n, 10)).toBe(10_000_000n);
+  });
+
+  it("counts at full value, with no discount for the time left in the epoch", () => {
+    expect(ticketsFromUsdc(86_400n, 1)).toBe(86_400n);
   });
 
   it("is zero for a zero amount", () => {
@@ -40,13 +21,15 @@ describe("ticketsFromUsdc", () => {
   });
 });
 
-describe("apyFromBaseRateBps", () => {
-  it("compounds 488 bps APR to about 5% APY (spec.md)", () => {
-    expect(apyFromBaseRateBps(488)).toBeCloseTo(5.0, 1);
+describe("buyTicketsVisible", () => {
+  it("shows only when neither the Vercel gate nor the on-chain pause says no", () => {
+    expect(buyTicketsVisible(false, false)).toBe(true);
+    expect(buyTicketsVisible(true, false)).toBe(false);
+    expect(buyTicketsVisible(false, true)).toBe(false);
   });
 
-  it("is zero for a zero rate", () => {
-    expect(apyFromBaseRateBps(0)).toBe(0);
+  it("hides while the on-chain pause is unknown", () => {
+    expect(buyTicketsVisible(false, null)).toBe(false);
   });
 });
 
@@ -57,8 +40,8 @@ describe("buyDisabledReason", () => {
     expect(buyDisabledReason(base)).toBeNull();
   });
 
-  it("is disabled while the pool is paused", () => {
-    expect(buyDisabledReason({ ...base, paused: true })).toBe("pool is paused");
+  it("is disabled while the on-chain buy-tickets pause is set", () => {
+    expect(buyDisabledReason({ ...base, paused: true })).toBe("buying Tickets is paused");
   });
 
   it("is disabled once the pool is shut down, ahead of the paused reason", () => {
@@ -77,5 +60,15 @@ describe("buyDisabledReason", () => {
     expect(buyDisabledReason({ ...base, allowanceLeft: 0n })).toBe(
       "today's buy allowance is spent",
     );
+  });
+});
+
+describe("pendingDepositNote", () => {
+  it("is absent with no Pending deposit", () => {
+    expect(pendingDepositNote(0n)).toBeNull();
+  });
+
+  it("says the new deposit counts from the next epoch", () => {
+    expect(pendingDepositNote(1n)).toBe("Your new deposit counts from the next epoch.");
   });
 });

@@ -53,7 +53,7 @@ export type StatusValue = number | string;
 
 export const EPOCH_STATUS = [
   "Open",
-  "Registering",
+  "Ended",
   "Drawing",
   "Drawn",
   "Paid",

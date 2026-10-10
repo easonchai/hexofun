@@ -97,7 +97,8 @@ export function RoundPotPill({
   houseCutBps,
 }: {
   value: bigint;
-  houseCutBps: number;
+  /** The Game config's House cut; null until `/game/config` has answered. */
+  houseCutBps: number | null;
 }) {
   return (
     <div
@@ -111,8 +112,11 @@ export function RoundPotPill({
         <div className="hexpot-tooltip">
           <div className="hexpot-tooltip-title">ROUND POT</div>
           <div>
-            Tickets everyone has staked on this round. {houseCutBps / 100}%
-            goes to the House and the winning tiles split the rest.
+            Tickets everyone has staked on this round.{" "}
+            {houseCutBps === null
+              ? "The House takes a cut"
+              : `${houseCutBps / 100}% goes to the House`}{" "}
+            and the winning tiles split the rest.
           </div>
         </div>
       </div>
@@ -128,8 +132,8 @@ export interface ArenaProps {
   onToggleTile: (displayNumber: number) => void;
   /** True when the backend status pill is amber: the operator isn't ticking. */
   operatorStale?: boolean;
-  /** Live pool rate, for the pot tooltip. */
-  houseCutBps: number;
+  /** The Game config's House cut, for the pot tooltip; null until it loads. */
+  houseCutBps?: number | null;
   /** `idleBoardLabel`'s answer: shown in the timer's spot while there is no
    *  countdown, so an empty board says why it is empty. */
   idleLabel?: string | null;
@@ -140,7 +144,7 @@ export function Arena({
   canPick,
   onToggleTile,
   operatorStale = false,
-  houseCutBps,
+  houseCutBps = null,
   idleLabel = null,
 }: ArenaProps) {
   const {
@@ -153,6 +157,7 @@ export function Arena({
     coreEnter,
     takeover,
     dismissTakeover,
+    result,
   } = engine;
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
@@ -162,19 +167,18 @@ export function Arena({
   const revealDots = reveal?.fired ? reveal.laser.activeDotTimes : {};
   const flyMap = reveal?.flyMap ?? {};
   const seconds = Number(secondsLeft);
-  const showTimer =
-    phase === "mine" || phase === "locked" || phase === "settling";
-  // The countdown ends at the close; from there the draw is in flight and
-  // its length is the oracle's, so the timer says what is happening instead.
-  const timerLabel = phase === "mine" ? timerText(secondsLeft) : "DRAWING";
+  // The countdown ends at the close; from there the draw waits on its beacon,
+  // whose length is drand's, so the timer says what is happening instead.
+  const timerLabel = phase === "mine" ? timerText(secondsLeft) : result;
   const timerRed = phase === "mine" && seconds <= 2;
 
   // Idle through the countdown and the draw; when the result lands the core
   // shakes hard for the build-up, then detonates as the laser fires.
+  const coreLive = phase !== "idle" || result !== null;
   const shake =
     reveal && !reveal.fired
       ? "hexShake .08s infinite"
-      : phase === "mine" || phase === "locked" || phase === "settling"
+      : coreLive
         ? "hexShakeSubtle .25s infinite"
         : "none";
 
@@ -214,7 +218,7 @@ export function Arena({
     <div className="stage-arena-wrap" data-testid="arena" ref={arenaWrapRef}>
       <div className="hex-stage-container">
         {/* Timer / win banner above the hexagon */}
-        {showTimer && !banner ? (
+        {timerLabel !== null && !banner ? (
           <div
             className={`stage-timer${operatorStale ? " stage-timer-stale" : ""}${timerRed && !operatorStale ? " stage-timer-red" : ""}`}
             data-testid="round-timer"
@@ -292,10 +296,7 @@ export function Arena({
             >
               <LogoCog size={72} />
             </div>
-          ) : reveal ||
-            phase === "mine" ||
-            phase === "locked" ||
-            phase === "settling" ? (
+          ) : reveal || coreLive ? (
             <div
               className="stage-core"
               style={{

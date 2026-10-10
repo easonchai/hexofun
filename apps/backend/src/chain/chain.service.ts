@@ -15,6 +15,9 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  TransactionMessage,
+  VersionedTransaction,
+  type AddressLookupTableAccount,
   type SignatureResult,
   type TransactionInstruction,
 } from "@solana/web3.js";
@@ -27,9 +30,8 @@ import {
   jackpotVaultAddress,
   playerAddress,
   poolAddress,
-  positionAddress,
   principalVaultAddress,
-  roundAddress,
+  venueProposalAddress,
 } from "./pda";
 import {
   heliusPriorityFeeEstimate,
@@ -47,6 +49,17 @@ export const SOLANA_CONNECTION = Symbol("SOLANA_CONNECTION");
  * so the wait is bounded and the fallback decides pending from expired.
  */
 export const CONFIRM_TIMEOUT_MS = 30_000;
+
+/** `send` gave up waiting but the blockhash is still live: the transaction may yet land. */
+export class TxPendingError extends Error {}
+
+/** `send` callbacks for a caller that records the signature (mainnet-readiness-fixes 07). */
+export interface SendHooks {
+  /** The transaction is on the wire, before confirmation. */
+  onSent(signature: string): Promise<void>;
+  /** Confirmation failed for good (expired, or landed with an error): nothing happened. */
+  onDropped(signature: string): Promise<void>;
+}
 
 /**
  * How often `send`'s confirmation wait rebroadcasts the identical signed
@@ -139,22 +152,11 @@ export class ChainService {
     return epochAddress(this.programId, pool, epochId);
   }
 
-  roundAddress(
-    roundId: bigint,
-    pool: PublicKey = this.poolAddress(),
-  ): PublicKey {
-    return roundAddress(this.programId, pool, roundId);
-  }
-
   playerAddress(
     owner: PublicKey,
     pool: PublicKey = this.poolAddress(),
   ): PublicKey {
     return playerAddress(this.programId, pool, owner);
-  }
-
-  positionAddress(round: PublicKey, owner: PublicKey): PublicKey {
-    return positionAddress(this.programId, round, owner);
   }
 
   principalVaultAddress(pool: PublicKey = this.poolAddress()): PublicKey {
@@ -163,6 +165,11 @@ export class ChainService {
 
   jackpotVaultAddress(pool: PublicKey = this.poolAddress()): PublicKey {
     return jackpotVaultAddress(this.programId, pool);
+  }
+
+  /** The pool's venue proposal PDA; the account exists only while one is open. */
+  venueProposalAddress(pool: PublicKey = this.poolAddress()): PublicKey {
+    return venueProposalAddress(this.programId, pool);
   }
 
   /** Records a Clock sysvar reading, for `lastObservedChainTime`. */
@@ -196,13 +203,21 @@ export class ChainService {
   async send(
     instructions: TransactionInstruction[],
     signer: Keypair = this.keypair,
+    lookupTables: readonly AddressLookupTableAccount[] = [],
+    hooks?: SendHooks,
   ): Promise<string> {
     try {
       const { blockhash, lastValidBlockHeight } =
         await this.connection.getLatestBlockhash("finalized");
       const [microLamports, computeUnits] = await Promise.all([
         this.priorityFeeMicroLamports(writableAccountsOf(instructions)),
-        this.computeUnitLimit(instructions, signer.publicKey, blockhash, lastValidBlockHeight),
+        this.computeUnitLimit(
+          instructions,
+          signer.publicKey,
+          blockhash,
+          lastValidBlockHeight,
+          lookupTables,
+        ),
       ]);
       const budgetInstructions = [
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports }),
@@ -210,6 +225,27 @@ export class ChainService {
           ? []
           : [ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnits })]),
       ];
+      if (lookupTables.length > 0) {
+        // A kVault pool's instructions name too many accounts for a legacy
+        // transaction (venue-switch ticket 06): v0, with the vault's table.
+        const versioned = new VersionedTransaction(
+          new TransactionMessage({
+            payerKey: signer.publicKey,
+            recentBlockhash: blockhash,
+            instructions: [...budgetInstructions, ...instructions],
+          }).compileToV0Message([...lookupTables]),
+        );
+        versioned.sign([signer]);
+        // SAFETY: sign() has just filled the fee payer's signature slot.
+        const versionedSignature = bs58.encode(versioned.signatures[0] as Uint8Array);
+        await this.sendSigned(
+          versioned.serialize(),
+          versionedSignature,
+          lastValidBlockHeight,
+          hooks,
+        );
+        return versionedSignature;
+      }
       const tx = new Transaction({
         blockhash,
         lastValidBlockHeight,
@@ -218,7 +254,7 @@ export class ChainService {
       tx.sign(signer);
       // SAFETY: sign() has just filled the fee payer's signature slot.
       const signature = bs58.encode(tx.signature as Buffer);
-      await this.sendSigned(tx.serialize(), signature, lastValidBlockHeight);
+      await this.sendSigned(tx.serialize(), signature, lastValidBlockHeight, hooks);
       return signature;
     } catch (cause) {
       throw this.mapSendError(cause);
@@ -236,6 +272,7 @@ export class ChainService {
     raw: Uint8Array,
     signature: string,
     lastValidBlockHeight: number,
+    hooks?: SendHooks,
   ): Promise<void> {
     // Subscribe before sending. The RPC only notifies a signature that lands
     // after the subscription opens, so one that confirms first never would.
@@ -249,7 +286,14 @@ export class ChainService {
       watch.cancel();
       throw cause;
     }
-    await this.confirm(raw, signature, watch, lastValidBlockHeight);
+    await hooks?.onSent(signature);
+    try {
+      await this.confirm(raw, signature, watch, lastValidBlockHeight);
+    } catch (cause) {
+      // A pending transaction keeps its recorded signature: it may still land.
+      if (!(cause instanceof TxPendingError)) await hooks?.onDropped(signature);
+      throw cause;
+    }
   }
 
   /**
@@ -260,25 +304,51 @@ export class ChainService {
    * transaction actually uses, so simulating first is what lets `send` stop
    * paying for the runtime's 200k-per-instruction default.
    *
-   * A failed simulation is logged once and answered with `undefined`, so
-   * `send` still lands the transaction without a limit instruction, same as
-   * before this ticket.
+   * A simulation that fails inside the program (a custom error code, such
+   * as `NothingToHarvest`) is deterministic: preflight would refuse the same
+   * bytes, so it throws through `mapSendError` and `send` never goes to the
+   * wire. Any other failure (RPC hiccup, no `unitsConsumed`) is logged once
+   * and answered with `undefined`, so `send` still lands the transaction
+   * without a limit instruction, same as before this ticket.
    */
   private async computeUnitLimit(
     instructions: TransactionInstruction[],
     payer: PublicKey,
     blockhash: string,
     lastValidBlockHeight: number,
+    lookupTables: readonly AddressLookupTableAccount[] = [],
   ): Promise<number | undefined> {
     const generousLimit = ComputeBudgetProgram.setComputeUnitLimit({
       units: MAX_COMPUTE_UNIT_LIMIT,
     });
-    const tx = new Transaction({ blockhash, lastValidBlockHeight, feePayer: payer }).add(
-      generousLimit,
-      ...instructions,
-    );
     try {
-      const { value } = await this.connection.simulateTransaction(tx);
+      const { value } =
+        lookupTables.length > 0
+          ? await this.connection.simulateTransaction(
+              new VersionedTransaction(
+                new TransactionMessage({
+                  payerKey: payer,
+                  recentBlockhash: blockhash,
+                  instructions: [generousLimit, ...instructions],
+                }).compileToV0Message([...lookupTables]),
+              ),
+              { sigVerify: false },
+            )
+          : await this.connection.simulateTransaction(
+              new Transaction({ blockhash, lastValidBlockHeight, feePayer: payer }).add(
+                generousLimit,
+                ...instructions,
+              ),
+            );
+      const code = customErrorCode(value.err);
+      if (code !== undefined) {
+        // Carries the program's logs (how `mapSendError` names an Anchor
+        // error) and the code (its fallback when the RPC returned none).
+        throw Object.assign(new Error(JSON.stringify(value.err)), {
+          code,
+          logs: value.logs ?? undefined,
+        });
+      }
       if (value.err || value.unitsConsumed === undefined) {
         throw new Error(
           value.err ? JSON.stringify(value.err) : "simulation reported no unitsConsumed",
@@ -286,6 +356,7 @@ export class ChainService {
       }
       return Math.ceil(value.unitsConsumed * COMPUTE_UNIT_MARGIN);
     } catch (cause) {
+      if (cause instanceof Error && "code" in cause) throw cause;
       this.logger.warn(
         `simulate failed, sending without a compute limit: ${
           cause instanceof Error ? cause.message : String(cause)
@@ -360,7 +431,7 @@ export class ChainService {
         `transaction ${signature} expired: block height ${blockHeight} passed the blockhash's last valid height ${lastValidBlockHeight}`,
       );
     }
-    throw new Error(
+    throw new TxPendingError(
       `transaction ${signature} still pending after ${CONFIRM_TIMEOUT_MS}ms; the blockhash has not expired yet`,
     );
   }
@@ -452,6 +523,19 @@ export class ChainService {
       )
       .catch(() => 0);
   }
+}
+
+/** The program's own error code inside a simulation's `err`, when it is one:
+ *  `{ InstructionError: [index, { Custom: code }] }`. Anything else (a
+ *  runtime error, an RPC shape, null) answers undefined. */
+function customErrorCode(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null || !("InstructionError" in err)) return undefined;
+  const inner = (err as { InstructionError: unknown }).InstructionError;
+  if (!Array.isArray(inner)) return undefined;
+  const detail: unknown = inner[1];
+  if (typeof detail !== "object" || detail === null || !("Custom" in detail)) return undefined;
+  const code = (detail as { Custom: unknown }).Custom;
+  return typeof code === "number" ? code : undefined;
 }
 
 /** Every writable account across `instructions`, deduplicated — the account

@@ -6,19 +6,16 @@ import type { PlayerDto, StateDto } from "./api.js";
 const player = (overrides: Partial<PlayerDto> = {}): PlayerDto => ({
   owner: "Ai1ce",
   principal: "1000000",
-  entries: "1000000",
-  weightAcc: "0",
-  lastUpdate: "1800000000",
+  tickets: "1000000",
   epochId: "7",
-  frozenWeight: "0",
-  frozenEpoch: "0",
-  regEpoch: "0",
-  regStart: "0",
-  regEnd: "0",
   isHouse: false,
   pendingWithdraw: "0",
   pendingEpoch: "0",
-  liveWeight: "1000",
+  pendingDeposit: "0",
+  pendingDepositEpoch: "0",
+  weight: "1000",
+  pendingTickets: "0",
+  pendingActivatesEpoch: null,
   odds: "50.00",
   ...overrides,
 });
@@ -27,10 +24,7 @@ const state = (overrides: Partial<StateDto> = {}): StateDto =>
   ({
     pool: { totalPrincipal: "2000000" },
     currentEpoch: { jackpotAmount: "42069000000" },
-    openRound: { id: "100", pot: "5000" },
-    round: { id: "100", pot: "5000" },
     player: player(),
-    position: null,
     status: { operator: { lastTickAt: "2026-09-14T00:00:00.000Z" } },
     chainTime: "1800000000",
     ...overrides,
@@ -44,19 +38,14 @@ describe("snapshot", () => {
     const later = state({
       chainTime: "1800000012",
       status: { operator: { lastTickAt: "2026-09-14T00:00:12.000Z" } } as StateDto["status"],
-      player: player({ liveWeight: "13000", odds: "51.20" }),
+      player: player({ weight: "13000", odds: "51.20" }),
     });
     expect(snapshot(later)).toBe(snapshot(before));
   });
 
   it("notices a deposit landing", () => {
-    const deposited = state({ player: player({ principal: "3000000", entries: "3000000" }) });
+    const deposited = state({ player: player({ principal: "3000000", tickets: "3000000" }) });
     expect(snapshot(deposited)).not.toBe(snapshot(state()));
-  });
-
-  it("notices a register, which moves nothing else on the Player", () => {
-    const registered = state({ player: player({ regEpoch: "7", regStart: "0", regEnd: "1000" }) });
-    expect(snapshot(registered)).not.toBe(snapshot(state()));
   });
 
   it("notices a process_withdraw paying out, which moves nothing else", () => {
@@ -66,8 +55,8 @@ describe("snapshot", () => {
     expect(snapshot(requested)).not.toBe(snapshot(state()));
   });
 
-  it("notices a Position bought in the tracked Round", () => {
-    const bought = state({ position: { tiles: "7", stakePerTile: "1000000" } });
-    expect(snapshot(bought)).not.toBe(snapshot(state()));
+  it("notices Tickets moving on their own, as a bought-tickets credit does", () => {
+    const credited = state({ player: player({ tickets: "2000000" }) });
+    expect(snapshot(credited)).not.toBe(snapshot(state()));
   });
 });

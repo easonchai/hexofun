@@ -4,6 +4,7 @@ import { validateProdEnv } from "./env.js";
 
 const FULL_ENV = {
   VITE_CLUSTER: "mainnet-beta",
+  VITE_PUBLIC_RPC_URL: "https://rpc.example.com",
   VITE_API_URL: "https://api.example.com",
   VITE_PRIVY_APP_ID: "app-id",
   VITE_PROGRAM_ID: "LFk9ba6QXuM9oYRRNGGPxMGzfo13X3DAr8ghSPz72C6",
@@ -26,10 +27,9 @@ describe("validateProdEnv", () => {
     );
   });
 
-  it("does not require the public RPC URL; chain.ts falls back to the cluster endpoint", () => {
-    expect(() =>
-      validateProdEnv({ ...FULL_ENV, VITE_PUBLIC_RPC_URL: undefined }),
-    ).not.toThrow();
+  it("allows the public RPC URL to be unset", () => {
+    const { VITE_PUBLIC_RPC_URL: _drop, ...rest } = FULL_ENV;
+    expect(() => validateProdEnv(rest)).not.toThrow();
   });
 
   it("treats a blank value the same as a missing one", () => {

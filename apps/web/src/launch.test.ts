@@ -1,6 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import { launchCountdown, launchCountdownLabel, prizeCardState } from "./launch.js";
+import {
+  launchCountdown,
+  launchCountdownLabel,
+  prizeCardState,
+  prizeShown,
+  showsNextDrawLabel,
+} from "./launch.js";
+
+describe("prizeShown", () => {
+  it("shows the live prize with no draw under way", () => {
+    expect(prizeShown({ jackpotAmount: "5", drawing: null })).toBe("5");
+  });
+
+  it("keeps the live prize while the ended epoch waits for request_draw", () => {
+    expect(prizeShown({ jackpotAmount: "5", drawing: { epochId: "4", status: 1, jackpotAmount: "0" } })).toBe("5");
+  });
+
+  it("shows the drawn-for prize once request_draw reserved it", () => {
+    expect(
+      prizeShown({ jackpotAmount: "0", drawing: { epochId: "4", status: 2, jackpotAmount: "2816873" } }),
+    ).toBe("2816873");
+  });
+});
 
 describe("launchCountdown", () => {
   it("is unscheduled with no launch time configured", () => {
@@ -78,5 +100,28 @@ describe("prizeCardState", () => {
   it("the gate wins over a live epoch, even over paused", () => {
     expect(prizeCardState(true, true, false, false)).toBe("launch");
     expect(prizeCardState(true, true, true, true)).toBe("launch");
+  });
+});
+
+describe("showsNextDrawLabel", () => {
+  it("shows above the live countdown and the launch countdown", () => {
+    expect(showsNextDrawLabel("live", false, 3_600n)).toBe(true);
+    expect(showsNextDrawLabel("live", false, null)).toBe(true);
+    expect(showsNextDrawLabel("launch", false, null)).toBe(true);
+  });
+
+  it("is gone while DRAWING… is up, whether the program says so or the clock ran out", () => {
+    expect(showsNextDrawLabel("live", true, 3_600n)).toBe(false);
+    expect(showsNextDrawLabel("live", false, 0n)).toBe(false);
+    expect(showsNextDrawLabel("live", false, -5n)).toBe(false);
+  });
+
+  it("is gone while DRAW PAUSED is up", () => {
+    expect(showsNextDrawLabel("paused", false, 3_600n)).toBe(false);
+  });
+
+  it("comes back with the next round's countdown", () => {
+    expect(showsNextDrawLabel("live", true, 0n)).toBe(false);
+    expect(showsNextDrawLabel("live", false, 86_400n)).toBe(true);
   });
 });

@@ -1,0 +1,26 @@
+# Build context is the repo root (apps/backend/Dockerfile). The Dockerfile COPYs
+# only the root manifests and apps/backend, apps/web/package.json. Everything
+# below stays out of the context, secrets first.
+.git
+.claude
+**/.env
+**/.env.*
+**/keys
+**/.surf
+**/node_modules
+**/dist
+target
+id.json
+**/id.json
+*-keypair.json
+**/*-keypair.json
+admin.json
+**/admin.json
+*.keypair
+**/*.keypair
+*.keypair.json
+**/*.keypair.json
+operator.json
+operator-*.json
+docs
+tests

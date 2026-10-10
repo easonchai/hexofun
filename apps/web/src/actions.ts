@@ -1,5 +1,5 @@
 /**
- * The six instructions this app sends. Each builds from the IDL by name and
+ * The instructions this app sends. Each builds from the IDL by name and
  * goes through `sendMany` (ticket 08, production-hardening): a compute
  * budget sized from a public-RPC simulation, signed through the wallet
  * adapter or Privy, confirmed with the blockhash strategy at `confirmed`.
@@ -7,17 +7,21 @@
  * message)` — instead of a bare signature or a thrown error, and triggers
  * the chain re-read only on `landed`.
  *
- * `settlePosition`, `register` and `processWithdraw` are permissionless: the
- * program takes no signer for them, so the connected wallet is only the fee
- * payer.
+ * `processWithdraw` is permissionless but wants the owner's signature while
+ * the pool is impaired.
  */
 import { createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
 import {
   ComputeBudgetProgram,
   PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
   SystemProgram,
   Transaction,
   TransactionExpiredBlockheightExceededError,
+  TransactionMessage,
+  VersionedTransaction,
+  type AccountMeta,
+  type AddressLookupTableAccount,
   type Connection,
   type TransactionInstruction,
 } from "@solana/web3.js";
@@ -25,17 +29,17 @@ import {
 import {
   acceptedAta,
   bn,
-  epochAddress,
   jackpotVaultAddress,
   method,
   playerAddress,
-  positionAddress,
   principalVaultAddress,
-  roundAddress,
   TOKEN_PROGRAM,
+  VENUE_KIND,
   type HexVaultProgram,
   type TxBuilder,
 } from "./chain.js";
+import { fetchKvaultView, kvaultRemaining } from "./kvault.js";
+import { splitWithdraw } from "./lib/money.js";
 import type { PoolLike } from "./read.js";
 import { shutdownWithdrawStep } from "./shutdown.js";
 
@@ -171,15 +175,27 @@ async function computeUnitLimit(
   instructions: TransactionInstruction[],
   payer: PublicKey,
   options: { sponsored: boolean },
+  v0?: { blockhash: string; tables: AddressLookupTableAccount[] },
 ): Promise<ComputeSizing> {
   let simulated: { err: unknown; unitsConsumed?: number; logs?: string[] | null };
   try {
-    const probe = new Transaction().add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: MAX_COMPUTE_UNIT_LIMIT }),
-      ...instructions,
-    );
-    probe.feePayer = payer;
-    simulated = (await connection.simulateTransaction(probe)).value;
+    const budget = ComputeBudgetProgram.setComputeUnitLimit({ units: MAX_COMPUTE_UNIT_LIMIT });
+    if (v0) {
+      const probe = new VersionedTransaction(
+        new TransactionMessage({
+          payerKey: payer,
+          recentBlockhash: v0.blockhash,
+          instructions: [budget, ...instructions],
+        }).compileToV0Message(v0.tables),
+      );
+      simulated = (
+        await connection.simulateTransaction(probe, { sigVerify: false, replaceRecentBlockhash: true })
+      ).value;
+    } else {
+      const probe = new Transaction().add(budget, ...instructions);
+      probe.feePayer = payer;
+      simulated = (await connection.simulateTransaction(probe)).value;
+    }
   } catch {
     return {
       kind: "units",
@@ -219,13 +235,14 @@ export async function sendMany(
   owner: TxSigner,
   instructions: TransactionInstruction[],
   priorityFeeMicroLamports: number,
+  lookupTables: AddressLookupTableAccount[] = [],
 ): Promise<SendResult> {
   const provider = providerOf(program);
   const connection = provider.connection;
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash(CONFIRMED);
   const sizing = await computeUnitLimit(connection, instructions, owner.publicKey, {
     sponsored: owner.sendTransaction !== undefined,
-  });
+  }, lookupTables.length > 0 ? { blockhash, tables: lookupTables } : undefined);
   if (sizing.kind === "programError") {
     // Ticket 15: caught before anything is signed or sent.
     return {
@@ -234,15 +251,28 @@ export async function sendMany(
       message: JSON.stringify(sizing.err),
     };
   }
-  const transaction = new Transaction({
-    blockhash,
-    lastValidBlockHeight,
-    feePayer: owner.publicKey,
-  }).add(
+  const budgeted = [
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports }),
     ComputeBudgetProgram.setComputeUnitLimit({ units: sizing.units }),
     ...instructions,
-  );
+  ];
+  // A kVault pool's instructions name too many accounts for a legacy
+  // transaction: v0 with the vault's lookup table (venue-switch ticket 06).
+  // ponytail: the Privy sponsored path (`owner.sendTransaction`) is typed for
+  // legacy transactions, so v0 is only proven on the wallet-adapter path the
+  // Ops console uses.
+  const transaction =
+    lookupTables.length > 0
+      ? (new VersionedTransaction(
+          new TransactionMessage({
+            payerKey: owner.publicKey,
+            recentBlockhash: blockhash,
+            instructions: budgeted,
+          }).compileToV0Message(lookupTables),
+        ) as unknown as Transaction)
+      : new Transaction({ blockhash, lastValidBlockHeight, feePayer: owner.publicKey }).add(
+          ...budgeted,
+        );
 
   let signature: string;
   if (owner.sendTransaction) {
@@ -280,8 +310,9 @@ export type ResolvedSendResult = Exclude<SendResult, { kind: "unknown" }>;
  * Ticket 15: resolves a `SendResult` of kind `"unknown"` by polling the
  * signature's status until it lands, fails on chain, or the blockhash's
  * `lastValidBlockHeight` passes (expired) — the same three outcomes a clean
- * confirmation would have produced. Callers keep money buttons disabled
- * while this is in flight.
+ * confirmation would have produced. An RPC error from either read is logged
+ * and retried after the interval, so this never rejects. Callers keep money
+ * buttons disabled while this is in flight.
  */
 export async function resolveUnknownSend(
   connection: Connection,
@@ -290,18 +321,29 @@ export async function resolveUnknownSend(
   pollMs = 2_000,
 ): Promise<ResolvedSendResult> {
   for (;;) {
-    const { value } = await connection.getSignatureStatuses([signature]);
-    const status = value[0];
-    if (status) {
-      if (status.err) {
-        return { kind: "failed", code: customErrorCode(status.err), message: JSON.stringify(status.err) };
+    // Each read has its own try: the RPC that made the send unknown can throw
+    // again here, and a throw is one more unknown, not an answer. Only the
+    // chain's word (landed, failed, or past the last valid block) ends this.
+    try {
+      const { value } = await connection.getSignatureStatuses([signature]);
+      const status = value[0];
+      if (status) {
+        if (status.err) {
+          return { kind: "failed", code: customErrorCode(status.err), message: JSON.stringify(status.err) };
+        }
+        if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+          return { kind: "landed", signature };
+        }
       }
-      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
-        return { kind: "landed", signature };
-      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
     }
-    const blockHeight = await connection.getBlockHeight(CONFIRMED);
-    if (blockHeight > lastValidBlockHeight) return { kind: "expired" };
+    try {
+      const blockHeight = await connection.getBlockHeight(CONFIRMED);
+      if (blockHeight > lastValidBlockHeight) return { kind: "expired" };
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+    }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
@@ -322,15 +364,98 @@ export async function awaitSendResult(
   );
 }
 
+/** The four pinned klend accounts every instruction that runs sync names. */
+const venueAccounts = (pool: PoolLike) => ({
+  klendProgram: pool.klendProgram,
+  klendMarket: pool.klendMarket,
+  klendReserve: pool.klendReserve,
+  klendCtoken: pool.klendCtoken,
+});
+
+/**
+ * What the venue backing needs beyond the pinned four, chosen by the pool's
+ * `venueKind` like the operator's `venueRemaining`, not by which program is
+ * pinned. For klend, in the order klend.rs reads them: the lending market
+ * authority, the reserve's liquidity supply vault, the cToken mint and the
+ * instructions sysvar. klend derives the first three from the market and the
+ * liquidity mint, so no RPC read is needed; the program checks each against
+ * the reserve itself. The `test-venue` stub takes none (apps/backend
+ * operator/instructions.ts `venueRemaining` does the same). A kind this
+ * build does not know throws rather than guess an account list.
+ */
+export function klendRemaining(pool: PoolLike): AccountMeta[] {
+  if (pool.venueKind === VENUE_KIND.stub) return [];
+  if (pool.venueKind !== VENUE_KIND.klend) {
+    throw new Error(`unsupported venue kind ${pool.venueKind}`);
+  }
+  const derive = (...seeds: (string | PublicKey)[]): PublicKey =>
+    PublicKey.findProgramAddressSync(
+      seeds.map((seed) => (typeof seed === "string" ? Buffer.from(seed) : seed.toBuffer())),
+      pool.klendProgram,
+    )[0];
+  const meta = (pubkey: PublicKey, isWritable: boolean) => ({
+    pubkey,
+    isSigner: false,
+    isWritable,
+  });
+  return [
+    meta(derive("lma", pool.klendMarket), false),
+    meta(derive("reserve_liq_supply", pool.klendMarket, pool.acceptedMint), true),
+    meta(derive("reserve_coll_mint", pool.klendMarket, pool.acceptedMint), true),
+    meta(SYSVAR_INSTRUCTIONS_PUBKEY, false),
+  ];
+}
+
+interface VenueSend {
+  /** The remaining accounts the instruction's Sync (and redeem) reads. */
+  remaining: AccountMeta[];
+  /** Non-empty only for a kVault pool, whose account list fits a legacy
+   *  transaction only with the vault's lookup table (venue-switch ticket 06). */
+  lookupTables: AddressLookupTableAccount[];
+}
+
+/**
+ * `klendRemaining` for klend and the stub, where a Sync alone (`deposit`,
+ * `process_withdraw`) reads none of them. For a kVault pool the program
+ * values the position from the klend program, every allocation reserve and
+ * its market (kvault.rs `layout`), so the vault state is read now, never
+ * cached: the curator can change the allocation list at any time, and a list
+ * that no longer matches fails with `VaultAccountMismatch` for a retry to pick
+ * up. A redeem (`request_withdraw` refunding past free idle) adds the CPI
+ * extras the Ops console's `venueRemaining` passes.
+ */
+async function venueRemaining(
+  program: HexVaultProgram,
+  pool: PoolLike,
+  use: "sync" | "redeem",
+): Promise<VenueSend> {
+  if (pool.venueKind !== VENUE_KIND.kvault) {
+    const klend = klendRemaining(pool);
+    return { remaining: use === "redeem" ? klend : [], lookupTables: [] };
+  }
+  const connection = providerOf(program).connection;
+  const view = await fetchKvaultView(connection, pool.klendMarket, pool.klendProgram);
+  const { value } = await connection.getAddressLookupTable(view.lookupTable);
+  if (!value) throw new Error(`lookup table ${view.lookupTable.toBase58()} does not exist`);
+  return {
+    remaining: kvaultRemaining(
+      view,
+      use === "sync" ? { valueOnly: true } : { writableMint: pool.acceptedMint },
+    ),
+    lookupTables: [value],
+  };
+}
+
 /** Sends `builder`'s instructions through `sendMany` above. */
 async function send(
   program: HexVaultProgram,
   owner: TxSigner,
   builder: TxBuilder,
   priorityFeeMicroLamports: number,
+  lookupTables: AddressLookupTableAccount[] = [],
 ): Promise<SendResult> {
   const unsigned = await builder.transaction();
-  return sendMany(program, owner, unsigned.instructions, priorityFeeMicroLamports);
+  return sendMany(program, owner, unsigned.instructions, priorityFeeMicroLamports, lookupTables);
 }
 
 export async function deposit(
@@ -341,6 +466,7 @@ export async function deposit(
 ): Promise<SendResult> {
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const venue = await venueRemaining(program, pool, "sync");
   const builder = method(
     program,
     "deposit",
@@ -352,9 +478,11 @@ export async function deposit(
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
+      ...venueAccounts(pool),
       tokenProgram: TOKEN_PROGRAM,
       systemProgram: SystemProgram.programId,
     })
+    .remainingAccounts(venue.remaining)
     // The faucet may already have created it; idempotent either way.
     .preInstructions([
       createAssociatedTokenAccountIdempotentInstruction(
@@ -365,12 +493,13 @@ export async function deposit(
         TOKEN_PROGRAM,
       ),
     ]);
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+  return send(program, owner, builder, pool.priorityFeeMicroLamports, venue.lookupTables);
 }
 
 /**
- * Spends `amount` USDC into the jackpot vault for `amount × ticketsPerUsdc`
- * Tickets (ticket 10). Per Player per day the program caps total spend at
+ * Spends `amount` USDC into the jackpot vault. The program credits nothing
+ * and emits `TicketsBought`; the Tickets come from the backend's ledger
+ * (ADR 0025). Per Player per day the program caps total spend at
  * Principal, checked live: fails with `DailyBuyCapExceeded` over the cap,
  * `HouseCannotBuyTickets` for the House Player.
  */
@@ -398,17 +527,31 @@ export async function buyTickets(
 }
 
 /**
- * Books the withdrawal. No USDC moves here: `process_withdraw` pays it out
- * once the epoch this lands in has ended (ADR 0009). Ticket 05 builds the UI
- * around the wait; this is the same button pointed at the new instruction.
+ * The one withdraw (ADR 0020). The part of `amount` that is still a pending
+ * deposit pays to the wallet in this transaction and the rest queues for
+ * `process_withdraw` once the epoch ends (ADR 0009). The program syncs the venue
+ * itself, so no refresh instruction goes in front; a refund redeems from klend
+ * when free idle is short, which is why the klend extras ride along. The compute
+ * limit comes from `sendMany`'s simulation. Fails with `VenueIlliquid` when the
+ * reserve cannot cover the refund's gap, and with `InsufficientPrincipal` past
+ * Principal less what is already queued.
+ *
+ * `pendingDeposit` is the Player's Pending deposit as the screen holds it. The
+ * program redeems only for the refund, `min(amount, pending_deposit)`, so a
+ * queue-only request takes the sync list and never needs a funded allocation.
+ * Left out (unknown), the redeem list is built as if the refund were positive.
  */
 export async function requestWithdraw(
   program: HexVaultProgram,
   owner: TxSigner,
   pool: PoolLike,
   amount: bigint,
+  pendingDeposit?: bigint,
 ): Promise<SendResult> {
   const o = owner.publicKey;
+  const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const refund = pendingDeposit === undefined ? amount : splitWithdraw(amount, pendingDeposit).payNow;
+  const venue = await venueRemaining(program, pool, refund > 0n ? "redeem" : "sync");
   const builder = method(
     program,
     "requestWithdraw",
@@ -417,14 +560,50 @@ export async function requestWithdraw(
       owner: o,
       pool: pool.address,
       player: playerAddress(pool.address, o),
-    });
+      acceptedMint: pool.acceptedMint,
+      ownerToken,
+      principalVault: principalVaultAddress(pool.address),
+      ...venueAccounts(pool),
+      tokenProgram: TOKEN_PROGRAM,
+    })
+    .remainingAccounts(venue.remaining)
+    // A mainnet depositor may have closed the ATA since depositing.
+    .preInstructions([
+      createAssociatedTokenAccountIdempotentInstruction(
+        o,
+        ownerToken,
+        o,
+        pool.acceptedMint,
+        TOKEN_PROGRAM,
+      ),
+    ]);
+  return send(program, owner, builder, pool.priorityFeeMicroLamports, venue.lookupTables);
+}
+
+/**
+ * Takes back the queued withdrawal. Moves no money: the amount was only a flag
+ * on Principal that never left the vault. Works while paused, shut down or
+ * impaired. Fails with `NothingPending` when the crank paid it first.
+ */
+export async function cancelWithdraw(
+  program: HexVaultProgram,
+  owner: TxSigner,
+  pool: PoolLike,
+): Promise<SendResult> {
+  const o = owner.publicKey;
+  const builder = method(program, "cancelWithdraw")().accounts({
+    owner: o,
+    pool: pool.address,
+    player: playerAddress(pool.address, o),
+  });
   return send(program, owner, builder, pool.priorityFeeMicroLamports);
 }
 
 /**
- * Pays out the whole pending amount. The program takes no signer, so this is
- * the depositor's own escape hatch when the operator has not pushed it yet:
- * the wallet only pays the fee. Fails with `WithdrawalNotDue` before the
+ * Pays out the whole pending amount. The wallet signs as the owner, which the
+ * program needs while the pool is impaired (the payout is the haircut value)
+ * and ignores otherwise, so this is the depositor's own escape hatch when the
+ * operator has not pushed it yet. Fails with `WithdrawalNotDue` before the
  * requesting epoch has ended and `InsufficientVaultLiquidity` while the
  * vault is short, so the caller gates it on the pending row's `due` state.
  */
@@ -435,15 +614,19 @@ export async function processWithdraw(
 ): Promise<SendResult> {
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  const venue = await venueRemaining(program, pool, "sync");
   const builder = method(program, "processWithdraw")()
     .accounts({
       pool: pool.address,
       player: playerAddress(pool.address, o),
+      owner: o,
       acceptedMint: pool.acceptedMint,
       ownerToken,
       principalVault: principalVaultAddress(pool.address),
+      ...venueAccounts(pool),
       tokenProgram: TOKEN_PROGRAM,
     })
+    .remainingAccounts(venue.remaining)
     // A mainnet depositor may have closed the ATA since depositing; the
     // transfer needs it back, and this costs nothing when it is already there.
     .preInstructions([
@@ -455,7 +638,7 @@ export async function processWithdraw(
         TOKEN_PROGRAM,
       ),
     ]);
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+  return send(program, owner, builder, pool.priorityFeeMicroLamports, venue.lookupTables);
 }
 
 /**
@@ -476,6 +659,9 @@ export async function shutdownWithdraw(
   if (step.kind === "none") throw new Error("nothing to withdraw");
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
+  // One vault read serves both instructions: a Sync ignores the redeem
+  // extras, so `process_withdraw` on a kVault takes the same list.
+  const venue = await venueRemaining(program, pool, "redeem");
   const instructions: TransactionInstruction[] = [];
   if (step.kind === "request-and-process") {
     instructions.push(
@@ -487,7 +673,13 @@ export async function shutdownWithdraw(
           owner: o,
           pool: pool.address,
           player: playerAddress(pool.address, o),
+              acceptedMint: pool.acceptedMint,
+          ownerToken,
+          principalVault: principalVaultAddress(pool.address),
+          ...venueAccounts(pool),
+          tokenProgram: TOKEN_PROGRAM,
         })
+        .remainingAccounts(venue.remaining)
         .instruction(),
     );
   }
@@ -505,72 +697,15 @@ export async function shutdownWithdraw(
       .accounts({
         pool: pool.address,
         player: playerAddress(pool.address, o),
-        acceptedMint: pool.acceptedMint,
+        owner: o,
+          acceptedMint: pool.acceptedMint,
         ownerToken,
         principalVault: principalVaultAddress(pool.address),
+        ...venueAccounts(pool),
         tokenProgram: TOKEN_PROGRAM,
       })
+      .remainingAccounts(pool.venueKind === VENUE_KIND.kvault ? venue.remaining : [])
       .instruction(),
   );
-  return sendMany(program, owner, instructions, pool.priorityFeeMicroLamports);
-}
-
-/** Stakes `stakePerTile` Entries on every tile set in `tilesMask`. */
-export async function buyPosition(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  roundId: bigint,
-  tilesMask: bigint,
-  stakePerTile: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const round = roundAddress(pool.address, roundId);
-  const builder = method(program, "buyPosition")(bn(tilesMask), bn(stakePerTile))
-    .accounts({
-      owner: o,
-      pool: pool.address,
-      player: playerAddress(pool.address, o),
-      round,
-      position: positionAddress(round, o),
-      systemProgram: SystemProgram.programId,
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
-}
-
-/** Credits the round reward as Entries and closes the Position (rent back). */
-export async function settlePosition(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  roundId: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const round = roundAddress(pool.address, roundId);
-  const builder = method(program, "settlePosition")()
-    .accounts({
-      pool: pool.address,
-      round,
-      player: playerAddress(pool.address, o),
-      owner: o,
-      position: positionAddress(round, o),
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
-}
-
-/** Records this Player's final Weight in an ended epoch that is Registering. */
-export async function register(
-  program: HexVaultProgram,
-  owner: TxSigner,
-  pool: PoolLike,
-  epochId: bigint,
-): Promise<SendResult> {
-  const o = owner.publicKey;
-  const builder = method(program, "register")()
-    .accounts({
-      pool: pool.address,
-      epoch: epochAddress(pool.address, epochId),
-      player: playerAddress(pool.address, o),
-    });
-  return send(program, owner, builder, pool.priorityFeeMicroLamports);
+  return sendMany(program, owner, instructions, pool.priorityFeeMicroLamports, venue.lookupTables);
 }

@@ -53,6 +53,16 @@ describe("isMissingTokenAccount", () => {
     ).toBe(true);
   });
 
+  it("treats Surfpool's missing-account message as a real zero balance", () => {
+    expect(
+      isMissingTokenAccount(
+        new Error(
+          "failed to get token account balance: Account 25y3UAQcpu1jocbidRRcdWErSz7drFDwS4xtbtrVirow not found",
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("treats any other failure as unknown, not zero", () => {
     expect(isMissingTokenAccount(new Error("fetch failed"))).toBe(false);
     expect(isMissingTokenAccount(new Error("429 Too Many Requests"))).toBe(false);

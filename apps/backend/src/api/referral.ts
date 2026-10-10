@@ -3,7 +3,7 @@
 // tracker and ticket 08's daily bonus job can both import it without pulling
 // in Prisma.
 //
-// CONTEXT.md "Qualified referral": a wallet whose Referrer is set and whose
+// GLOSSARY.md "Qualified referral": a wallet whose Referrer is set and whose
 // Principal has stayed at or above 50 USDC for the last 7 days without a
 // break. Dropping below ends it at once; it restarts from zero.
 
@@ -28,28 +28,32 @@ export interface ReferralQualificationState {
   aboveSince: bigint | null;
 }
 
-/** The four Principal-changing events spec.md "Qualification" lists.
- *  Deposited carries the absolute new Principal; the other three carry a
- *  delta applied to whatever Principal was immediately before them. */
+/** The Principal-changing events spec.md "Qualification" lists, with
+ *  `Withdrawn` in place of the retired `YieldCredited` (live yield settles
+ *  inside the money instructions and emits no event of its own). A queued
+ *  withdrawal stays in Principal until it pays (ADR 0020), so a request lowers
+ *  it only by the part that refunded a pending deposit. Deposited and Withdrawn
+ *  carry the absolute new Principal; the other two carry a delta applied to
+ *  whatever Principal was immediately before. */
 export type ReferralPrincipalEvent =
   | { kind: "Deposited"; principal: bigint }
-  | { kind: "WithdrawRequested"; amount: bigint }
-  | { kind: "YieldCredited"; amount: bigint }
+  | { kind: "WithdrawRequested"; refunded: bigint }
+  | { kind: "Withdrawn"; principal: bigint }
   | { kind: "JackpotPaid"; amount: bigint };
 
 /** The referee's Principal immediately after `event`, given it was
  *  `previous` immediately before. Clamped at 0: the program never lets a
- *  withdrawal request exceed Principal, so a negative result here would only
- *  mean this tracker's own state had already drifted from the chain. */
+ *  refund exceed Principal, so a negative result here would only mean this
+ *  tracker's own state had already drifted from the chain. */
 export function nextPrincipal(previous: bigint, event: ReferralPrincipalEvent): bigint {
   switch (event.kind) {
     case "Deposited":
+    case "Withdrawn":
       return event.principal;
     case "WithdrawRequested": {
-      const next = previous - event.amount;
+      const next = previous - event.refunded;
       return next > 0n ? next : 0n;
     }
-    case "YieldCredited":
     case "JackpotPaid":
       return previous + event.amount;
   }

@@ -1,7 +1,7 @@
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 
-import { atomicUsdc, parseAdminCommand } from "./args";
+import { parseAdminCommand } from "./args";
 
 describe("parseAdminCommand", () => {
   it("parses pause and unpause with no flags", () => {
@@ -14,6 +14,13 @@ describe("parseAdminCommand", () => {
       expect(parseAdminCommand([kind])).toEqual({ kind });
     }
     expect(() => parseAdminCommand(["start-game", "now"])).toThrow(/unexpected argument/);
+  });
+
+  it("parses pause-deploy and start-deploy with no flags", () => {
+    for (const kind of ["pause-deploy", "start-deploy"]) {
+      expect(parseAdminCommand([kind])).toEqual({ kind });
+    }
+    expect(() => parseAdminCommand(["pause-deploy", "now"])).toThrow(/unexpected argument/);
   });
 
   it("rejects stray arguments to pause/unpause", () => {
@@ -39,47 +46,44 @@ describe("parseAdminCommand", () => {
     );
   });
 
-  it("parses fund-yield's amount", () => {
-    expect(parseAdminCommand(["fund-yield", "--amount", "12000000"])).toEqual({
-      kind: "fund-yield",
-      amount: 12_000_000n,
-    });
-  });
-
-  it("rejects fund-yield without an amount, or a bad one", () => {
-    expect(() => parseAdminCommand(["fund-yield"])).toThrow(/needs --amount/);
-    expect(() => parseAdminCommand(["fund-yield", "--amount=-5"])).toThrow(
-      /positive whole number/,
-    );
-  });
-
-  it("parses grant-tickets' owner and amount", () => {
+  it("parses grant-tickets as a signed backend request", () => {
     const owner = Keypair.generate().publicKey;
-    expect(
-      parseAdminCommand([
-        "grant-tickets",
-        "--owner",
-        owner.toBase58(),
-        "--amount",
-        "500",
-      ]),
-    ).toEqual({ kind: "grant-tickets", owner, amount: 500n });
+    const flags = ["--owner", owner.toBase58(), "--amount", "500", "--reason", "launch bonus", "--keypair", "team.json"];
+    expect(parseAdminCommand(["grant-tickets", ...flags])).toEqual({
+      kind: "grant-tickets",
+      owner,
+      amount: 500n,
+      reason: "launch bonus",
+      keypair: "team.json",
+    });
+    expect(parseAdminCommand(["grant-tickets", ...flags, "--backend", "http://b"])).toMatchObject({ backend: "http://b" });
   });
 
-  it("rejects grant-tickets missing either flag, or a bad one", () => {
+  it("rejects grant-tickets missing a flag, or with a bad amount or reason", () => {
     const owner = Keypair.generate().publicKey.toBase58();
-    expect(() => parseAdminCommand(["grant-tickets", "--amount", "1"])).toThrow(
-      /needs --owner/,
-    );
-    expect(() => parseAdminCommand(["grant-tickets", "--owner", owner])).toThrow(
-      /needs --amount/,
-    );
-    expect(() =>
-      parseAdminCommand(["grant-tickets", "--owner", "nope", "--amount", "1"]),
-    ).toThrow(/base58 pubkey/);
-    expect(() =>
-      parseAdminCommand(["grant-tickets", "--owner", owner, "--amount=-1"]),
-    ).toThrow(/positive whole number/);
+    const flags = ["--owner", owner, "--amount", "5", "--reason", "r", "--keypair", "k.json"];
+    for (const flag of ["owner", "amount", "reason", "keypair"]) {
+      const at = flags.indexOf(`--${flag}`);
+      const without = flags.filter((_, i) => i !== at && i !== at + 1);
+      expect(() => parseAdminCommand(["grant-tickets", ...without])).toThrow(new RegExp(`needs --${flag}`));
+    }
+    const withFlag = (flag: string, value: string) => {
+      const copy = [...flags];
+      copy[copy.indexOf(flag) + 1] = value;
+      return ["grant-tickets", ...copy];
+    };
+    expect(() => parseAdminCommand(withFlag("--amount", "0"))).toThrow(/positive whole number/);
+    expect(() => parseAdminCommand(withFlag("--amount", "9007199254740993"))).toThrow(/at most/);
+    expect(() => parseAdminCommand(withFlag("--reason", "x".repeat(201)))).toThrow(/1 to 200/);
+    expect(() => parseAdminCommand(withFlag("--owner", "nope"))).toThrow(/base58 pubkey/);
+  });
+
+  it("no longer has void-round or the round and ticket-rate flags", () => {
+    // The program dropped them (off-chain-tickets ticket 10).
+    expect(() => parseAdminCommand(["void-round", "--round", "1"])).toThrow(/usage/);
+    for (const flag of ["--round-seconds", "--close-buffer", "--house-cut-bps", "--tickets-per-usdc", "--bonus-cap-bps"]) {
+      expect(() => parseAdminCommand(["set-params", flag, "1"])).toThrow(/usage/);
+    }
   });
 
   it("parses only the set-params flags given", () => {
@@ -87,27 +91,9 @@ describe("parseAdminCommand", () => {
       kind: "set-params",
       params: { epochSeconds: 900 },
     });
-    expect(
-      parseAdminCommand([
-        "set-params",
-        "--round-seconds",
-        "20",
-        "--close-buffer",
-        "0",
-      ]),
-    ).toEqual({
-      kind: "set-params",
-      params: { roundSeconds: 20, closeBuffer: 0 },
-    });
     expect(parseAdminCommand(["set-params", "--min-deposit", "0"])).toEqual({
       kind: "set-params",
       params: { minDeposit: 0n },
-    });
-    expect(
-      parseAdminCommand(["set-params", "--house-cut-bps", "600"]),
-    ).toEqual({
-      kind: "set-params",
-      params: { houseCutBps: 600 },
     });
   });
 
@@ -119,116 +105,52 @@ describe("parseAdminCommand", () => {
     expect(() =>
       parseAdminCommand(["set-params", "--epoch-seconds", "0"]),
     ).toThrow(/positive whole number/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--close-buffer=-1"]),
-    ).toThrow(/non-negative whole number/);
   });
 
-  it("rejects a House cut rate above 10000", () => {
-    expect(() =>
-      parseAdminCommand(["set-params", "--house-cut-bps", "10001"]),
-    ).toThrow(/0 to 10000/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--house-cut-bps=-1"]),
-    ).toThrow(/0 to 10000/);
-  });
-
-  it("parses the base yield, bought and granted tickets flags (ticket 05)", () => {
-    expect(
-      parseAdminCommand([
-        "set-params",
-        "--base-rate-bps",
-        "488",
-        "--tickets-per-usdc",
-        "10",
-        "--bonus-cap-bps",
-        "500",
-      ]),
-    ).toEqual({
+  it("parses the base yield flag (ticket 05)", () => {
+    expect(parseAdminCommand(["set-params", "--base-rate-bps", "488"])).toEqual({
       kind: "set-params",
-      params: { baseRateBps: 488, ticketsPerUsdc: 10, bonusCapBps: 500 },
+      params: { baseRateBps: 488 },
     });
   });
 
-  it("rejects a base yield or bonus cap rate outside 0..=10000", () => {
+  it("rejects a base yield rate outside 0..=10000", () => {
     expect(() =>
       parseAdminCommand(["set-params", "--base-rate-bps", "10001"]),
     ).toThrow(/0 to 10000/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--bonus-cap-bps=-1"]),
-    ).toThrow(/0 to 10000/);
   });
 
-  it("rejects a tickets-per-usdc rate of zero or above a u16", () => {
-    expect(() =>
-      parseAdminCommand(["set-params", "--tickets-per-usdc", "0"]),
-    ).toThrow(/1 to 65535/);
-    expect(() =>
-      parseAdminCommand(["set-params", "--tickets-per-usdc", "65536"]),
-    ).toThrow(/1 to 65535/);
+  it("refuses a basis-point value that is not plain digits, naming the flag (audit-2026-10-09 09)", () => {
+    for (const bad of ["", "1e2", "0x10"]) {
+      expect(() => parseAdminCommand(["set-params", "--base-rate-bps", bad])).toThrow(/--base-rate-bps must be/);
+      expect(() => parseAdminCommand(["set-venue-params", "--yield-fee-bps", bad])).toThrow(/--yield-fee-bps must be/);
+    }
+    expect(parseAdminCommand(["set-venue-params", "--yield-fee-bps", "1000"])).toEqual({
+      kind: "set-venue-params",
+      params: { yieldFeeBps: 1000 },
+    });
   });
 
-  it("parses the three flags ticket 10 added to the program", () => {
+  it("parses the two flags ticket 10 added to the program", () => {
     expect(
-      parseAdminCommand([
-        "set-params",
-        "--min-jackpot",
-        "42",
-        "--registration-window",
-        "600",
-        "--payout-timeout",
-        "86400",
-      ]),
+      parseAdminCommand(["set-params", "--min-jackpot", "42", "--payout-timeout", "86400"]),
     ).toEqual({
       kind: "set-params",
       params: {
         minJackpot: 42_000_000n,
-        registrationWindow: 600,
         payoutTimeout: 86_400,
       },
     });
   });
 
-  it("rejects a registration window at or past the epoch it is given with", () => {
-    expect(() =>
-      parseAdminCommand([
-        "set-params",
-        "--epoch-seconds",
-        "600",
-        "--registration-window",
-        "600",
-      ]),
-    ).toThrow(/must be under the 600s epoch/);
+  it("rejects the registration window the program no longer has", () => {
+    expect(() => parseAdminCommand(["set-params", "--registration-window", "600"])).toThrow();
+  });
+
+  it("rejects a payout timeout of zero", () => {
     expect(() => parseAdminCommand(["set-params", "--payout-timeout", "0"])).toThrow(
       /positive whole number/,
     );
-  });
-
-  it("parses withdraw-principal's amount as typed, decimals and all", () => {
-    expect(parseAdminCommand(["withdraw-principal", "--amount", "250"])).toEqual({
-      kind: "withdraw-principal",
-      amount: "250",
-    });
-    expect(parseAdminCommand(["withdraw-principal", "--amount", "12.5"])).toEqual({
-      kind: "withdraw-principal",
-      amount: "12.5",
-    });
-  });
-
-  it("rejects a withdraw-principal amount that is zero, negative or too precise", () => {
-    expect(() => parseAdminCommand(["withdraw-principal"])).toThrow(/needs --amount/);
-    expect(() => parseAdminCommand(["withdraw-principal", "--amount", "0"])).toThrow(
-      /positive amount of USDC/,
-    );
-    expect(() => parseAdminCommand(["withdraw-principal", "--amount", "0.000"])).toThrow(
-      /positive amount of USDC/,
-    );
-    expect(() => parseAdminCommand(["withdraw-principal", "--amount=-5"])).toThrow(
-      /positive amount of USDC/,
-    );
-    expect(() =>
-      parseAdminCommand(["withdraw-principal", "--amount", "1.1234567"]),
-    ).toThrow(/positive amount of USDC/);
   });
 
   it("parses the two key commands and accept-admin", () => {
@@ -249,6 +171,30 @@ describe("parseAdminCommand", () => {
     expect(() => parseAdminCommand(["accept-admin", "now"])).toThrow(
       /unexpected argument/,
     );
+  });
+
+  it("parses propose-venue by kind name or number, and cancel-venue", () => {
+    const [program, market, reserve, ctoken] = Array.from({ length: 4 }, () => Keypair.generate().publicKey);
+    const flags = (kind: string) => [
+      "propose-venue",
+      "--kind", kind,
+      "--program", program!.toBase58(),
+      "--market", market!.toBase58(),
+      "--reserve", reserve!.toBase58(),
+      "--ctoken", ctoken!.toBase58(),
+    ];
+    expect(parseAdminCommand(flags("klend"))).toEqual({
+      kind: "propose-venue", venueKind: 0, program, market, reserve, ctoken,
+    });
+    expect(parseAdminCommand(flags("kvault"))).toMatchObject({ venueKind: 2 });
+    expect(parseAdminCommand(flags("7"))).toMatchObject({ venueKind: 7 });
+    expect(() => parseAdminCommand(flags("vault"))).toThrow(/--kind must be one of/);
+    expect(() => parseAdminCommand(flags("256"))).toThrow(/--kind must be one of/);
+    expect(() => parseAdminCommand(["propose-venue", "--kind", "klend"])).toThrow(/needs --program/);
+    expect(() => parseAdminCommand([...flags("klend").slice(0, 7), "--reserve", "nope", "--ctoken", ctoken!.toBase58()]))
+      .toThrow(/--reserve must be a base58 pubkey/);
+    expect(parseAdminCommand(["cancel-venue"])).toEqual({ kind: "cancel-venue" });
+    expect(() => parseAdminCommand(["cancel-venue", "now"])).toThrow(/unexpected argument/);
   });
 
   it("parses create-invite, owner and count optional", () => {
@@ -293,21 +239,127 @@ describe("parseAdminCommand", () => {
     ).toThrow(/base58 pubkey/);
   });
 
-  it("parses principal-out and sweep-house with no flags", () => {
-    expect(parseAdminCommand(["principal-out"])).toEqual({ kind: "principal-out" });
+  it("parses sweep-house with no flags", () => {
     expect(parseAdminCommand(["sweep-house"])).toEqual({ kind: "sweep-house" });
-    expect(() => parseAdminCommand(["principal-out", "now"])).toThrow(/unexpected argument/);
     expect(() => parseAdminCommand(["sweep-house", "now"])).toThrow(/unexpected argument/);
   });
 
-  it("parses return-principal's amount the same way as withdraw-principal", () => {
-    expect(parseAdminCommand(["return-principal", "--amount", "12.5"])).toEqual({
-      kind: "return-principal",
-      amount: "12.5",
+  it("parses pause-buy-tickets and start-buy-tickets with no flags", () => {
+    for (const kind of ["pause-buy-tickets", "start-buy-tickets"]) {
+      expect(parseAdminCommand([kind])).toEqual({ kind });
+    }
+    expect(() => parseAdminCommand(["start-buy-tickets", "now"])).toThrow(/unexpected argument/);
+  });
+
+  it("parses only the set-venue-params flags given", () => {
+    expect(parseAdminCommand(["set-venue-params", "--yield-fee-bps", "500"])).toEqual({
+      kind: "set-venue-params",
+      params: { yieldFeeBps: 500 },
     });
-    expect(() => parseAdminCommand(["return-principal", "--amount", "0"])).toThrow(
-      /positive amount of USDC/,
+    expect(
+      parseAdminCommand([
+        "set-venue-params",
+        "--idle-floor-bps",
+        "0",
+        "--idle-target-bps",
+        "1000",
+        "--reserve-share-cap-bps",
+        "1500",
+        "--reserve-liquidity-floor-bps",
+        "20000",
+        "--min-venue-move",
+        "100000000",
+        "--loss-tolerance-bps",
+        "50",
+      ]),
+    ).toEqual({
+      kind: "set-venue-params",
+      params: {
+        idleFloorBps: 0,
+        idleTargetBps: 1000,
+        reserveShareCapBps: 1500,
+        reserveLiquidityFloorBps: 20_000,
+        minVenueMove: 100_000_000n,
+        lossToleranceBps: 50,
+      },
+    });
+  });
+
+  it("rejects set-venue-params with no flags, or a value that does not fit", () => {
+    expect(() => parseAdminCommand(["set-venue-params"])).toThrow(/at least one flag/);
+    expect(() => parseAdminCommand(["set-venue-params", "--yield-fee-bps", "65536"])).toThrow(
+      /0 to 65535/,
     );
+    expect(() => parseAdminCommand(["set-venue-params", "--idle-floor-bps=-1"])).toThrow(
+      /0 to 65535/,
+    );
+    expect(() => parseAdminCommand(["set-venue-params", "--min-venue-move", "0"])).toThrow(
+      /positive whole number/,
+    );
+    expect(() => parseAdminCommand(["set-venue-params", "--bogus", "1"])).toThrow(/usage/);
+  });
+
+  it("parses set-treasury-accounts' two token accounts", () => {
+    const treasury = Keypair.generate().publicKey;
+    const buybackReserve = Keypair.generate().publicKey;
+    expect(
+      parseAdminCommand([
+        "set-treasury-accounts",
+        "--treasury",
+        treasury.toBase58(),
+        "--buyback-reserve",
+        buybackReserve.toBase58(),
+      ]),
+    ).toEqual({ kind: "set-treasury-accounts", treasury, buybackReserve });
+  });
+
+  it("rejects set-treasury-accounts missing either flag, or a bad one", () => {
+    const key = Keypair.generate().publicKey.toBase58();
+    expect(() => parseAdminCommand(["set-treasury-accounts", "--buyback-reserve", key])).toThrow(
+      /needs --treasury/,
+    );
+    expect(() => parseAdminCommand(["set-treasury-accounts", "--treasury", key])).toThrow(
+      /needs --buyback-reserve/,
+    );
+    expect(() =>
+      parseAdminCommand(["set-treasury-accounts", "--treasury", "nope", "--buyback-reserve", key]),
+    ).toThrow(/base58 pubkey/);
+  });
+
+  it("parses drain-venue's amount and refuses a missing, zero or fractional one", () => {
+    expect(parseAdminCommand(["drain-venue", "--amount", "1500000"])).toEqual({
+      kind: "drain-venue",
+      amount: 1_500_000n,
+    });
+    expect(() => parseAdminCommand(["drain-venue"])).toThrow(/needs --amount/);
+    expect(() => parseAdminCommand(["drain-venue", "--amount", "0"])).toThrow(
+      /positive whole number/,
+    );
+    expect(() => parseAdminCommand(["drain-venue", "--amount", "1.5"])).toThrow(
+      /positive whole number/,
+    );
+  });
+
+  it("parses migrate-venue, which takes no flags", () => {
+    expect(parseAdminCommand(["migrate-venue"])).toEqual({ kind: "migrate-venue" });
+    expect(() => parseAdminCommand(["migrate-venue", "now"])).toThrow(/unexpected argument/);
+  });
+
+  it("parses cover-deficit's amount", () => {
+    expect(parseAdminCommand(["cover-deficit", "--amount", "2500000"])).toEqual({
+      kind: "cover-deficit",
+      amount: 2_500_000n,
+    });
+    expect(() => parseAdminCommand(["cover-deficit"])).toThrow(/needs --amount/);
+    expect(() => parseAdminCommand(["cover-deficit", "--amount", "0"])).toThrow(
+      /positive whole number/,
+    );
+  });
+
+  it("no longer knows the commands that moved principal by hand or funded a Yield budget", () => {
+    for (const command of ["fund-yield", "withdraw-principal", "principal-out", "return-principal"]) {
+      expect(() => parseAdminCommand([command])).toThrow();
+    }
   });
 
   it("parses shutdown's confirm as the pool id", () => {
@@ -335,25 +387,12 @@ describe("parseAdminCommand", () => {
     );
   });
 
-  it("parses void-round and rollover-epoch ids as bigints", () => {
-    expect(parseAdminCommand(["void-round", "--round", "17"])).toEqual({
-      kind: "void-round",
-      roundId: 17n,
-    });
+  it("parses the rollover-epoch id as a bigint", () => {
     expect(parseAdminCommand(["rollover-epoch", "--epoch", "3"])).toEqual({
       kind: "rollover-epoch",
       epochId: 3n,
     });
-    expect(() => parseAdminCommand(["void-round"])).toThrow(/--round/);
-    expect(() => parseAdminCommand(["rollover-epoch", "--epoch", "-1"])).toThrow(/whole number/);
-  });
-
-  it("scales a USDC amount by the mint's decimals", () => {
-    expect(atomicUsdc("250", 6)).toBe(250_000_000n);
-    expect(atomicUsdc("12.5", 6)).toBe(12_500_000n);
-    expect(atomicUsdc("0.000001", 6)).toBe(1n);
-    expect(atomicUsdc("1.5", 9)).toBe(1_500_000_000n);
-    expect(() => atomicUsdc("1.5", 0)).toThrow(/more decimal places/);
+    expect(() => parseAdminCommand(["rollover-epoch", "--epoch", "-1"])).toThrow(/usage/);
   });
 
   it("rejects an unknown command", () => {

@@ -7,12 +7,18 @@
 // applied to the sum of those referrals' own Principal (each counted up to
 // $2,500), capped at the referrer's own Principal, then scaled down
 // pool-wide (floored) if the total would exceed the epoch's bonus cap.
+//
+// The tiers are an argument (off-chain-tickets 32): callers pass the
+// `referralTiers` of the Game config row in force. RATE_TIERS below is only
+// the seed that row starts from.
 
-/** Qualified-referral counts to rate tiers, in basis points: 1-2 -> 2%,
- *  3-5 -> 3%, 6-10 -> 4%, 11+ -> 5%. Checked highest `min` first so the
- *  first match wins. `max: null` at the top tier (11+, tier 4), which has no
- *  upper bound. */
-const RATE_TIERS: readonly { tier: number; min: number; max: number | null; rateBps: number }[] = [
+import type { ReferralTier } from "./game-config";
+
+/** The seed tiers in `DEFAULT_GAME_CONFIG`, nothing else reads them. Qualified-
+ *  referral counts to rate tiers, in basis points: 1-2 -> 2%, 3-5 -> 3%,
+ *  6-10 -> 4%, 11+ -> 5%. Highest `min` first so the first match wins.
+ *  `max: null` at the top tier (11+, tier 4), which has no upper bound. */
+export const RATE_TIERS: readonly ReferralTier[] = [
   { tier: 4, min: 11, max: null, rateBps: 500 },
   { tier: 3, min: 6, max: 10, rateBps: 400 },
   { tier: 2, min: 3, max: 5, rateBps: 300 },
@@ -54,8 +60,8 @@ export interface ReferrerBonus {
   readonly rateBps: number;
 }
 
-function rateBpsFor(qualifiedCount: number): number {
-  return RATE_TIERS.find((tier) => qualifiedCount >= tier.min)?.rateBps ?? 0;
+function rateBpsFor(tiers: readonly ReferralTier[], qualifiedCount: number): number {
+  return tiers.find((tier) => qualifiedCount >= tier.min)?.rateBps ?? 0;
 }
 
 /**
@@ -75,9 +81,9 @@ export function remainingGrantCap(principal: bigint, alreadyGrantedToday: bigint
 /** One referrer's bonus before the pool-wide cap scales it down. `uncapped`
  *  is the raw basis*rate figure, i.e. `amount` before `remainingGrantCap`
  *  clamps it. */
-function preScaleBonus(input: ReferrerBonusInput): ReferrerBonus {
+function preScaleBonus(tiers: readonly ReferralTier[], input: ReferrerBonusInput): ReferrerBonus {
   const qualifiedCount = input.qualifiedReferralPrincipals.length;
-  const rateBps = rateBpsFor(qualifiedCount);
+  const rateBps = rateBpsFor(tiers, qualifiedCount);
   if (rateBps === 0) {
     return { referrer: input.referrer, amount: 0n, uncapped: 0n, qualifiedCount, rateBps };
   }
@@ -105,12 +111,13 @@ function preScaleBonus(input: ReferrerBonusInput): ReferrerBonus {
  * is left out of the result: `grant_tickets` refuses a zero amount.
  */
 export function computeBonuses(
+  tiers: readonly ReferralTier[],
   referrers: readonly ReferrerBonusInput[],
   totalPrincipal: bigint,
   capBps: number,
   alreadyGrantedThisEpoch: bigint = 0n,
 ): ReferrerBonus[] {
-  const preScaled = referrers.map(preScaleBonus).filter((bonus) => bonus.amount > 0n);
+  const preScaled = referrers.map((referrer) => preScaleBonus(tiers, referrer)).filter((bonus) => bonus.amount > 0n);
   if (preScaled.length === 0) return [];
 
   const sum = preScaled.reduce((total, bonus) => total + bonus.amount, 0n);
@@ -203,18 +210,19 @@ const NO_BAND: ReferralBand = { tier: 0, rateBps: 0, minCount: 0, maxCount: 0 };
  * `nextBand`. Tier 0 means no rate yet (0 qualified referrals).
  */
 export function bandForCount(
+  tiers: readonly ReferralTier[],
   qualifiedCount: number,
 ): { band: ReferralBand; nextBand: ReferralBand | null } {
-  // RATE_TIERS is ordered highest-min-first, so the first match is the
-  // current tier.
-  const current = RATE_TIERS.find((tier) => qualifiedCount >= tier.min);
+  // `tiers` is ordered highest-min-first (game-config.ts checks it), so the
+  // first match is the current tier.
+  const current = tiers.find((tier) => qualifiedCount >= tier.min);
   const band: ReferralBand = current
     ? { tier: current.tier, rateBps: current.rateBps, minCount: current.min, maxCount: current.max }
     : NO_BAND;
 
   // The next band up is the smallest min still greater than the current
   // count, found by scanning from the low end.
-  const next = [...RATE_TIERS].reverse().find((tier) => tier.min > qualifiedCount);
+  const next = [...tiers].reverse().find((tier) => tier.min > qualifiedCount);
   const nextBand: ReferralBand | null = next
     ? { tier: next.tier, rateBps: next.rateBps, minCount: next.min, maxCount: next.max }
     : null;

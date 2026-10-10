@@ -15,81 +15,51 @@ import { Leaderboard } from "./screens/Leaderboard.js";
 import { Referrals } from "./screens/Referrals.js";
 import { Vault, type VaultMode } from "./screens/Vault.js";
 import { WeeklyDraw } from "./screens/WeeklyDraw.js";
-import { awaitSendResult, buyPosition, settlePosition } from "./actions.js";
 import { track } from "./analytics.js";
-import { apiBaseUrl, fetchFeed, type RoundDto } from "./api.js";
-import { GAME_GATED, PROGRAM_ID, POOL_ID, poolAddress, type HexVaultProgram } from "./chain.js";
+import { apiBaseUrl, fetchFeed } from "./api.js";
+import { httpBetApi, sendBet } from "./bet.js";
+import { CLUSTER, GAME_GATED, PROGRAM_ID, POOL_ID, poolAddress, type HexVaultProgram } from "./chain.js";
 import { idl } from "./idl.js";
 import {
-  covers,
   decideAutoRound,
-  displayTile,
-  expectedReward,
-  isRevealed,
   idleBoardLabel,
+  openRoundFrom,
   phaseFor,
+  positionsFrom,
+  resultRoundFrom,
+  tileCountOf,
   type FeedRow,
   type RememberedBoard,
-  type RoundLike,
 } from "./engine.js";
 import { formatAtomic, formatAtomic2, parseAtomic } from "./lib/money.js";
-import {
-  decodePlayerError,
-  decodeSendFailure,
-  failureReason,
-  thrownReason,
-} from "./playerErrors.js";
+import { fetchGameConfig } from "./ops/gameConfig.js";
+import { decodeBetRefusal, decodePlayerError, thrownReason } from "./playerErrors.js";
 import { sfx, setSoundOn, subscribeSound, isSoundOn } from "./sfx.js";
 import { SHUTDOWN_BANNER, SHUTDOWN_REASON } from "./shutdown.js";
 import { SoundIcon } from "./SoundIcon.js";
 import { WalletMenu } from "./WalletMenu.js";
-import { poolFromDto, solRentWarning, useSolBalance, useWalletBalance } from "./read.js";
+import { poolFromDto, useSolBalance, useWalletBalance } from "./read.js";
 import { useGenesisCheck } from "./useGenesisCheck.js";
 import { useChainClock } from "./useChainClock.js";
 import { useApiPoll } from "./useApiPoll.js";
 import { snapshot, useStatePoll } from "./useStatePoll.js";
 import { useRoundEngine } from "./useRoundEngine.js";
+import { LEDGER_COPY } from "./session.js";
+import { storage as browserStorage, useSession } from "./useSession.js";
 import { useGameSigner } from "./wallets.js";
 import { summarizeStatus } from "./status.js";
 import { TABS, hashForTab, playLock, tabFromHash, type Tab } from "./tabs.js";
 
-/** `GET /state`'s tracked Round (any status) → the engine's `RoundLike`. */
-function roundLikeFrom(dto: RoundDto): RoundLike {
-  return {
-    roundId: BigInt(dto.id),
-    epochId: BigInt(dto.epochId),
-    startsAt: BigInt(dto.startsAt),
-    endsAt: BigInt(dto.endsAt),
-    status: Number(dto.status),
-    winningTile: dto.winningTile ?? -1,
-    pot: BigInt(dto.pot),
-    houseCut: BigInt(dto.houseCut),
-    tileTotals: dto.tileTotals.map((value) => BigInt(value)),
-  };
-}
-
 /** The accepted asset is USDC (6 decimals) for every pool in this build. */
 const SYMBOL = "USDC";
 const DECIMALS = 6;
-/**
- * How long after a round ends before the manual SETTLE POSITION button shows.
- * The operator settles one batch per 2 s tick, so a healthy crank clears a
- * round well inside this; the button is the fallback for a stalled one.
- * ponytail: fixed guess, derive from batch size × tick if rounds get crowded.
- */
-const SETTLE_GRACE_SECONDS = 30n;
-
+/** The Game config's `roundSeconds` default. Only the epoch-tail label reads it. */
+const ROUND_SECONDS = 60n;
+const loadGameConfig = (signal: AbortSignal) => fetchGameConfig(apiBaseUrl(), signal);
 export function App() {
   const { connection } = useConnection();
   const signer = useGameSigner();
   const { publicKey, connected, sendTransaction } = signer;
-  // What the actions sign with: the address plus, for the Privy embedded
-  // wallet, its sponsored send path. Keyed on the two so the action
-  // callbacks below don't rebuild on every signer object Privy hands back.
-  const txSigner = useMemo(
-    () => (publicKey ? { publicKey, sendTransaction } : null),
-    [publicKey, sendTransaction],
-  );
   const [tab, setTab] = useState<Tab>(() =>
     tabFromHash(window.location.hash),
   );
@@ -108,11 +78,17 @@ export function App() {
     setAutoRounds(value);
   };
   const [addressCopied, setAddressCopied] = useState(false);
-  const [deployBusy, setDeployBusy] = useState(false);
-  const [deployNote, setDeployNote] = useState<string | null>(null);
-  // Phone bet drawer (spec.md "Drawer"): controlled here so the deploy
-  // success path and the win takeover path can both close it.
+  // Phone bet drawer (spec.md "Drawer"): controlled here so the win takeover
+  // path can close it.
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Ticket 15: one wallet prompt per 24 hours buys a browser-held session key.
+  const betSession = useSession(signer);
+  const { ensure: ensureSession } = betSession;
+  // Opening the drawer asks for a delegation when none is live (or under five
+  // minutes remain); a live one opens silently.
+  useEffect(() => {
+    if (drawerOpen && !betSession.cannotSign) void ensureSession();
+  }, [drawerOpen, betSession.cannotSign, ensureSession]);
 
   // Privy and wallet-adapter hand back a fresh signer object on every render,
   // so memoizing the provider on it rebuilt the Program every render — and the
@@ -172,9 +148,6 @@ export function App() {
   const pool = poolResult?.ok && !genesisMismatch ? poolResult.pool : null;
   const refusalReason = genesisMismatch ?? (poolResult && !poolResult.ok ? poolResult.reason : null);
   const player = state?.player ?? null;
-  // The tracked Round: open, or the last one this session saw once it has
-  // settled (see api.service.ts `getState`'s comment on `round`).
-  const round = state?.round ? roundLikeFrom(state.round) : null;
   // Ticket 11: irreversible once true. Read off `/state`'s `status`, not
   // `pool.paused` — shutdown forces `paused` too, but the reason shown for
   // each is different (see `shutdown.ts`).
@@ -183,7 +156,15 @@ export function App() {
   // than the signing-side `pool`, which a refused Pool leaves null.
   const gamePaused = state?.pool.gamePaused ?? false;
   const jackpotPaused = state?.pool.jackpotPaused ?? false;
-  const now = useChainClock(state ? BigInt(state.chainTime) : null, round?.roundId ?? null);
+  const now = useChainClock(state ? BigInt(state.chainTime) : null, null);
+  // Ticket 18: the Rounds come from the API. Their `closeAt` is on the
+  // server's wall clock, so the countdown anchors to `serverTime` through its
+  // own offset, re-anchored when a Round opens. `now` above stays chain time,
+  // the clock epochs are on.
+  const open = useMemo(() => openRoundFrom(state?.openRound ?? null), [state?.openRound]);
+  const lastRound = useMemo(() => resultRoundFrom(state?.lastRound ?? null), [state?.lastRound]);
+  const positions = useMemo(() => positionsFrom(state?.positions ?? []), [state?.positions]);
+  const roundNow = useChainClock(state ? BigInt(state.serverTime) : null, open?.roundId ?? null);
   // The wallet balance is the one chain read left in the browser, so it
   // reloads when something actually moved, not on every poll: `snapshot` is
   // unchanged while only chain time and the heartbeat tick. The nonce covers
@@ -195,9 +176,8 @@ export function App() {
     publicKey ?? undefined,
     `${state ? snapshot(state) : ""}:${balanceNonce}`,
   );
-  // Ticket 15: rent for a first deposit or Position's account creation.
+  // Ticket 15: rent for a first deposit's account creation.
   const solBalance = useSolBalance(connection, publicKey ?? undefined, balanceNonce);
-  const rentWarning = solRentWarning(solBalance, { sponsored: sendTransaction !== undefined });
   const status = useMemo(
     () => summarizeStatus(state?.status ?? null, Date.now()),
     [state?.status],
@@ -206,20 +186,26 @@ export function App() {
     (signal: AbortSignal) => fetchFeed(apiBaseUrl(), 12, signal),
     [],
   );
+  const houseCutBps = useApiPoll(loadGameConfig, 30_000).data?.inForce?.houseCutBps ?? null;
   const feedPoll = useApiPoll(loadFeed, 2000);
   const feedRows = useMemo<FeedRow[]>(
     () => eventsToRows(feedPoll.data ?? [], ownerKey),
     [feedPoll.data, ownerKey],
   );
-  const trackedPosition = state?.position
-    ? { tiles: BigInt(state.position.tiles), stakePerTile: BigInt(state.position.stakePerTile) }
-    : null;
+  const principal = player ? BigInt(player.principal) : 0n;
+  // The read model's `weight` is the Player's Tickets from the backend's Ticket
+  // ledger, the same number as `tickets`: the cutoff reset has already run.
+  const tickets = player ? BigInt(player.weight) : 0n;
+  const pendingWithdraw = player ? BigInt(player.pendingWithdraw) : 0n;
+  const fmt = useCallback((value: bigint) => formatAtomic2(value, DECIMALS), []);
+
   const engine = useRoundEngine({
-    round,
-    position: trackedPosition,
+    open,
+    last: lastRound,
+    positions,
     owner: publicKey ?? undefined,
-    closeBuffer: pool?.closeBuffer ?? 0n,
-    clockNow: now,
+    clockNow: roundNow,
+    tickets,
     feed: feedRows,
   });
 
@@ -229,12 +215,6 @@ export function App() {
   useEffect(() => {
     if (engine.takeover) setDrawerOpen(false);
   }, [engine.takeover]);
-
-  const principal = player ? BigInt(player.principal) : 0n;
-  const entries = player ? BigInt(player.entries) : 0n;
-  const pendingWithdraw = player ? BigInt(player.pendingWithdraw) : 0n;
-  const pendingEpoch = player ? BigInt(player.pendingEpoch) : 0n;
-  const fmt = useCallback((value: bigint) => formatAtomic2(value, DECIMALS), []);
 
   // Header chip copies the full address; the truncated form is unusable for
   // funding. Clipboard needs a secure context, so fall back to a prompt.
@@ -248,134 +228,133 @@ export function App() {
     }
   }, []);
 
-  const feed = engine.feed;
-
   // --- Actions ---------------------------------------------------------------
-  const stake = parseAtomic(stakeText, DECIMALS) ?? 0n;
-  const position = engine.activePosition;
-  // `round` is the tracked Round (any status once revealed); a genuinely
-  // open one for gating positions is status 0 specifically — Requested
-  // (VRF already in flight) never reaches here in practice since positions
-  // close before the operator requests it, but this keeps that guaranteed
-  // rather than assumed.
-  const openRound = round && round.status === 0 ? round : null;
-  const locked = Boolean(position) && Boolean(openRound);
+  // A bet is a message the session key signs and `POST /game/bets` checks
+  // (ADR 0025); there is no transaction, so no SOL balance matters here.
+  const [deployBusy, setDeployBusy] = useState(false);
+  const [deployNote, setDeployNote] = useState<string | null>(null);
+  const lastDeployRef = useRef<RememberedBoard | null>(null);
+  const autoRoundRef = useRef<string | null>(null);
+  // The Round a bet names, read after the wallet prompt: approving a first
+  // delegation can take longer than the countdown the click saw.
+  const betTargetRef = useRef<bigint | null>(null);
+  useEffect(() => {
+    betTargetRef.current =
+      state === null ? null : open && phaseFor(open, roundNow ?? 0n) === "mine" ? open.roundId : BigInt(state.nextRoundId);
+  }, [state, open, roundNow]);
+  const stake =parseAtomic(stakeText, DECIMALS) ?? 0n;
+  const position = engine.position;
+  // One bet per wallet per Round, so the panel locks on the open Round's.
+  const locked = position !== null;
   const deployedTotal = position
-    ? BigInt(position.tiles.toString(2).replace(/[^1]/g, "").length) *
-      position.stakePerTile
+    ? BigInt(tileCountOf(position.tiles)) * position.stakePerTile
     : 0n;
   const spend = stake * BigInt(engine.selected.length);
+  // What a bet needs besides the board: a wallet that can sign, a live game.
+  const canBet =
+    connected && state !== null && !shutdown && !gamePaused && !betSession.cannotSign && !refusalReason;
+  const canDeploy = canBet && !locked && spend <= tickets;
 
-  // Red text is for things the user can act on. Round state (no open
-  // round, closed, already placed) is what the deploy button label already
-  // says, so it only goes on the button as a tooltip.
+  // Red text is for things the player can act on. Round state is what the
+  // board and the button already say.
   const problems: string[] = [];
   if (shutdown) problems.push(SHUTDOWN_REASON);
-  if (!pool) problems.push(refusalReason ?? "no pool found yet");
-  if (spend > entries)
-    problems.push("not enough Tickets — deposit to earn more");
-  // ticket 15: a Position opens the round's account, which needs rent; a
-  // wallet with only USDC (email login) fails there with no clear reason.
-  if (!position && rentWarning) problems.push(rentWarning);
-  // ticket 11: `buy_position` refuses outright once shut down, ahead of the
-  // ordinary round-state reasons below.
+  if (refusalReason) problems.push(refusalReason);
+  if (spend > tickets) problems.push("not enough Tickets — deposit to earn more");
   const deployHint = shutdown
     ? SHUTDOWN_REASON
-    : !openRound
-      ? gamePaused
-        ? "the game is paused"
-        : "no open round (the operator opens rounds)"
-      : locked
-        ? `position already placed in round #${openRound.roundId}`
-        : phaseFor(openRound, now ?? 0n, pool?.closeBuffer ?? 0n) !== "mine"
-          ? "positions are closed for this round"
-          : null;
+    : gamePaused
+      ? "the game is paused"
+      : !connected
+        ? "connect a wallet to play"
+        : betSession.cannotSign
+          ? "this wallet cannot play"
+          : locked
+            ? "your bet is in this round"
+            : null;
 
-  /** Places `tiles` at `stakeAmount` per tile in the open round. Returns whether the transaction landed. */
+  /**
+   * Signs and posts a bet for `tiles` (display numbers 1..36) at `stakeAmount`
+   * per tile. It names the open Round while its countdown runs, else the next
+   * id, which opens a Round. Returns the Round the bet landed in, or null.
+   */
   const deploy = useCallback(
-    async (tiles: number[], stakeAmount: bigint, autoRound = false): Promise<boolean> => {
-      if (!pool || !openRound || !txSigner || !program) return false;
-      if (tiles.length === 0 || stakeAmount <= 0n) return false;
+    async (tiles: number[], stakeAmount: bigint, autoRound = false): Promise<bigint | null> => {
+      if (!canBet || tiles.length === 0 || stakeAmount <= 0n || !state) return null;
       setDeployBusy(true);
       setDeployNote(null);
       try {
         sfx("click");
-        const tileMask = tiles.reduce(
-          (acc, tile) => acc | (1n << BigInt(tile - 1)),
-          0n,
-        );
-        let result = await buyPosition(
-          program,
-          txSigner,
-          pool,
-          openRound.roundId,
-          tileMask,
-          stakeAmount,
-        );
-        if (result.kind === "unknown") result = await awaitSendResult(program, result);
-        if (result.kind !== "landed") {
-          track("position_failed", { reason: failureReason(result) });
-          setDeployNote(decodeSendFailure(result));
-          return false;
+        // A live session answers silently; otherwise the wallet is asked once.
+        const ensured = await ensureSession();
+        if (!ensured?.ok) {
+          track("position_failed", { reason: `session_${ensured?.reason ?? "unavailable"}` });
+          setDeployNote(ensured ? ensured.message : decodeBetRefusal("SessionInvalid"));
+          return null;
         }
-        track("position_placed", { tile_count: tiles.length, stake_per_tile: Number(formatAtomic(stakeAmount, DECIMALS)), is_topup: Boolean(position), auto_round: autoRound });
-        // No predicted Tickets balance: the panel shows "confirming…" (see
-        // `deployNote` below) until the next poll's Position actually moves.
-        setDeployNote(null);
+        const target = betTargetRef.current;
+        if (target === null) return null;
+        const outcome = await sendBet(
+          {
+            api: httpBetApi(apiBaseUrl()),
+            storage: browserStorage(),
+            cluster: CLUSTER,
+            programId: PROGRAM_ID.toBase58(),
+            pool: expectedPoolAddress.toBase58(),
+            session: ensured.session,
+          },
+          { tiles: tiles.map((tile) => tile - 1), stake: stakeAmount, round: target },
+        );
+        if (!outcome.ok) {
+          track("position_failed", { reason: outcome.code });
+          // The server no longer knows this key; the next bet asks the wallet again.
+          if (outcome.code === "SessionInvalid") betSession.drop();
+          setDeployNote(decodeBetRefusal(outcome.code));
+          return null;
+        }
+        track("position_placed", {
+          tile_count: tiles.length,
+          stake_per_tile: Number(formatAtomic(stakeAmount, DECIMALS)),
+          auto_round: autoRound,
+        });
+        // No predicted Tickets balance: the panel shows "confirming…" until the
+        // next poll's balance actually moves.
         lastDeployRef.current = { tiles: [...tiles], stake: stakeAmount };
         sfx("prime");
         statePoll.kick();
-        return true;
+        return outcome.roundId;
       } catch (error) {
+        // A browser without WebCrypto Ed25519, or a network failure, lands here.
         track("position_failed", { reason: thrownReason(error) });
         setDeployNote(decodePlayerError(error));
-        return false;
+        return null;
       } finally {
         setDeployBusy(false);
       }
     },
-    [pool, openRound, txSigner, program, statePoll.kick, position],
+    [canBet, state, ensureSession, betSession, expectedPoolAddress, statePoll.kick],
   );
 
-  // Auto-rounds: re-place the last board when a fresh round opens. The
-  // counter and the "handled this round" marker only move after deploy()
-  // reports the transaction was actually sent — a board that can't be
-  // placed (see decideAutoRound) leaves both alone, so it retries next
-  // round instead of silently eating one.
-  const lastDeployRef = useRef<RememberedBoard | null>(null);
-  const autoRoundRef = useRef<string | null>(null);
+  // Auto-rounds: re-place the last board in the next Round. The counter only
+  // moves once a bet lands. A board that fails is not retried until the next
+  // Round, so a refused wallet prompt cannot loop.
   useEffect(() => {
-    if (autoRounds <= 0 || !pool || !openRound || deployBusy) return;
-    const key = openRound.roundId.toString();
+    if (autoRounds <= 0 || !canBet || !state || deployBusy) return;
+    const key = (open ? open.roundId : BigInt(state.nextRoundId)).toString();
     if (autoRoundRef.current === key) return;
-    const phase = phaseFor(openRound, now ?? 0n, pool.closeBuffer);
-    const decision = decideAutoRound(
-      lastDeployRef.current,
-      entries,
-      phase,
-      Boolean(position),
-    );
+    const decision = decideAutoRound(lastDeployRef.current, tickets, phaseFor(open, roundNow ?? 0n), locked);
     if (decision.action === "skip") return;
     const { tiles, stake: stakeForRound } = decision;
+    autoRoundRef.current = key;
     void (async () => {
-      const placed = await deploy(tiles, stakeForRound, true);
-      if (!placed) return;
-      autoRoundRef.current = key;
+      const landed = await deploy(tiles, stakeForRound, true);
+      if (landed === null) return;
+      autoRoundRef.current = landed.toString();
       setAutoRounds((value) => value - 1);
       setStakeText(formatAtomic(stakeForRound, DECIMALS));
       engine.setSelected(tiles);
     })();
-  }, [
-    openRound,
-    autoRounds,
-    position,
-    now,
-    pool,
-    entries,
-    deployBusy,
-    engine,
-    deploy,
-  ]);
+  }, [open, state, autoRounds, canBet, locked, roundNow, tickets, deployBusy, deploy, engine]);
 
   // Theme attribute + sound subscription.
   useEffect(() => {
@@ -399,69 +378,38 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  const canPick = Boolean(
-    pool &&
-      openRound &&
-      !shutdown &&
-      phaseFor(openRound, now ?? 0n, pool.closeBuffer) === "mine" &&
-      !locked &&
-      connected,
-  );
-
-  // A revealed round leaves the Position open until it is settled; that is the
-  // permissionless instruction which credits the round reward as Entries. The
-  // operator sweeps positions every tick, so the manual button only shows once
-  // the round has been over long enough that the sweep is clearly behind.
-  const settleState = useMemo(() => {
-    if (!round || !position || !publicKey) return null;
-    if (!isRevealed(round)) return null;
-    if ((now ?? 0n) < round.endsAt + SETTLE_GRACE_SECONDS) return null;
-    const reward = covers(position.tiles, round.winningTile)
-      ? expectedReward(round, position)
-      : 0n;
-    return { roundId: round.roundId, winningTile: round.winningTile, reward };
-  }, [round, position, publicKey, now]);
-  const rewardHint = settleState
-    ? settleState.reward > 0n
-      ? `round #${settleState.roundId}: you covered tile ${displayTile(settleState.winningTile)} — settle for +${fmt(settleState.reward)} Tickets`
-      : `round #${settleState.roundId}: settle to close your position and get its rent back`
-    : null;
-
-  const [settleBusy, setSettleBusy] = useState(false);
-  const settle = useCallback(async () => {
-    if (!settleState || !pool || !txSigner || !program) return;
-    setSettleBusy(true);
-    try {
-      sfx("land");
-      let result = await settlePosition(program, txSigner, pool, settleState.roundId);
-      if (result.kind === "unknown") result = await awaitSendResult(program, result);
-      if (result.kind !== "landed") {
-        setDeployNote(decodeSendFailure(result));
-        return;
-      }
-      track("position_settled", { won: settleState.reward > 0n, reward: Number(formatAtomic(settleState.reward, DECIMALS)) });
-      setDeployNote(
-        settleState.reward > 0n
-          ? `round reward settled: +${fmt(settleState.reward)} Tickets`
-          : "position settled",
-      );
-      if (settleState.reward > 0n) sfx("win");
-      statePoll.kick();
-    } catch (error) {
-      setDeployNote(decodePlayerError(error));
-    } finally {
-      setSettleBusy(false);
-    }
-  }, [settleState, pool, txSigner, program, fmt, statePoll.kick]);
-
-  // Shown in the deploy note area whenever a send is outstanding and no
-  // error replaced it: no predicted Tickets balance, just an honest "still
-  // waiting on the read model" (ticket 07).
+  // Shown in the deploy note area whenever a send is outstanding: no
+  // predicted Tickets balance, just an honest "still waiting on the read
+  // model" (ticket 07).
   const confirmingNote = statePoll.pending
     ? statePoll.stillConfirming
       ? "still confirming…"
       : "confirming…"
     : null;
+
+  const panelProps = {
+    engine,
+    tickets,
+    decimals: DECIMALS,
+    stakeText,
+    setStakeText,
+    autoRounds,
+    setAutoRounds: setAutoRoundsByUser,
+    canDeploy,
+    deployProblems: problems,
+    deployHint,
+    deployBusy,
+    deployNote: deployNote ?? confirmingNote,
+    locked,
+    deployedTotal,
+    lastWin: engine.lastWin,
+    feed: engine.feed,
+    // A bet that lands closes the phone drawer; a refused one keeps it open with the note.
+    onDeploy: () =>
+      void deploy(engine.selected, stake).then((landed) => {
+        if (landed !== null) setDrawerOpen(false);
+      }),
+  };
 
   return (
     <main className="app" data-tab={tab}>
@@ -481,10 +429,10 @@ export function App() {
           {TABS.map((candidate) => {
             // PLAY needs Tickets, or is gated off entirely; aria-disabled
             // (not `disabled`) keeps the button hoverable so the data-tip
-            // tooltip (styles.css) shows. The gate wins over the entries
+            // tooltip (styles.css) shows. The gate wins over the Tickets
             // lock (ticket 01, feature-gates).
             const lock =
-              candidate.id === "MINE" ? playLock(GAME_GATED, entries) : null;
+              candidate.id === "MINE" ? playLock(GAME_GATED, tickets) : null;
             return (
               <button
                 key={candidate.id}
@@ -508,7 +456,7 @@ export function App() {
           {connected ? (
             <>
               <span className="chip" data-testid="topbar-tickets">
-                Tickets: {fmt(entries)}
+                Tickets: {fmt(tickets)}
               </span>
               <span className="chip" data-testid="topbar-balance">
                 {SYMBOL}: {walletBalance === null ? "—" : fmt(walletBalance)}
@@ -532,7 +480,7 @@ export function App() {
           {signer.connected && signer.publicKey ? (
             <WalletMenu
               address={signer.publicKey.toBase58()}
-              tickets={fmt(entries)}
+              tickets={fmt(tickets)}
               balance={walletBalance === null ? "—" : fmt(walletBalance)}
               symbol={SYMBOL}
               addressCopied={addressCopied}
@@ -593,12 +541,13 @@ export function App() {
           <Dashboard
             owner={publicKey ?? null}
             principal={principal}
-            entries={entries}
+            tickets={tickets}
             now={now}
             currentEpoch={state?.currentEpoch ?? null}
             launchAt={state?.launchAt ?? null}
             jackpotPaused={jackpotPaused}
             player={player}
+            baseRateBps={pool?.baseRateBps ?? null}
             onDeposit={() => {
               setVaultMode("deposit");
               setTab("VAULT");
@@ -615,12 +564,19 @@ export function App() {
           <>
             <Arena
               engine={engine}
-              canPick={canPick}
+              canPick={canBet && !locked}
               operatorStale={status.stale}
-              houseCutBps={pool?.houseCutBps ?? 0}
+              houseCutBps={houseCutBps}
               idleLabel={
                 state
-                  ? idleBoardLabel(state.openRound !== null, state.currentEpoch !== null, gamePaused)
+                  ? idleBoardLabel(
+                      open !== null,
+                      state.currentEpoch !== null,
+                      gamePaused,
+                      now ?? 0n,
+                      state.currentEpoch ? BigInt(state.currentEpoch.endsAt) : null,
+                      ROUND_SECONDS,
+                    )
                   : null
               }
               onToggleTile={(n) => {
@@ -632,28 +588,12 @@ export function App() {
                 );
               }}
             />
-            <ControlPanel
-              engine={engine}
-              entries={entries}
-              decimals={DECIMALS}
-              stakeText={stakeText}
-              setStakeText={setStakeText}
-              autoRounds={autoRounds}
-              setAutoRounds={setAutoRoundsByUser}
-              canDeploy={canPick}
-              deployProblems={problems}
-              deployHint={deployHint}
-              deployBusy={deployBusy}
-              deployNote={deployNote ?? confirmingNote}
-              locked={locked}
-              deployedTotal={deployedTotal}
-              lastWin={engine.lastWin}
-              feed={feed}
-              rewardHint={rewardHint}
-              settleBusy={settleBusy}
-              onSettle={() => void settle()}
-              onDeploy={() => void deploy(engine.selected, stake)}
-            />
+            {betSession.cannotSign ? (
+              <div className="screen-note err ledger-copy" data-testid="ledger-copy">
+                {LEDGER_COPY}
+              </div>
+            ) : null}
+            <ControlPanel {...panelProps} />
             <StakeBarButton
               stakeText={stakeText}
               selected={engine.selected}
@@ -661,10 +601,12 @@ export function App() {
               phase={engine.phase}
               decimals={DECIMALS}
               onOpen={() => setDrawerOpen(true)}
+              disabled={betSession.cannotSign}
             />
             <BetDrawer
-              open={drawerOpen}
+              open={drawerOpen && !betSession.cannotSign}
               onOpenChange={setDrawerOpen}
+              session={{ busy: betSession.busy, error: betSession.error }}
               soundOn={soundOn}
               onToggleSound={() => {
                 const next = !soundOn;
@@ -672,38 +614,7 @@ export function App() {
                 setSoundOnState(next);
               }}
             >
-              {(tab) => (
-                <ControlPanel
-                  tab={tab}
-                  engine={engine}
-                  entries={entries}
-                  decimals={DECIMALS}
-                  stakeText={stakeText}
-                  setStakeText={setStakeText}
-                  autoRounds={autoRounds}
-                  setAutoRounds={setAutoRoundsByUser}
-                  canDeploy={canPick}
-                  deployProblems={problems}
-                  deployHint={deployHint}
-                  deployBusy={deployBusy}
-                  deployNote={deployNote ?? confirmingNote}
-                  locked={locked}
-                  deployedTotal={deployedTotal}
-                  lastWin={engine.lastWin}
-                  feed={feed}
-                  rewardHint={rewardHint}
-                  settleBusy={settleBusy}
-                  onSettle={() => void settle()}
-                  onDeploy={() => {
-                    // Confirmed deploy closes the drawer; a failed one leaves
-                    // it open with deployNote's error visible (spec.md
-                    // "Drawer": close states).
-                    void deploy(engine.selected, stake).then((placed) => {
-                      if (placed) setDrawerOpen(false);
-                    });
-                  }}
-                />
-              )}
+              {(tab) => <ControlPanel tab={tab} {...panelProps} />}
             </BetDrawer>
           </>
         ) : null}
@@ -714,31 +625,24 @@ export function App() {
             sendTransaction={sendTransaction}
             pool={pool}
             principal={principal}
-            entries={entries}
             walletBalance={walletBalance}
             solBalance={solBalance}
             paused={pool?.paused ?? false}
             shutdown={shutdown}
             currentEpoch={state?.currentEpoch ?? null}
             pendingWithdraw={pendingWithdraw}
-            pendingEpoch={pendingEpoch}
             initialMode={vaultMode}
             onConnect={() => signer.connect()}
             onDone={statePoll.kick}
-            onPlay={() => setTab("MINE")}
           />
         ) : null}
         {tab === "DAILY DRAW" ? (
           <WeeklyDraw
-            program={program}
             owner={publicKey ?? undefined}
-            sendTransaction={sendTransaction}
-            pool={pool}
             now={now}
             currentEpoch={state?.currentEpoch ?? null}
             jackpotPaused={jackpotPaused}
             player={player}
-            onDone={statePoll.kick}
           />
         ) : null}
         {tab === "LEADERBOARD" ? (

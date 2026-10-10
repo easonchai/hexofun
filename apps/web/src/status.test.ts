@@ -12,14 +12,11 @@ const status = (overrides: Partial<StatusDto> = {}): StatusDto => ({
     nextWakeAt: null,
     lastAction: "settleRound",
     lastError: null,
-    registeredCount: null,
-    registeredTotal: null,
   },
   cursor: { lastSlot: "1", lastSignature: "x", ageSeconds: 1 },
   rpcOk: true,
   slot: 1,
   shutdown: false,
-  principalOut: null,
   launchAt: null,
   ...overrides,
 });
@@ -55,8 +52,6 @@ describe("summarizeStatus", () => {
         nextWakeAt: null,
         lastAction: "settleRound",
         lastError: null,
-        registeredCount: null,
-        registeredTotal: null,
       },
     });
     const result = summarizeStatus(stale, NOW);
@@ -73,8 +68,6 @@ describe("summarizeStatus", () => {
         nextWakeAt: null,
         lastAction: "settleRound",
         lastError: "OPERATOR_TICK_FAILED",
-        registeredCount: null,
-        registeredTotal: null,
       },
     });
     const result = summarizeStatus(errored, NOW);
@@ -113,8 +106,6 @@ describe("summarizeStatus", () => {
         nextWakeAt: "2026-09-06T00:00:38.000Z",
         lastAction: "createRound",
         lastError: null,
-        registeredCount: null,
-        registeredTotal: null,
       },
     });
     const result = summarizeStatus(sleeping, NOW);
@@ -132,8 +123,6 @@ describe("summarizeStatus", () => {
         nextWakeAt: "2026-09-05T23:59:59.000Z",
         lastAction: "createRound",
         lastError: null,
-        registeredCount: null,
-        registeredTotal: null,
       },
     });
     const result = summarizeStatus(missed, NOW);

@@ -18,7 +18,6 @@ import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import { FastifyAdapter } from "@nestjs/platform-fastify";
 import { Test } from "@nestjs/testing";
 import type { Player, Pool } from "@prisma/client";
-import { Prisma } from "@prisma/client";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import request from "supertest";
@@ -29,6 +28,8 @@ import { ConfigModule } from "../config/config.module";
 import { PrismaModule } from "../prisma/prisma.module";
 import { PrismaService } from "../prisma/prisma.service";
 import { isDatabaseReachableSync } from "../test-utils/db-probe";
+import { LIVE_PLAYER_DEFAULTS, LIVE_POOL_DEFAULTS } from "../test-utils/live-yield-defaults";
+import { DEFAULT_GAME_CONFIG } from "./game-config";
 import { applyReferralMessage } from "./invite-code";
 import { REFERRAL_QUALIFY_PRINCIPAL } from "./referral";
 import { ReferralsController } from "./referrals.controller";
@@ -46,7 +47,7 @@ const fakeChain = { provide: ChainService, useValue: { poolAddress: () => new Pu
 
 async function truncate(prisma: PrismaService): Promise<void> {
   await prisma.$executeRawUnsafe(
-    'TRUNCATE "Pool", "InviteCode", "InviteRedemption", "Referral", "ReferralGrant", "ReferralGrantShare", "ReferralCode", "Player" CASCADE',
+    'TRUNCATE "Pool", "InviteCode", "InviteRedemption", "Referral", "ReferralGrant", "ReferralGrantShare", "ReferralCode", "Player", "GameConfig" CASCADE',
   );
 }
 
@@ -66,25 +67,14 @@ const emptyPlayer = (owner: string, poolAddress: string = POOL_ADDRESS): Player 
   poolAddress,
   owner,
   principal: 0n,
-  entries: 0n,
-  weightAcc: new Prisma.Decimal(0),
-  lastUpdate: 0n,
   epochId: 0n,
-  frozenWeight: new Prisma.Decimal(0),
-  frozenEpoch: 0n,
-  regEpoch: 0n,
-  regStart: new Prisma.Decimal(0),
-  regEnd: new Prisma.Decimal(0),
   isHouse: false,
   pendingWithdraw: 0n,
   pendingEpoch: 0n,
-  principalAcc: new Prisma.Decimal(0),
-  frozenPrincipalAcc: new Prisma.Decimal(0),
-  yieldEpoch: 0n,
   boughtEpoch: 0n,
   boughtAmount: 0n,
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
+  slot: 0n,
+  ...LIVE_PLAYER_DEFAULTS,
 });
 
 const emptyPool = (overrides: Partial<Pool> = {}): Pool => ({
@@ -96,8 +86,6 @@ const emptyPool = (overrides: Partial<Pool> = {}): Pool => ({
   mint: Keypair.generate().publicKey.toBase58(),
   epochSeconds: 86_400n,
   epochAnchor: 0n,
-  roundSeconds: 60n,
-  closeBuffer: 15n,
   minDeposit: 0n,
   paused: false,
   currentEpochId: 5n,
@@ -106,18 +94,12 @@ const emptyPool = (overrides: Partial<Pool> = {}): Pool => ({
   totalPrincipal: 0n,
   pendingWithdrawals: 0n,
   minJackpot: 0n,
-  carryPot: 0n,
-  houseCutBps: 0,
   baseRateBps: 488,
-  yieldBudget: 0n,
-  ticketsPerUsdc: 1,
-  bonusCapBps: 500,
-  bonusEpoch: 0n,
-  bonusGranted: 0n,
   version: 1,
   shutdown: false,
   gamePaused: false,
   jackpotPaused: false,
+  ...LIVE_POOL_DEFAULTS,
   updatedSlot: 0n,
   ...overrides,
 });
@@ -161,10 +143,28 @@ describe.skipIf(!DB_AVAILABLE)("GET /referrals/:wallet", () => {
     await prisma.player.deleteMany();
     // Last: every pool-scoped row above references it (onDelete: Restrict).
     await prisma.pool.deleteMany();
+    await prisma.gameConfig.deleteMany();
+    await setTiers(DEFAULT_GAME_CONFIG.referralTiers);
   });
+
+  /** A new Game config row; the newest is in force. */
+  const setTiers = (referralTiers: object) =>
+    prisma.gameConfig.create({
+      data: { poolAddress: POOL_ADDRESS, roundSeconds: 60, houseCutBps: 600, ticketsPerUsdc: 10, bonusCapBps: 500, referralTiers, maxTilesPerBet: 36 },
+    });
 
   it("400s a malformed wallet", async () => {
     await http.get("/referrals/not-a-wallet").expect(400);
+  });
+
+  it("bands over the tiers of the Game config row in force", async () => {
+    await prisma.referral.create({
+      data: { referee: Keypair.generate().publicKey.toBase58(), referrer: REFERRER, code: "ABCD2345", boundAt: 1n, aboveSince: 0n, principal: 50_000_000n },
+    });
+    await setTiers([{ tier: 9, min: 1, max: null, rateBps: 1000 }]);
+    const { body } = await http.get(`/referrals/${REFERRER}`).expect(200);
+    expect(body.band).toEqual({ tier: 9, rateBps: 1000, minCount: 1, maxCount: null });
+    expect(body.nextBand).toBeNull();
   });
 
   it("is the empty state for a wallet with nothing indexed yet (no pool either)", async () => {

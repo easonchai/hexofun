@@ -50,11 +50,11 @@ describe("ChainModule", () => {
   it("names an Anchor error from its program logs", () => {
     const fakeSendFailure = {
       logs: [
-        "Program log: AnchorError thrown in lib.rs:100. Error Code: InvalidTileSelection. Error Number: 6000. Error Message: Invalid tile selection.",
+        "Program log: AnchorError thrown in lib.rs:100. Error Code: PoolPaused. Error Number: 6001. Error Message: the pool is paused.",
       ],
     };
     expect(chain.mapSendError(fakeSendFailure).message).toBe(
-      "InvalidTileSelection",
+      "PoolPaused",
     );
   });
 });
@@ -117,6 +117,28 @@ describe("ChainService.send", () => {
       // The bounded fallback: one status query, one block-height read.
       expect(connection.callsTo("getSignatureStatuses")).toBe(1);
       expect(connection.callsTo("getBlockHeight")).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("send hooks: the signature is reported before confirmation, and dropped only when the send fails for good", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const [blockHeightOffset, dropped] of [[0, 0], [1_000, 1]] as const) {
+        const connection = new CountingConnection();
+        connection.autoConfirmSignature = false;
+        connection.blockHeight = connection.slot + blockHeightOffset;
+        const chain = chainWith(connection);
+        const onSent = vi.fn(async () => {});
+        const onDropped = vi.fn(async () => {});
+
+        const rejected = expect(chain.send(noop, undefined, [], { onSent, onDropped })).rejects.toThrow();
+        await vi.advanceTimersByTimeAsync(CONFIRM_TIMEOUT_MS);
+        await rejected;
+        expect(onSent).toHaveBeenCalledTimes(1);
+        expect(onDropped).toHaveBeenCalledTimes(dropped);
+      }
     } finally {
       vi.useRealTimers();
     }
@@ -215,6 +237,19 @@ describe("ChainService.send", () => {
       await expect(chain.send(noop)).resolves.toBeDefined();
 
       expect(sentComputeLimit(connection)).toBeUndefined();
+    });
+
+    // A program error in simulation is deterministic: preflight would refuse
+    // the same bytes, so `send` throws the named error without going to the
+    // wire (seen as a daily NothingToHarvest warning in the operator log).
+    it("throws the program's named error when simulation fails inside the program", async () => {
+      const connection = new CountingConnection();
+      connection.simulateError = { InstructionError: [1, { Custom: 6042 }] };
+      const chain = chainWith(connection);
+
+      await expect(chain.send(noop)).rejects.toThrow("NothingToHarvest");
+
+      expect(connection.callsTo("sendRawTransaction")).toBe(0);
     });
   });
 

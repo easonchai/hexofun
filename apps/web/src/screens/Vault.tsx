@@ -1,25 +1,21 @@
 /**
  * VAULT tab: the Figma "Deposit" frame. One widget with DEPOSIT / WITHDRAW
  * tabs on the HOME halftone background. The program is the custody boundary.
- * WITHDRAW sends `request_withdraw`, which deducts Principal and Tickets now
- * and pays out after the epoch ends (ADR 0009). The pending row below the
- * widget carries that wait: the amount, the day it pays in, and a "pay out
- * now" button that sends the permissionless `process_withdraw` when the
- * operator has not.
+ * WITHDRAW sends `request_withdraw` (ADR 0020): the part that is still a
+ * pending deposit pays in the same transaction and the rest queues and pays
+ * after the epoch ends (ADR 0009). The sheet previews that split from the
+ * pending deposit (`splitWithdraw`). Fork-run-fixes 09: no pending row, so no
+ * Cancel or Pay out now here; `cancel_withdraw` stays on chain and
+ * `process_withdraw` stays an operator crank.
  *
  * Ticket 07: `currentEpoch` comes from App's one `GET /state` poll instead
  * of a duplicate `/epochs/current` poll of its own; `onDone` tightens that
  * poll (see `useStatePoll.ts` `kick`) instead of triggering a chain re-read.
  *
- * Ticket 10: base yield is placeholder UI (plain elements, no Figma styling
- * yet), unlike the deposit/withdraw widget above it. Buy Tickets is hidden for
+ * Estimated yield is a year at the pool's base rate, shown as "~" because the
+ * venue's real rate floats under that ceiling. Buy Tickets is hidden for
  * now; its markup was removed but buyTickets.ts and useBuyTickets.ts stay, so
- * bringing it back is markup only. The math split mirrors how ticket 09
- * split access.ts / useAccessGate.ts / AccessGate.tsx, so the designer's
- * restyle only touches this file's markup. `buyAllowanceLeft`/yield figures
- * are not on `GET /state`'s embedded Player, so this screen polls
- * `GET /players/:owner` on its own slower interval, same as Dashboard.tsx and
- * WeeklyDraw.tsx already do for their own list data.
+ * bringing it back is markup only, behind `buyTicketsVisible`.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PublicKey } from "@solana/web3.js";
@@ -27,7 +23,6 @@ import type { PublicKey } from "@solana/web3.js";
 import {
   awaitSendResult,
   deposit,
-  processWithdraw,
   requestWithdraw,
   shutdownWithdraw,
   type SendResult,
@@ -36,29 +31,32 @@ import {
 import { track } from "../analytics.js";
 import { apiBaseUrl, fetchPlayer, type CurrentEpochDto } from "../api.js";
 import { LogoCog } from "../arena/Arena.js";
-import { apyFromBaseRateBps } from "../buyTickets.js";
 import { InfoTip } from "../InfoTip.js";
 import { CLUSTER, type HexVaultProgram } from "../chain.js";
 import {
   addCapped,
   clampDecimals,
+  depositOpen,
   formatAtomic,
   formatAtomic2,
+  formatMoney2,
+  haircutValue,
   parseAtomic,
-  pendingWithdrawal,
-  previewWithdraw,
+  pendingTickets,
+  splitWithdraw,
+  unsettledYieldLine,
+  withdrawCap,
 } from "../lib/money.js";
 import {
-  decodeErrorCode,
   decodePlayerError,
   decodeSendFailure,
   failureReason,
-  NOTHING_PENDING_CODE,
   thrownReason,
 } from "../playerErrors.js";
 import { solRentWarning, type PoolLike } from "../read.js";
 import { SHUTDOWN_BANNER } from "../shutdown.js";
 import { useApiPoll } from "../useApiPoll.js";
+import { useLivePool } from "../useLiveYield.js";
 import { GlyphRow } from "./Home.js";
 
 const DECIMALS = 6;
@@ -66,28 +64,36 @@ const SYMBOL = "USDC";
 const ONE = 10n ** BigInt(DECIMALS);
 /**
  * The input, the pills and MAX all stay at two decimals so what the rows show
- * is what gets signed. Up to 0.009999 USDC of game dust in Tickets can
- * stay behind on a MAX withdraw; worth less than a cent.
+ * is what gets signed. Up to 0.009999 USDC of Principal can stay behind on a
+ * MAX withdraw; worth less than a cent.
  */
 const INPUT_DECIMALS = 2;
 /** The Figma quick pills: each adds this many whole USDC. */
 const QUICK_ADDS = [50n, 100n, 500n] as const;
+/** Withdraw's pills: this percent of what can be withdrawn. */
+const QUICK_PERCENTS = [25n, 50n, 75n] as const;
+/** Figma types the CTA in mixed case; Syncopate's lowercase glyphs draw "DePOSIT". */
+const MODE_CTA = { deposit: "Deposit", withdraw: "Withdraw" } as const;
+
+/** ADR 0020: a deposit earns no Ticket until the next epoch. */
+const TICKETS_TIP = ["Tickets from this deposit join the draw from tomorrow."];
+
+const RECEIVE_TIP = [
+  "A deposit from today never held a Ticket, so it comes back at once. The rest stays in today's draw, keeps earning yield, and pays after the day ends.",
+];
 
 const YIELD_TIP = [
   "Base yield is paid into your deposit once a day, so it compounds. The estimate is a year at today's rate.",
 ];
 
+/** `base_rate_bps` APR compounded daily, as a percentage: 488 bps is about 5%. */
+export const apyFromBaseRateBps = (baseRateBps: number): number =>
+  ((1 + baseRateBps / 10_000 / 365) ** 365 - 1) * 100;
+
 /** A year of compounded Base yield on `amount` at `apy` percent, in atomic
  *  units. Display only: floats are fine at these magnitudes. */
 const yearlyYield = (amount: bigint, apy: number): bigint =>
   BigInt(Math.floor((Number(amount) * apy) / 100));
-
-/**
- * `NothingPending` (playerErrors.ts, ticket 09 — this used to be this file's
- * own `payoutError`): the operator's crank paid this withdrawal before the
- * click landed. `payOutNow` below treats that as a success, not an error.
- */
-const NOTHING_PENDING_NOTE = decodeErrorCode(NOTHING_PENDING_CODE);
 
 /** Ticket 15: shown while an `"unknown"` `SendResult` is being polled to a
  *  real outcome, with a link so the depositor can check for themselves too. */
@@ -95,6 +101,20 @@ const explorerUrl = (signature: string): string =>
   `https://explorer.solana.com/tx/${signature}${CLUSTER === "devnet" ? "?cluster=devnet" : ""}`;
 
 const CHECKING_NOTE = "Checking your transaction…";
+
+const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+/** Unix seconds as the Figma's local "6 OCT, 12:00AM (GMT+8)"; `gap` goes
+ *  between the time and AM/PM (the modal has one, the widget does not). */
+export function receiveTime(unixSeconds: number, gap = ""): string {
+  const at = new Date(unixSeconds * 1000);
+  const hours = at.getHours();
+  const clock = `${hours % 12 || 12}:${String(at.getMinutes()).padStart(2, "0")}${gap}${hours < 12 ? "AM" : "PM"}`;
+  const offset = -at.getTimezoneOffset();
+  const abs = Math.abs(offset);
+  const zone = `GMT${offset < 0 ? "-" : "+"}${Math.floor(abs / 60)}${abs % 60 ? `:${String(abs % 60).padStart(2, "0")}` : ""}`;
+  return `${at.getDate()} ${MONTHS[at.getMonth()]}, ${clock} (${zone})`;
+}
 
 export type VaultMode = "deposit" | "withdraw";
 type Mode = VaultMode;
@@ -107,7 +127,6 @@ export interface VaultScreenProps {
   sendTransaction?: TxSigner["sendTransaction"] | undefined;
   pool: PoolLike | null;
   principal: bigint;
-  entries: bigint;
   /** Null when the chain read failed (ticket 15): a stuttering RPC must
    *  never look like an empty wallet and block a deposit as over balance. */
   walletBalance: bigint | null;
@@ -120,8 +139,6 @@ export interface VaultScreenProps {
   currentEpoch: CurrentEpochDto | null;
   /** Requested but unpaid Principal; 0 when nothing is pending. */
   pendingWithdraw: bigint;
-  /** The epoch that pending amount was requested in, so the day it pays after. */
-  pendingEpoch: bigint;
   /**
    * Which tab the widget opens on. The dashboard's two buttons are the only
    * way in, and they arrive with an intent already; App unmounts the screen on
@@ -130,8 +147,6 @@ export interface VaultScreenProps {
   initialMode?: Mode | undefined;
   onConnect: () => void;
   onDone: () => void;
-  /** "Play HEXO" on the deposit-confirmed modal: App switches to the MINE tab. */
-  onPlay: () => void;
 }
 
 export function Vault(props: VaultScreenProps) {
@@ -141,18 +156,15 @@ export function Vault(props: VaultScreenProps) {
     sendTransaction,
     pool,
     principal,
-    entries,
     walletBalance,
     solBalance,
     paused,
     shutdown,
     currentEpoch,
     pendingWithdraw,
-    pendingEpoch,
     initialMode,
     onConnect,
     onDone,
-    onPlay,
   } = props;
   // Two decimals everywhere, including what the pills write into the input
   // (see INPUT_DECIMALS).
@@ -166,25 +178,10 @@ export function Vault(props: VaultScreenProps) {
   >(null);
   /** Atomic amount of the deposit that just landed; null closes the modal. */
   const [confirmed, setConfirmed] = useState<bigint | null>(null);
-  /**
-   * A `process_withdraw` has been sent and the read model has not caught up.
-   * Keyed on the pending amount so the flag clears itself the moment the
-   * payout lands (or a fresh request books a different amount).
-   */
-  const [payoutSent, setPayoutSent] = useState<bigint | null>(null);
 
   const connected = owner !== null && program !== null && pool !== null;
   const amount = parseAtomic(amountText, DECIMALS);
   const amountUsdc = amount === null ? 0 : Number(formatAtomic(amount, DECIMALS));
-  /**
-   * What the pills clamp to: wallet on deposit, Principal on withdraw.
-   * `request_withdraw` only checks Principal now (ADR 0009), so Tickets
-   * spent in the game no longer hold any of it back. Null only on deposit,
-   * when the wallet balance read failed (ticket 15) — the pills and the
-   * over-balance check both stand down rather than guess.
-   */
-  const cap = mode === "deposit" ? walletBalance : principal;
-  const balanceUnavailable = mode === "deposit" && walletBalance === null;
   const rentWarning = solRentWarning(solBalance, { sponsored: sendTransaction !== undefined });
 
   const ownerBase58 = owner?.toBase58();
@@ -195,21 +192,26 @@ export function Vault(props: VaultScreenProps) {
         : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
     [ownerBase58],
   );
-  const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
+  const playerExtras = useApiPoll(loadPlayerExtras, 10_000, ownerBase58);
+  /**
+   * What the pills clamp to: wallet on deposit; on withdraw, Principal plus
+   * the yield the Sync settles, less what is already queued (`withdrawCap`,
+   * fork-run-fixes 13). `request_withdraw` only checks that, so Tickets spent
+   * in the game do not hold any of it back. Null only on deposit,
+   * when the wallet balance read failed (ticket 15) — the pills and the
+   * over-balance check both stand down rather than guess.
+   */
+  const cap =
+    mode === "deposit"
+      ? walletBalance
+      : withdrawCap(principal, playerExtras.data?.unsettledYield, pendingWithdraw);
+  const balanceUnavailable = mode === "deposit" && walletBalance === null;
 
-  // The payout landed (or the request was never there): drop the flag, so a
-  // later request for the same amount does not inherit this one's state.
-  useEffect(() => {
-    if (pendingWithdraw === 0n) setPayoutSent(null);
-  }, [pendingWithdraw]);
-
-  const pending = pendingWithdrawal(
-    pendingWithdraw,
-    pendingEpoch,
-    currentEpoch ? BigInt(currentEpoch.id) : null,
-    payoutSent !== null && payoutSent === pendingWithdraw,
-    shutdown,
-  );
+  // While the pool is impaired every withdrawal pays a share of the amount, and
+  // the program takes no deposit.
+  const livePool = useLivePool();
+  const haircutFactor = livePool?.live.haircutFactor ?? null;
+  const impaired = livePool?.pool.impaired ?? false;
 
   const switchMode = (next: Mode) => {
     if (next === mode) return;
@@ -270,11 +272,38 @@ export function Vault(props: VaultScreenProps) {
   // 15): unknown is not "over balance", so this stands down rather than
   // guess — `balanceUnavailable`'s own note carries the warning instead.
   const overCap = connected && amount !== null && cap !== null && amount > cap;
-  const apy = pool ? apyFromBaseRateBps(pool.baseRateBps) : null;
   const underMin =
     mode === "deposit" && pool !== null && amount !== null && amount < pool.minDeposit;
-  const withdrawPreview =
-    mode === "withdraw" && amount !== null ? previewWithdraw(entries, amount) : null;
+  const apy = pool ? apyFromBaseRateBps(pool.baseRateBps) : null;
+  const currentEpochId = currentEpoch ? BigInt(currentEpoch.id) : null;
+  // ADR 0020: a deposit earns no Ticket until the next epoch. The read model
+  // sends the row, and the same lazy fold `touch` does runs here against the
+  // epoch the screen already holds.
+  const pendingNow = playerExtras.data
+    ? pendingTickets(
+        BigInt(playerExtras.data.pendingDeposit),
+        BigInt(playerExtras.data.pendingDepositEpoch),
+        currentEpochId,
+      )
+    : 0n;
+  // The refund part pays in the transaction; at Shutdown the whole amount does.
+  const split =
+    mode === "withdraw" && amount !== null && amount > 0n
+      ? shutdown
+        ? { payNow: amount, queued: 0n }
+        : splitWithdraw(amount, pendingNow)
+      : null;
+  // The queue pays when the epoch ends, as long as that is still ahead; the
+  // same moment a deposit's Tickets start counting.
+  const epochEnd = currentEpoch ? Number(currentEpoch.endsAt) : 0;
+  const epochAhead = epochEnd * 1000 > Date.now();
+  const expectedAt =
+    shutdown || (split !== null && split.queued === 0n)
+      ? "Now"
+      : epochAhead
+        ? receiveTime(epochEnd).replace(" (", "\n(")
+        : "After today's draw";
+  const yieldEarned = unsettledYieldLine(playerExtras.data?.unsettledYield, DECIMALS);
 
   const submit = () => {
     if (!connected || !amount) return;
@@ -288,42 +317,17 @@ export function Vault(props: VaultScreenProps) {
         shutdownWithdraw(program, signer, pool, amount, pendingWithdraw),
       );
     } else {
-      void run("Withdraw requested", program, () =>
-        requestWithdraw(program, signer, pool, amount),
+      // One instruction (ADR 0020): the pending-deposit part refunds in the same
+      // transaction and the rest queues. The note says which happened.
+      const label =
+        split === null || split.payNow === 0n
+          ? "Withdraw requested"
+          : split.queued === 0n
+            ? "Refunded"
+            : "Refunded today's deposit, rest requested";
+      void run(label, program, () =>
+        requestWithdraw(program, signer, pool, amount, playerExtras.data ? pendingNow : undefined),
       );
-    }
-  };
-
-  const payOutNow = async () => {
-    if (!connected) return;
-    setBusy(true);
-    setNote(null);
-    setPayoutSent(pendingWithdraw);
-    try {
-      let result = await processWithdraw(program, { publicKey: owner, sendTransaction }, pool);
-      if (result.kind === "unknown") {
-        setNote({ tone: "ok", text: CHECKING_NOTE, href: explorerUrl(result.signature) });
-        result = await awaitSendResult(program, result);
-      }
-      if (result.kind === "landed") {
-        track("withdraw_paid_out");
-        setNote({ tone: "ok", text: "Payout sent." });
-        onDone();
-      } else if (result.kind === "failed" && result.code === NOTHING_PENDING_CODE) {
-        // Already paid by the operator: the read model is stale, so refresh
-        // it the same way a successful payout does instead of offering the
-        // button again.
-        setNote({ tone: "ok", text: NOTHING_PENDING_NOTE });
-        onDone();
-      } else {
-        setPayoutSent(null);
-        setNote({ tone: "err", text: decodeSendFailure(result) });
-      }
-    } catch (error) {
-      setPayoutSent(null);
-      setNote({ tone: "err", text: decodePlayerError(error) });
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -334,7 +338,7 @@ export function Vault(props: VaultScreenProps) {
     amount > 0n &&
     !overCap &&
     !underMin &&
-    !(mode === "deposit" && paused);
+    !(mode === "deposit" && !depositOpen(paused, impaired));
 
   const ctaText = !connected
     ? "CONNECT WALLET"
@@ -344,7 +348,9 @@ export function Vault(props: VaultScreenProps) {
         ? "POOL CLOSED"
         : mode === "deposit" && paused
           ? "POOL PAUSED"
-          : mode.toUpperCase();
+          : mode === "deposit" && impaired
+            ? "DEPOSITS CLOSED"
+            : MODE_CTA[mode];
 
   return (
     <div className="vault" data-testid="vault-screen">
@@ -399,21 +405,35 @@ export function Vault(props: VaultScreenProps) {
                   ? walletBalance === null
                     ? "Balance unavailable"
                     : `Available ${fmt2(walletBalance)} ${SYMBOL}`
-                  : `Withdrawable at day end ${fmt2(principal)} ${SYMBOL}`}
+                  : `Available to withdraw: ${fmt2(cap ?? 0n)} ${SYMBOL}`}
               </span>
             </label>
 
             <div className="vault-quick">
-              {QUICK_ADDS.map((units) => (
-                <button
-                  key={units.toString()}
-                  type="button"
-                  className="vault-pill"
-                  onClick={() => addQuick(units)}
-                >
-                  +${units.toString()}
-                </button>
-              ))}
+              {mode === "deposit"
+                ? QUICK_ADDS.map((units) => (
+                    <button
+                      key={units.toString()}
+                      type="button"
+                      className="vault-pill"
+                      onClick={() => addQuick(units)}
+                    >
+                      +${units.toString()}
+                    </button>
+                  ))
+                : QUICK_PERCENTS.map((percent) => (
+                    <button
+                      key={percent.toString()}
+                      type="button"
+                      className="vault-pill"
+                      disabled={cap === null}
+                      onClick={() => {
+                        if (cap !== null) setAmountText(fmt2((cap * percent) / 100n));
+                      }}
+                    >
+                      {percent.toString()}%
+                    </button>
+                  ))}
               <button
                 type="button"
                 className="vault-pill"
@@ -429,8 +449,11 @@ export function Vault(props: VaultScreenProps) {
             <dl className="vault-rows">
               {mode === "deposit" ? (
                 <>
-                  <div className="vault-line">
-                    <dt>Tickets</dt>
+                  <div className="vault-line" data-testid="vault-tickets">
+                    <dt className="vault-line-label">
+                      Tickets
+                      <InfoTip id="tickets-tip" paragraphs={TICKETS_TIP} />
+                    </dt>
                     <dd>{fmt2(amount ?? 0n)}</dd>
                   </div>
                   <div className="vault-line" data-testid="estimated-yield">
@@ -441,51 +464,29 @@ export function Vault(props: VaultScreenProps) {
                     <dd>
                       {apy === null
                         ? "—"
-                        : `$${fmt2(yearlyYield(amount ?? 0n, apy))} (${Number(apy.toFixed(2))}% APY)`}
+                        : `$${fmt2(yearlyYield(amount ?? 0n, apy))} (~${Number(apy.toFixed(2))}% APY)`}
                     </dd>
                   </div>
                 </>
               ) : (
                 <>
-                  <div className="vault-line">
-                    <dt>You receive at day end</dt>
-                    <dd>
-                      {fmt2(amount ?? 0n)} {SYMBOL}
-                    </dd>
+                  <div className="vault-line" data-testid="withdraw-receive">
+                    <dt>You will receive</dt>
+                    <dd>${fmt2(haircutValue(amount ?? 0n, haircutFactor))}</dd>
                   </div>
-                  <div className="vault-line">
-                    <dt>Tickets after</dt>
-                    <dd>
-                      {fmt2(withdrawPreview ? withdrawPreview.entriesAfter : entries)}
-                    </dd>
+                  <div className="vault-line" data-testid="withdraw-expected">
+                    <dt className="vault-line-label">
+                      Expected to receive at
+                      <InfoTip id="receive-tip" paragraphs={RECEIVE_TIP} />
+                    </dt>
+                    <dd className="vault-line-when">{expectedAt}</dd>
                   </div>
                 </>
               )}
-              {pending.kind === "none" ? null : (
-                <div className="vault-line" data-testid="pending-withdraw">
-                  <dt>
-                    Pending {fmt2(pending.amount)} {SYMBOL}
-                  </dt>
-                  <dd className="vault-pending-state">
-                    <span data-testid="pending-withdraw-state">
-                      {pending.kind === "pending"
-                        ? `pays out after day #${pending.epoch} ends`
-                        : pending.kind === "processing"
-                          ? "paying out…"
-                          : "ready"}
-                    </span>
-                    {pending.kind === "due" ? (
-                      <button
-                        type="button"
-                        className="vault-pill vault-payout"
-                        data-testid="pay-out-now"
-                        disabled={busy}
-                        onClick={() => void payOutNow()}
-                      >
-                        PAY OUT NOW
-                      </button>
-                    ) : null}
-                  </dd>
+              {mode === "withdraw" || yieldEarned === null ? null : (
+                <div className="vault-line" data-testid="unsettled-yield">
+                  <dt>Yield</dt>
+                  <dd>${yieldEarned}</dd>
                 </div>
               )}
             </dl>
@@ -509,12 +510,20 @@ export function Vault(props: VaultScreenProps) {
                 <span className="vault-note">
                   Pool is paused: deposits are blocked; withdrawals stay live.
                 </span>
+              ) : mode === "deposit" && impaired ? (
+                <span className="vault-note" data-testid="deposit-impaired-note">
+                  Deposits reopen when the pool recovers from its venue loss.
+                </span>
               ) : null}
-              {mode === "withdraw" ? (
+              {mode === "withdraw" && shutdown ? (
                 <span className="vault-note" data-testid="withdraw-lock-note">
-                  {shutdown
-                    ? "Principal and Tickets leave your account now. The pool is closed, so the payout lands in this same transaction."
-                    : "Principal and Tickets leave your account now. The USDC pays out once today's draw is over."}
+                  The pool is closed, so the whole payout lands in this same transaction.
+                </span>
+              ) : null}
+              {mode === "withdraw" && haircutFactor !== null && haircutFactor < 1 ? (
+                <span className="vault-note" data-testid="withdraw-impaired-note">
+                  The pool lost value on its lending venue, so every withdrawal pays{" "}
+                  {Number((haircutFactor * 100).toFixed(2))}% of the amount until it recovers.
                 </span>
               ) : null}
               {overCap ? (
@@ -558,42 +567,12 @@ export function Vault(props: VaultScreenProps) {
         <GlyphRow />
       </div>
 
-      {/* Ticket 10: placeholder UI. Plain elements, no Figma styling yet;
-          see this file's header comment for where the math lives. */}
-      {/* <section data-testid="vault-yield" aria-label="Base yield"> */}
-      {/*   <h2>Base yield</h2> */}
-      {/*   <dl> */}
-      {/*     <div> */}
-      {/*       <dt>Rate</dt> */}
-      {/*       <dd data-testid="yield-apy"> */}
-      {/*         {pool ? `${apyFromBaseRateBps(pool.baseRateBps).toFixed(2)}% APY` : "—"} */}
-      {/*       </dd> */}
-      {/*     </div> */}
-      {/*     <div> */}
-      {/*       <dt>Yield yesterday</dt> */}
-      {/*       <dd data-testid="yield-yesterday"> */}
-      {/*         {playerExtras.data */}
-      {/*           ? `${fmt2(BigInt(playerExtras.data.yieldLastEpoch))} ${SYMBOL}` */}
-      {/*           : "—"} */}
-      {/*       </dd> */}
-      {/*     </div> */}
-      {/*     <div> */}
-      {/*       <dt>Yield to date</dt> */}
-      {/*       <dd data-testid="yield-to-date"> */}
-      {/*         {playerExtras.data */}
-      {/*           ? `${fmt2(BigInt(playerExtras.data.yieldToDate))} ${SYMBOL}` */}
-      {/*           : "—"} */}
-      {/*       </dd> */}
-      {/*     </div> */}
-      {/*   </dl> */}
-      {/* </section> */}
-
       {confirmed !== null ? (
         <DepositConfirmed
           amount={`$${fmt2(confirmed)} ${SYMBOL}`}
-          tickets={fmt2(entries)}
+          tickets={formatMoney2(confirmed, DECIMALS).replace(/\.00$/, "")}
+          availableAt={epochAhead ? receiveTime(epochEnd, " ") : null}
           onClose={() => setConfirmed(null)}
-          onPlay={onPlay}
         />
       ) : null}
     </div>
@@ -602,14 +581,15 @@ export function Vault(props: VaultScreenProps) {
 
 interface DepositConfirmedProps {
   amount: string;
-  /** Live Tickets balance; refreshes in place once the chain read lands. */
+  /** What the deposit adds from the next epoch. */
   tickets: string;
+  /** When the next epoch starts; null when the clock is unknown or past. */
+  availableAt: string | null;
   onClose: () => void;
-  onPlay: () => void;
 }
 
 /** The Figma "deposit confirmed" popup: backdrop, ×, and Escape dismiss. */
-function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmedProps) {
+function DepositConfirmed({ amount, tickets, availableAt, onClose }: DepositConfirmedProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -657,15 +637,22 @@ function DepositConfirmed({ amount, tickets, onClose, onPlay }: DepositConfirmed
           {amount}
         </p>
         <p className="deposit-modal-sub">
-          You have <strong>{tickets} Tickets</strong> to play
+          <strong>{tickets} Tickets</strong> available{" "}
+          {availableAt ? (
+            <>
+              on <strong>{availableAt}</strong>
+            </>
+          ) : (
+            "from the next draw"
+          )}
         </p>
         <button
           type="button"
-          className="vault-cta deposit-modal-play"
-          data-testid="deposit-modal-play"
-          onClick={onPlay}
+          className="vault-cta deposit-modal-ok"
+          data-testid="deposit-modal-ok"
+          onClick={onClose}
         >
-          Play HEXO
+          Got it!
         </button>
       </section>
     </div>

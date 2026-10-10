@@ -12,7 +12,10 @@ else
   echo "pre-push: no target/deploy/hex_vault.so, skipping check-deployable" >&2
 fi
 
+pnpm check:sh
+
 pnpm test:unit
 
-# Production-hardening ticket 07: a provider key in the web bundle never ships.
-pnpm -C apps/web check
+# Typechecks backend and web (unused locals included) and, from production-
+# hardening ticket 07, fails if a provider key lands in the web bundle.
+pnpm check

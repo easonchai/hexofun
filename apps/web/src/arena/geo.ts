@@ -144,7 +144,7 @@ export function genPath(
     dots.filter(
       (dot) =>
         dot !== cur &&
-        Math.hypot(dot.x - cur!.x, dot.y - cur!.y) < 52 &&
+        Math.hypot(dot.x - cur!.x, dot.y - cur!.y) < limit &&
         !pts.slice(-exclude).includes(dot),
     );
 

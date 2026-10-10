@@ -19,8 +19,8 @@ export interface ControlPanelProps {
   /** Omitted (desktop) renders every tier stacked. */
   tab?: PanelTab;
   engine: EngineOutput;
-  /** Player.entries, atomic units. */
-  entries: bigint;
+  /** The Player's Tickets, atomic units. */
+  tickets: bigint;
   decimals: number;
   stakeText: string;
   setStakeText: (value: string) => void;
@@ -36,9 +36,6 @@ export interface ControlPanelProps {
   deployedTotal: bigint;
   lastWin: { tile: number; kind: string } | null;
   feed: FeedRow[];
-  rewardHint: string | null;
-  settleBusy: boolean;
-  onSettle: () => void;
   onDeploy: () => void;
 }
 
@@ -46,7 +43,7 @@ export function ControlPanel(props: ControlPanelProps) {
   const {
     tab,
     engine,
-    entries,
+    tickets,
     decimals,
     stakeText,
     setStakeText,
@@ -61,9 +58,6 @@ export function ControlPanel(props: ControlPanelProps) {
     deployedTotal,
     lastWin,
     feed,
-    rewardHint,
-    settleBusy,
-    onSettle,
     onDeploy,
   } = props;
 
@@ -82,7 +76,7 @@ export function ControlPanel(props: ControlPanelProps) {
 
   const setMax = (): void => {
     if (tiles === 0) return;
-    setStakeText(formatAtomic(entries / BigInt(tiles), decimals));
+    setStakeText(formatAtomic(tickets / BigInt(tiles), decimals));
   };
 
   const togglePreset = (kind: "odd" | "even" | "all"): void => {
@@ -117,19 +111,11 @@ export function ControlPanel(props: ControlPanelProps) {
       ]);
   };
 
-  const ready = canDeploy && tiles > 0 && stake > 0n && !locked && !deployBusy;
+  // Betting is shut and a Round waits on its beacon; the button can't be pressed either way.
+  const settling = engine.phase === "locked" && !deployBusy;
+  const ready = canDeploy && tiles > 0 && stake > 0n && !locked && !deployBusy && !settling;
   const showScan = ready && !locked;
   const showLocked = locked && !deployBusy;
-  // "locked" (positions closed, countdown still running) reads the same as
-  // "settling" here: the deploy button can't be pressed either way.
-  const settling =
-    (engine.phase === "settling" || engine.phase === "locked") && !deployBusy;
-  // Once a round settles, forfeits or voids, App nulls `openRound`, so
-  // `locked` and `canDeploy` both go false and this button would otherwise
-  // fall through to "SELECT TILES"/"DEPLOY" — inviting a bet while Positions
-  // are closed (see stakeBar.ts's doc comment, which needed the same fix on
-  // the phone stake bar, and used this same string).
-  const awaiting = engine.phase === "awaiting" && !deployBusy;
 
   /** Prototype deploy burst: six symbols radiating out for 0.65s. */
   const [burst, setBurst] = useState(false);
@@ -175,7 +161,7 @@ export function ControlPanel(props: ControlPanelProps) {
         </div>
 
         <div className="dual-line" style={{ justifyContent: "flex-end" }}>
-          <span data-testid="wallet-entries">Tickets {fmt(entries)}</span>
+          <span data-testid="wallet-tickets">Tickets {fmt(tickets)}</span>
         </div>
 
         <div className="quick-row">
@@ -293,23 +279,6 @@ export function ControlPanel(props: ControlPanelProps) {
             {fmt(deployedTotal)}
           </span>
         </div>
-        {rewardHint ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div className="reward-hint" data-testid="reward-hint">
-              {rewardHint}
-            </div>
-            <button
-              type="button"
-              className="btn-deploy ghost"
-              disabled={settleBusy}
-              data-testid="settle-position"
-              onClick={onSettle}
-            >
-              <span>{settleBusy ? "SIGNING…" : "SETTLE POSITION"}</span>
-            </button>
-          </div>
-        ) : null}
-
         {deployProblems.length > 0 ? (
           <div className="problems" data-testid="deploy-problems">
             {deployProblems.map((problem) => (
@@ -367,17 +336,7 @@ export function ControlPanel(props: ControlPanelProps) {
               </span>
             </span>
           ) : (
-            <span>
-              {awaiting
-                ? "AWAITING…"
-                : settling
-                  ? "DRAWING…"
-                  : tiles === 0
-                    ? "SELECT TILES"
-                    : locked
-                      ? "DEPLOYED"
-                      : "DEPLOY"}
-            </span>
+            <span>{settling ? "DRAWING…" : tiles === 0 ? "SELECT TILES" : locked ? "DEPLOYED" : "DEPLOY"}</span>
           )}
         </button>
         {deployNote ? (

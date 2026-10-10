@@ -47,6 +47,9 @@ importers:
       commander:
         specifier: 15.0.0
         version: 15.0.0
+      drand-client:
+        specifier: 1.4.2
+        version: 1.4.2
       fastify:
         specifier: 5.12.1
         version: 5.12.1
@@ -128,6 +131,9 @@ importers:
       bs58:
         specifier: 6.0.0
         version: 6.0.0
+      drand-client:
+        specifier: 1.4.2
+        version: 1.4.2
       reflect-metadata:
         specifier: 0.2.2
         version: 0.2.2
@@ -904,6 +910,12 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@kevincharm/noble-bn254-drand@0.0.1':
+    resolution: {integrity: sha512-HU5Gmst+nxYx8OYKMWuaJZyXh+9/oqJL/L9F3B4My4/IOZZBqIkZIfHQMuPN6KoFHBni08YOw0sRQqEyHVpnGg==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@noble/curves': ^1.6.0
 
   '@ledgerhq/devices@8.16.0':
     resolution: {integrity: sha512-brXLPzkvGM3D5YNsWQ25P5G4SmWdSNBed9W8wKoOIRLGdRfvE+bg9mzFty0iZ+aRLBkLoXwX7xKIL9zUi6LBKQ==}
@@ -4460,6 +4472,10 @@ packages:
     resolution: {integrity: sha512-k8DaKGP6r1G30Lx8V4+pCsLzKr8vLmV2paqEj1Y55GdAgJuIqpRp5FfajGF8KtwMxCz9qJc6wUIJnm053d/WCw==}
     engines: {node: '>=12'}
 
+  drand-client@1.4.2:
+    resolution: {integrity: sha512-jeNJmrVplfgIA/GVndxxJ5mo8y63BS2pEdNhk1siU4pQ+z/BnxsqRnxjH9ag1ip887s12SEgo0MTZPbQNz27NA==}
+    engines: {node: '>= 10.4.0'}
+
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
     engines: {node: '>= 0.4'}
@@ -5052,6 +5068,9 @@ packages:
 
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
+
+  isomorphic-fetch@3.0.0:
+    resolution: {integrity: sha512-qvUtwJ3j6qwsF3jLxkZ72qCgjMysPzDfeV240JHiGZsANBYd+EEuu35v7dfrJ9Up0Ak07D7GGSkGhCHTqg/5wA==}
 
   isomorphic-ws@4.0.1:
     resolution: {integrity: sha512-BhBvN2MBpWTaSHdWRb/bwdZJ1WaehQ2L1KngkCkfLUGF0mAWAT1sQUQacEmQ0jXkFw/czDXPNQSL5u2/Krsz1w==}
@@ -8213,6 +8232,10 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@kevincharm/noble-bn254-drand@0.0.1(@noble/curves@1.9.7)':
+    dependencies:
+      '@noble/curves': 1.9.7
 
   '@ledgerhq/devices@8.16.0':
     dependencies:
@@ -16141,6 +16164,15 @@ snapshots:
 
   dotenv@17.4.1: {}
 
+  drand-client@1.4.2:
+    dependencies:
+      '@kevincharm/noble-bn254-drand': 0.0.1(@noble/curves@1.9.7)
+      '@noble/curves': 1.9.7
+      buffer: 6.0.3
+      isomorphic-fetch: 3.0.0
+    transitivePeerDependencies:
+      - encoding
+
   dunder-proto@1.0.1:
     dependencies:
       call-bind-apply-helpers: 1.0.2
@@ -16766,6 +16798,13 @@ snapshots:
   isarray@2.0.5: {}
 
   isexe@2.0.0: {}
+
+  isomorphic-fetch@3.0.0:
+    dependencies:
+      node-fetch: 2.7.0
+      whatwg-fetch: 3.6.20
+    transitivePeerDependencies:
+      - encoding
 
   isomorphic-ws@4.0.1(ws@7.5.13(bufferutil@4.1.0)(utf-8-validate@6.0.6)):
     dependencies:

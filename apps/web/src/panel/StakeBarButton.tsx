@@ -14,6 +14,8 @@ type Props = {
   phase: Phase;
   decimals: number;
   onOpen: () => void;
+  /** The wallet cannot start a betting session (Ledger): the bar stays shut. */
+  disabled?: boolean;
 };
 
 export function StakeBarButton({
@@ -23,9 +25,10 @@ export function StakeBarButton({
   phase,
   decimals,
   onOpen,
+  disabled = false,
 }: Props) {
   const model = stakeBarModel(stakeText, selected, position, phase, decimals);
-  const ariaLabel = `Stake bar: ${model.entriesPerTile} tickets per tile, ${model.tilesSelected} tiles selected, ${model.entriesIn} tickets in. ${model.label}.`;
+  const ariaLabel = `Stake bar: ${model.ticketsPerTile} tickets per tile, ${model.tilesSelected} tiles selected, ${model.ticketsIn} tickets in. ${model.label}.`;
 
   return (
     <button
@@ -34,19 +37,20 @@ export function StakeBarButton({
       data-testid="stake-bar"
       data-state={model.state}
       aria-label={ariaLabel}
+      disabled={disabled}
       onClick={onOpen}
     >
       <span className="stake-bar-stats">
         <span className="stake-bar-stat">
           <span className="stake-bar-stat-label">AMOUNT</span>
           <span className="stake-bar-stat-value" data-testid="stake-bar-per-tile">
-            {model.entriesPerTile}
+            {model.ticketsPerTile}
           </span>
         </span>
         <span className="stake-bar-stat">
           <span className="stake-bar-stat-label">TICKETS IN</span>
-          <span className="stake-bar-stat-value" data-testid="stake-bar-entries-in">
-            {model.entriesIn}
+          <span className="stake-bar-stat-value" data-testid="stake-bar-tickets-in">
+            {model.ticketsIn}
           </span>
         </span>
         <span className="stake-bar-stat">

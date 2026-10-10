@@ -3,6 +3,7 @@
 // referral-bonus.ts: referrals.controller.ts fetches rows from Postgres and
 // hands them here, so the response shape is unit tested without a database.
 
+import type { ReferralTier } from "./game-config";
 import { daysToQualify, isQualified } from "./referral";
 import { bandForCount, type ReferralBand } from "./referral-bonus";
 
@@ -108,6 +109,7 @@ function paginateReferrals(
  * unused codes here let anyone harvest them off the leaderboard.
  */
 export function buildReferralsResponse(
+  tiers: readonly ReferralTier[],
   referralCode: string | null,
   referrals: readonly ReferralInput[],
   now: bigint,
@@ -119,7 +121,7 @@ export function buildReferralsResponse(
   const qualifiedCount = referrals.filter((referral) =>
     isQualified(referral.aboveSince, now, qualifySeconds),
   ).length;
-  const { band, nextBand } = bandForCount(qualifiedCount);
+  const { band, nextBand } = bandForCount(tiers, qualifiedCount);
   const { page, nextCursor } = paginateReferrals(referrals, cursor, limit);
 
   return {

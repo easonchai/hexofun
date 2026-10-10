@@ -1,13 +1,19 @@
 /**
- * ABOUT tab on a phone: single column, no horizontal overflow, the navbar
- * entry is reachable. Runs only on the "phone" Playwright project.
+ * ABOUT tab on a phone: single column, no horizontal overflow, the wallet
+ * menu entry is reachable. Runs only on the "phone" Playwright project.
  */
-import { expect, test } from "playwright/test";
+import { expect } from "playwright/test";
+
+import { test } from "./admitted";
 
 test("about page stacks without horizontal overflow", async ({ page }) => {
   await page.goto("/#about");
   await expect(page.getByTestId("about-screen")).toBeVisible();
-  await expect(page.getByTestId("tab-about")).toBeVisible();
+  // A connected wallet moves ABOUT from the navbar into the wallet menu on phones.
+  await expect(page.getByTestId("tab-about")).toBeHidden();
+  await page.getByTestId("connect-button").click();
+  await expect(page.getByTestId("wallet-menu-about")).toBeVisible();
+  await page.keyboard.press("Escape");
 
   const { scrollWidth, viewportWidth } = await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>(".about")!;
