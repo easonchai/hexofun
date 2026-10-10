@@ -472,6 +472,43 @@ describe("resolveUnknownSend", () => {
   });
 });
 
+describe("resolveUnknownSend through RPC errors", () => {
+  it("resolves to landed after a status read throws once", async () => {
+    let calls = 0;
+    const connection = fakeConnection({
+      signatureStatuses: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("rpc down");
+        return { value: [{ err: null, confirmationStatus: "confirmed" }] };
+      },
+    });
+
+    const result = await resolveUnknownSend(connection, "sig", LAST_VALID_BLOCK_HEIGHT, 0);
+
+    expect(calls).toBe(2);
+    expect(result).toEqual({ kind: "landed", signature: "sig" });
+  });
+
+  it("resolves to expired when every read throws until the block height passes the limit", async () => {
+    let heights = 0;
+    const connection = fakeConnection({
+      signatureStatuses: async () => {
+        throw new Error("rpc down");
+      },
+      blockHeight: async () => {
+        heights += 1;
+        if (heights < 3) throw new Error("rpc down");
+        return LAST_VALID_BLOCK_HEIGHT + 1;
+      },
+    });
+
+    const result = await resolveUnknownSend(connection, "sig", LAST_VALID_BLOCK_HEIGHT, 0);
+
+    expect(heights).toBe(3);
+    expect(result).toEqual({ kind: "expired" });
+  });
+});
+
 describe("awaitSendResult", () => {
   it("passes a landed/expired/failed result through unchanged", async () => {
     const program = { provider: { connection: fakeConnection() } } as unknown as HexVaultProgram;

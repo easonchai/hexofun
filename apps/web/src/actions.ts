@@ -39,6 +39,7 @@ import {
   type TxBuilder,
 } from "./chain.js";
 import { fetchKvaultView, kvaultRemaining } from "./kvault.js";
+import { splitWithdraw } from "./lib/money.js";
 import type { PoolLike } from "./read.js";
 import { shutdownWithdrawStep } from "./shutdown.js";
 
@@ -309,8 +310,9 @@ export type ResolvedSendResult = Exclude<SendResult, { kind: "unknown" }>;
  * Ticket 15: resolves a `SendResult` of kind `"unknown"` by polling the
  * signature's status until it lands, fails on chain, or the blockhash's
  * `lastValidBlockHeight` passes (expired) — the same three outcomes a clean
- * confirmation would have produced. Callers keep money buttons disabled
- * while this is in flight.
+ * confirmation would have produced. An RPC error from either read is logged
+ * and retried after the interval, so this never rejects. Callers keep money
+ * buttons disabled while this is in flight.
  */
 export async function resolveUnknownSend(
   connection: Connection,
@@ -319,18 +321,29 @@ export async function resolveUnknownSend(
   pollMs = 2_000,
 ): Promise<ResolvedSendResult> {
   for (;;) {
-    const { value } = await connection.getSignatureStatuses([signature]);
-    const status = value[0];
-    if (status) {
-      if (status.err) {
-        return { kind: "failed", code: customErrorCode(status.err), message: JSON.stringify(status.err) };
+    // Each read has its own try: the RPC that made the send unknown can throw
+    // again here, and a throw is one more unknown, not an answer. Only the
+    // chain's word (landed, failed, or past the last valid block) ends this.
+    try {
+      const { value } = await connection.getSignatureStatuses([signature]);
+      const status = value[0];
+      if (status) {
+        if (status.err) {
+          return { kind: "failed", code: customErrorCode(status.err), message: JSON.stringify(status.err) };
+        }
+        if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+          return { kind: "landed", signature };
+        }
       }
-      if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
-        return { kind: "landed", signature };
-      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
     }
-    const blockHeight = await connection.getBlockHeight(CONFIRMED);
-    if (blockHeight > lastValidBlockHeight) return { kind: "expired" };
+    try {
+      const blockHeight = await connection.getBlockHeight(CONFIRMED);
+      if (blockHeight > lastValidBlockHeight) return { kind: "expired" };
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+    }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
@@ -522,16 +535,23 @@ export async function buyTickets(
  * limit comes from `sendMany`'s simulation. Fails with `VenueIlliquid` when the
  * reserve cannot cover the refund's gap, and with `InsufficientPrincipal` past
  * Principal less what is already queued.
+ *
+ * `pendingDeposit` is the Player's Pending deposit as the screen holds it. The
+ * program redeems only for the refund, `min(amount, pending_deposit)`, so a
+ * queue-only request takes the sync list and never needs a funded allocation.
+ * Left out (unknown), the redeem list is built as if the refund were positive.
  */
 export async function requestWithdraw(
   program: HexVaultProgram,
   owner: TxSigner,
   pool: PoolLike,
   amount: bigint,
+  pendingDeposit?: bigint,
 ): Promise<SendResult> {
   const o = owner.publicKey;
   const ownerToken = acceptedAta(pool.acceptedMint, o);
-  const venue = await venueRemaining(program, pool, "redeem");
+  const refund = pendingDeposit === undefined ? amount : splitWithdraw(amount, pendingDeposit).payNow;
+  const venue = await venueRemaining(program, pool, refund > 0n ? "redeem" : "sync");
   const builder = method(
     program,
     "requestWithdraw",

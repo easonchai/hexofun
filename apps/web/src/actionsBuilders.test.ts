@@ -56,10 +56,10 @@ const pool: PoolLike = {
  * `reserve` in slot 0 and `table` as its lookup table, the reserve naming
  * `market`, and an empty lookup table so the v0 message compiles.
  */
-function kvaultChain(reserve: PublicKey, market: PublicKey, table: PublicKey) {
+function kvaultChain(reserve: PublicKey, market: PublicKey, table: PublicKey, funded = true) {
   const vault = Buffer.alloc(8 + 62_544);
   reserve.toBuffer().copy(vault, 312);
-  vault.writeBigUInt64LE(1n, 312 + 1104); // ctokens, so the allocation counts as funded
+  if (funded) vault.writeBigUInt64LE(1n, 312 + 1104); // ctokens, so the allocation counts as funded
   table.toBuffer().copy(vault, 58_568);
   const reserveData = Buffer.alloc(2_600);
   market.toBuffer().copy(reserveData, 32);
@@ -199,6 +199,16 @@ describe("a kVault pool (fork-run-fixes ticket 10)", () => {
     expect(last.pubkey.equals(kv.acceptedMint) && last.isWritable).toBe(true);
     const vaultMeta = ix!.keys.find((k) => k.pubkey.equals(kv.klendMarket) && k.isWritable);
     expect(vaultMeta).toBeDefined();
+  });
+
+  it("request_withdraw on an all-idle vault builds the sync list when nothing refunds", async () => {
+    const idle = kvaultChain(reserve, market, table, false);
+    // Principal 10, Pending deposit 4: a request of 4 or less refunds, the rest only queues.
+    const [queueOnly] = await sent((p, o) => requestWithdraw(p, o, kv, 5n, 0n), idle);
+    expect(queueOnly!.keys).toHaveLength(idlAccounts("request_withdraw") + 3);
+    await expect(sent((p, o) => requestWithdraw(p, o, kv, 5n, 4n), idle)).rejects.toThrow(
+      "has no funded allocation",
+    );
   });
 
   it("the shutdown pair reads the vault once and gives both instructions the kVault list", async () => {

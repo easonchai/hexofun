@@ -20,14 +20,28 @@ export interface ApiPollState<T> {
   refresh: () => void;
 }
 
+/** Data held for one `key` (a wallet, say). Read under another key it is
+ *  `empty`, so a switch shows nothing of the previous key, not even for the
+ *  render before the new fetch starts. */
+export function scoped<V>(held: { key: unknown; value: V } | null, key: unknown, empty: V): V {
+  return held !== null && held.key === key ? held.value : empty;
+}
+
+/**
+ * `resetKey` is whatever the data belongs to (the owner). When it changes the
+ * data and error clear at once and a failed fetch for the new key leaves
+ * `data` null. Omit it for data that is the same for everyone.
+ */
 export function useApiPoll<T>(
   load: (signal: AbortSignal) => Promise<ApiResult<T>>,
   intervalMs: number,
+  resetKey?: unknown,
 ): ApiPollState<T> {
-  const [state, setState] = useState<Omit<ApiPollState<T>, "refresh">>({
-    data: null,
-    error: null,
-  });
+  const [held, setHeld] = useState<{
+    key: unknown;
+    value: Omit<ApiPollState<T>, "refresh">;
+  } | null>(null);
+  const state = scoped(held, resetKey, { data: null, error: null });
   const runRef = useRef<() => void>(() => {});
   const refresh = useCallback(() => runRef.current(), []);
 
@@ -38,11 +52,15 @@ export function useApiPoll<T>(
     const run = async (): Promise<void> => {
       const result = await load(controller.signal);
       if (cancelled) return;
-      setState((current) =>
-        result.ok
-          ? { data: result.data, error: null }
-          : { data: current.data, error: result.reason },
-      );
+      setHeld((current) => {
+        const previous = scoped(current, resetKey, { data: null, error: null });
+        return {
+          key: resetKey,
+          value: result.ok
+            ? { data: result.data, error: null }
+            : { data: previous.data, error: result.reason },
+        };
+      });
     };
     runRef.current = () => void run();
 
@@ -57,7 +75,7 @@ export function useApiPoll<T>(
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [load, intervalMs]);
+  }, [load, intervalMs, resetKey]);
 
   return { ...state, refresh };
 }

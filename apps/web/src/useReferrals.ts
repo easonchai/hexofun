@@ -27,7 +27,7 @@ export function useReferrals(owner: string | undefined): ReferralsState {
         : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
     [owner],
   );
-  const poll = useApiPoll(loadReferrals, 10_000);
+  const poll = useApiPoll(loadReferrals, 10_000, owner);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   const copyLink = useCallback((code: string) => {

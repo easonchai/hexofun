@@ -192,7 +192,7 @@ export function Vault(props: VaultScreenProps) {
         : Promise.resolve({ ok: false as const, reason: "no wallet connected" }),
     [ownerBase58],
   );
-  const playerExtras = useApiPoll(loadPlayerExtras, 10_000);
+  const playerExtras = useApiPoll(loadPlayerExtras, 10_000, ownerBase58);
   /**
    * What the pills clamp to: wallet on deposit; on withdraw, Principal plus
    * the yield the Sync settles, less what is already queued (`withdrawCap`,
@@ -326,7 +326,7 @@ export function Vault(props: VaultScreenProps) {
             ? "Refunded"
             : "Refunded today's deposit, rest requested";
       void run(label, program, () =>
-        requestWithdraw(program, signer, pool, amount),
+        requestWithdraw(program, signer, pool, amount, playerExtras.data ? pendingNow : undefined),
       );
     }
   };
