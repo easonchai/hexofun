@@ -483,6 +483,36 @@
     curl -s https://<deployed-host>/ | grep -oE '/assets/[^"]+\.js'
     curl -s https://<deployed-host><asset-path-from-above> | grep -E "api-key=|helius-rpc.com"
 
+  RPC providers
+
+  Devnet and the fork stay on Helius and the local validator: Solami serves mainnet only. On mainnet the backend can run on Solami
+  with Helius as the fallback (ADR 0027). Three variables in the backend env, all server-only:
+
+    RPC_URL=https://rpc.solami.fast/sol?api_key=<solami key>
+    RPC_WS_URL=wss://ws.solami.dev/ws/sol?api_key=<solami key>
+    RPC_FALLBACK_URL=https://mainnet.helius-rpc.com/?api-key=<helius key>
+
+  RPC_WS_URL is required with a Solami RPC_URL. Solami serves pub/sub only on ws.solami.dev, and the socket web3.js derives from
+  the HTTP URL answers 405, so without it the Indexer's onLogs feed and every send's signature subscription never connect. Leave
+  it empty with a Helius RPC_URL. Only the primary uses it; the fallback keeps its derived socket.
+
+  Helius belongs in RPC_FALLBACK_URL because getPriorityFeeEstimate is Helius-only. On Solami it answers "unsupported method", and
+  chain/priority-fee.ts returns nothing and lets ChainService price the send from getRecentPrioritizationFees instead. That
+  costs one rejected call per send and logs nothing: the backend prints no warning for it at boot or on a send. The fallback
+  does not catch that call, since withRpcFallback fails over only on a timeout, a 5xx or a 429. getProgramAccountsV2 works on
+  both providers with the same response shape, so the Indexer's paginated sweep keeps working; if a primary ever lacks it, the
+  Indexer logs "this RPC has no getProgramAccountsV2" and walks all program accounts for the next hour. Solami also accepts
+  changedSinceSlot on getProgramAccountsV2; the Indexer does not use it yet.
+
+  Solami Free has no WebSocket, so a lapsed plan is not a downgrade path. To roll back to Helius, set these in the env file and
+  restart the backend:
+
+    RPC_URL=https://mainnet.helius-rpc.com/?api-key=<helius key>
+    RPC_WS_URL=
+
+  Never put a Solami key in the web's VITE_PUBLIC_RPC_URL: Vite inlines it, and each browser's confirmTransaction would open a
+  socket against the plan's connection cap (5 on Pro, 2 on Dev, per Solami's GET /pricing on 2026-10-10).
+
   Mainnet stack
 
   Mainnet runs as a second compose project on the same box, out of the same checkout and behind the same Traefik. The two stacks

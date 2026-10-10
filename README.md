@@ -166,6 +166,51 @@ Then <http://localhost:5173>, wallet on devnet. [`runbook.md`](runbook.md) cover
 what to rebuild after each kind of change, the `close_buffer` draw window, and the gotchas
 that have already bitten (never build with `--features test-vrf` before a devnet deploy).
 
+## Solami
+
+Built for the Solami hackathon. On mainnet the backend can run its chain traffic through
+Solami, with Helius kept as the fallback. Solami serves mainnet only, so
+devnet and the local fork stay on Helius and the local validator. Every Solami piece is one env
+var away from off, and off is the code path that ran before.
+[ADR 0027](docs/adr/0027-the-backend-runs-on-solami-rpc-websocket-beam-and-webhooks.md) says
+which Solami products the backend uses, which it rejected, and why.
+
+- **RPC and WebSocket.** `RPC_URL` points at Solami and `RPC_WS_URL` at its pub/sub host, which
+  carries the Indexer's `onLogs` feed and every send's confirmation. `RPC_FALLBACK_URL` stays on
+  Helius: a call that times out or gets a 5xx or 429 on Solami is retried there, and Helius has
+  the priority fee estimator Solami lacks.
+- **Beam for operator sends.** With `BEAM_KEYPAIR` set, the operator's transactions go out through
+  Solami's stake-weighted sender, tipping `BEAM_TIP_LAMPORTS` each. Unset, they go through
+  `sendRawTransaction` as before.
+- **A webhook into the Indexer.** With `SOLAMI_WEBHOOK_SECRET` set, Solami pushes the program's
+  transactions to `POST /webhooks/solami`, a second live feed beside `onLogs`. The Indexer dedupes
+  by signature, so a transaction that arrives on both is written once. Unset, the route is off.
+- **The `hexo` subgraph**, only if Solami grants this account Index Engine quota. The deploy is
+  refused today with a subgraph limit of 0; ADR 0027 has the details.
+
+To point the backend at your own Solami key, set these in the env file compose hands the
+backend (`ENV_FILE`, `.env` at the repo root by default), then restart it:
+
+```bash
+RPC_URL=https://rpc.solami.fast/sol?api_key=<solami key>
+RPC_WS_URL=wss://ws.solami.dev/ws/sol?api_key=<solami key>
+RPC_FALLBACK_URL=https://mainnet.helius-rpc.com/?api-key=<helius key>
+# optional
+BEAM_KEYPAIR=
+BEAM_TIP_LAMPORTS=
+SOLAMI_WEBHOOK_SECRET=
+```
+
+```bash
+docker compose -f docker-compose.dev.yml up -d backend    # local
+docker compose --env-file .env.mainnet up -d backend      # mainnet stack on the VPS
+```
+
+`RPC_WS_URL` needs a paid plan: Solami Free has no WebSocket. To go back to Helius, set `RPC_URL`
+to the Helius URL and empty `RPC_WS_URL`. Never put a Solami key in the web's
+`VITE_PUBLIC_RPC_URL`, because Vite ships it in the bundle. [`runbook.md`](runbook.md), "RPC
+providers", has the rest.
+
 ## Layout
 
 ```

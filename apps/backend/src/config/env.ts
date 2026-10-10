@@ -69,6 +69,10 @@ export interface HexVaultEnv {
    *  out, or errors with a 5xx or a 429, on `RPC_URL` is retried once here.
    *  Absent means a failure just propagates, same as before this ticket. */
   RPC_FALLBACK_URL?: string;
+  /** Optional WebSocket for `RPC_URL`'s subscriptions (solami 06). Solami
+   *  serves pub/sub on its own host, not the one web3.js derives from the
+   *  HTTP URL. Absent keeps the derived socket. */
+  RPC_WS_URL?: string;
   /** Per-call timeout, in ms, every chain read and send is bounded by. */
   RPC_TIMEOUT_MS: number;
   PROGRAM_ID: string;
@@ -352,6 +356,7 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     // Spread rather than assigned: under `exactOptionalPropertyTypes` an
     // optional key cannot be set to `undefined`, and "absent" is the switch.
     ...(env.RPC_FALLBACK_URL ? { RPC_FALLBACK_URL: String(env.RPC_FALLBACK_URL) } : {}),
+    ...(env.RPC_WS_URL ? { RPC_WS_URL: String(env.RPC_WS_URL) } : {}),
     ...(env.ADMIN_ADDRESS ? { ADMIN_ADDRESS: String(env.ADMIN_ADDRESS) } : {}),
     ...(env.SPARRING_KEYPAIR
       ? { SPARRING_KEYPAIR: String(env.SPARRING_KEYPAIR) }

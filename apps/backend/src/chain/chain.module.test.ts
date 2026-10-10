@@ -19,7 +19,7 @@ import {
   type HexVaultEnv,
 } from "../config/env";
 import { CountingConnection } from "../test-utils/counting-connection";
-import { ChainModule } from "./chain.module";
+import { ChainModule, primaryConnection } from "./chain.module";
 import {
   CONFIRM_TIMEOUT_MS,
   ChainService,
@@ -348,5 +348,24 @@ describe("ChainService.send", () => {
 
       expect(sentPriceInstruction(connection)).toBe(DEFAULT_PRIORITY_FEE_MAX_MICROLAMPORTS);
     });
+  });
+});
+
+// Solami 06: Solami serves pub/sub on its own host, so RPC_WS_URL overrides
+// the socket web3.js derives from RPC_URL. Neither opens a socket here.
+describe("primaryConnection", () => {
+  // SAFETY: `_rpcWebSocket` is web3.js's private rpc-websockets client; its
+  // `address` is the URL the subscriptions connect to.
+  const socketOf = (connection: Connection) =>
+    (connection as unknown as { _rpcWebSocket: { address: string } })._rpcWebSocket.address;
+
+  it("subscribes on RPC_WS_URL when it is set", () => {
+    const connection = primaryConnection("https://rpc.example/sol", "wss://ws.example/ws/sol");
+    expect(socketOf(connection)).toBe("wss://ws.example/ws/sol");
+  });
+
+  it("derives the socket from RPC_URL when RPC_WS_URL is unset", () => {
+    const connection = primaryConnection("https://rpc.example/sol", undefined);
+    expect(socketOf(connection)).toBe("wss://rpc.example/sol");
   });
 });
