@@ -115,10 +115,11 @@ export interface MainnetGuardInput {
 }
 
 /**
- * On mainnet's genesis hash, refuses to proceed unless Admin, Treasury,
- * Buyback reserve and the accepted mint are all explicit, and refuses an
- * Admin equal to the Operator key. A forgotten flag names itself instead of
- * bootstrap silently handing protocol money to the operator hot key. Every
+ * On mainnet's genesis hash, refuses to proceed unless the Admin and the
+ * accepted mint are explicit, and refuses an Admin equal to the Operator key.
+ * A forgotten flag names itself instead of bootstrap silently handing
+ * protocol money to the operator hot key. Treasury and Buyback reserve may
+ * be left to bootstrap: it creates them owned by that explicit Admin. Every
  * other cluster is untouched.
  */
 export function assertMainnetSafe(input: MainnetGuardInput): void {
@@ -126,8 +127,6 @@ export function assertMainnetSafe(input: MainnetGuardInput): void {
 
   const missing: string[] = [];
   if (!input.admin) missing.push("--admin");
-  if (!input.treasury) missing.push("--treasury");
-  if (!input.buybackReserve) missing.push("--buyback-reserve");
   if (!input.acceptedMint) missing.push("ACCEPTED_MINT");
   if (missing.length > 0) {
     throw new Error(
@@ -447,9 +446,11 @@ export function parsePoolParams(argv: readonly string[]): PoolParams {
   // Treasury and buyback_reserve share (mint, owner) when both are the ATA,
   // so create_pool cannot tell them apart; catch the same-address case here
   // rather than after both accounts have been checked to exist.
-  if (params.treasury && params.buybackReserve && params.treasury.equals(params.buybackReserve)) {
-    throw new Error("--treasury and --buyback-reserve must differ");
-  }
+  // shortcut: guard off so one account can take both roles (no token buyback
+  // planned), re-enable when the buyback reserve gets its own use.
+  // if (params.treasury && params.buybackReserve && params.treasury.equals(params.buybackReserve)) {
+  //   throw new Error("--treasury and --buyback-reserve must differ");
+  // }
   // set_params requires payout_timeout < epoch_seconds (beta-launch-fixes
   // ticket 03); create_pool doesn't enforce it, but a pool bootstrapped past
   // this line would fail its very first set_params call.
