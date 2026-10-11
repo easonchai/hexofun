@@ -61,7 +61,7 @@ services:
       PORT: 8080
     networks:
       - default
-      - elvtd
+      - traefik
     # List form, not the mapping form: compose interpolates label values but not
     # label keys, and ${STACK_NAME} sits in the key half of the router names.
     labels:
