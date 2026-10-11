@@ -6,15 +6,17 @@ keys unless a step says "on the box". The long version of each step is in
 `runbook.md` ("Mainnet stack", "Launch week"); `docs/plan/mainnet/issues/08-...md` is the
 checklist this page was condensed from.
 
-Three keys matter. Keep them straight:
+Four keys matter. Keep them straight:
 
 | Key | What it does | Where it lives |
 | --- | --- | --- |
-| Deployer / Operator hot key | Deploys the program, creates the pool, then cranks it every day | `solana config` keypair on the laptop, base58 secret in `.env.mainnet` on the box |
+| Deployer | Deploys the program, stays its upgrade authority, pays the pool's creation | `keys/hexvault-mainnet-deployer.json` on the laptop (`DEPLOY_KEYPAIR`), offline backup. Never on the box |
+| Operator hot key | Cranks the pool every day | base58 secret in `.env.mainnet` on the box (`OPERATOR_KEYPAIR`) |
 | Program keypair | Fixes the program ID `EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH` | `keys/hex_vault-mainnet-keypair.json` (gitignored) and an offline backup |
-| Ledger | Upgrade authority after launch | the hardware wallet |
+| Ledger (optional) | Upgrade authority if you hand it over after launch | the hardware wallet |
 
-The Admin is the Squads vault, never a key on disk. Nobody holds a mainnet secret in git.
+The Admin is the Squads vault, never a key on disk. Nobody holds a mainnet secret in git. The key
+on the server never holds upgrade rights, so there is no handover window to get wrong.
 
 ## 0. Have these before you start
 
@@ -23,37 +25,39 @@ The Admin is the Squads vault, never a key on disk. Nobody holds a mainnet secre
 - A Ledger with the Solana app, and a second person to read addresses back.
 - A Helius mainnet key of its own, plus a second provider for `RPC_FALLBACK_URL`.
 - DNS: an A record for the API host pointing at the VPS. The Vercel Production project exists.
-- About 5 SOL for the deployer. Rent for the 820 KB binary is 4.25 SOL (`solana rent 837328 -u
-  mainnet-beta`) and stays locked in the program; the deploy instruction refunds the buffer to the
-  payer before it creates ProgramData, so that rent is paid once, not twice. The rest covers
-  pool creation (0.01), two token accounts (0.004), fees, and the operator's running costs.
+- About 7 SOL: 5 for the deployer, 2 for the operator. Rent for the 820 KB binary is 4.25 SOL
+  (`solana rent 837328 -u mainnet-beta`) and stays locked in the program; the deploy instruction
+  refunds the buffer to the payer before it creates ProgramData, so that rent is paid once, not
+  twice. The rest of the deployer's 5 covers pool creation (0.01), three token accounts (0.006)
+  and fees. The operator's 2 SOL pays crank fees.
 - `solana-verify` installed (`cargo install solana-verify`, needs Docker).
 - The mainnet build comes from `main`. Merge first.
 
-## 1. Pick the deployer
+## 1. Make the deployer and the operator
 
-The deployer and the operator are the same key on launch day: `create_pool` only accepts the
-program's upgrade authority as payer, and bootstrap pays with `OPERATOR_KEYPAIR`. One script
-makes a fresh key (never a devnet one), writes it into `.env.mainnet` as `OPERATOR_KEYPAIR`
-(base58, for the backend) and `DEPLOY_KEYPAIR` (the file, for `deploy.sh`), and points the solana
-CLI at it:
+`create_pool` only accepts the program's upgrade authority as payer, so the deployer both deploys
+and creates the pool; the operator is only named in that transaction and never signs. One script
+makes both keys (never a devnet one), writes the deployer file into `.env.mainnet` as
+`DEPLOY_KEYPAIR` (for `deploy.sh` and bootstrap) and the operator's base58 secret as
+`OPERATOR_KEYPAIR` (for the backend), and points the solana CLI at the deployer:
 
 ```bash
-scripts/mainnet-keys.sh             # prints the pubkey and the transfer command to fund it
-solana transfer <that pubkey> 5 --from <your funded wallet> --allow-unfunded-recipient
+scripts/mainnet-keys.sh             # prints both pubkeys and the two transfer commands
+solana transfer <deployer pubkey> 5 --from <your funded wallet> --allow-unfunded-recipient
+solana transfer <operator pubkey> 2 --from <your funded wallet> --allow-unfunded-recipient
 ```
 
 To deploy from a wallet you already have (Phantom, Backpack, Solflare) instead: export its private
 key from the wallet's settings, then `scripts/mainnet-keys.sh import` and paste it at the prompt.
-Everything after that is the same. Two things to know first: that key becomes the operator hot key
-and lives in `.env.mainnet` on the VPS, so use a wallet that holds nothing but this project's SOL,
-and it cannot be the Admin (`ADMIN_ADDRESS`), which bootstrap enforces. A Ledger cannot be the
-deployer; `deploy.sh` writes the 820 KB buffer in about 800 signed chunks, and it only asks the
-Ledger to sign after the handover.
+That wallet becomes the deployer and upgrade authority; the operator is still generated fresh.
+Use a wallet that holds nothing but this project's SOL, and not the Admin (`ADMIN_ADDRESS`). A
+Ledger cannot be the deployer: `deploy.sh` writes the 820 KB buffer in about 800 signed chunks and
+bootstrap signs only with a key file.
 
-Put `keys/hexvault-mainnet-operator.json` and `keys/hex_vault-mainnet-keypair.json` in the team
-password manager now. The program keypair is the only way to get this program ID; after step 5 it
-is never needed again.
+Put `keys/hexvault-mainnet-deployer.json`, `keys/hexvault-mainnet-operator.json` and
+`keys/hex_vault-mainnet-keypair.json` in the team password manager now. The program keypair is
+the only way to get this program ID; after step 5 it is never needed again. The deployer file is
+needed for every later upgrade unless you hand the authority to the Ledger.
 
 ## 2. What to change before the build
 
@@ -87,10 +91,10 @@ already lists the mainnet ID, and `deploy.sh mainnet` reads `RPC_URL` from `.env
 ```bash
 scripts/deploy.sh mainnet --dry-run     # build, check-deployable, program id check; writes nothing
 scripts/deploy.sh mainnet               # type the program id at the prompt
-solana program show EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH   # Authority = solana address
+solana program show EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH   # Authority = solana address (the deployer)
 ```
 
-The hot key stays upgrade authority on purpose. Do not run `handover` yet.
+The deployer stays upgrade authority. Do not run `handover` before step 4.
 
 ## 4. Create pool 1
 
@@ -100,10 +104,12 @@ pnpm --filter @hexvault/backend bootstrap \
   --epoch-anchor <next Sunday 16:00 UTC, ISO 8601> --epoch-seconds 86400 --min-jackpot 1 > mainnet-pool.env
 ```
 
-Open a fresh shell for this (a previous `set -a` on another env file leaks values). The admin
-comes from `ADMIN_ADDRESS`; do not pass `--operator` or `--start`. Bootstrap creates the Treasury
-and Buyback reserve itself, two plain USDC accounts owned by the Admin, then the pool, which
-starts with game, jackpot and bought tickets paused. To use one account for both roles (no
+Open a fresh shell for this (a previous `set -a` on another env file leaks values). Bootstrap
+signs and pays with `DEPLOY_KEYPAIR`, takes the admin from `ADMIN_ADDRESS` and the operator from
+`OPERATOR_KEYPAIR`; do not pass `--operator` or `--start`. Check its `signer`/`operator` log lines
+show the two different pubkeys from step 1. Bootstrap creates the Treasury and Buyback reserve
+itself, two plain USDC accounts owned by the Admin, the operator's USDC account (a House prize
+pays into it), then the pool, which starts with game, jackpot and bought tickets paused. To use one account for both roles (no
 token buyback planned, the same-address guard is commented out), pass the same address twice:
 `--treasury <addr> --buyback-reserve <addr>`, where `<addr>` is any USDC token account owned by
 the Admin. `mainnet-pool.env` holds `POOL_ADDRESS`, the
@@ -112,15 +118,21 @@ Paste `TREASURY`, `BUYBACK_RESERVE` and the venue lines it prints (`VENUE_KIND`,
 `KVAULT_ADDRESS` if used) into `.env.mainnet`: the backend compares all of them with the Pool at
 boot and refuses on any difference. The second person checks the pins against Kamino.
 
-## 5. Hand the program to the Ledger, publish the IDL
+## 5. Publish the IDL, optionally hand the program to the Ledger
 
-Ledger plugged in, unlocked, Solana app open.
+```bash
+scripts/deploy.sh mainnet --idl         # signs with the deployer
+git tag mainnet-v1 && git push origin mainnet-v1
+```
+
+The deployer can stay upgrade authority, kept offline between upgrades. To move it to the Ledger
+instead (plugged in, unlocked, Solana app open):
 
 ```bash
 scripts/deploy.sh mainnet handover      # type the Ledger pubkey at the prompt
-scripts/deploy.sh mainnet --idl         # signs with the Ledger
-git tag mainnet-v1 && git push origin mainnet-v1
 ```
+
+After a handover the Ledger signs every later `--upgrade` and `--idl`.
 
 If the repo is public at that commit, `scripts/deploy.sh mainnet verify`. If it stays private,
 run `solana-verify get-executable-hash target/deploy/hex_vault.so` and publish the hash.
@@ -205,7 +217,7 @@ when you are sure it is retired.
 
 ```bash
 solana program dump EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH /tmp/hex_vault-prev.so --url mainnet-beta   # rollback copy
-scripts/deploy.sh mainnet --upgrade     # hot key writes the buffer, Ledger signs once
+scripts/deploy.sh mainnet --upgrade     # deployer writes the buffer and signs; after a handover the Ledger signs once
 scripts/deploy.sh mainnet --idl         # if the IDL changed
 ```
 

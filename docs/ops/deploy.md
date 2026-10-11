@@ -32,11 +32,11 @@ The script, in order:
    (`--with-compute-unit-price`, from `DEPLOY_CU_PRICE`, default `100000`) and
    `--max-sign-attempts 50` so a large program lands under congestion; mainnet also adds
    `--use-rpc`, since it only helps when the RPC is stake-weighted (Helius, Triton) and only
-   mainnet's RPC is. On mainnet the hot key (the configured `solana` keypair) writes the buffer, so
-   the Ledger is not asked to sign each ~1 KB chunk of the 1 MB binary. An upgrade then hands the
-   buffer to the Ledger (`solana program set-buffer-authority`) and the Ledger signs the one
-   deploy transaction. A first deploy leaves the hot key as upgrade authority; see "Mainnet launch
-   order".
+   mainnet's RPC is. On mainnet the deployer (the configured `solana` keypair) writes the buffer,
+   so the Ledger is not asked to sign each ~1 KB chunk of the 1 MB binary. If the Ledger holds the
+   upgrade authority, an upgrade hands the buffer to it (`solana program set-buffer-authority`)
+   and the Ledger signs the one deploy transaction; otherwise the deployer signs it. See "Mainnet
+   launch order".
 6. After the deploy, asserts the on-chain upgrade authority (`solana program show
    <program-id>`) equals the authority expected for the env: the Ledger on a mainnet upgrade, the
    locally configured keypair (`solana address`) elsewhere, including a first mainnet deploy. Then checks `solana program show --buffers
@@ -68,15 +68,17 @@ key (`.env.mainnet`, `DEPLOY_RPC_URL`), so it still must not be pasted into a ti
 06), so a stranger cannot create pool 1 with their own admin the moment the program exists. The
 order is:
 
-1. `scripts/deploy.sh mainnet` deploys with the hot key as upgrade authority.
-2. Bootstrap creates the pool. Its payer is `OPERATOR_KEYPAIR`, so the keypair `solana address`
-   reports during step 1 must be the same key. Bootstrap and
-   the backend boot guard refuse an existing pool whose admin, treasury, buyback reserve, mint or
-   venue pins differ from the flags and env, and print the diff.
-3. `scripts/deploy.sh mainnet handover` moves the upgrade authority to the Ledger. It checks the
-   current authority is the hot key, asks you to type the Ledger pubkey, runs `solana program
-   set-upgrade-authority --new-upgrade-authority usb://ledger` (the Ledger signs as the new
-   authority, which proves it is reachable) and re-reads the authority.
+1. `scripts/deploy.sh mainnet` deploys with the deployer key (`DEPLOY_KEYPAIR` in `.env.mainnet`)
+   as upgrade authority.
+2. Bootstrap creates the pool. With `DEPLOY_KEYPAIR` set it pays with the deployer and names the
+   operator from `OPERATOR_KEYPAIR` (or `--operator`), so the key on the VPS never holds upgrade
+   rights. Bootstrap and the backend boot guard refuse an existing pool whose admin, treasury,
+   buyback reserve, mint or venue pins differ from the flags and env, and print the diff.
+3. Optional: `scripts/deploy.sh mainnet handover` moves the upgrade authority to the Ledger. It
+   checks the current authority is the deployer, asks you to type the Ledger pubkey, runs
+   `solana program set-upgrade-authority --new-upgrade-authority usb://ledger` (the Ledger signs
+   as the new authority, which proves it is reachable) and re-reads the authority. Until then the
+   deployer, kept offline between upgrades, signs `--upgrade` and `--idl` alone.
 
 Do not run step 3 before bootstrap: no one can create a pool afterwards without the Ledger. Later
 upgrades use `scripts/deploy.sh mainnet --upgrade`, where the Ledger signs only the final deploy.

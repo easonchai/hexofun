@@ -9,7 +9,8 @@
 //
 // stdout carries only the KEY=value block; progress goes to stderr, so
 // `bootstrap > pool.env` yields a pasteable file.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { AnchorProvider, BN, Program, Wallet, Idl } from "@anchor-lang/core";
 import {
@@ -416,9 +417,26 @@ async function main(): Promise<void> {
 
   const params = parsePoolParams(process.argv.slice(2));
   const connection = new Connection(requireEnv("RPC_URL"), "confirmed");
-  const authority = Keypair.fromSecretKey(
+  const operatorKey = Keypair.fromSecretKey(
     bs58.decode(requireEnv("OPERATOR_KEYPAIR")),
   );
+  // Mainnet launch: DEPLOY_KEYPAIR (the deployer file scripts/mainnet-keys.sh
+  // wrote) is the upgrade authority create_pool wants as payer; the operator
+  // key then only gets named, so it never holds upgrade rights. The path is
+  // relative to where pnpm was invoked (the repo root), not apps/backend.
+  const deployFile = process.env.DEPLOY_KEYPAIR;
+  const authority = deployFile
+    ? Keypair.fromSecretKey(
+        Uint8Array.from(
+          JSON.parse(
+            readFileSync(
+              resolve(process.env.INIT_CWD ?? process.cwd(), deployFile),
+              "utf8",
+            ),
+          ),
+        ),
+      )
+    : operatorKey;
   // The loaded key pays, mints and owns the token accounts unless overridden.
   // `explicitAdmin` stays undefined when it would default to the hot key, so
   // the mainnet guard below can tell "given" from "defaulted".
@@ -429,7 +447,7 @@ async function main(): Promise<void> {
       : undefined);
   const roles = {
     admin: explicitAdmin ?? authority.publicKey,
-    operator: params.operator ?? authority.publicKey,
+    operator: params.operator ?? operatorKey.publicKey,
   };
   const programId = new PublicKey(requireEnv("PROGRAM_ID"));
   const poolId = BigInt(requireEnv("POOL_ID"));
@@ -551,6 +569,18 @@ async function main(): Promise<void> {
         )
       ).address,
   );
+  // A House prize pays into the operator's ATA, so it must exist when the
+  // operator is not the signer.
+  if (!roles.operator.equals(authority.publicKey)) {
+    await step("creating the operator ATA", () =>
+      getOrCreateAssociatedTokenAccount(
+        connection,
+        authority,
+        mint,
+        roles.operator,
+      ),
+    );
+  }
 
   const treasury = existing
     ? existing.treasury
