@@ -142,6 +142,11 @@ const lagged = (slot: bigint): bigint => (slot > SWEEP_INDEX_LAG ? slot - SWEEP_
 
 /** The line Solana writes into a transaction's log when it passes the 10 KB cap. */
 const LOG_TRUNCATED = "Log truncated";
+/** The signature `logsSubscribe` stamps on a `simulateTransaction`'s logs
+ *  (64 zero bytes). The web app simulates every send to size its compute
+ *  limit, so the socket delivers each player action once as this and once
+ *  for real; storing the first double-counted the action (mainnet, 2026-10-11). */
+const SIMULATED_SIGNATURE = "1".repeat(64);
 /** `getMultipleAccounts` takes at most 100 keys. */
 const ACCOUNTS_PER_READ = 100;
 /** Apply order for a refresh: the Pool first, since the rest reference it (ADR 0016). */
@@ -1338,7 +1343,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * stored once by `persist`, and neither moves the cursor.
    */
   ingestPushed(tx: { signature: string; slot: bigint; logs: string[]; err: unknown }): Promise<void> {
-    if (tx.err) return Promise.resolve();
+    if (tx.err || tx.signature === SIMULATED_SIGNATURE) return Promise.resolve();
     return this.enqueue(async () => {
       // Before the first sweep lands there may be no Pool row for the
       // Event's foreign key (a fresh pool, ADR 0016). Dropping the event

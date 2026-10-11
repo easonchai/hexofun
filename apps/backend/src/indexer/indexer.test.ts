@@ -955,6 +955,22 @@ describe("event ingest", () => {
     expect(await prisma.cursor.findUnique({ where: { poolAddress: active() } })).toBeNull();
   });
 
+  // A simulateTransaction's logs reach logsSubscribe under the all-ones
+  // signature; the web app simulates every send, so storing it double-counted
+  // the player's action (mainnet 2026-10-11, +$1.00 earnings after a withdraw).
+  it("stores nothing from a simulated transaction's logs", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    indexer["lastSyncedSlot"] = 100n;
+    indexer["subscribeToLogs"]();
+    const simulated = "1".repeat(64);
+    const logs = batch(simulated, 0n, [deposited]).logs;
+
+    connection.fireLogs(chain.poolAddress(), "finalized", { err: null, signature: simulated, logs }, 62);
+    await indexer["queue"];
+
+    expect(await prisma.event.count({ where: { signature: simulated } })).toBe(0);
+  });
+
   it("stores nothing from a pushed transaction that failed", async () => {
     await put("pool", chain.poolAddress(), poolAccount());
     indexer["lastSyncedSlot"] = 100n;
