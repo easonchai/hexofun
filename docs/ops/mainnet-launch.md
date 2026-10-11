@@ -30,7 +30,8 @@ Nobody holds a mainnet secret in git, and B never holds upgrade rights.
   -u mainnet-beta`) and stays locked in the program; the deploy instruction refunds the buffer to
   the payer before it creates ProgramData, so that rent is paid once, not twice. The rest of A's 5
   covers pool creation (0.01), three token accounts (0.006) and fees. B's 2 SOL pays crank fees.
-- `solana-verify` installed (`cargo install solana-verify`, needs Docker).
+- Optional: `solana-verify` installed (`cargo install solana-verify`, needs Docker) for a
+  reproducible build. Without it `deploy.sh mainnet` falls back to a plain `anchor build`.
 - The mainnet build comes from `main`. Merge first.
 
 ## 1. Make A and B, fund A, B and C
@@ -60,8 +61,6 @@ every later upgrade.
 
 ## 2. What to change before the build
 
-- `programs/hex_vault/src/lib.rs`, `security_txt!`: `contacts` still says `email:TODO@hexvault.example`.
-  Put a monitored address there. It ships inside the binary, so fixing it later is an upgrade.
 - `.env.mainnet` (step 1 created it from the example): fill in `API_HOST`, `POSTGRES_PASSWORD`,
   `RPC_URL`, `RPC_FALLBACK_URL`, `ADMIN_ADDRESS` (C), `OPS_WALLETS` (C and the teammates who will
   use Fast pause and Game config, comma separated), `CORS_ORIGIN`, `INVITE_ADMIN_KEY`

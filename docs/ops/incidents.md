@@ -113,9 +113,8 @@ Starts with whichever code names the damage, or none if the report comes in firs
      to the owners.
 4. There is no on-call rotation yet (production-hardening ticket 13 sets up the uptime monitor's
    paging target); until it exists, whoever notices the incident runs this playbook and pulls the
-   rest of the team in directly. `security.txt`'s `project_url` and `contacts` are still `TODO` in
-   `programs/hex_vault/src/lib.rs`; once filled, an outside researcher's report lands on the
-   address in that file's `contacts:` line instead.
+   rest of the team in directly. The program ships no `security.txt`, so an outside researcher
+   has no published report address; they reach us through the app or the team's public handles.
 
 <a id="operator-sol-low"></a>
 ## Operator out of SOL

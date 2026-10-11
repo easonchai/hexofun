@@ -321,8 +321,6 @@ Before a real mainnet deploy:
 - [ ] Verifiable build: repo pushed at the deployed commit, `solana-verify verify-from-repo` and
   `solana-verify remote submit-job` run (see "Verifiable build" below), or the local hash
   published if the repo stays private.
-- [ ] Real contacts in `security_txt!` (`programs/hex_vault/src/lib.rs`): `project_url` and
-  `contacts` are TODO placeholders today. A placeholder wastes a researcher's report.
 - [ ] A paid RPC provider with its own API key for mainnet (never share the devnet key's rate
   limit or bill).
 - [ ] `PRIORITY_FEE_MAX_MICROLAMPORTS` set for mainnet congestion, not left at the devnet default
