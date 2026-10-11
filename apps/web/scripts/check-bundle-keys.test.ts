@@ -13,6 +13,19 @@ describe("findLeak", () => {
     });
   });
 
+  it("flags a Solami keyed RPC or WebSocket URL", () => {
+    for (const url of [
+      "https://rpc.solami.fast/sol?api_key=abc",
+      "wss://ws.solami.dev/ws/sol?api_key=abc",
+    ]) {
+      expect(findLeak([{ path: "dist/a.js", text: `const U="${url}"` }])).toEqual({
+        file: "dist/a.js",
+        pattern: "Solami api_key",
+      });
+    }
+    expect(findLeak([{ path: "dist/a.js", text: 'q.api_key="x"' }])).toBeNull();
+  });
+
   it("passes a clean bundle", () => {
     const hit = findLeak([
       { path: "dist/assets/index.js", text: 'const RPC="https://api.devnet.solana.com"' },

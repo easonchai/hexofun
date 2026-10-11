@@ -56,8 +56,9 @@ token_program=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
 venue="${SURF_VENUE:-kvault}"
 case "$venue" in kvault | klend) ;; *) echo "surf: SURF_VENUE must be kvault or klend, got $venue" >&2; exit 1 ;; esac
 # The Kamino Earn vault the fork tests use (tests/fork/kvault.pool.fork.ts). The
-# shares mint is a PDA of it, so bootstrap needs only the vault.
-kvault_address=DWSXb18xZApz29vnQpgR2m6MynCT7PznaXt7Ut7M7KaP
+# shares mint is a PDA of it, so bootstrap needs only the vault. KVAULT_ADDRESS
+# (up only) rehearses another vault, such as the one mainnet will pin.
+kvault_address="${KVAULT_ADDRESS:-DWSXb18xZApz29vnQpgR2m6MynCT7PznaXt7Ut7M7KaP}"
 # Fork-only: a lower Base yield ceiling leaves more of the venue's yield as prize.
 if [ "$venue" = kvault ]; then base_rate_bps=400; else base_rate_bps=488; fi
 # Kamino main market USDC reserve, its liquidity supply and cToken mint

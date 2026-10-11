@@ -272,3 +272,49 @@ describe("validateEnv", () => {
     ).toThrow(/INVITE_REDEEM_GRANT_COUNT/);
   });
 });
+
+// Solami ticket 08: Beam is off unless BEAM_KEYPAIR is set.
+describe("Beam env", () => {
+  it("is off by default, and on with a keypair and the floor tip", () => {
+    const off = validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_TIP_LAMPORTS: "5" });
+    expect(off.BEAM_KEYPAIR).toBeUndefined();
+    expect(off.BEAM_TIP_LAMPORTS).toBeUndefined();
+    const secret = bs58.encode(Keypair.generate().secretKey);
+    const on = validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_KEYPAIR: secret });
+    expect(on.BEAM_KEYPAIR).toBe(secret);
+    expect(on.BEAM_TIP_LAMPORTS).toBe(100_000);
+  });
+
+  it("fails the boot on a bad keypair without echoing it, and on a tip under the floor", () => {
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_KEYPAIR: "not-a-real-secret-0OIl" }),
+    ).toThrow(/^BEAM_KEYPAIR must be a base58 64-byte secret key$/);
+    const secret = bs58.encode(Keypair.generate().secretKey);
+    expect(() =>
+      validateEnv({ ...base, ACCEPTED_MINT: MINT, BEAM_KEYPAIR: secret, BEAM_TIP_LAMPORTS: "99999" }),
+    ).toThrow(/BEAM_TIP_LAMPORTS/);
+  });
+});
+
+// Solami ticket 05: both or neither.
+describe("Subgraph env", () => {
+  const URL = "https://api.solami.dev/index/hexo/graphql";
+
+  it("takes both, and treats one without the other as unset", () => {
+    const on = validateEnv({ ...base, ACCEPTED_MINT: MINT, SUBGRAPH_URL: URL, SUBGRAPH_API_KEY: "k" });
+    expect(on).toMatchObject({ SUBGRAPH_URL: URL, SUBGRAPH_API_KEY: "k" });
+    for (const half of [{ SUBGRAPH_URL: URL }, { SUBGRAPH_API_KEY: "k" }, {}]) {
+      const env = validateEnv({ ...base, ACCEPTED_MINT: MINT, ...half });
+      expect(env).not.toHaveProperty("SUBGRAPH_URL");
+      expect(env).not.toHaveProperty("SUBGRAPH_API_KEY");
+    }
+  });
+
+  it("fails the boot on a URL that is not a /graphql endpoint, without echoing it", () => {
+    for (const bad of ["not a url", "https://api.solami.dev/index/hexo", "ftp://x/graphql"]) {
+      expect(() =>
+        validateEnv({ ...base, ACCEPTED_MINT: MINT, SUBGRAPH_URL: bad, SUBGRAPH_API_KEY: "k" }),
+      ).toThrow(/^SUBGRAPH_URL must be an http\(s\) URL ending in \/graphql$/);
+    }
+  });
+});

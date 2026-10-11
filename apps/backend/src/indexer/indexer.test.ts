@@ -31,6 +31,7 @@ import { checkLedgerIfDue, countLedgerMismatches, LEDGER_CHECK_INTERVAL_S, princ
 import { buildSumTree } from "../snapshot/sum-tree";
 import { decodeEventLogs } from "./decode";
 import { IndexerService, type LogBatch } from "./indexer.service";
+import type { SubgraphSource, SubgraphTransaction } from "./subgraph";
 
 const DB_AVAILABLE = isDatabaseReachableSync(TEST_DATABASE_URL);
 
@@ -934,6 +935,32 @@ describe("event ingest", () => {
     expect(event.slot).toBe(77n);
   });
 
+  // solami-index 09: the webhook and the socket share `ingestPushed`, so a
+  // signature both deliver is stored once and neither moves the cursor.
+  it("stores a signature the webhook and onLogs both deliver once, without moving the cursor", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    indexer["lastSyncedSlot"] = 100n; // the first sweep has landed
+    indexer["subscribeToLogs"]();
+    const logs = batch("sig-both", 0n, [deposited]).logs;
+
+    await indexer.ingestPushed({ signature: "sig-both", slot: 60n, logs, err: null });
+    connection.fireLogs(chain.poolAddress(), "finalized", { err: null, signature: "sig-both", logs }, 60);
+    await indexer["queue"];
+
+    expect(await prisma.event.count({ where: { signature: "sig-both" } })).toBe(1);
+    expect(await prisma.cursor.findUnique({ where: { poolAddress: active() } })).toBeNull();
+  });
+
+  it("stores nothing from a pushed transaction that failed", async () => {
+    await put("pool", chain.poolAddress(), poolAccount());
+    indexer["lastSyncedSlot"] = 100n;
+    const logs = batch("sig-failed", 0n, [deposited]).logs;
+
+    await indexer.ingestPushed({ signature: "sig-failed", slot: 61n, logs, err: { InstructionError: [0, { Custom: 1 }] } });
+
+    expect(await prisma.event.count({ where: { signature: "sig-failed" } })).toBe(0);
+  });
+
   it("keeps the transaction's own block time on a backfilled event, even with a different chain time observed live", async () => {
     chain.recordChainTime(999_999n);
     expect(await indexer.ingestLogs(batch("sig-backfill", 40n, [deposited]))).toBe(1);
@@ -1050,6 +1077,135 @@ describe("event catch-up", () => {
     },
     120_000,
   );
+});
+
+/** Solami ticket 05: answers from `rows` and `synced`, or throws `failure`. */
+class FakeSubgraph implements SubgraphSource {
+  synced = { slot: 1_000, live: true };
+  rows: SubgraphTransaction[] = [];
+  failure: Error | undefined;
+  asked: { slot: bigint; pool: string }[] = [];
+
+  syncedSlot(): Promise<{ slot: number; live: boolean }> {
+    return this.failure ? Promise.reject(this.failure) : Promise.resolve(this.synced);
+  }
+
+  transactionsSince(slot: bigint, pool: string): Promise<SubgraphTransaction[]> {
+    this.asked.push({ slot, pool });
+    return Promise.resolve(this.rows.filter((row) => row.slot >= slot));
+  }
+}
+
+const subgraphRow = (signature: string, slot: bigint, lines: string[], flags: Partial<SubgraphTransaction> = {}) => ({
+  signature,
+  slot,
+  logs: batch(signature, slot, lines).logs,
+  truncated: false,
+  failed: false,
+  ...flags,
+});
+
+describe("subgraph catch-up (solami 05)", () => {
+  const HEAD = 1_000n;
+  let fake: FakeSubgraph;
+  let viaSubgraph: IndexerService;
+
+  beforeEach(async () => {
+    await seedActivePool();
+    fake = new FakeSubgraph();
+    viaSubgraph = new IndexerService(prisma, chain, fake);
+    viaSubgraph["lastSyncedSlot"] = HEAD;
+  });
+  afterEach(() => {
+    connection.signaturesForAddress = [];
+  });
+
+  it("ingests a fresh subgraph's rows and advances the cursor with no getTransaction", async () => {
+    fake.synced = { slot: Number(HEAD) - 300, live: true }; // the edge still counts as fresh
+    fake.rows = [
+      subgraphRow("sg-1", 10n, [epochRolledOver]),
+      subgraphRow("sg-2", 11n, [deposited], { failed: true }),
+    ];
+
+    await viaSubgraph["catchUpEvents"]();
+
+    expect(fake.asked).toEqual([{ slot: 0n, pool: active() }]);
+    expect(connection.callsTo("getTransaction")).toBe(0);
+    expect(connection.callsTo("getSignaturesForAddress")).toBe(0);
+    // The failed row stores nothing but still moves the cursor past it.
+    expect(await prisma.event.findMany()).toMatchObject([{ signature: "sg-1", name: "EpochRolledOver", ledgered: true, blockTime: null }]);
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({
+      lastSignature: "sg-2",
+      lastSlot: 11n,
+    });
+  });
+
+  it("falls back to the RPC walk when the subgraph is 301 slots behind, not Live, or throws", async () => {
+    connection.signaturesForAddress = [{ signature: "rpc-1", slot: 20, err: null, blockTime: 1_700_000_020 }];
+    connection.setTransaction("rpc-1", batch("rpc-1", 20n, [epochRolledOver]).logs);
+
+    for (const setUp of [
+      () => (fake.synced = { slot: Number(HEAD) - 301, live: true }),
+      () => (fake.synced = { slot: Number(HEAD), live: false }),
+      () => (fake.failure = new Error("subgraph query: boom")),
+    ]) {
+      await wipe();
+      await seedActivePool();
+      connection.resetCalls();
+      fake = new FakeSubgraph();
+      fake.rows = [subgraphRow("sg-1", 10n, [epochRolledOver])];
+      setUp();
+      viaSubgraph = new IndexerService(prisma, chain, fake);
+      viaSubgraph["lastSyncedSlot"] = HEAD;
+
+      await viaSubgraph["catchUpEvents"]();
+
+      expect(fake.asked).toEqual([]);
+      expect(connection.callsTo("getSignaturesForAddress")).toBe(1);
+      expect((await prisma.event.findMany()).map((event) => event.signature)).toEqual(["rpc-1"]);
+    }
+  });
+
+  it("skips rows at the cursor's slot a catch-up already consumed, and books one only the live feed stored", async () => {
+    // a: consumed by an earlier catch-up. c: the cursor's own signature. b: the live feed's only.
+    await viaSubgraph.ingestLogs(batch("a", 10n, [epochRolledOver]));
+    await viaSubgraph.ingestLogs(batch("c", 10n, []));
+    await viaSubgraph.ingestPushed({ signature: "b", slot: 10n, logs: batch("b", 10n, [epochRolledOver]).logs, err: null });
+    fake.rows = ["a", "b", "c"].map((signature) => subgraphRow(signature, 10n, [epochRolledOver]));
+    fake.rows.push(subgraphRow("d", 11n, [epochRolledOver]));
+    const persisted: string[] = [];
+    const persist = viaSubgraph["persist"].bind(viaSubgraph);
+    viaSubgraph["persist"] = (batch, ...rest) => {
+      persisted.push(batch.signature);
+      return persist(batch, ...rest);
+    };
+
+    await viaSubgraph["catchUpEvents"]();
+
+    expect(fake.asked).toEqual([{ slot: 10n, pool: active() }]);
+    expect(persisted).toEqual(["b", "d"]);
+    expect(await prisma.event.findMany({ where: { signature: "b" } })).toMatchObject([{ ledgered: true }]);
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ lastSignature: "d" });
+  });
+
+  it("logs a source change once, not once per tick", async () => {
+    const lines: string[] = [];
+    viaSubgraph["logger"].log = (message: unknown) => void lines.push(String(message));
+
+    await viaSubgraph["catchUpEvents"]();
+    await viaSubgraph["catchUpEvents"]();
+    fake.synced = { slot: Number(HEAD) - 301, live: true };
+    await viaSubgraph["catchUpEvents"]();
+    await viaSubgraph["catchUpEvents"]();
+    fake.synced = { slot: Number(HEAD), live: true };
+    await viaSubgraph["catchUpEvents"]();
+
+    expect(lines).toEqual([
+      "catch-up source: subgraph",
+      "catch-up source: rpc (subgraph 301 slots behind)",
+      "catch-up source: subgraph",
+    ]);
+  });
 });
 
 // `getProgramAccountsV2`'s index runs 13 to 24 seconds behind the chain
@@ -1820,6 +1976,22 @@ describe("truncated transaction logs", () => {
     // A replay records nothing new.
     await indexer["catchUpEvents"]();
     expect(await prisma.truncatedLog.count()).toBe(1);
+  });
+
+  it("a truncated subgraph row refreshes the accounts and moves the cursor (solami 05)", async () => {
+    const fake = new FakeSubgraph();
+    fake.synced = { slot: 100, live: true };
+    fake.rows = [{ signature: "cut-5", slot: 50n, logs: truncatedLogs("cut-5"), truncated: true, failed: false }];
+    connection.setTransaction("cut-5", truncatedLogs("cut-5"), ownerKeys());
+    const viaSubgraph = new IndexerService(prisma, chain, fake);
+    viaSubgraph["lastSyncedSlot"] = 100n;
+
+    await viaSubgraph["catchUpEvents"]();
+
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) })).toMatchObject({ principal: 7_000_000n });
+    expect(await prisma.truncatedLog.findMany()).toMatchObject([{ signature: "cut-5", slot: 50n }]);
+    expect(await prisma.event.count()).toBe(0);
+    expect(await prisma.cursor.findUniqueOrThrow({ where: { poolAddress: active() } })).toMatchObject({ lastSignature: "cut-5" });
   });
 
   it("the live log path does the same without moving the cursor", async () => {

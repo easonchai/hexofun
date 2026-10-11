@@ -60,10 +60,18 @@
 //! partial redeem pays it again on each call, which the callers book as dust
 //! against `fee_owed`, as they do klend's one-unit rounding.
 //!
+//! A vault may also set a withdrawal penalty, `withdrawal_penalty_bps` of the
+//! payout plus `withdrawal_penalty_lamports` flat, which it keeps for the
+//! remaining holders (the Institutional Commodity Yield vault charges 1 bps
+//! plus 1 unit, measured on a fork 2026-10-11: a 30,000.001010 USDC burn paid
+//! 29,997.001009). It comes off the value the same way as the exit cost, so a
+//! deploy books it as dust at once and a full redeem still returns at least the
+//! value; a redeem grosses its burn up by it.
+//!
 //! # Redeem
 //!
-//! Burns the shares worth `amount + exit_cost` at the conservative price, so
-//! the payout is at least `amount`. When the vault cannot pay that much now
+//! Burns the shares worth `amount + exit_cost`, grossed up for the penalty, at
+//! the conservative price, so the payout is at least `amount`. When the vault cannot pay that much now
 //! (idle tokens plus the source reserve's free liquidity, or the pool's own
 //! shares) it burns what the limit allows and pays less. The caller books what
 //! arrived. `recall`, `harvest` and the refund path refuse a short payout with
@@ -105,11 +113,44 @@ const DISINVEST_ROUNDING: u64 = 10;
 const EXIT_COST: u64 = VAULT_KEEPS + DISINVEST_ROUNDING;
 
 fn exit_cost(min_withdraw: u64) -> u64 {
-    VAULT_KEEPS.max(min_withdraw).saturating_add(DISINVEST_ROUNDING)
+    VAULT_KEEPS
+        .max(min_withdraw)
+        .saturating_add(DISINVEST_ROUNDING)
 }
 
 const BPS: u128 = 10_000;
 const SECONDS_PER_YEAR: u128 = 31_536_000;
+
+/// The vault's withdrawal penalty, read off its state: `bps` of every payout
+/// plus `flat` units, both kept by the vault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Penalty {
+    pub bps: u64,
+    pub flat: u64,
+}
+
+impl Penalty {
+    #[cfg(test)]
+    pub const NONE: Penalty = Penalty { bps: 0, flat: 0 };
+
+    /// What the vault keeps of a payout of `tokens`, rounded against the pool.
+    fn of(&self, tokens: u128) -> u128 {
+        (tokens * u128::from(self.bps)).div_ceil(BPS) + u128::from(self.flat)
+    }
+
+    /// The payout the vault must compute so that `base` arrives after the
+    /// penalty: the smallest `gross` with `gross - of(gross) >= base`.
+    fn gross_up(&self, base: u64) -> Result<u64> {
+        require!(u128::from(self.bps) < BPS, HexVaultError::VenueIlliquid);
+        let base = u128::from(base);
+        let mut gross = ((base + u128::from(self.flat)) * BPS).div_ceil(BPS - u128::from(self.bps));
+        // The ceilings can leave it one or two units under; never more.
+        while gross - self.of(gross) < base {
+            gross += 1;
+        }
+        u64::try_from(gross).map_err(|_| error!(HexVaultError::ArithmeticOverflow))
+    }
+}
 
 /// SPL token account, byte offsets: mint, amount, owner, and the length.
 const TOKEN_MINT: usize = 0;
@@ -159,26 +200,37 @@ pub fn net_aum(gross: u64, fees: &Fees, now: i64) -> u64 {
     let at_last_charge = (fees.prev_aum_sf + fees.pending_sf) >> FRACTION_BITS;
     let earned = u128::from(gross).saturating_sub(at_last_charge);
     let performance = (earned * u128::from(fees.performance_bps)).div_ceil(BPS);
-    let elapsed = u128::try_from(now.saturating_sub(i64::try_from(fees.last_charge).unwrap_or(i64::MAX)))
-        .unwrap_or(0);
+    let elapsed =
+        u128::try_from(now.saturating_sub(i64::try_from(fees.last_charge).unwrap_or(i64::MAX)))
+            .unwrap_or(0);
     let management = ((fees.prev_aum_sf >> FRACTION_BITS)
         .saturating_mul(u128::from(fees.management_bps))
         .saturating_mul(elapsed))
     .div_ceil(BPS * SECONDS_PER_YEAR);
-    let owed = pending.saturating_add(performance).saturating_add(management);
+    let owed = pending
+        .saturating_add(performance)
+        .saturating_add(management);
     u64::try_from(u128::from(gross).saturating_sub(owed)).unwrap_or(u64::MAX)
 }
 
 /// What a full redeem of `shares` returns, at most: the shares' worth at the
-/// net AUM, rounded down, less what the vault keeps. Zero shares are worth
-/// zero, not a negative exit cost.
-pub fn position_value(shares: u64, net: u64, issued: u64, exit_cost: u64) -> Result<u64> {
+/// net AUM, rounded down, less the penalty on it and what the vault keeps.
+/// Zero shares are worth zero, not a negative exit cost.
+pub fn position_value(
+    shares: u64,
+    net: u64,
+    issued: u64,
+    exit_cost: u64,
+    penalty: Penalty,
+) -> Result<u64> {
     if shares == 0 || issued == 0 {
         return Ok(0);
     }
     let worth = u128::from(shares) * u128::from(net) / u128::from(issued);
-    let worth = u64::try_from(worth).map_err(|_| error!(HexVaultError::ArithmeticOverflow))?;
-    Ok(worth.saturating_sub(exit_cost))
+    let after_penalty = worth.saturating_sub(penalty.of(worth));
+    let value =
+        u64::try_from(after_penalty).map_err(|_| error!(HexVaultError::ArithmeticOverflow))?;
+    Ok(value.saturating_sub(exit_cost))
 }
 
 /// Shares to burn for `tokens` of payout before the exit cost. Rounded up when
@@ -196,13 +248,15 @@ pub fn shares_for(tokens: u64, net: u64, issued: u64, round_up: bool) -> Result<
 /// to pay for them before the exit cost.
 ///
 /// - `want` is `amount`, lifted to the vault's minimum withdraw.
-/// - The burn is priced at `want + exit_cost` so the payout reaches `want`.
+/// - The burn is priced at `want + exit_cost`, grossed up for the penalty, so
+///   the payout reaches `want`.
 /// - `limit` is what the vault can pay now before the exit cost: idle tokens
 ///   plus the source reserve's free liquidity. A burn above it is cut down to
 ///   it, rounded down, so the CPI cannot fail on liquidity.
 /// - `held` caps the burn at the pool's shares.
 ///
 /// Fails with `VenueIlliquid` when nothing above the minimum can move.
+#[allow(clippy::too_many_arguments)]
 pub fn redeem_shares(
     amount: u64,
     net: u64,
@@ -211,11 +265,13 @@ pub fn redeem_shares(
     min_withdraw: u64,
     limit: u64,
     held: u64,
+    penalty: Penalty,
 ) -> Result<u64> {
     let want = amount.max(min_withdraw);
-    let tokens = want
-        .checked_add(exit_cost)
-        .ok_or(HexVaultError::ArithmeticOverflow)?;
+    let tokens = penalty.gross_up(
+        want.checked_add(exit_cost)
+            .ok_or(HexVaultError::ArithmeticOverflow)?,
+    )?;
     let shares = if tokens <= limit {
         shares_for(tokens, net, issued, true)?
     } else {
@@ -223,10 +279,10 @@ pub fn redeem_shares(
     };
     let shares = shares.min(held);
     // The vault refuses a payout under its minimum; the payout is the burn's
-    // worth less the exit cost.
+    // worth less the penalty and the exit cost.
     let paid = u128::from(shares) * u128::from(net) / u128::from(issued);
     require!(
-        paid >= u128::from(exit_cost) + u128::from(min_withdraw),
+        paid.saturating_sub(penalty.of(paid)) >= u128::from(exit_cost) + u128::from(min_withdraw),
         HexVaultError::VenueIlliquid
     );
     Ok(shares)
@@ -278,8 +334,10 @@ fn layout<'a, 'info>(venue: &Venue<'a, 'info>) -> Result<Layout<'a, 'info>> {
     let (markets, extras) = tail.split_at(n);
     for (info, &slot) in reserves.iter().zip(&slots) {
         require!(
-            same(info.key, &state.vault_allocation_strategy[slot].reserve.to_bytes())
-                && info.owner == klend.key,
+            same(
+                info.key,
+                &state.vault_allocation_strategy[slot].reserve.to_bytes()
+            ) && info.owner == klend.key,
             HexVaultError::VaultAccountMismatch
         );
     }
@@ -329,6 +387,7 @@ struct Snapshot {
     net: u64,
     exit_cost: u64,
     min_withdraw: u64,
+    penalty: Penalty,
     holdings: Vec<Holding>,
 }
 
@@ -356,8 +415,8 @@ fn snapshot(venue: &Venue<'_, '_>, l: &Layout<'_, '_>) -> Result<Snapshot> {
     let mut holdings = Vec::with_capacity(l.slots.len());
     for (info, &slot) in l.reserves.iter().zip(&l.slots) {
         let rdata = info.try_borrow_data()?;
-        let reserve: &Reserve = reserve_from_data(&rdata)
-            .map_err(|_| error!(HexVaultError::ReserveUnreadable))?;
+        let reserve: &Reserve =
+            reserve_from_data(&rdata).map_err(|_| error!(HexVaultError::ReserveUnreadable))?;
         check_fresh(&reserve.last_update, clock.slot)?;
         let held = state.vault_allocation_strategy[slot].ctoken_allocation;
         let value = ctoken_value(
@@ -385,6 +444,10 @@ fn snapshot(venue: &Venue<'_, '_>, l: &Layout<'_, '_>) -> Result<Snapshot> {
         net: net_aum(gross, &fees, clock.unix_timestamp),
         exit_cost: exit_cost(state.min_withdraw_amount),
         min_withdraw: state.min_withdraw_amount,
+        penalty: Penalty {
+            bps: state.withdrawal_penalty_bps,
+            flat: state.withdrawal_penalty_lamports,
+        },
         holdings,
     })
 }
@@ -412,7 +475,13 @@ pub fn value(_pool: &Pool, venue: &Venue<'_, '_>) -> Result<u64> {
     let l = layout(venue)?;
     refresh(&l)?;
     let snap = snapshot(venue, &l)?;
-    position_value(shares_held(venue)?, snap.net, snap.issued, snap.exit_cost)
+    position_value(
+        shares_held(venue)?,
+        snap.net,
+        snap.issued,
+        snap.exit_cost,
+        snap.penalty,
+    )
 }
 
 /// The vault's assets under management as supply, what it can pay out now as
@@ -456,7 +525,10 @@ fn check_vault_accounts(
     require!(
         same(venue.reserve.key, &state.shares_mint.to_bytes())
             && same(l.extras[X_TOKEN_VAULT].key, &state.token_vault.to_bytes())
-            && same(l.extras[X_BASE_AUTHORITY].key, &state.base_vault_authority.to_bytes())
+            && same(
+                l.extras[X_BASE_AUTHORITY].key,
+                &state.base_vault_authority.to_bytes()
+            )
             && same(&funds.mint.key(), &state.token_mint.to_bytes())
             && same(&funds.token_program.key(), &state.token_program.to_bytes())
             && funds.token_program.key() == anchor_spl::token::ID,
@@ -487,7 +559,6 @@ fn candidates<'info>(
     infos.extend(l.extras.iter().cloned());
     infos
 }
-
 
 /// Moves `amount` USDC from the principal vault into the vault, and the shares
 /// to the pool's shares account. The vault credits the deposit at its own
@@ -549,22 +620,25 @@ pub fn redeem<'info>(
             .position(|&slot| {
                 same(
                     l.extras[X_SOURCE_CTOKEN_VAULT].key,
-                    &state.vault_allocation_strategy[slot].ctoken_vault.to_bytes(),
+                    &state.vault_allocation_strategy[slot]
+                        .ctoken_vault
+                        .to_bytes(),
                 )
             })
             .ok_or(HexVaultError::VaultAccountMismatch)?
     };
     {
         let rdata = l.reserves[source].try_borrow_data()?;
-        let reserve: &Reserve = reserve_from_data(&rdata)
-            .map_err(|_| error!(HexVaultError::ReserveUnreadable))?;
+        let reserve: &Reserve =
+            reserve_from_data(&rdata).map_err(|_| error!(HexVaultError::ReserveUnreadable))?;
         require!(
-            same(l.extras[X_SOURCE_LIQUIDITY].key, &reserve.liquidity.supply_vault.to_bytes())
-                && same(
-                    l.extras[X_SOURCE_CTOKEN_MINT].key,
-                    &reserve.collateral.mint_pubkey.to_bytes()
-                )
-                && same(l.extras[X_SYSVAR].key, &SYSVAR_INSTRUCTIONS_ID.to_bytes()),
+            same(
+                l.extras[X_SOURCE_LIQUIDITY].key,
+                &reserve.liquidity.supply_vault.to_bytes()
+            ) && same(
+                l.extras[X_SOURCE_CTOKEN_MINT].key,
+                &reserve.collateral.mint_pubkey.to_bytes()
+            ) && same(l.extras[X_SYSVAR].key, &SYSVAR_INSTRUCTIONS_ID.to_bytes()),
             HexVaultError::KlendAccountMismatch
         );
     }
@@ -578,6 +652,7 @@ pub fn redeem<'info>(
         snap.min_withdraw,
         limit,
         shares_held(venue)?,
+        snap.penalty,
     )?;
     let ix = rebuild!(
         withdraw_ix(
@@ -598,10 +673,7 @@ pub fn redeem<'info>(
                 reserve: l.reserves[source].key.to_bytes().into(),
                 ctoken_vault: l.extras[X_SOURCE_CTOKEN_VAULT].key.to_bytes().into(),
                 lending_market: l.markets[source].key.to_bytes().into(),
-                lending_market_authority: l.extras[X_SOURCE_MARKET_AUTHORITY]
-                    .key
-                    .to_bytes()
-                    .into(),
+                lending_market_authority: l.extras[X_SOURCE_MARKET_AUTHORITY].key.to_bytes().into(),
                 reserve_liquidity_supply: l.extras[X_SOURCE_LIQUIDITY].key.to_bytes().into(),
                 reserve_collateral_mint: l.extras[X_SOURCE_CTOKEN_MINT].key.to_bytes().into(),
                 reserve_collateral_token_program: funds.token_program.key().to_bytes().into(),
@@ -707,6 +779,12 @@ mod tests {
         assert_eq!(at(offset_of!(VaultState, pending_fees_sf)), 296);
         assert_eq!(at(offset_of!(VaultState, vault_allocation_strategy)), 312);
         assert_eq!(at(offset_of!(VaultState, min_withdraw_amount)), 58_416);
+        // Read off the Institutional Commodity Yield vault on a fork, 2026-10-11.
+        assert_eq!(
+            at(offset_of!(VaultState, withdrawal_penalty_lamports)),
+            58_680
+        );
+        assert_eq!(at(offset_of!(VaultState, withdrawal_penalty_bps)), 58_688);
         assert_eq!(offset_of!(VaultAllocation, ctoken_vault), 32);
         assert_eq!(offset_of!(VaultAllocation, ctoken_allocation), 1_104);
         assert_eq!(core::mem::size_of::<VaultAllocation>(), 2_160);
@@ -719,7 +797,10 @@ mod tests {
         let net = net_aum(gross, &spike_fees(), 1_000);
         // The vault stored prev_aum 66_368_566_433_528; ours is the same or
         // one unit under (the pending fees round up).
-        assert!(net == 66_368_566_433_528 || net == 66_368_566_433_527, "{net}");
+        assert!(
+            net == 66_368_566_433_528 || net == 66_368_566_433_527,
+            "{net}"
+        );
     }
 
     #[test]
@@ -754,36 +835,160 @@ mod tests {
         // 500 USDC bought 482,811,493 shares; the formula said 499,999,987.
         let net = 66_368_566_433_527;
         let issued = 64_087_014_918_202;
-        let v = position_value(482_811_493, net, issued, 0).unwrap();
+        let v = position_value(482_811_493, net, issued, 0, Penalty::NONE).unwrap();
         assert!(v <= 500_000_000 && 500_000_000 - v < 100, "{v}");
         // With the exit cost off: what a full redeem returns, at most.
-        assert_eq!(position_value(482_811_493, net, issued, EXIT_COST).unwrap(), v - EXIT_COST);
-        assert_eq!(position_value(0, net, issued, EXIT_COST).unwrap(), 0);
-        assert_eq!(position_value(10, net, issued, EXIT_COST).unwrap(), 0);
+        assert_eq!(
+            position_value(482_811_493, net, issued, EXIT_COST, Penalty::NONE).unwrap(),
+            v - EXIT_COST
+        );
+        assert_eq!(
+            position_value(0, net, issued, EXIT_COST, Penalty::NONE).unwrap(),
+            0
+        );
+        assert_eq!(
+            position_value(10, net, issued, EXIT_COST, Penalty::NONE).unwrap(),
+            0
+        );
     }
 
-    /// What the vault pays, worst case measured: the formula less 1,000 and less
-    /// one more for klend's floor on a disinvest.
-    fn payout(shares: u64, net: u64, issued: u64) -> u64 {
-        (u128::from(shares) * u128::from(net) / u128::from(issued)) as u64 - VAULT_KEEPS - 1
+    /// What the vault pays, worst case measured: the formula less the penalty
+    /// as the vault rounds it (down on the bps, measured 2026-10-11), less
+    /// 1,000 and less one more for klend's floor on a disinvest.
+    fn payout_with(shares: u64, net: u64, issued: u64, p: Penalty) -> u64 {
+        let worth = u128::from(shares) * u128::from(net) / u128::from(issued);
+        let penalty = worth * u128::from(p.bps) / BPS + u128::from(p.flat);
+        (worth - penalty) as u64 - VAULT_KEEPS - 1
     }
+
+    fn payout(shares: u64, net: u64, issued: u64) -> u64 {
+        payout_with(shares, net, issued, Penalty::NONE)
+    }
+
+    /// The Institutional Commodity Yield vault's penalty.
+    const ONE_BPS: Penalty = Penalty { bps: 1, flat: 1 };
 
     #[test]
     fn a_redeem_pays_at_least_the_amount() {
         let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
-        for amount in [1_000u64, 1_001, 2_000, 12_345, 1_000_000, 333_666_660, 9_000_000_000] {
-            let shares =
-                redeem_shares(amount, net, issued, EXIT_COST, 1_000, u64::MAX, u64::MAX).unwrap();
-            assert!(payout(shares, net, issued) >= amount.max(1_000), "{amount} -> {shares}");
+        for amount in [
+            1_000u64,
+            1_001,
+            2_000,
+            12_345,
+            1_000_000,
+            333_666_660,
+            9_000_000_000,
+        ] {
+            let shares = redeem_shares(
+                amount,
+                net,
+                issued,
+                EXIT_COST,
+                1_000,
+                u64::MAX,
+                u64::MAX,
+                Penalty::NONE,
+            )
+            .unwrap();
+            assert!(
+                payout(shares, net, issued) >= amount.max(1_000),
+                "{amount} -> {shares}"
+            );
             // Not by much: the ten units of headroom and a share of rounding.
-            assert!(payout(shares, net, issued) <= amount.max(1_000) + 12, "{amount} -> {shares}");
+            assert!(
+                payout(shares, net, issued) <= amount.max(1_000) + 12,
+                "{amount} -> {shares}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_penalised_redeem_pays_at_least_the_amount_and_not_much_more() {
+        let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
+        for amount in [
+            1_000u64,
+            1_001,
+            2_000,
+            12_345,
+            1_000_000,
+            333_666_660,
+            30_000_000_000,
+        ] {
+            let shares = redeem_shares(
+                amount,
+                net,
+                issued,
+                EXIT_COST,
+                10,
+                u64::MAX,
+                u64::MAX,
+                ONE_BPS,
+            )
+            .unwrap();
+            let paid = payout_with(shares, net, issued, ONE_BPS);
+            assert!(paid >= amount, "{amount} -> {shares} pays {paid}");
+            // Headroom, two units of ceiling slack, and a share of rounding.
+            assert!(paid <= amount + 14, "{amount} -> {shares} pays {paid}");
+        }
+    }
+
+    #[test]
+    fn the_fork_measured_burn_is_grossed_up_past_what_the_vault_kept() {
+        // 2026-10-11: a 30,000.001010 burn paid 29,997.001009, so the gross-up
+        // for 30,000.001010 must clear that shortfall.
+        let gross = ONE_BPS.gross_up(30_000_001_010).unwrap();
+        assert!(gross - (gross / 10_000) - 1 >= 30_000_001_010, "{gross}");
+        assert!(gross <= 30_003_001_320, "{gross}");
+        // No penalty, no change.
+        assert_eq!(Penalty::NONE.gross_up(12_345).unwrap(), 12_345);
+        // Each of the first ten thousand bases clears its own penalty.
+        for base in 0..10_000u64 {
+            let g = u128::from(ONE_BPS.gross_up(base).unwrap());
+            assert!(g - ONE_BPS.of(g) >= u128::from(base), "{base} -> {g}");
+            assert!(g - ONE_BPS.of(g) <= u128::from(base) + 2, "{base} -> {g}");
+        }
+        // A penalty of everything cannot be grossed up.
+        assert!(Penalty {
+            bps: 10_000,
+            flat: 0
+        }
+        .gross_up(1)
+        .is_err());
+    }
+
+    #[test]
+    fn a_full_redeem_never_returns_less_than_the_penalised_value() {
+        let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
+        for shares in [2_000u64, 482_811_493, 29_544_077_666, 133_000_000_000_000] {
+            let value = position_value(shares, net, issued, EXIT_COST, ONE_BPS).unwrap();
+            assert!(
+                payout_with(shares, net, issued, ONE_BPS) >= value,
+                "{shares}"
+            );
+            // And the penalty is the only difference from the unpenalised value.
+            let plain = position_value(shares, net, issued, EXIT_COST, Penalty::NONE).unwrap();
+            assert!(
+                plain - value <= plain / 10_000 + 2,
+                "{shares}: {plain} vs {value}"
+            );
         }
     }
 
     #[test]
     fn a_small_redeem_is_lifted_to_the_vaults_minimum() {
         let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
-        let shares = redeem_shares(10, net, issued, EXIT_COST, 1_000, u64::MAX, u64::MAX).unwrap();
+        let shares = redeem_shares(
+            10,
+            net,
+            issued,
+            EXIT_COST,
+            1_000,
+            u64::MAX,
+            u64::MAX,
+            Penalty::NONE,
+        )
+        .unwrap();
         assert!(payout(shares, net, issued) >= 1_000);
     }
 
@@ -791,7 +996,17 @@ mod tests {
     fn liquidity_caps_the_burn_and_the_payout_comes_up_short() {
         let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
         let limit = 5_000_000;
-        let shares = redeem_shares(9_000_000, net, issued, EXIT_COST, 1_000, limit, u64::MAX).unwrap();
+        let shares = redeem_shares(
+            9_000_000,
+            net,
+            issued,
+            EXIT_COST,
+            1_000,
+            limit,
+            u64::MAX,
+            Penalty::NONE,
+        )
+        .unwrap();
         let paid_before_cost = (u128::from(shares) * u128::from(net) / u128::from(issued)) as u64;
         assert!(paid_before_cost <= limit, "{paid_before_cost}");
         assert!(paid_before_cost > limit - 10);
@@ -801,7 +1016,17 @@ mod tests {
     #[test]
     fn the_pools_own_shares_cap_the_burn() {
         let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
-        let shares = redeem_shares(9_000_000, net, issued, EXIT_COST, 1_000, u64::MAX, 1_000_000).unwrap();
+        let shares = redeem_shares(
+            9_000_000,
+            net,
+            issued,
+            EXIT_COST,
+            1_000,
+            u64::MAX,
+            1_000_000,
+            Penalty::NONE,
+        )
+        .unwrap();
         assert_eq!(shares, 1_000_000);
     }
 
@@ -809,10 +1034,30 @@ mod tests {
     fn nothing_above_the_minimum_to_pay_is_illiquid_by_name() {
         let (net, issued) = (66_368_566_433_527u64, 64_087_014_918_202u64);
         // Liquidity under the exit cost plus the minimum.
-        let err = redeem_shares(5_000, net, issued, EXIT_COST, 1_000, 1_500, u64::MAX).unwrap_err();
+        let err = redeem_shares(
+            5_000,
+            net,
+            issued,
+            EXIT_COST,
+            1_000,
+            1_500,
+            u64::MAX,
+            Penalty::NONE,
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("VenueIlliquid"));
         // No shares at all.
-        let err = redeem_shares(5_000, net, issued, EXIT_COST, 1_000, u64::MAX, 0).unwrap_err();
+        let err = redeem_shares(
+            5_000,
+            net,
+            issued,
+            EXIT_COST,
+            1_000,
+            u64::MAX,
+            0,
+            Penalty::NONE,
+        )
+        .unwrap_err();
         assert!(format!("{err:?}").contains("VenueIlliquid"));
         // An empty vault prices nothing.
         assert!(shares_for(5_000, 0, issued, true).is_err());
@@ -826,10 +1071,20 @@ mod tests {
             net: 1,
             exit_cost: EXIT_COST,
             min_withdraw: 1_000,
+            penalty: Penalty::NONE,
             holdings: vec![
-                Holding { value: 500, available: 900 },
-                Holding { value: 500, available: 200 },
-                Holding { value: 0, available: 50 },
+                Holding {
+                    value: 500,
+                    available: 900,
+                },
+                Holding {
+                    value: 500,
+                    available: 200,
+                },
+                Holding {
+                    value: 0,
+                    available: 50,
+                },
             ],
         };
         assert_eq!(snap.withdrawable(), 100 + 500 + 200);

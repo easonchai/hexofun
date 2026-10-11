@@ -29,6 +29,15 @@ process.env.REFERRAL_QUALIFY_SECONDS = "604800";
 // A bare `new ConfigService({})` falls back to process.env, so a shell
 // OPS_WALLETS turns the "404 with the allowlist unset" checks into 403.
 delete process.env.OPS_WALLETS;
+// Same for the Solami webhook route's "404 with the secret unset" check.
+delete process.env.SOLAMI_WEBHOOK_SECRET;
+// Solami ticket 08: a shell BEAM_KEYPAIR would send every suite's
+// transactions to the real Beam endpoint.
+delete process.env.BEAM_KEYPAIR;
+delete process.env.BEAM_TIP_LAMPORTS;
+// Solami ticket 05: a shell SUBGRAPH_URL would point catch-up at the real subgraph.
+delete process.env.SUBGRAPH_URL;
+delete process.env.SUBGRAPH_API_KEY;
 // Beta-launch-fixes ticket 05: a harmless default so any suite that flips a
 // seeded Pool's currentEpochId to 0 sees `/state`/`/status` carry a launch
 // time, without every other suite (whose Pool already has an Epoch) noticing.

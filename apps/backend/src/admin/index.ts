@@ -40,6 +40,7 @@ import {
 import bs58 from "bs58";
 
 import { generateInviteCode } from "../api/invite-code";
+import { primaryConnection } from "../chain/chain.module";
 import { ChainService } from "../chain/chain.service";
 import { fetchKvaultView, kvaultRemaining } from "../chain/kvault";
 import { poolAddress, venueProposalAddress } from "../chain/pda";
@@ -907,7 +908,7 @@ export async function main(): Promise<void> {
     return;
   }
 
-  const primary = new Connection(env.RPC_URL, "confirmed");
+  const primary = primaryConnection(env.RPC_URL, env.RPC_WS_URL);
   const fallback = env.RPC_FALLBACK_URL
     ? new Connection(env.RPC_FALLBACK_URL, "confirmed")
     : undefined;

@@ -3,6 +3,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 
 import { ChainModule } from "../chain/chain.module";
+import { subgraphProvider } from "../indexer/subgraph";
 import { AccessController } from "./access.controller";
 import { AlertsController } from "./alerts.controller";
 import { ApiController } from "./api.controller";
@@ -22,6 +23,7 @@ import { SerializationInterceptor } from "./serialization.interceptor";
 import { SessionsController } from "./sessions.controller";
 import { SessionsService } from "./sessions.service";
 import { SparringService } from "./sparring.service";
+import { WebhooksController } from "./webhooks.controller";
 
 /**
  * spec.md §3.5. The interceptor and the guard are registered here rather than
@@ -36,7 +38,8 @@ import { SparringService } from "./sparring.service";
  * Postgres by anyone, so it is throttled too, tighter (5 a minute, set on the
  * handler; mainnet-readiness-fixes 10). `POST /referrals/apply` shares that limit for the
  * same reason (ticket 02); the rest of ReferralsController (the polled GET
- * /referrals/:wallet) stays unthrottled.
+ * /referrals/:wallet) stays unthrottled. `POST /webhooks/solami` (registered in
+ * AppModule) takes the read limit, set on its class.
  */
 @Module({
   imports: [
@@ -54,7 +57,8 @@ import { SparringService } from "./sparring.service";
             controller === FastPauseController ||
             controller === SessionsController ||
             controller === BetsController ||
-            controller === ApiController
+            controller === ApiController ||
+            controller === WebhooksController
           ) {
             return false;
           }
@@ -87,6 +91,8 @@ import { SparringService } from "./sparring.service";
     RoundsService,
     SparringService,
     OpsSummaryService,
+    // Solami ticket 05: `/status` reads the subgraph's synced slot.
+    subgraphProvider,
     { provide: APP_INTERCEPTOR, useClass: SerializationInterceptor },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],
