@@ -11,6 +11,7 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
+  TransactionExpiredBlockheightExceededError,
   type Connection,
   type TransactionInstruction,
 } from "@solana/web3.js";
@@ -31,6 +32,7 @@ function realInstruction(payer: PublicKey): TransactionInstruction {
 
 interface FakeConnectionOptions {
   simulate?: () => Promise<{ value: { err: unknown; unitsConsumed?: number; logs?: string[] } }>;
+  confirm?: () => Promise<{ value: { err: unknown } }>;
   sendRawTransaction?: () => Promise<string>;
   signatureStatuses?: () => Promise<{ value: (SignatureStatus | null)[] }>;
   blockHeight?: () => Promise<number>;
@@ -53,12 +55,8 @@ function fakeConnection(options: FakeConnectionOptions = {}): Connection {
     simulateTransaction:
       options.simulate ?? (async () => ({ value: { err: null, unitsConsumed: 100_000 } })),
     sendRawTransaction: options.sendRawTransaction ?? (async () => "fake-signature"),
-    // Confirmed on the first status read by default: `sendMany` polls statuses
-    // (no websocket), so an unseen signature would poll until the block height
-    // passes. Tests that want a wait or an expiry set these two themselves.
-    getSignatureStatuses:
-      options.signatureStatuses ??
-      (async () => ({ value: [{ err: null, confirmationStatus: "confirmed" }] })),
+    confirmTransaction: options.confirm ?? (async () => ({ value: { err: null } })),
+    getSignatureStatuses: options.signatureStatuses ?? (async () => ({ value: [null] })),
     getBlockHeight: options.blockHeight ?? (async () => 0),
   } as unknown as Connection;
 }
@@ -142,7 +140,7 @@ describe("sendMany", () => {
 
   it("maps a clean confirmation to landed", async () => {
     const signer = Keypair.generate();
-    const connection = fakeConnection();
+    const connection = fakeConnection({ confirm: async () => ({ value: { err: null } }) });
     const program = fakeProgram(connection, fakeWallet(signer, { tx: null }));
 
     const result = await sendMany(
@@ -155,11 +153,12 @@ describe("sendMany", () => {
     expect(result).toEqual<SendResult>({ kind: "landed", signature: "fake-signature" });
   });
 
-  it("maps an unseen signature past its lastValidBlockHeight to expired", async () => {
+  it("maps a blockhash-expiry confirm error to expired", async () => {
     const signer = Keypair.generate();
     const connection = fakeConnection({
-      signatureStatuses: async () => ({ value: [null] }),
-      blockHeight: async () => LAST_VALID_BLOCK_HEIGHT + 1,
+      confirm: async () => {
+        throw new TransactionExpiredBlockheightExceededError("fake-signature");
+      },
     });
     const program = fakeProgram(connection, fakeWallet(signer, { tx: null }));
 
@@ -176,9 +175,7 @@ describe("sendMany", () => {
   it("maps a landed-but-failed confirmation to failed with the decoded Custom code", async () => {
     const signer = Keypair.generate();
     const err = { InstructionError: [0, { Custom: 6012 }] };
-    const connection = fakeConnection({
-      signatureStatuses: async () => ({ value: [{ err, confirmationStatus: "confirmed" }] }),
-    });
+    const connection = fakeConnection({ confirm: async () => ({ value: { err } }) });
     const program = fakeProgram(connection, fakeWallet(signer, { tx: null }));
 
     const result = await sendMany(
@@ -198,9 +195,7 @@ describe("sendMany", () => {
   it("maps a failure with no Custom code to failed with a null code", async () => {
     const signer = Keypair.generate();
     const err = "AccountInUse";
-    const connection = fakeConnection({
-      signatureStatuses: async () => ({ value: [{ err, confirmationStatus: "confirmed" }] }),
-    });
+    const connection = fakeConnection({ confirm: async () => ({ value: { err } }) });
     const program = fakeProgram(connection, fakeWallet(signer, { tx: null }));
 
     const result = await sendMany(
@@ -222,8 +217,9 @@ describe("sendMany", () => {
     // stands in for Privy's own sign-and-broadcast.
     const signer = Keypair.generate();
     const connection = fakeConnection({
-      signatureStatuses: async () => ({ value: [null] }),
-      blockHeight: async () => LAST_VALID_BLOCK_HEIGHT + 1,
+      confirm: async () => {
+        throw new TransactionExpiredBlockheightExceededError("privy-signature");
+      },
     });
     const program = fakeProgram(connection, fakeWallet(signer, { tx: null }));
 
@@ -238,13 +234,17 @@ describe("sendMany", () => {
     );
 
     // Had this path returned the moment `sendTransaction` resolved, the
-    // result would be `landed`; it is `expired` because the poll ran too.
+    // result would be `landed`; it is `expired` because confirm ran too.
     expect(result).toEqual<SendResult>({ kind: "expired" });
   });
 
-  it("confirms without a websocket: no subscription, only status reads", async () => {
+  it("ticket 15: maps a confirm failure that is not an expiry to unknown, carrying the signature", async () => {
     const signer = Keypair.generate();
-    const connection = fakeConnection();
+    const connection = fakeConnection({
+      confirm: async () => {
+        throw new Error("fetch failed");
+      },
+    });
     const program = fakeProgram(connection, fakeWallet(signer, { tx: null }));
 
     const result = await sendMany(
@@ -254,9 +254,11 @@ describe("sendMany", () => {
       FEE_MICROLAMPORTS,
     );
 
-    // The fake has no `confirmTransaction` or `onSignature` at all; reaching
-    // `landed` proves the send never asked for one.
-    expect(result).toEqual<SendResult>({ kind: "landed", signature: "fake-signature" });
+    expect(result).toEqual<SendResult>({
+      kind: "unknown",
+      signature: "fake-signature",
+      lastValidBlockHeight: LAST_VALID_BLOCK_HEIGHT,
+    });
   });
 
   it("ticket 15: a simulation that runs but reports a program error fails before anything signs", async () => {
