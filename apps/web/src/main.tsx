@@ -13,7 +13,7 @@ import { createRoot } from "react-dom/client";
 import { AccessGate } from "./AccessGate.js";
 import { initAnalytics } from "./analytics.js";
 import { App } from "./App.js";
-import { RPC_URL } from "./chain.js";
+import { CONNECTION_CONFIG, RPC_URL } from "./chain.js";
 import { BurnerWalletAdapter, burnerEnabled } from "./dev-burner.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
 import {
@@ -50,7 +50,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
       <WalletLayer env={ENV}>
-        <ConnectionProvider endpoint={RPC_URL}>
+        <ConnectionProvider endpoint={RPC_URL} config={CONNECTION_CONFIG}>
           <WalletProvider wallets={wallets} autoConnect>
             <WalletModalProvider>
               <WalletModeProvider mode={mode}>

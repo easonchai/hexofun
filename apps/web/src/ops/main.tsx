@@ -7,7 +7,7 @@ import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
-import { RPC_URL } from "../chain.js";
+import { CONNECTION_CONFIG, RPC_URL } from "../chain.js";
 import { OpsPage } from "./OpsPage.js";
 import { OpsProvider } from "./useOps.js";
 
@@ -21,7 +21,7 @@ document.body.classList.add("ops");
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ConnectionProvider endpoint={RPC_URL}>
+    <ConnectionProvider endpoint={RPC_URL} config={CONNECTION_CONFIG}>
       <WalletProvider wallets={[]} autoConnect>
         <WalletModalProvider>
           <OpsProvider>

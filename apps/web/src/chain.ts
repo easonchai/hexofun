@@ -9,6 +9,7 @@ import {
 } from "@solana/spl-token";
 import {
   PublicKey,
+  type ConnectionConfig,
   type Transaction,
   type TransactionInstruction,
   clusterApiUrl,
@@ -178,6 +179,18 @@ export const POOL_ID = BigInt(trimmed(import.meta.env.VITE_POOL_ID) ?? "1");
 /** The cluster's public endpoint unless overridden; .env.example pins the local validator. */
 export const RPC_URL =
   trimmed(import.meta.env.VITE_PUBLIC_RPC_URL) ?? clusterApiUrl(CLUSTER);
+
+/** Optional websocket twin of RPC_URL, for a provider whose wss lives on a
+ *  different host or path than its https (Solami). Unset, web3.js derives
+ *  it from RPC_URL. Sends confirm over this socket, so a wrong one makes
+ *  every send report expired. */
+const RPC_WS_URL = trimmed(import.meta.env.VITE_PUBLIC_WS_URL);
+
+/** What both `ConnectionProvider`s pass as `config`. */
+export const CONNECTION_CONFIG: ConnectionConfig = {
+  commitment: "confirmed",
+  ...(RPC_WS_URL === undefined ? {} : { wsEndpoint: RPC_WS_URL }),
+};
 
 export const API_URL =
   trimmed(import.meta.env.VITE_API_URL) ?? "http://127.0.0.1:8080";
