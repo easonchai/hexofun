@@ -172,7 +172,8 @@
 
        Check: `venueParams.minVenueMove` in `/ops/summary` reads 10000. With 10000 (0.01 USDC) both klend sources ended with
        `left_behind` 0. 10000 is enough for a klend source; it has not been run from a kVault source, whose redeem keeps
-       a flat 1,000 base units and which the program values 1,010 under the formula, so read `left_behind` before trusting it
+       a flat 1,000 base units plus the vault's withdrawal penalty (1 bps plus 1 unit on the Institutional Commodity Yield
+       vault, zero on DWSX) and which the program values that much under the formula, so read `left_behind` before trusting it
        there (step 6).
 
     4. Wait out the lock. Deposits and withdrawals work throughout. Watch the target the whole time. If it turns bad

@@ -82,7 +82,13 @@ every later upgrade.
     KVAULT_ADDRESS=<vault state account>
     ```
     The shares mint is a PDA of the vault and the pool's share account is its ATA of that mint;
-    bootstrap creates it. The `KLEND_*` keys are not read for this kind.
+    bootstrap creates it. The `KLEND_*` keys are not read for this kind. Rehearse the exact vault
+    on the fork first (`KVAULT_ADDRESS=<vault> scripts/surf.sh up`): vaults differ in withdrawal
+    penalty, deposit cap and on-chain liquidity. Kamino's Institutional Commodity Yield vault
+    (`B5pjfZAiKjyUEuqB2694NHrsjcaM67uuJaWqjzTVtzR6`, about 7.5% on 2026-10-11) keeps 1 bps plus 1
+    unit of every withdraw, which the program books as a deficit at deploy and repays from yield,
+    and holds about 2% of its USDC on chain, so a withdrawal beyond the pool's idle plus that
+    waits for loan repayments.
   - A different klend reserve: set `KLEND_RESERVE` plus `KLEND_CTOKEN` (the pool PDA's ATA of that
     reserve's cToken mint). Program and market still default.
 
