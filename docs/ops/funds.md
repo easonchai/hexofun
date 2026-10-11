@@ -62,7 +62,9 @@ Priority fees are not included; the fork charges none.
 ```
 # Deployment
   Deploy program      4.225 SOL  (4.221 is a refundable deposit, ~0.004 in tx fees)
-                      need ~8.5 SOL in the wallet during the deploy
+                      the deploy instruction drains the buffer to the payer before it
+                      creates ProgramData, so the wallet needs rent once, not twice
+                      (checked 2026-10-11 on localnet: 1.3x rent in, deploy landed)
   Create pool         0.009 SOL
   Upgrade (same size) 0.009 SOL  (needs 4.22 SOL on hand, returned after; scaled, not measured)
   Bigger program      +0.05 SOL per extra 10 KB

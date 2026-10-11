@@ -1,5 +1,7 @@
 # Deploying and upgrading
 
+First mainnet launch, as one ordered checklist: [`mainnet-launch.md`](mainnet-launch.md).
+
 One script, `scripts/deploy.sh <dev|staging|mainnet> [--upgrade] [--dry-run]`, builds, checks and
 deploys or upgrades the `hex_vault` program for one environment. The same script also has two
 opt-in actions, `--idl` (publish the on-chain IDL) and `verify` (reproducible-build
@@ -231,26 +233,23 @@ CLI is using for instructions.
 
 ## Treasury and Buyback reserve for a mainnet Pool
 
-`bootstrap` refuses to run on mainnet's genesis hash unless `--admin`, `--treasury` and
-`--buyback-reserve` are all given explicitly, and refuses an `--admin` equal to the operator hot
-key (`apps/backend/src/bootstrap/params.ts`, `assertMainnetSafe`); it never creates a mint on
-mainnet either. Treasury and Buyback reserve share (mint, owner), so they cannot both be the
-Associated Token Account of the Squads vault and the accepted mint: `create_pool` would accept it,
-but the two roles would then be indistinguishable to anyone reading the vault's token accounts.
-Create one of them as a plain (non-ATA) token account instead, owned by the vault:
+`bootstrap` refuses to run on mainnet's genesis hash unless `--admin` and `ACCEPTED_MINT` are
+given explicitly, and refuses an `--admin` equal to the operator hot key
+(`apps/backend/src/bootstrap/params.ts`, `assertMainnetSafe`); it never creates a mint on mainnet
+either. Without `--treasury` and `--buyback-reserve`, bootstrap creates both itself: two plain
+(non-ATA) token accounts of the accepted mint, seeded from the operator key and the pool address,
+owned by the Admin. On mainnet the Admin is the Squads vault, so the vault owns both from the
+start and nobody runs `spl-token create-account` by hand. They are deliberately not the vault's
+ATA: Treasury and Buyback reserve share (mint, owner), and two ATAs would be one address.
 
 ```
-spl-token create-account <accepted-mint> --owner <squads-vault> --fee-payer <funding-keypair>
+bootstrap --admin <squads-vault>
 ```
 
-run twice with two throwaway account keypairs (`spl-token create-account` without `--owner`
-defaults to a fresh random address rather than the deterministic ATA when a keypair is supplied
-positionally: `spl-token create-account <accepted-mint> <new-account-keypair.json> --owner
-<squads-vault>`). Pass the resulting addresses to bootstrap:
-
-```
-bootstrap --admin <squads-vault> --treasury <treasury-address> --buyback-reserve <buyback-address>
-```
+Bootstrap prints both addresses; paste them into `.env.mainnet` as `TREASURY` and
+`BUYBACK_RESERVE` before the backend's first boot, which compares them with the Pool. Passing
+`--treasury` and `--buyback-reserve` explicitly still works, for accounts that already exist; on
+mainnet each must then be owned by the Admin (`assertTokenAccountOwner`).
 
 ## The venue a Pool pins
 

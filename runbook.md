@@ -20,7 +20,8 @@
   Without it, every DB-backed suite skips itself and prints a warning naming the database it could not reach; a
   green run without those warnings is the only one that counts.
 
-  See also: docs/architecture.md (components, accounts, roles, fund flow), docs/ops/deploy.md
+  See also: docs/architecture.md (components, accounts, roles, fund flow), docs/ops/mainnet-launch.md
+  (first mainnet launch, step by step), docs/ops/deploy.md
   (deploying and upgrading), docs/ops/funds.md (pulling and returning principal, shutdown),
   docs/ops/environments.md (dev/staging/mainnet) and docs/ops/incidents.md (what to do when an
   /alerts code fires).

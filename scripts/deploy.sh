@@ -119,6 +119,18 @@ elif [ "$env_name" = "mainnet" ]; then
     echo "deploy: RPC_URL is empty in $mainnet_env" >&2
     exit 1
   fi
+  # DEPLOY_KEYPAIR (written by scripts/mainnet-keys.sh) is the hot key file.
+  # The solana CLI has no env var for its keypair, so point its config at the
+  # file once; every solana call below then signs with it.
+  deploy_keypair=$(grep -E '^DEPLOY_KEYPAIR=' "$mainnet_env" | tail -1 | cut -d= -f2-)
+  if [ -n "$deploy_keypair" ]; then
+    if [ ! -f "$deploy_keypair" ]; then
+      echo "deploy: DEPLOY_KEYPAIR=$deploy_keypair in $mainnet_env does not exist" >&2
+      exit 1
+    fi
+    solana config set --keypair "$deploy_keypair" >/dev/null
+    echo "==> signing as $(solana address) (DEPLOY_KEYPAIR from $mainnet_env)"
+  fi
 fi
 
 if [ ! -f "$keypair" ]; then
