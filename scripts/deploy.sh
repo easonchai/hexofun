@@ -228,11 +228,7 @@ fi
 
 # --- 2. build -------------------------------------------------------------
 echo "==> building $env_name"
-if [ "$env_name" = "mainnet" ]; then
-  if ! command -v solana-verify >/dev/null 2>&1; then
-    echo "deploy: solana-verify is required for a mainnet build (cargo install solana-verify)" >&2
-    exit 1
-  fi
+if [ "$env_name" = "mainnet" ] && command -v solana-verify >/dev/null 2>&1; then
   solana-verify build -- --features mainnet
   # solana-verify builds only the .so; target/idl keeps whatever the last
   # `anchor build` wrote, usually the dev id. Regenerate it under the same
@@ -240,6 +236,9 @@ if [ "$env_name" = "mainnet" ]; then
   # one (mainnet readiness 2026-09-28, blocker 3).
   anchor idl build -o target/idl/hex_vault.json -t target/types/hex_vault.ts -- --features mainnet
 elif [ -n "$feature" ]; then
+  # Without solana-verify a mainnet build is a plain anchor build: deployable,
+  # but not reproducible, so `verify` and a published hash mean little.
+  [ "$env_name" = "mainnet" ] && echo "==> solana-verify not installed, plain anchor build (not reproducible)"
   anchor build -- --features "$feature"
 else
   anchor build
