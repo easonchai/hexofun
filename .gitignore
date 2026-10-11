@@ -43,3 +43,4 @@ operator.json
 
 .vercel
 operator-*.json
+mainnet-pool.env

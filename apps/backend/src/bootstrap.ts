@@ -23,6 +23,7 @@ import {
   getOrCreateAssociatedTokenAccount,
 } from "@solana/spl-token";
 import {
+  ComputeBudgetProgram,
   Connection,
   Keypair,
   PublicKey,
@@ -298,6 +299,13 @@ async function createPool(
       systemProgram: SystemProgram.programId,
     })
     .signers([payer])
+    // Mainnet dropped the fee-less send on 2026-10-11; the operator's cap is
+    // the price here, same env key the backend already requires.
+    .preInstructions([
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: Number(process.env.PRIORITY_FEE_MAX_MICROLAMPORTS ?? 50_000),
+      }),
+    ])
     .rpc();
   log(
     `created pool ${pool.toBase58()} (epoch ${params.epochSeconds}s)`,

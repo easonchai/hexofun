@@ -1,5 +1,5 @@
 {
-  "address": "H2iWyng2orJpHNGGWhrR7rBQNDqixThpTpAwF4dnPXax",
+  "address": "EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH",
   "metadata": {
     "name": "hex_vault",
     "version": "0.1.0",
@@ -550,7 +550,7 @@
         },
         {
           "name": "program",
-          "address": "H2iWyng2orJpHNGGWhrR7rBQNDqixThpTpAwF4dnPXax"
+          "address": "EwqRKGqnH7dGwL5ERMGQc2tsLKwT3duzKWPcCDphyPCH"
         },
         {
           "name": "program_data"

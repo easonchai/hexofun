@@ -277,7 +277,10 @@ echo "==> $env_name program id $keypair_pubkey matches the build (IDL and binary
 
 # --- --idl: publish the freshly built IDL on chain, no deploy --------------
 if [ "$action" = "idl" ]; then
-  idl_wallet=""
+  # Anchor otherwise reads Anchor.toml's wallet (~/.config/solana/id.json),
+  # which is not the upgrade authority; the solana CLI keypair is (the
+  # mainnet branch above points it at DEPLOY_KEYPAIR).
+  idl_wallet=$(solana config get keypair | awk '{print $NF}')
   if ledger_holds_authority; then
     idl_wallet="usb://ledger"
   fi
