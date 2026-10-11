@@ -35,7 +35,7 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: [ "CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB" ]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -61,7 +61,7 @@ services:
       PORT: 8080
     networks:
       - default
-      - traefik
+      - elvtd
     # List form, not the mapping form: compose interpolates label values but not
     # label keys, and ${STACK_NAME} sits in the key half of the router names.
     labels:
