@@ -69,9 +69,12 @@ needed for every later upgrade unless you hand the authority to the Ledger.
   empty for now (bootstrap creates them in step 4) and `SPARRING_KEYPAIR` empty. `PROGRAM_ID`,
   `CLUSTER`, `POOL_ID=1`, `ACCEPTED_MINT` are already right.
 - Pick the venue. `create_pool` pins it for good; changing it later is a proposal, a 48 hour lock,
-  a drain and a migration (`runbook.md`, "Changing a pool's venue"). Two choices:
-  - Kamino's USDC lending reserve on the main market: leave `VENUE_KIND` and `KLEND_*` empty.
-    Bootstrap pins it and creates the pool's cToken account. Low yield on a small pool.
+  a drain and a migration (`runbook.md`, "Changing a pool's venue"). Each choice takes one input
+  at most; bootstrap derives every other pin (`apps/backend/src/bootstrap/params.ts`,
+  `venuePinsFor`) and prints the four `KLEND_*` read-backs at the end:
+  - Kamino's USDC lending reserve on the main market: set nothing. On mainnet the program, market,
+    reserve and cToken mint are hardcoded, and bootstrap creates the pool's cToken account. Low
+    yield on a small pool.
   - A Kamino Earn vault of your choice (the fork rehearsals used
     `DWSXb18xZApz29vnQpgR2m6MynCT7PznaXt7Ut7M7KaP`, about 5.2% on 2026-10-09). Find the vault's
     state account on Kamino's site and set:
@@ -79,9 +82,13 @@ needed for every later upgrade unless you hand the authority to the Ledger.
     VENUE_KIND=kvault
     KVAULT_ADDRESS=<vault state account>
     ```
-    Bootstrap derives the shares mint and creates the pool's share account. A different klend
-    reserve instead takes `KLEND_RESERVE` plus `KLEND_CTOKEN` (the pool PDA's ATA of that
-    reserve's cToken mint).
+    The shares mint is a PDA of the vault and the pool's share account is its ATA of that mint;
+    bootstrap creates it. The `KLEND_*` keys are not read for this kind.
+  - A different klend reserve: set `KLEND_RESERVE` plus `KLEND_CTOKEN` (the pool PDA's ATA of that
+    reserve's cToken mint). Program and market still default.
+
+  Whatever you set here stays in `.env.mainnet` on the box: the backend rebuilds the expected
+  pins from the same keys at boot and compares them with the Pool.
 
 Nothing else switches by hand: the `mainnet` cargo feature picks `declare_id!`, `Anchor.toml`
 already lists the mainnet ID, and `deploy.sh mainnet` reads `RPC_URL` from `.env.mainnet`.
@@ -114,9 +121,9 @@ token buyback planned, the same-address guard is commented out), pass the same a
 `--treasury <addr> --buyback-reserve <addr>`, where `<addr>` is any USDC token account owned by
 the Admin. `mainnet-pool.env` holds `POOL_ADDRESS`, the
 vaults, `TREASURY`, `BUYBACK_RESERVE` and the four `KLEND_*` pins as the chain recorded them.
-Paste `TREASURY`, `BUYBACK_RESERVE` and the venue lines it prints (`VENUE_KIND`, `KLEND_*`,
-`KVAULT_ADDRESS` if used) into `.env.mainnet`: the backend compares all of them with the Pool at
-boot and refuses on any difference. The second person checks the pins against Kamino.
+Paste `TREASURY` and `BUYBACK_RESERVE` into `.env.mainnet`; the venue keys from step 2 are
+already there. The backend compares all of them with the Pool at boot and refuses on any
+difference. The second person checks the four `KLEND_*` read-backs against Kamino.
 
 ## 5. Publish the IDL, optionally hand the program to the Ledger
 
