@@ -417,16 +417,21 @@ describe("account sync", () => {
     await put("pool", chain.poolAddress(), poolAccount());
     await put("epoch", chain.epochAddress(1n), epochAccount());
     await put("player", chain.playerAddress(OWNER), playerAccount(OWNER));
-    connection.pageSize = 1; // three accounts, one per page: three calls
+    await put("player", chain.playerAddress(STRANGER), playerAccount(STRANGER));
+    // One walk per account type (four), one account per page: the two
+    // Players span two pages, so five calls.
+    connection.pageSize = 1;
 
     await indexer.syncAccounts();
 
-    expect(connection.callsTo("getProgramAccountsV2")).toBe(3);
+    expect(connection.callsTo("getProgramAccountsV2")).toBe(5);
     expect(await prisma.pool.findUniqueOrThrow({ where: { address: chain.poolAddress().toBase58() } }))
       .toMatchObject({ poolId: POOL_ID });
     expect(await prisma.epoch.findUniqueOrThrow({ where: byId(1n) })).toMatchObject({ id: 1n });
     expect(await prisma.player.findUniqueOrThrow({ where: byOwner(OWNER.toBase58()) }))
       .toMatchObject({ owner: OWNER.toBase58() });
+    expect(await prisma.player.findUniqueOrThrow({ where: byOwner(STRANGER.toBase58()) }))
+      .toMatchObject({ owner: STRANGER.toBase58() });
   });
 
   it("an incremental sweep asks for changedSinceSlot and only touches the rows the RPC reports", async () => {
@@ -446,7 +451,7 @@ describe("account sync", () => {
     await put("pool", chain.poolAddress(), poolAccount({ totalPrincipal: bn(999) }));
     await indexer.syncAccounts();
 
-    expect(connection.callsTo("getProgramAccountsV2")).toBe(1);
+    expect(connection.callsTo("getProgramAccountsV2")).toBe(4); // one walk per account type
     // SAFETY: the fake only ever receives [programId, config] from the indexer.
     const [, config] = connection.lastParams("getProgramAccountsV2") as [string, { changedSinceSlot?: number }];
     // The V2 index runs up to 60 slots behind its context slot (audit-2026-10-09 05).
@@ -490,13 +495,12 @@ describe("account sync", () => {
       .toMatchObject({ poolId: POOL_ID });
   });
 
-  it("the counting connection: seven calls for a full walk, one for a quiet incremental sweep", async () => {
+  it("the counting connection: four calls (one per account type) for a full walk and for a quiet incremental sweep", async () => {
     indexer["lastSyncedSlot"] = undefined;
     indexer["lastFullWalkAt"] = 0;
     await put("pool", chain.poolAddress(), poolAccount());
-    // Padding so the walk spans seven one-account pages; the padding never
-    // matches a real discriminator, so it is silently dropped, same as any
-    // account from an abandoned program build.
+    // Accounts from an abandoned program build never match a discriminator
+    // filter, so the RPC never serves them and they cost no page.
     for (let i = 0; i < 6; i++) {
       connection.setAccount(Keypair.generate().publicKey, Buffer.alloc(8));
     }
@@ -504,12 +508,12 @@ describe("account sync", () => {
     connection.resetCalls();
 
     await indexer.syncAccounts();
-    expect(connection.callsTo("getProgramAccountsV2")).toBe(7);
+    expect(connection.callsTo("getProgramAccountsV2")).toBe(4);
 
     connection.resetCalls();
     connection.clearAccounts();
     await indexer.syncAccounts();
-    expect(connection.callsTo("getProgramAccountsV2")).toBe(1);
+    expect(connection.callsTo("getProgramAccountsV2")).toBe(4);
   });
 
   it("falls back to the plain call on an RPC without getProgramAccountsV2, and stops asking for it", async () => {

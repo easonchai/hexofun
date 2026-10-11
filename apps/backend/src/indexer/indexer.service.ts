@@ -737,6 +737,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
    * same method, so this stays testable behind that fake.
    */
   private async programAccountsPage(
+    discriminator: string,
     paginationKey: string | undefined,
     changedSinceSlot: bigint | undefined,
   ): Promise<ProgramAccountsV2Response> {
@@ -757,6 +758,9 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       {
         encoding: "base64",
         withContext: true,
+        // Solami refuses an unfiltered walk ("requires at least one
+        // filter", probed 2026-10-11 on mainnet); Helius accepts either.
+        filters: [{ memcmp: { offset: 0, bytes: discriminator } }],
         ...(paginationKey !== undefined ? { paginationKey } : {}),
         ...(changedSinceSlot !== undefined ? { changedSinceSlot: Number(changedSinceSlot) } : {}),
       },
@@ -801,7 +805,6 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     }
     if (!this.v2Unsupported) {
       const raw: RawProgramAccount[] = [];
-      let paginationKey: string | undefined;
       // Security review ticket 14: `withRpcFallback` fails over per call,
       // with no stickiness, so a flaky primary can serve page 1 and the
       // fallback page 2 of the same walk. The two endpoints can sit at
@@ -814,22 +817,31 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
       // keeps every page of one walk on one endpoint.
       let servedBy: "primary" | "fallback" | undefined;
       try {
-        do {
-          const page = await this.programAccountsPage(paginationKey, changedSinceSlot);
-          const endpoint = rpcStatus(this.chain.connection).endpoint;
-          if (servedBy === undefined) {
-            servedBy = endpoint;
-          } else if (endpoint !== servedBy) {
-            throw new Error(
-              "getProgramAccountsV2 walk failed over to a different RPC endpoint mid-walk; aborting this sweep rather than mixing two providers' snapshots",
-            );
-          }
-          if (slot === undefined) slot = BigInt(page.context.slot);
-          raw.push(...page.value.accounts);
-          // Null and absent both mean "that was the last page"; see the
-          // `paginationKey` note on ProgramAccountsV2Response.
-          paginationKey = page.value.paginationKey ?? undefined;
-        } while (paginationKey !== undefined);
+        // One walk per account type, filtered on its discriminator: the
+        // slot stays the first page's, so an account written during a
+        // later type's walk is still ahead of it and gets asked for again.
+        for (const name of Object.values(ACCOUNT)) {
+          // SAFETY: the interface types `memcmp` as `any`; BorshAccountsCoder
+          // returns `{ offset: 0, bytes: base58(discriminator) }`.
+          const { bytes } = coder.memcmp(name) as { bytes: string };
+          let paginationKey: string | undefined;
+          do {
+            const page = await this.programAccountsPage(bytes, paginationKey, changedSinceSlot);
+            const endpoint = rpcStatus(this.chain.connection).endpoint;
+            if (servedBy === undefined) {
+              servedBy = endpoint;
+            } else if (endpoint !== servedBy) {
+              throw new Error(
+                "getProgramAccountsV2 walk failed over to a different RPC endpoint mid-walk; aborting this sweep rather than mixing two providers' snapshots",
+              );
+            }
+            if (slot === undefined) slot = BigInt(page.context.slot);
+            raw.push(...page.value.accounts);
+            // Null and absent both mean "that was the last page"; see the
+            // `paginationKey` note on ProgramAccountsV2Response.
+            paginationKey = page.value.paginationKey ?? undefined;
+          } while (paginationKey !== undefined);
+        }
       } catch (error: unknown) {
         if (!(error instanceof MethodNotFound)) throw error;
         // beta-launch-fixes ticket 08: `withRpcFallback` fails over per call

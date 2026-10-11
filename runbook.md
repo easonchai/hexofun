@@ -502,9 +502,10 @@
   chain/priority-fee.ts returns nothing and lets ChainService price the send from getRecentPrioritizationFees instead. That
   costs one rejected call per send and logs nothing: the backend prints no warning for it at boot or on a send. The fallback
   does not catch that call, since withRpcFallback fails over only on a timeout, a 5xx or a 429. getProgramAccountsV2 works on
-  both providers with the same response shape, so the Indexer's paginated sweep keeps working; if a primary ever lacks it, the
-  Indexer logs "this RPC has no getProgramAccountsV2" and walks all program accounts for the next hour. Solami also accepts
-  changedSinceSlot on getProgramAccountsV2; the Indexer does not use it yet.
+  both providers with the same response shape, but Solami refuses it (and plain getProgramAccounts) without a filter
+  ("requires at least one filter", 2026-10-11), so the Indexer's sweep walks once per account type with a discriminator
+  memcmp: four calls a sweep instead of one. If a primary ever lacks V2, the Indexer logs "this RPC has no
+  getProgramAccountsV2" and walks all program accounts unfiltered for the next hour, which only Helius will serve.
 
   Solami Free has no WebSocket, so a lapsed plan is not a downgrade path. To roll back to Helius, set these in the env file and
   restart the backend:

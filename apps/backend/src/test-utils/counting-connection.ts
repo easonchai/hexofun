@@ -21,6 +21,7 @@
 // Ops-and-envs ticket 10 added `getRecentPrioritizationFees`, which
 // `ChainService.send` now calls on every send to price its priority fee.
 import { PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
 
 /** Shape `onLogs`'s callback receives; mirrors web3.js's `Logs`. */
 interface FakeLogs {
@@ -395,7 +396,10 @@ export class CountingConnection {
       return Promise.resolve({ error: { code: -32601, message: "Method not found" } });
     }
     // SAFETY: the indexer always calls this with [programId, config].
-    const [, config] = params as [string, { paginationKey?: string | null }];
+    const [, config] = params as [
+      string,
+      { paginationKey?: string | null; filters?: { memcmp: { offset: number; bytes: string } }[] },
+    ];
     // What the real RPC does with the null it just handed back: refuses it.
     // The last page ends the walk with `paginationKey: null` rather than
     // leaving the field out, so a walk that reads null as "one more page"
@@ -405,7 +409,16 @@ export class CountingConnection {
         error: { code: -32602, message: "Invalid param at index 1: invalid type: null, expected a string" },
       });
     }
-    const entries = [...this.accounts.entries()];
+    // Solami refuses a walk without one (probed 2026-10-11), so the fake does too.
+    if (!config.filters?.length) {
+      return Promise.resolve({ error: { code: -32602, message: `${method} requires at least one filter` } });
+    }
+    const entries = [...this.accounts.entries()].filter(([, data]) =>
+      config.filters?.every(({ memcmp }) => {
+        const bytes = Buffer.from(bs58.decode(memcmp.bytes));
+        return data.subarray(memcmp.offset, memcmp.offset + bytes.length).equals(bytes);
+      }),
+    );
     const offset = config.paginationKey ? Number(config.paginationKey) : 0;
     const page = entries.slice(offset, offset + this.pageSize);
     const nextOffset = offset + this.pageSize;
