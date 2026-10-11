@@ -17,7 +17,6 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
   SystemProgram,
   Transaction,
-  TransactionExpiredBlockheightExceededError,
   TransactionMessage,
   VersionedTransaction,
   type AccountMeta,
@@ -225,10 +224,11 @@ async function computeUnitLimit(
  * production-hardening): fetches the blockhash and `lastValidBlockHeight`,
  * prepends compute-budget instructions (the capped priority fee from
  * `/state`, and a compute-unit limit sized above), signs through the wallet
- * adapter or Privy's own `sendTransaction`, then confirms with the blockhash
- * strategy at `confirmed` — never the deprecated signature-only confirm, and
- * never left to Anchor's `.rpc()`/`sendAndConfirm`, so an expired or
- * on-chain-failed send always resolves to a `SendResult` instead of hanging.
+ * adapter or Privy's own `sendTransaction`, then polls the signature's status
+ * at `confirmed` until it lands, fails, or its blockhash expires — never a
+ * websocket confirm, and never left to Anchor's `.rpc()`/`sendAndConfirm`,
+ * so an expired or on-chain-failed send always resolves to a `SendResult`
+ * instead of hanging.
  */
 export async function sendMany(
   program: HexVaultProgram,
@@ -283,23 +283,12 @@ export async function sendMany(
     signature = await connection.sendRawTransaction(signed.serialize());
   }
 
-  try {
-    const { value } = await connection.confirmTransaction(
-      { signature, blockhash, lastValidBlockHeight },
-      CONFIRMED,
-    );
-    if (value.err) {
-      return { kind: "failed", code: customErrorCode(value.err), message: JSON.stringify(value.err) };
-    }
-    return { kind: "landed", signature };
-  } catch (error) {
-    if (error instanceof TransactionExpiredBlockheightExceededError) return { kind: "expired" };
-    // Ticket 15: the confirm call itself failed for some other reason (a
-    // dropped connection, a stuttering RPC) — whether the transaction landed
-    // is genuinely unknown, so this is not "failed" and never "try again".
-    console.error(error instanceof Error ? error.message : String(error));
-    return { kind: "unknown", signature, lastValidBlockHeight };
-  }
+  // Polled, not `confirmTransaction`: that one waits on a `signatureSubscribe`
+  // over the websocket web3.js derives from the HTTPS url, and an RPC without
+  // one (Solami answers the upgrade with a 405) never confirms, so a landed
+  // send would be reported expired. The poll uses the same reads as the
+  // unknown-outcome path and shares its three verdicts.
+  return resolveUnknownSend(connection, signature, lastValidBlockHeight);
 }
 
 /** `SendResult` once `"unknown"` has been resolved: never hangs a caller's
