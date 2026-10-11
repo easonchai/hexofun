@@ -229,9 +229,9 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   all. It signs a message with `--keypair`, a wallet listed in the backend's `OPS_WALLETS`, and
   posts it to the backend, which books the ledger row.
 
-`scripts/deploy.sh mainnet --upgrade` always signs the program upgrade itself with a Ledger
-(`--upgrade-authority usb://ledger`), independent of whichever of the three modes above the admin
-CLI is using for instructions.
+`scripts/deploy.sh mainnet --upgrade` signs the program upgrade with whoever holds the upgrade
+authority, the deployer file or the Ledger after a handover, independent of whichever of the
+three modes above the admin CLI is using for instructions.
 
 ## Treasury and Buyback reserve for a mainnet Pool
 
