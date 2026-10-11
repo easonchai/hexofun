@@ -101,6 +101,9 @@ importers:
       '@ledgerhq/hw-transport-node-hid':
         specifier: 6.33.5
         version: 6.33.5
+      '@matrixai/quic':
+        specifier: 2.0.9
+        version: 2.0.9
       '@nestjs/common':
         specifier: 11.2.3
         version: 11.2.3(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -964,6 +967,61 @@ packages:
     peerDependencies:
       react: ^17.0.2 || ^18.0.0 || ^19.0
       react-dom: ^17.0.2 || ^18.0.0 || ^19.0
+
+  '@matrixai/async-cancellable@2.0.1':
+    resolution: {integrity: sha512-4oZC7RMehzZCfyVLk33fOZpW1Nz4WFxuHzznrjFDBre6FmGb63jc2uWjwn+BKplqyby1J/sdJbjO0iqNcweWHg==}
+
+  '@matrixai/async-init@2.1.2':
+    resolution: {integrity: sha512-i8Hj9Q/FGM725/LpsUyXk2APHn6y7yV9VmPoayAMkzM54+7p9ylmyxIwpYzw1A2zslrgUUvszg++uSM4a+5REw==}
+
+  '@matrixai/async-locks@5.0.2':
+    resolution: {integrity: sha512-YX3LUt4okyXPnDpx78PgPQybn8duh/FvWKx0t3UTaJW/0HL0/ZOQEEOsX1qefV1fQps1nKUHfjK1VeqZciCvXQ==}
+
+  '@matrixai/contexts@2.0.2':
+    resolution: {integrity: sha512-nI29nv2UP43s+hO+N8SDNxlDHHfj0Evypg5IxZ/Y04o6/InDhCQmZErxMu4ZAOTtt21yuI4zssPRcBQdhtQygA==}
+
+  '@matrixai/errors@2.1.3':
+    resolution: {integrity: sha512-uPH09OHLykjCdX17Piyc1P0kw3pkJC8l2ydr6LzcWUPmP8i38oO9oq2AqX21UeyeBhGvDcBzQk890GUMb6iOIA==}
+
+  '@matrixai/events@4.0.1':
+    resolution: {integrity: sha512-75hH7ZTmhM/VXeICXCPiVr/ZxQSoBwXh2HOI3AhD8AGYDDsEJsm4tnDSr/6vT3vS0ryZb3kb9mpAmCeibdrF3w==}
+
+  '@matrixai/logger@4.0.3':
+    resolution: {integrity: sha512-cu7e82iwN32H+K8HxsrvrWEYSEj7+RP/iVFhJ4RuacC8/BSOLFOYxry3EchVjrx4FP5G7QP1HnKYXAGpZN/46w==}
+
+  '@matrixai/quic-darwin-arm64@2.0.9':
+    resolution: {integrity: sha512-PLJvRXmeTJ2OLPnnDP8GBbXjGns2ltouZOcZqJB60DTIR+ijH6LAflvCw+0JT6a6jByD3gjRqSUIGsPbK7OMWg==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@matrixai/quic-darwin-universal@2.0.9':
+    resolution: {integrity: sha512-WjhxEoHIrIVpxBrIJH1Iy9jXDJygniXZxqGKTJd5+VrBttPn7ab9Ywe2SEly6DTH+rk8UlhTQpSgqz1Z+v5eww==}
+    cpu: [x64, arm64]
+    os: [darwin]
+
+  '@matrixai/quic-darwin-x64@2.0.9':
+    resolution: {integrity: sha512-J/RAWtbz7UMcaUTsgbbvBeXSwfZpq+DMkhfXhsqECgUwBAAsDW5UyZlemD/5mgYhYyFiwcaybOkttj11bKqyOg==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@matrixai/quic-linux-x64@2.0.9':
+    resolution: {integrity: sha512-2m2mBp2c+qdlh3mBbHT7iHqLGPksFJGxxKWcJRJXiHUnyeh9M5gMXia2bWc7VXty0n6eGZak4txD8CPaeINDRQ==}
+    cpu: [x64]
+    os: [linux]
+
+  '@matrixai/quic-win32-x64@2.0.9':
+    resolution: {integrity: sha512-VNdEh74Db/pX2BByuYaZ/3haGCejrAfDmVe+7OD/FKlHyIJkicKWjhNaeTDK2Nh2laaRF54MDZV+1FqO6TGePg==}
+    cpu: [x64]
+    os: [win32]
+
+  '@matrixai/quic@2.0.9':
+    resolution: {integrity: sha512-3Ld/RTZsqOVTggOYalt0U9yCmoseY9IfzUM+QOSU5+nxCs23ds4ol7dmbXon9NcGXsuePs6UkVFsNwwL7x9ZlQ==}
+
+  '@matrixai/resources@2.0.1':
+    resolution: {integrity: sha512-qP7wDz1HnQY7wV4NxybAE+A+488D7bGkkdgk2TIRaw8/fTWENi9Y/AFvOJrdKt3q5rDybB4OeTJIkN5qULE35A==}
+
+  '@matrixai/timer@2.1.1':
+    resolution: {integrity: sha512-8N4t3eISASJttKIuQKitVfCNxfaUp1Tritg9/92biGDxVwoP+Err8FVrjG30yWz56K/H+T9xUcZ58AH/mk15Sw==}
 
   '@metamask/eth-json-rpc-provider@1.0.1':
     resolution: {integrity: sha512-whiUMPlAOrVGmX8aKYVPvlKyG4CpQXiNNyt74vE1xb5sPvmx5oA7B/kOi/JdBvhGQq97U1/AVdXEdk2zkP8qyA==}
@@ -4990,6 +5048,9 @@ packages:
   invariant@2.2.4:
     resolution: {integrity: sha512-phJfQVBuaJM5raOpJjSfkiD6BpbCE4Ns//LaXl6wGYtUBY83nWS6Rf9tXm2e8VaK60JEjYldbPif/A2B1C2gNA==}
 
+  ip-num@1.6.2:
+    resolution: {integrity: sha512-NECaiXtcprXHALHE3c/isP2mJAjhJqnMWbrNLnZXoKg8LsZm1TTGkvbXBodXaNfXMCJ24uE5SUq7tCln9vUBwQ==}
+
   ipaddr.js@2.5.0:
     resolution: {integrity: sha512-aq+t5NAc+cS6rZQQVWC2x98CPqGtKKTMDd4Gaodv0wShnItdKg/51djkGJ1hqH+Oy0ivDftCbSLCQob8zso01w==}
     engines: {node: '>= 10'}
@@ -6685,6 +6746,10 @@ packages:
   tr46@0.0.3:
     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}
 
+  ts-custom-error@3.2.2:
+    resolution: {integrity: sha512-u0YCNf2lf6T/vHm+POKZK1yFKWpSpJitcUN3HxqyEcFuNnHIDbyuIQC7QDy/PsBX3giFyk9rt6BFqBAh2lsDZQ==}
+    engines: {node: '>=14.0.0'}
+
   tsconfig-paths-webpack-plugin@4.2.0:
     resolution: {integrity: sha512-zbem3rfRS8BgeNK50Zz5SIQgXzLafiHjOwUAvk/38/o1jHn/V5QAgVUcz884or7WYcPaH3N2CIfUc2u0ul7UcA==}
     engines: {node: '>=10.13.0'}
@@ -8303,6 +8368,78 @@ snapshots:
     dependencies:
       react: 19.1.1
       react-dom: 19.1.1(react@19.1.1)
+
+  '@matrixai/async-cancellable@2.0.1': {}
+
+  '@matrixai/async-init@2.1.2':
+    dependencies:
+      '@matrixai/async-locks': 5.0.2
+      '@matrixai/errors': 2.1.3
+      '@matrixai/events': 4.0.1
+
+  '@matrixai/async-locks@5.0.2':
+    dependencies:
+      '@matrixai/async-cancellable': 2.0.1
+      '@matrixai/errors': 2.1.3
+      '@matrixai/resources': 2.0.1
+      '@matrixai/timer': 2.1.1
+
+  '@matrixai/contexts@2.0.2':
+    dependencies:
+      '@matrixai/async-cancellable': 2.0.1
+      '@matrixai/async-locks': 5.0.2
+      '@matrixai/errors': 2.1.3
+      '@matrixai/resources': 2.0.1
+      '@matrixai/timer': 2.1.1
+
+  '@matrixai/errors@2.1.3':
+    dependencies:
+      ts-custom-error: 3.2.2
+
+  '@matrixai/events@4.0.1': {}
+
+  '@matrixai/logger@4.0.3': {}
+
+  '@matrixai/quic-darwin-arm64@2.0.9':
+    optional: true
+
+  '@matrixai/quic-darwin-universal@2.0.9':
+    optional: true
+
+  '@matrixai/quic-darwin-x64@2.0.9':
+    optional: true
+
+  '@matrixai/quic-linux-x64@2.0.9':
+    optional: true
+
+  '@matrixai/quic-win32-x64@2.0.9':
+    optional: true
+
+  '@matrixai/quic@2.0.9':
+    dependencies:
+      '@matrixai/async-cancellable': 2.0.1
+      '@matrixai/async-init': 2.1.2
+      '@matrixai/async-locks': 5.0.2
+      '@matrixai/contexts': 2.0.2
+      '@matrixai/errors': 2.1.3
+      '@matrixai/events': 4.0.1
+      '@matrixai/logger': 4.0.3
+      '@matrixai/resources': 2.0.1
+      '@matrixai/timer': 2.1.1
+      ip-num: 1.6.2
+    optionalDependencies:
+      '@matrixai/quic-darwin-arm64': 2.0.9
+      '@matrixai/quic-darwin-universal': 2.0.9
+      '@matrixai/quic-darwin-x64': 2.0.9
+      '@matrixai/quic-linux-x64': 2.0.9
+      '@matrixai/quic-win32-x64': 2.0.9
+
+  '@matrixai/resources@2.0.1': {}
+
+  '@matrixai/timer@2.1.1':
+    dependencies:
+      '@matrixai/async-cancellable': 2.0.1
+      '@matrixai/errors': 2.1.3
 
   '@metamask/eth-json-rpc-provider@1.0.1':
     dependencies:
@@ -16738,6 +16875,8 @@ snapshots:
     dependencies:
       loose-envify: 1.4.0
 
+  ip-num@1.6.2: {}
+
   ipaddr.js@2.5.0: {}
 
   iron-webcrypto@1.2.1: {}
@@ -18875,6 +19014,8 @@ snapshots:
   toml@3.0.0: {}
 
   tr46@0.0.3: {}
+
+  ts-custom-error@3.2.2: {}
 
   tsconfig-paths-webpack-plugin@4.2.0:
     dependencies:

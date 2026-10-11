@@ -1,0 +1,85 @@
+type ProgramTransaction @entity(immutable: true) {
+  id: ID!                 # signature
+  slot: BigInt!
+  pools: [String!]!       # pool pubkeys touched, for the backend's filter
+  logs: [String!]!        # raw log lines, what the backend decodes
+  eventCount: Int!
+  truncated: Boolean!
+  failed: Boolean!
+}
+
+type Event @entity(immutable: true) {
+  id: ID!                 # signature-index
+  tx: ProgramTransaction!
+  name: String!
+  slot: BigInt!
+  pool: String
+  owner: String           # owner or winner when the event names a wallet
+  epochId: BigInt
+  amount: BigInt          # the event's primary USDC amount when it has one
+  fields: String!         # every field, JSON, numbers as strings
+}
+
+type Pool @entity {
+  id: ID!                 # pool pubkey
+  poolId: BigInt!
+  admin: String!
+  operator: String!
+  paused: Boolean!
+  shutdownAt: BigInt
+  deposited: BigInt!      # sum Deposited.amount
+  withdrawn: BigInt!      # sum Withdrawn.amount + EmergencyWithdrawn.total
+  ticketsUsdc: BigInt!    # sum TicketsBought.usdc
+  jackpotPaid: BigInt!    # sum JackpotPaid.amount
+  yieldGain: BigInt!      # sum Synced.gain (Harvested.gain re-reports the same syncs)
+  yieldFee: BigInt!       # sum Synced.fee
+  venueDeployed: BigInt!  # sum VenueDeployed.amount
+  venueRecalled: BigInt!  # sum VenueRecalled.amount + VenueDrained.received
+  epochsDrawn: Int!
+  lastSlot: BigInt!
+}
+
+type Epoch @entity {
+  id: ID!                 # pool-epochId
+  pool: Pool!
+  epochId: BigInt!
+  startsAt: BigInt!
+  endsAt: BigInt!
+  ticketsUsdc: BigInt!
+  totalTickets: BigInt
+  target: BigInt
+  winner: String
+  jackpotAmount: BigInt
+  isHouse: Boolean
+  rolledOver: Boolean!
+  beganSlot: BigInt!
+  drawnSlot: BigInt
+  paidSlot: BigInt
+}
+
+type Wallet @entity {
+  id: ID!                 # owner pubkey
+  deposited: BigInt!
+  withdrawn: BigInt!
+  ticketsUsdc: BigInt!
+  jackpotWon: BigInt!
+  txCount: Int!
+  firstSlot: BigInt!
+  lastSlot: BigInt!
+}
+
+type SlotBucket @entity {
+  id: ID!                 # slot / 216000, as a string
+  startSlot: BigInt!
+  deposits: BigInt!
+  withdrawals: BigInt!
+  ticketsUsdc: BigInt!
+  jackpotPaid: BigInt!
+  yieldGain: BigInt!
+  txCount: Int!
+  uniqueWallets: Int!
+}
+
+type BucketWallet @entity(immutable: true) {
+  id: ID!                 # bucket-owner, the marker uniqueWallets counts
+}

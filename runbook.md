@@ -20,7 +20,8 @@
   Without it, every DB-backed suite skips itself and prints a warning naming the database it could not reach; a
   green run without those warnings is the only one that counts.
 
-  See also: docs/architecture.md (components, accounts, roles, fund flow), docs/ops/deploy.md
+  See also: docs/architecture.md (components, accounts, roles, fund flow), docs/ops/mainnet-launch.md
+  (first mainnet launch, step by step), docs/ops/deploy.md
   (deploying and upgrading), docs/ops/funds.md (pulling and returning principal, shutdown),
   docs/ops/environments.md (dev/staging/mainnet) and docs/ops/incidents.md (what to do when an
   /alerts code fires).
@@ -483,6 +484,39 @@
     curl -s https://<deployed-host>/ | grep -oE '/assets/[^"]+\.js'
     curl -s https://<deployed-host><asset-path-from-above> | grep -E "api-key=|helius-rpc.com"
 
+  RPC providers
+
+  Devnet and the fork stay on Helius and the local validator: Solami serves mainnet only. On mainnet the backend can run on Solami
+  with Helius as the fallback (ADR 0027). Three variables in the backend env, all server-only:
+
+    RPC_URL=https://rpc.solami.fast/sol?api_key=<solami key>
+    RPC_WS_URL=wss://ws.solami.dev/ws/sol?api_key=<solami key>
+    RPC_FALLBACK_URL=https://mainnet.helius-rpc.com/?api-key=<helius key>
+
+  RPC_WS_URL is required with a Solami RPC_URL. Solami serves pub/sub only on ws.solami.dev, and the socket web3.js derives from
+  the HTTP URL answers 405, so without it the Indexer's onLogs feed and every send's signature subscription never connect. Leave
+  it empty with a Helius RPC_URL. Only the primary uses it; the fallback keeps its derived socket.
+
+  Helius belongs in RPC_FALLBACK_URL because getPriorityFeeEstimate is Helius-only. On Solami it answers "unsupported method", and
+  chain/priority-fee.ts returns nothing and lets ChainService price the send from getRecentPrioritizationFees instead. That
+  costs one rejected call per send and logs nothing: the backend prints no warning for it at boot or on a send. The fallback
+  does not catch that call, since withRpcFallback fails over only on a timeout, a 5xx or a 429. getProgramAccountsV2 works on
+  both providers with the same response shape, so the Indexer's paginated sweep keeps working; if a primary ever lacks it, the
+  Indexer logs "this RPC has no getProgramAccountsV2" and walks all program accounts for the next hour. Solami also accepts
+  changedSinceSlot on getProgramAccountsV2; the Indexer does not use it yet.
+
+  Solami Free has no WebSocket, so a lapsed plan is not a downgrade path. To roll back to Helius, set these in the env file and
+  restart the backend:
+
+    RPC_URL=https://mainnet.helius-rpc.com/?api-key=<helius key>
+    RPC_WS_URL=
+
+  Never put a Solami key in the web's VITE_PUBLIC_RPC_URL: Vite inlines it, and each browser's confirmTransaction would open a
+  socket against the plan's connection cap (5 on Pro, 2 on Dev, per Solami's GET /pricing on 2026-10-10).
+
+  SUBGRAPH_URL (https://api.solami.dev/index/hexo/graphql) and SUBGRAPH_API_KEY (the Solami key) are set together or not at all; with
+  both, catch-up reads the subgraph while it is Live and within 300 slots, and `/status` shows subgraphSyncedSlot and subgraphBehindSlots.
+
   Mainnet stack
 
   Mainnet runs as a second compose project on the same box, out of the same checkout and behind the same Traefik. The two stacks
@@ -666,3 +700,94 @@
 
   A Round that stays `closed` with a good beacon in hand and an error in the log (`has no House player`, `does not match
   its Positions`) is stuck on that error; it retries every second until the cause is fixed.
+
+  Solami webhook
+
+  A second live feed into the Indexer (Solami ticket 09). Solami pushes each pool transaction to `POST /webhooks/solami`;
+  the backend checks the HMAC, then stores the events the same way the `onLogs` socket does, deduplicated by signature.
+  The cursor never moves on it, so the RPC catch-up walk still fills any gap. Mainnet only: Solami does not see devnet.
+  Solami delivers before finality (0-1 s after the block, measured 2026-10-10), so the backend answers 200 at once and
+  ingests only after the RPC reports the signature finalized, about 13 s later. One that never finalizes within ~40 s
+  logs `did not finalize` and is left to the walk.
+
+    1. Read the Active pool's address: `curl -s https://<API_HOST>/pool | jq -r .pool.address`. Watch the pool, not
+       the program id: retired pools share the program (ADR 0016) and their events carry no pool field, so a program-wide
+       feed would write their events into the Active pool. The `onLogs` socket watches the pool for the same reason.
+    2. In the Solami dashboard, Webhooks, create one: addresses = that pool address, payload Raw, event types empty (all),
+       transaction status Succeeded only, URL `https://<API_HOST>/webhooks/solami`, HTTP push on. Copy the signing secret;
+       Solami shows it once.
+    3. Put it in the backend's env file on the VPS as `SOLAMI_WEBHOOK_SECRET=<secret>` and recreate the backend
+       container (`up -d --force-recreate backend` with that environment's compose flags; a restart does not re-read the
+       file). The boot log says `solami webhook route on at POST /webhooks/solami`.
+    4. Confirm it moves: about 15 s after the next pool transaction, `curl -s https://<API_HOST>/status | jq
+       .webhookLastSlot` shows a slot instead of null. The dashboard's delivery list should show 200s. A 401 there means
+       the secret in the env file does not match; a 400 means Solami changed the delivery shape away from the field
+       paths at the top of apps/backend/src/api/webhooks.controller.ts.
+
+  `webhookLastSlot` is in memory: it reads null again after every restart until the next delivery. It is not an alert.
+
+  Rollback: unset `SOLAMI_WEBHOOK_SECRET`, recreate the backend (the route answers 404 and the Indexer is back on
+  `onLogs` plus the walk), then delete the webhook in the dashboard so Solami stops retrying into a 404.
+
+  Beam
+
+  Mainnet only. With `BEAM_KEYPAIR` set, every transaction the operator key signs carries a tip transfer to one of
+  Solami's tip addresses and goes to Beam (`beam.solami.dev:11000`, QUIC) before the RPC. If Beam throws, the same
+  bytes go through `sendRawTransaction`; the 2-second rebroadcast always uses the RPC. The admin CLI's Ledger sends
+  and Sparring player sends never use Beam.
+
+    1. In the Solami dashboard create a "swQoS key". It is a keypair; paste its base58 secret into apps/backend/.env as
+       `BEAM_KEYPAIR`. Beam authenticates by a client certificate built from it, so it is a secret like
+       `OPERATOR_KEYPAIR`.
+    2. `BEAM_TIP_LAMPORTS` is optional: default and minimum 100000 (0.0001 SOL, Solami's floor). The operator wallet
+       pays it on every send.
+    3. Recreate the backend. `/status` shows `beam: { enabled, sent, landed }` counted since boot (`null` when off).
+       A send whose Beam submit failed logs `Beam submit failed ...; sending <sig> through the RPC`.
+    4. Where a signature landed, with no auth:
+
+         curl -s https://api.solami.dev/swqos/tx/<signature>
+
+       It answers `is_landed`, `landed_via_jito`, `region`, `tip_lamports`, `first_seen_ms`, `forwarded_ms`.
+
+  The QUIC client (`@matrixai/quic`) is a native module with linux-x64 glibc builds only, which is why the backend
+  image is node:22-bookworm-slim and not alpine. On a host it does not load on (an ARM box, or an image built for
+  linux/arm64 on an Apple Silicon Mac), the backend logs `BEAM_KEYPAIR is set but the QUIC module does not load here;
+  Beam stays off` at boot, `/status` shows `beam: null`, and no tip is paid. Check the VPS with `uname -m`: it must
+  say `x86_64`.
+
+  Rollback: unset `BEAM_KEYPAIR` and recreate the backend. Sends go back to `sendRawTransaction` with no tip.
+
+  Subgraph
+
+  The `hexo` subgraph on Solami Index (Solami tickets 02 to 04, crate in subgraph/). It stores each HexVault transaction's
+  raw log lines plus decoded Event, Pool, Epoch, Wallet and SlotBucket rows, served at
+  `https://api.solami.dev/index/hexo/graphql`; every query needs a Solami key as `Authorization: Bearer`. Mainnet only.
+  Nothing is deployed: on 2026-10-10 the deploy answered `402 subgraph limit reached (0)` until Solami raises the
+  account's quota (Solami ticket 07, item 1b).
+
+    1. Copy .env.solami.example to .env.solami and fill in SOLAMI_API_KEY, SUBGRAPH_PROGRAM_ID (the mainnet program id)
+       and SUBGRAPH_START_SLOT (see the cutover step below).
+    2. `scripts/subgraph.sh deploy --dry-run` builds the wasm and checks the request body without the key or a network call.
+    3. `scripts/subgraph.sh deploy`. Solami's route docs give the success body as `{ "ok": true, "version", "new" }`.
+    4. `scripts/subgraph.sh status` until it prints `status Live`. Before that it says `Validating`, `Migrating` or
+       `Backfilling`; `synced_slot` is the last slot indexed. `scripts/subgraph.sh logs` shows the mapping's own lines,
+       including any event that did not fit its IDL layout.
+
+  The program id is compiled into the wasm, so `build` needs SUBGRAPH_PROGRAM_ID too and a build for one program never
+  indexes another. `build` reruns scripts/subgraph-codegen.mjs from the IDL; commit any change it makes to
+  subgraph/src/generated.rs. A mapping-only fix goes out with `scripts/subgraph.sh redeploy-wasm`, which keeps the
+  version. A schema or manifest change needs a higher `version` in subgraph/subgraph.yaml and a full `deploy`, and
+  Solami reindexes from startSlot, which on the Free tier cannot reach back.
+
+  Mainnet cutover step, keyed on the tier Solami ticket 07 picks:
+
+    Free (live-only, no backfill): before `create_pool`, deploy with SUBGRAPH_START_SLOT set to the current finalized slot
+    (`solana slot --url mainnet-beta --commitment finalized`) and wait for `Live`. Then create the pool. Then set
+    SUBGRAPH_URL=https://api.solami.dev/index/hexo/graphql and SUBGRAPH_API_KEY on the backend (Solami ticket 05) and
+    recreate it.
+
+    Starter or Pro (backfill on): create the pool first, deploy with SUBGRAPH_START_SLOT set to the slot of the
+    `create_pool` transaction, wait for `Live`, then set the two backend variables and recreate the backend.
+
+  Rollback: unset SUBGRAPH_URL and SUBGRAPH_API_KEY and recreate the backend; its catch-up goes back to the RPC walk.
+  `DELETE /index/hexo` with the same bearer key removes the deployment.

@@ -154,11 +154,11 @@ describe("parsePoolParams", () => {
     expect(parsePoolParams([])).not.toHaveProperty("buybackReserve");
   });
 
-  it("rejects a treasury equal to the buyback reserve", () => {
+  it("accepts one account as both treasury and buyback reserve (guard commented out)", () => {
     const same = Keypair.generate().publicKey.toBase58();
-    expect(() =>
-      parsePoolParams(["--treasury", same, "--buyback-reserve", same]),
-    ).toThrow(/--treasury and --buyback-reserve must differ/);
+    const params = parsePoolParams(["--treasury", same, "--buyback-reserve", same]);
+    expect(params.treasury?.toBase58()).toBe(same);
+    expect(params.buybackReserve?.toBase58()).toBe(same);
   });
 });
 
@@ -175,10 +175,10 @@ describe("assertMainnetSafe", () => {
     ).not.toThrow();
   });
 
-  it("refuses mainnet missing any of admin, treasury, buyback reserve or mint", () => {
+  it("refuses mainnet missing admin or mint", () => {
     expect(() =>
       assertMainnetSafe({ genesisHash: MAINNET_GENESIS_HASH, operator }),
-    ).toThrow(/--admin.*--treasury.*--buyback-reserve.*ACCEPTED_MINT/s);
+    ).toThrow(/--admin.*ACCEPTED_MINT/s);
     expect(() =>
       assertMainnetSafe({
         genesisHash: MAINNET_GENESIS_HASH,
@@ -188,15 +188,17 @@ describe("assertMainnetSafe", () => {
         buybackReserve,
       }),
     ).toThrow(/ACCEPTED_MINT/);
+  });
+
+  it("lets bootstrap create treasury and buyback reserve on mainnet (owned by the explicit Admin)", () => {
     expect(() =>
       assertMainnetSafe({
         genesisHash: MAINNET_GENESIS_HASH,
         operator,
         admin,
-        treasury,
         acceptedMint,
       }),
-    ).toThrow(/--buyback-reserve/);
+    ).not.toThrow();
   });
 
   it("refuses mainnet with Admin equal to Operator", () => {

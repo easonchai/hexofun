@@ -25,15 +25,17 @@
 #
 # Mainnet launch order (mainnet-readiness-fixes 06, 13): create_pool is
 # refused unless the payer is the program's upgrade authority, so
-#   1. `deploy.sh mainnet` deploys with the hot key (the configured solana
-#      keypair) as upgrade authority,
-#   2. bootstrap creates the pool with that same hot key as payer,
-#   3. `deploy.sh mainnet handover` moves the upgrade authority to the Ledger
-#      after a confirmation prompt. Nothing else is signed by the Ledger on
-#      this first deploy.
-# Later upgrades (`--upgrade`) write the buffer with the hot key, hand the
-# buffer to the Ledger with set-buffer-authority, and the Ledger signs only
-# the final deploy (one confirmation) instead of every ~1 KB write.
+#   1. `deploy.sh mainnet` deploys with the deployer key (DEPLOY_KEYPAIR in
+#      .env.mainnet, written by scripts/mainnet-keys.sh) as upgrade authority,
+#   2. bootstrap creates the pool with that same deployer as payer and names
+#      the operator hot key, which never holds upgrade rights,
+#   3. optionally, `deploy.sh mainnet handover` moves the upgrade authority to
+#      the Ledger after a confirmation prompt.
+# Later upgrades (`--upgrade`) write the buffer with the deployer. If the
+# deployer still holds the upgrade authority it signs the deploy too, no
+# Ledger involved. Once the Ledger holds it (after handover), the buffer is
+# handed to the Ledger with set-buffer-authority and the Ledger signs only the
+# final deploy (one confirmation) instead of every ~1 KB write.
 # The script prints the cluster name, never the RPC URL: the URL carries the
 # provider key (.env.mainnet, DEPLOY_RPC_URL).
 #
@@ -45,8 +47,8 @@
 # the uploader address; it defaults to the program's on-chain upgrade
 # authority). Both are opt-in so a plain deploy stays fast.
 #
-# Mainnet's long-term upgrade authority is a Ledger (usb://ledger); plug it in
-# before `handover` or an `--upgrade`. The fee payer defaults to the locally
+# If the Ledger is the upgrade authority (usb://ledger), plug it in before an
+# `--upgrade` or `--idl`. The fee payer defaults to the locally
 # configured keypair (`solana config get`); set FEE_PAYER_KEYPAIR (a path or
 # another usb://ledger[?key=N]) to pay the final deploy's fees from somewhere
 # else.
@@ -119,6 +121,18 @@ elif [ "$env_name" = "mainnet" ]; then
     echo "deploy: RPC_URL is empty in $mainnet_env" >&2
     exit 1
   fi
+  # DEPLOY_KEYPAIR (written by scripts/mainnet-keys.sh) is the deployer file.
+  # The solana CLI has no env var for its keypair, so point its config at the
+  # file once; every solana call below then signs with it.
+  deploy_keypair=$(grep -E '^DEPLOY_KEYPAIR=' "$mainnet_env" | tail -1 | cut -d= -f2-)
+  if [ -n "$deploy_keypair" ]; then
+    if [ ! -f "$deploy_keypair" ]; then
+      echo "deploy: DEPLOY_KEYPAIR=$deploy_keypair in $mainnet_env does not exist" >&2
+      exit 1
+    fi
+    solana config set --keypair "$deploy_keypair" >/dev/null
+    echo "==> signing as $(solana address) (DEPLOY_KEYPAIR from $mainnet_env)"
+  fi
 fi
 
 if [ ! -f "$keypair" ]; then
@@ -170,11 +184,22 @@ if [ "$action" = "verify" ]; then
   exit 0
 fi
 
+# The program's on-chain upgrade authority; empty when not deployed yet.
+current_authority() {
+  solana program show "$keypair_pubkey" --url "$cluster" --output json 2>/dev/null \
+    | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/'
+}
+# Mainnet: the Ledger signs the deploy/IDL only once it holds the upgrade
+# authority (after `handover`). While the configured keypair still holds it,
+# that key signs alone and no Ledger is needed.
+ledger_holds_authority() {
+  [ "$env_name" = "mainnet" ] && [ "$(current_authority)" != "$(solana address)" ]
+}
+
 # --- handover: hot key -> Ledger upgrade authority (mainnet, after bootstrap) ---
 if [ "$action" = "handover" ]; then
   hot_key=$(solana address)
-  current_authority=$(solana program show "$keypair_pubkey" --url "$cluster" --output json \
-    | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/')
+  current_authority=$(current_authority)
   if [ "$current_authority" != "$hot_key" ]; then
     echo "deploy: upgrade authority is $current_authority, not the hot key $hot_key; nothing to hand over" >&2
     exit 1
@@ -192,8 +217,7 @@ if [ "$action" = "handover" ]; then
   # before the hot key lets go of the program.
   solana program set-upgrade-authority "$keypair_pubkey" --url "$cluster" \
     --new-upgrade-authority usb://ledger
-  after=$(solana program show "$keypair_pubkey" --url "$cluster" --output json \
-    | grep -m1 '"authority"' | sed -E 's/.*"authority": *"?([^",}]+)"?.*/\1/')
+  after=$(current_authority)
   if [ "$after" != "$ledger_pubkey" ]; then
     echo "deploy: upgrade authority is $after, expected $ledger_pubkey" >&2
     exit 1
@@ -255,7 +279,7 @@ echo "==> $env_name program id $keypair_pubkey matches the build (IDL and binary
 # --- --idl: publish the freshly built IDL on chain, no deploy --------------
 if [ "$action" = "idl" ]; then
   idl_wallet=""
-  if [ "$env_name" = "mainnet" ]; then
+  if ledger_holds_authority; then
     idl_wallet="usb://ledger"
   fi
 
@@ -325,12 +349,12 @@ fi
 # --- 6. write-buffer, then deploy (deploy also covers upgrades) -----------
 cu_price="${DEPLOY_CU_PRICE:-100000}"
 hot_key=$(solana address)
-# Mainnet: the hot key writes the buffer (the Ledger would sign each ~1 KB
-# chunk). A first deploy keeps the hot key as upgrade authority so bootstrap's
-# create_pool works; `handover` moves it to the Ledger afterwards. An upgrade
-# hands the buffer to the Ledger and the Ledger signs only the deploy.
+# Mainnet: the deployer writes the buffer (the Ledger would sign each ~1 KB
+# chunk) and stays upgrade authority so bootstrap's create_pool works. Only an
+# upgrade after `handover` hands the buffer to the Ledger, which then signs
+# the one deploy.
 ledger_deploy=0
-if [ "$env_name" = "mainnet" ] && [ "$upgrade" -eq 1 ]; then
+if [ "$upgrade" -eq 1 ] && ledger_holds_authority; then
   ledger_deploy=1
 fi
 

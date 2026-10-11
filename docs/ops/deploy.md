@@ -1,5 +1,7 @@
 # Deploying and upgrading
 
+First mainnet launch, as one ordered checklist: [`mainnet-launch.md`](mainnet-launch.md).
+
 One script, `scripts/deploy.sh <dev|staging|mainnet> [--upgrade] [--dry-run]`, builds, checks and
 deploys or upgrades the `hex_vault` program for one environment. The same script also has two
 opt-in actions, `--idl` (publish the on-chain IDL) and `verify` (reproducible-build
@@ -30,11 +32,11 @@ The script, in order:
    (`--with-compute-unit-price`, from `DEPLOY_CU_PRICE`, default `100000`) and
    `--max-sign-attempts 50` so a large program lands under congestion; mainnet also adds
    `--use-rpc`, since it only helps when the RPC is stake-weighted (Helius, Triton) and only
-   mainnet's RPC is. On mainnet the hot key (the configured `solana` keypair) writes the buffer, so
-   the Ledger is not asked to sign each ~1 KB chunk of the 1 MB binary. An upgrade then hands the
-   buffer to the Ledger (`solana program set-buffer-authority`) and the Ledger signs the one
-   deploy transaction. A first deploy leaves the hot key as upgrade authority; see "Mainnet launch
-   order".
+   mainnet's RPC is. On mainnet the deployer (the configured `solana` keypair) writes the buffer,
+   so the Ledger is not asked to sign each ~1 KB chunk of the 1 MB binary. If the Ledger holds the
+   upgrade authority, an upgrade hands the buffer to it (`solana program set-buffer-authority`)
+   and the Ledger signs the one deploy transaction; otherwise the deployer signs it. See "Mainnet
+   launch order".
 6. After the deploy, asserts the on-chain upgrade authority (`solana program show
    <program-id>`) equals the authority expected for the env: the Ledger on a mainnet upgrade, the
    locally configured keypair (`solana address`) elsewhere, including a first mainnet deploy. Then checks `solana program show --buffers
@@ -66,15 +68,17 @@ key (`.env.mainnet`, `DEPLOY_RPC_URL`), so it still must not be pasted into a ti
 06), so a stranger cannot create pool 1 with their own admin the moment the program exists. The
 order is:
 
-1. `scripts/deploy.sh mainnet` deploys with the hot key as upgrade authority.
-2. Bootstrap creates the pool. Its payer is `OPERATOR_KEYPAIR`, so the keypair `solana address`
-   reports during step 1 must be the same key. Bootstrap and
-   the backend boot guard refuse an existing pool whose admin, treasury, buyback reserve, mint or
-   venue pins differ from the flags and env, and print the diff.
-3. `scripts/deploy.sh mainnet handover` moves the upgrade authority to the Ledger. It checks the
-   current authority is the hot key, asks you to type the Ledger pubkey, runs `solana program
-   set-upgrade-authority --new-upgrade-authority usb://ledger` (the Ledger signs as the new
-   authority, which proves it is reachable) and re-reads the authority.
+1. `scripts/deploy.sh mainnet` deploys with the deployer key (`DEPLOY_KEYPAIR` in `.env.mainnet`)
+   as upgrade authority.
+2. Bootstrap creates the pool. With `DEPLOY_KEYPAIR` set it pays with the deployer and names the
+   operator from `OPERATOR_KEYPAIR` (or `--operator`), so the key on the VPS never holds upgrade
+   rights. Bootstrap and the backend boot guard refuse an existing pool whose admin, treasury,
+   buyback reserve, mint or venue pins differ from the flags and env, and print the diff.
+3. Optional: `scripts/deploy.sh mainnet handover` moves the upgrade authority to the Ledger. It
+   checks the current authority is the deployer, asks you to type the Ledger pubkey, runs
+   `solana program set-upgrade-authority --new-upgrade-authority usb://ledger` (the Ledger signs
+   as the new authority, which proves it is reachable) and re-reads the authority. Until then the
+   deployer, kept offline between upgrades, signs `--upgrade` and `--idl` alone.
 
 Do not run step 3 before bootstrap: no one can create a pool afterwards without the Ledger. Later
 upgrades use `scripts/deploy.sh mainnet --upgrade`, where the Ledger signs only the final deploy.
@@ -225,32 +229,29 @@ Three ways an admin-gated instruction gets signed, picked by env vars the admin 
   all. It signs a message with `--keypair`, a wallet listed in the backend's `OPS_WALLETS`, and
   posts it to the backend, which books the ledger row.
 
-`scripts/deploy.sh mainnet --upgrade` always signs the program upgrade itself with a Ledger
-(`--upgrade-authority usb://ledger`), independent of whichever of the three modes above the admin
-CLI is using for instructions.
+`scripts/deploy.sh mainnet --upgrade` signs the program upgrade with whoever holds the upgrade
+authority, the deployer file or the Ledger after a handover, independent of whichever of the
+three modes above the admin CLI is using for instructions.
 
 ## Treasury and Buyback reserve for a mainnet Pool
 
-`bootstrap` refuses to run on mainnet's genesis hash unless `--admin`, `--treasury` and
-`--buyback-reserve` are all given explicitly, and refuses an `--admin` equal to the operator hot
-key (`apps/backend/src/bootstrap/params.ts`, `assertMainnetSafe`); it never creates a mint on
-mainnet either. Treasury and Buyback reserve share (mint, owner), so they cannot both be the
-Associated Token Account of the Squads vault and the accepted mint: `create_pool` would accept it,
-but the two roles would then be indistinguishable to anyone reading the vault's token accounts.
-Create one of them as a plain (non-ATA) token account instead, owned by the vault:
+`bootstrap` refuses to run on mainnet's genesis hash unless `--admin` and `ACCEPTED_MINT` are
+given explicitly, and refuses an `--admin` equal to the operator hot key
+(`apps/backend/src/bootstrap/params.ts`, `assertMainnetSafe`); it never creates a mint on mainnet
+either. Without `--treasury` and `--buyback-reserve`, bootstrap creates both itself: two plain
+(non-ATA) token accounts of the accepted mint, seeded from the operator key and the pool address,
+owned by the Admin. On mainnet the Admin is the Squads vault, so the vault owns both from the
+start and nobody runs `spl-token create-account` by hand. They are deliberately not the vault's
+ATA: Treasury and Buyback reserve share (mint, owner), and two ATAs would be one address.
 
 ```
-spl-token create-account <accepted-mint> --owner <squads-vault> --fee-payer <funding-keypair>
+bootstrap --admin <squads-vault>
 ```
 
-run twice with two throwaway account keypairs (`spl-token create-account` without `--owner`
-defaults to a fresh random address rather than the deterministic ATA when a keypair is supplied
-positionally: `spl-token create-account <accepted-mint> <new-account-keypair.json> --owner
-<squads-vault>`). Pass the resulting addresses to bootstrap:
-
-```
-bootstrap --admin <squads-vault> --treasury <treasury-address> --buyback-reserve <buyback-address>
-```
+Bootstrap prints both addresses; paste them into `.env.mainnet` as `TREASURY` and
+`BUYBACK_RESERVE` before the backend's first boot, which compares them with the Pool. Passing
+`--treasury` and `--buyback-reserve` explicitly still works, for accounts that already exist; on
+mainnet each must then be owned by the Admin (`assertTokenAccountOwner`).
 
 ## The venue a Pool pins
 

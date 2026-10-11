@@ -20,6 +20,7 @@ Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents
 - Ops console: `apps/web/src/ops/` (`tx.ts` signs, `instructions.ts` builds).
 - Backend read model: `apps/backend/src/api/api.service.ts`. Operator: `apps/backend/src/operator/` (`tick.ts`, `instructions.ts`). Admin CLI: `apps/backend/src/admin/`.
 - Program: `programs/hex_vault/`. Deploys and env layout: `runbook.md`.
+- Solami subgraph: `subgraph/` (own Cargo workspace, `cargo test` on the host; `src/generated.rs` comes from `scripts/subgraph-codegen.mjs`). Build and deploy: `scripts/subgraph.sh`.
 
 ## Testing
 

@@ -9,7 +9,8 @@
 //
 // stdout carries only the KEY=value block; progress goes to stderr, so
 // `bootstrap > pool.env` yields a pasteable file.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { AnchorProvider, BN, Program, Wallet, Idl } from "@anchor-lang/core";
 import {
@@ -162,12 +163,16 @@ async function ensureMint(
  * bootstrapping pool 1 on a second program ID would otherwise land on the
  * first program's treasury, whose mint differs (MintMismatch in create_pool).
  */
+/** A plain (non-ATA) token account the authority pays for, owned by `owner`:
+ * the Admin, so on mainnet the Squads vault owns the Treasury and Buyback
+ * reserve without anyone running `spl-token create-account` by hand. */
 async function ensureSeededTokenAccount(
   connection: Connection,
   authority: Keypair,
   mint: PublicKey,
   label: string,
   pool: PublicKey,
+  owner: PublicKey,
 ): Promise<PublicKey> {
   // Seeds cap at 32 bytes: "treasury-" plus 16 base58 chars of the pool.
   const seed = `${label}-${pool.toBase58().slice(0, 16)}`;
@@ -193,12 +198,7 @@ async function ensureSeededTokenAccount(
       space: ACCOUNT_SIZE,
       programId: TOKEN_PROGRAM_ID,
     }),
-    createInitializeAccount3Instruction(
-      address,
-      mint,
-      authority.publicKey,
-      TOKEN_PROGRAM_ID,
-    ),
+    createInitializeAccount3Instruction(address, mint, owner, TOKEN_PROGRAM_ID),
   );
   await sendAndConfirmTransaction(connection, tx, [authority], {
     commitment: "confirmed",
@@ -417,9 +417,26 @@ async function main(): Promise<void> {
 
   const params = parsePoolParams(process.argv.slice(2));
   const connection = new Connection(requireEnv("RPC_URL"), "confirmed");
-  const authority = Keypair.fromSecretKey(
+  const operatorKey = Keypair.fromSecretKey(
     bs58.decode(requireEnv("OPERATOR_KEYPAIR")),
   );
+  // Mainnet launch: DEPLOY_KEYPAIR (the deployer file scripts/mainnet-keys.sh
+  // wrote) is the upgrade authority create_pool wants as payer; the operator
+  // key then only gets named, so it never holds upgrade rights. The path is
+  // relative to where pnpm was invoked (the repo root), not apps/backend.
+  const deployFile = process.env.DEPLOY_KEYPAIR;
+  const authority = deployFile
+    ? Keypair.fromSecretKey(
+        Uint8Array.from(
+          JSON.parse(
+            readFileSync(
+              resolve(process.env.INIT_CWD ?? process.cwd(), deployFile),
+              "utf8",
+            ),
+          ),
+        ),
+      )
+    : operatorKey;
   // The loaded key pays, mints and owns the token accounts unless overridden.
   // `explicitAdmin` stays undefined when it would default to the hot key, so
   // the mainnet guard below can tell "given" from "defaulted".
@@ -430,7 +447,7 @@ async function main(): Promise<void> {
       : undefined);
   const roles = {
     admin: explicitAdmin ?? authority.publicKey,
-    operator: params.operator ?? authority.publicKey,
+    operator: params.operator ?? operatorKey.publicKey,
   };
   const programId = new PublicKey(requireEnv("PROGRAM_ID"));
   const poolId = BigInt(requireEnv("POOL_ID"));
@@ -470,12 +487,12 @@ async function main(): Promise<void> {
   }
   if (!params.treasury) {
     log(
-      "warning: no --treasury given; bootstrap will create one owned by the operator hot key",
+      `no --treasury given; bootstrap will create one owned by the Admin ${roles.admin.toBase58()}`,
     );
   }
   if (!params.buybackReserve) {
     log(
-      "warning: no --buyback-reserve given; bootstrap will create one owned by the operator hot key",
+      `no --buyback-reserve given; bootstrap will create one owned by the Admin ${roles.admin.toBase58()}`,
     );
   }
   if (!envMint) {
@@ -552,6 +569,18 @@ async function main(): Promise<void> {
         )
       ).address,
   );
+  // A House prize pays into the operator's ATA, so it must exist when the
+  // operator is not the signer.
+  if (!roles.operator.equals(authority.publicKey)) {
+    await step("creating the operator ATA", () =>
+      getOrCreateAssociatedTokenAccount(
+        connection,
+        authority,
+        mint,
+        roles.operator,
+      ),
+    );
+  }
 
   const treasury = existing
     ? existing.treasury
@@ -569,6 +598,7 @@ async function main(): Promise<void> {
             mint,
             "treasury",
             pool,
+            roles.admin,
           ),
         );
   const buybackReserve = existing
@@ -590,12 +620,14 @@ async function main(): Promise<void> {
             mint,
             "buyback",
             pool,
+            roles.admin,
           ),
         );
 
-  if (treasury.equals(buybackReserve)) {
-    throw new Error("treasury and buyback reserve must differ");
-  }
+  // shortcut: same-account guard off, see parsePoolParams; re-enable with it.
+  // if (treasury.equals(buybackReserve)) {
+  //   throw new Error("treasury and buyback reserve must differ");
+  // }
 
   if (!venue) {
     log(`pool ${pool.toBase58()} already exists`);

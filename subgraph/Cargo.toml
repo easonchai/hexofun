@@ -1,0 +1,19 @@
+[package]
+name = "hexo-subgraph"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+bs58 = "0.4"
+solami-index-sdk = "0.1.0"
+
+[profile.release]
+opt-level = "s"
+
+# Its own workspace, so the Anchor workspace at the repo root never builds it.
+[workspace]

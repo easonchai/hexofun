@@ -19,6 +19,8 @@ export const PATTERNS = [
   { name: "QuickNode token", re: /quiknode\.pro\/[a-z0-9]{16,}/i },
   { name: "Alchemy token", re: /alchemy\.com\/v2\/[a-z0-9_-]{16,}/i },
   { name: "Triton token", re: /rpcpool\.com\/[a-z0-9_-]{16,}/i },
+  // Solami spells it `api_key=`; matched on its hosts so library code saying api_key= stays clean.
+  { name: "Solami api_key", re: /solami\.(?:fast|dev)\/[^\s"'<>]*api_key=/i },
 ];
 
 const TEXT_EXT = new Set([".js", ".mjs", ".css", ".html", ".json", ".map", ".txt"]);

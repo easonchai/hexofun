@@ -3,9 +3,11 @@
 // time, so a fresh checkout tells you everything it needs in one error.
 import { Logger } from "@nestjs/common";
 import { PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
 
 import { INVITE_CIRCULATION_CAP, INVITE_REDEEM_GRANT_COUNT } from "../api/invite-code";
 import { DEFAULT_REFERRAL_QUALIFY_SECONDS } from "../api/referral";
+import { MIN_TIP_LAMPORTS } from "../chain/beam";
 
 const REQUIRED_KEYS = [
   "DATABASE_URL",
@@ -69,6 +71,10 @@ export interface HexVaultEnv {
    *  out, or errors with a 5xx or a 429, on `RPC_URL` is retried once here.
    *  Absent means a failure just propagates, same as before this ticket. */
   RPC_FALLBACK_URL?: string;
+  /** Optional WebSocket for `RPC_URL`'s subscriptions (solami 06). Solami
+   *  serves pub/sub on its own host, not the one web3.js derives from the
+   *  HTTP URL. Absent keeps the derived socket. */
+  RPC_WS_URL?: string;
   /** Per-call timeout, in ms, every chain read and send is bounded by. */
   RPC_TIMEOUT_MS: number;
   PROGRAM_ID: string;
@@ -130,6 +136,23 @@ export interface HexVaultEnv {
    *  `begin_epoch` fires on the first tick. Reported on `/state` and
    *  `/status` so the web can render a countdown. */
   LAUNCH_AT?: string;
+  /** Signing secret of the Solami webhook that pushes the program's
+   *  transactions to `POST /webhooks/solami` (solami-index 09). Absent
+   *  switches the route off (404). */
+  SOLAMI_WEBHOOK_SECRET?: string;
+  /** Solami ticket 08: the swQoS keypair, base58 like `OPERATOR_KEYPAIR`.
+   *  Set, operator sends go through Beam with a tip; absent, every send is
+   *  `sendRawTransaction` as before. Mainnet only. */
+  BEAM_KEYPAIR?: string;
+  /** The tip each Beam send pays, in lamports: at least, and by default,
+   *  100,000. Parsed only with `BEAM_KEYPAIR` set. */
+  BEAM_TIP_LAMPORTS?: number;
+  /** Solami ticket 05: the hexo subgraph's GraphQL endpoint, ending in
+   *  `/graphql`, and the Solami key sent as its bearer. Both or neither; with
+   *  both, the Indexer's catch-up reads the subgraph while it keeps pace with
+   *  the chain and the RPC walk otherwise. Mainnet only. */
+  SUBGRAPH_URL?: string;
+  SUBGRAPH_API_KEY?: string;
 }
 
 /**
@@ -352,11 +375,70 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     // Spread rather than assigned: under `exactOptionalPropertyTypes` an
     // optional key cannot be set to `undefined`, and "absent" is the switch.
     ...(env.RPC_FALLBACK_URL ? { RPC_FALLBACK_URL: String(env.RPC_FALLBACK_URL) } : {}),
+    ...(env.RPC_WS_URL ? { RPC_WS_URL: String(env.RPC_WS_URL) } : {}),
     ...(env.ADMIN_ADDRESS ? { ADMIN_ADDRESS: String(env.ADMIN_ADDRESS) } : {}),
     ...(env.SPARRING_KEYPAIR
       ? { SPARRING_KEYPAIR: String(env.SPARRING_KEYPAIR) }
       : {}),
     ...(env.INVITE_ADMIN_KEY ? { INVITE_ADMIN_KEY: String(env.INVITE_ADMIN_KEY) } : {}),
     ...(launchAtValue !== undefined ? { LAUNCH_AT: launchAtValue } : {}),
+    ...(env.SOLAMI_WEBHOOK_SECRET ? { SOLAMI_WEBHOOK_SECRET: String(env.SOLAMI_WEBHOOK_SECRET) } : {}),
+    ...(env.BEAM_KEYPAIR
+      ? {
+          BEAM_KEYPAIR: beamKeypair(env.BEAM_KEYPAIR),
+          BEAM_TIP_LAMPORTS: beamTipLamports(env.BEAM_TIP_LAMPORTS),
+        }
+      : {}),
+    ...subgraphVars(env.SUBGRAPH_URL, env.SUBGRAPH_API_KEY),
   };
+}
+
+/** Both or neither. One without the other counts as unset and says so once,
+ *  here at boot. The URL must end in `/graphql`: the subgraph's status route
+ *  is the same path without it. Neither value is echoed. */
+function subgraphVars(
+  rawUrl: unknown,
+  rawKey: unknown,
+): Pick<HexVaultEnv, "SUBGRAPH_URL" | "SUBGRAPH_API_KEY"> {
+  if (!rawUrl && !rawKey) return {};
+  if (!rawUrl || !rawKey) {
+    new Logger("env").warn(
+      `${rawUrl ? "SUBGRAPH_API_KEY" : "SUBGRAPH_URL"} is unset, so the subgraph is off and catch-up stays on the RPC walk`,
+    );
+    return {};
+  }
+  const url = String(rawUrl).trim();
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // reported below
+  }
+  if (!parsed || !/^https?:$/.test(parsed.protocol) || !parsed.pathname.endsWith("/graphql")) {
+    throw new Error("SUBGRAPH_URL must be an http(s) URL ending in /graphql");
+  }
+  return { SUBGRAPH_URL: url, SUBGRAPH_API_KEY: String(rawKey).trim() };
+}
+
+/** A 64-byte base58 secret, or the boot fails without echoing the value. */
+function beamKeypair(raw: unknown): string {
+  const value = String(raw).trim();
+  let bytes = 0;
+  try {
+    bytes = bs58.decode(value).length;
+  } catch {
+    // reported below
+  }
+  if (bytes !== 64) throw new Error("BEAM_KEYPAIR must be a base58 64-byte secret key");
+  return value;
+}
+
+/** Unset or empty takes Beam's floor; less than the floor fails the boot,
+ *  since Beam would refuse every send with `tip_too_low`. */
+function beamTipLamports(raw: unknown): number {
+  const value = wholeNumber("BEAM_TIP_LAMPORTS", raw, MIN_TIP_LAMPORTS);
+  if (value < MIN_TIP_LAMPORTS) {
+    throw new Error(`BEAM_TIP_LAMPORTS must be at least ${MIN_TIP_LAMPORTS}, got "${String(raw)}"`);
+  }
+  return value;
 }

@@ -1,0 +1,14 @@
+# Template. `scripts/subgraph.sh deploy` replaces the two __PLACEHOLDERS__
+# from .env.solami. The version is semver and must rise on any manifest or
+# schema change (a schema change reindexes); a wasm-only re-push keeps it.
+specVersion: "0.0.1"
+id: hexo
+version: 1.0.0
+schema:
+  file: ./schema.graphql
+dataSources:
+  - name: hexvault
+    source:
+      programId: "__SUBGRAPH_PROGRAM_ID__"
+      startSlot: __SUBGRAPH_START_SLOT__
+      commitment: finalized

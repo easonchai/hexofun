@@ -125,8 +125,9 @@ function parseCreateInvitesBody(body: unknown): CreateInvitesBody {
 }
 
 /** Hashing first gives both sides the same length, which `timingSafeEqual`
- *  needs, without leaking the key's length through an early return. */
-const sameKey = (given: string, expected: string): boolean =>
+ *  needs, without leaking the key's length through an early return. Also
+ *  checks webhooks.controller.ts's signature header. */
+export const sameKey =(given: string, expected: string): boolean =>
   timingSafeEqual(
     createHash("sha256").update(given).digest(),
     createHash("sha256").update(expected).digest(),

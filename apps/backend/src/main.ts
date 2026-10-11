@@ -17,9 +17,13 @@ async function bootstrap(): Promise<void> {
   // trustProxy: the API sits behind Traefik, so every request's remote
   // address is Traefik's; trusting the forwarded header is what lets the
   // throttler (api.module.ts) key on the real client (ticket 13).
+  // rawBody: keeps each JSON body's bytes beside the parsed object, which the
+  // Solami webhook's HMAC is computed over (webhooks.controller.ts). Parsing
+  // itself is unchanged: Nest registers the same JSON parser either way.
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
     new FastifyAdapter({ trustProxy: true }),
+    { rawBody: true },
   );
   // SAFETY: the workspace has two copies of `fastify` at different patch
   // versions (@nestjs/platform-fastify's own dependency vs. the root
