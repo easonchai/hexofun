@@ -67,6 +67,19 @@ test("an older email row is taken over and keeps its code", { skip }, async () =
   });
 });
 
+// A Privy app switch: same person, same email, a DID from the other app.
+test("a new DID for a known email finds the same row, every time", { skip }, async () => {
+  const a = await signIn({ did: "did:privy:app1", email: "moved@example.com" });
+  const { code } = await row(a.id);
+  for (let i = 0; i < 2; i++) {
+    assert.deepEqual(await signIn({ did: "did:privy:app2", email: "moved@example.com" }), {
+      id: a.id,
+      created: false,
+    });
+  }
+  assert.equal((await row(a.id)).code, code);
+});
+
 test("a typed-email referrer's code pays nothing until they log in with Privy", { skip }, async () => {
   await pool.query("insert into waitlist (email, code) values ('typed@example.com', 'ee0001')");
   const guest = await signIn({ did: "did:privy:tg", email: "tg@example.com" }, { ref: "ee0001" });
