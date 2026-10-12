@@ -3,6 +3,9 @@
 // is driven through `handleFrame` and a recording fake socket. What the feed
 // owes the Indexer is one `ingestPushed` per finalized, non-failed frame.
 // Dedup against `onLogs` and the webhook is covered in indexer.test.ts.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { ConfigService } from "@nestjs/config";
 import bs58 from "bs58";
 import { describe, expect, it, vi } from "vitest";
@@ -78,6 +81,23 @@ describe("decodeFrame", () => {
   it("names a ping and shrugs at an update it does not read", () => {
     expect(decodeFrame(pingFrame())).toEqual({ kind: "ping" });
     expect(decodeFrame(Uint8Array.from(bytes(3, uint64(1, 5n))))).toEqual({ kind: "other" });
+  });
+
+  // A frame Solami delivered on 2026-10-12 for a mainnet pool-1 deposit,
+  // saved raw off the socket. The RPC's finalized view of the same signature
+  // had slot 455898981, no error and 48 log lines.
+  it("decodes a real Solami frame to what the RPC reports for the same signature", () => {
+    const frame = readFileSync(path.join(__dirname, "fixtures", "mirage-deposit-frame.bin"));
+    const decoded = decodeFrame(new Uint8Array(frame));
+    expect(decoded).toMatchObject({
+      kind: "transaction",
+      signature: "5mWT19qYsAdkbUPfMh1JGtXK4gaeoWeMraFZfJ57tKhy3MWUrDn78suBJTJVdhAw1i5xFCCEab6z5hhnV3sF9Pqn",
+      slot: 455898981n,
+      failed: false,
+    });
+    if (decoded.kind !== "transaction") throw new Error("unreachable");
+    expect(decoded.logs).toHaveLength(48);
+    expect(decoded.logs).toContain("Program log: Instruction: Deposit");
   });
 
   it("throws on a truncated frame instead of returning a partial transaction", () => {
