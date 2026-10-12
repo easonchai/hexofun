@@ -42,7 +42,7 @@ test("sharePage carries the tags and redirects to ?ref=", () => {
     'name="twitter:card" content="summary_large_image"',
     'name="twitter:site" content="@Hexofun"',
     `name="twitter:image" content="${ORIGIN}/api/card?code=abc123&amp;v=7"`,
-    'location.replace("/?ref=abc123")',
+    '<script src="/share-redirect.js" data-target="/?ref=abc123"></script>',
   ]) {
     assert.ok(html.includes(want), want);
   }

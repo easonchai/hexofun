@@ -63,7 +63,7 @@ export function sharePage({ origin, code, handle, v }) {
 <meta name="twitter:title" content="${e(title)}" />
 <meta name="twitter:description" content="${e(desc)}" />
 <meta name="twitter:image" content="${e(image)}" />
-<script>location.replace(${JSON.stringify(target)});</script>
+<script src="/share-redirect.js" data-target="${e(target)}"></script>
 </head>
 <body><a href="${e(target)}">HEXO.fun</a></body>
 </html>
