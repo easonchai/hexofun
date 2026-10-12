@@ -731,6 +731,42 @@
   Rollback: unset `SOLAMI_WEBHOOK_SECRET`, recreate the backend (the route answers 404 and the Indexer is back on
   `onLogs` plus the walk), then delete the webhook in the dashboard so Solami stops retrying into a 404.
 
+  Known gap (Solami docs, read 2026-10-12): a webhook with empty event types fires only for transactions carrying a
+  decoded event (`transfer`, `swap`, `mint`...). Deposits and withdrawals qualify; round closes, draws and settles do
+  not, so they never arrive on the webhook. Mirage below carries every pool transaction.
+
+  Solami Mirage
+
+  A third live feed into the Indexer: Solami's Yellowstone geyser stream for one saved filter, served over a plain
+  WebSocket as protobuf `SubscribeUpdate` frames. The backend decodes signature, slot, error and log lines itself
+  (apps/backend/src/indexer/mirage.service.ts, field numbers from yellowstone-grpc-proto), waits for the RPC to report
+  the signature finalized, then stores it through the same `ingestPushed` the socket and the webhook use. Dedup by
+  signature, cursor untouched, RPC walk still the gap filler. Mainnet only.
+
+    1. In the Solami dashboard, Mirage, create a subscription: commitment Confirmed, Transactions include = the Active
+       pool address (`curl -s https://<API_HOST>/pool | jq -r .pool.address`; the pool, not the program id, for the ADR
+       0016 reason above), vote No, failed No, nothing else on. Note its id.
+    2. API keys: add a role holding only `MirageStream` (New role, tick Stream Mirage), then create an API key with that
+       role alone. The key rides in the stream URL, so it must not be able to do anything else.
+    3. In the backend's env file on the VPS: `MIRAGE_STREAM_URL=wss://ws.solami.dev/mirage/stream/<id>?api_key=<key>`
+       and `up -d --force-recreate backend`. Boot log: `mirage feed on, ingesting confirmed frames once finalized`, then
+       `mirage socket connected`.
+    4. Confirm: `curl -s https://<API_HOST>/status | jq '{mirageConnected, mirageLastSlot}'` shows `true`, and a slot
+       about 15 s after the next pool transaction.
+
+  The socket closing is logged with Solami's code and retried with backoff from 1 s to 5 min: `4002` streaming
+  bandwidth exhausted (buy more in the dashboard, Bandwidth), `4029` concurrent stream limit, `1001` node restart.
+  A handshake refusal shows as `1006` with no reason; to see the real status run the upgrade by hand:
+
+    curl -s -i --http1.1 "$MIRAGE_STREAM_URL" -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+      -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' | head -12
+
+  `403 missing required permission: MirageStream` means the key's role is wrong; `404` the subscription id; `400` it
+  is disabled in the dashboard. None of this touches the Indexer: `mirageConnected` reads false and everything else
+  runs on `onLogs` plus the walk.
+
+  Rollback: unset `MIRAGE_STREAM_URL`, recreate the backend, then disable or delete the subscription in the dashboard.
+
   Beam
 
   Mainnet only. With `BEAM_KEYPAIR` set, every transaction the operator key signs carries a tip transfer to one of

@@ -185,6 +185,14 @@ which Solami products the backend uses, which it rejected, and why.
 - **A webhook into the Indexer.** With `SOLAMI_WEBHOOK_SECRET` set, Solami pushes the program's
   transactions to `POST /webhooks/solami`, a second live feed beside `onLogs`. The Indexer dedupes
   by signature, so a transaction that arrives on both is written once. Unset, the route is off.
+  Solami only fires a webhook for transactions carrying an event its decoder knows (a token
+  transfer, a swap), so round closes and draws never arrive this way; Mirage covers those.
+- **A Mirage stream into the Indexer.** With `MIRAGE_STREAM_URL` set, the backend holds a WebSocket
+  to Solami's Yellowstone feed for a saved filter (every confirmed transaction touching the Active
+  pool), decodes each protobuf frame and ingests it once the RPC reports it finalized, through the
+  same path as the other two feeds. A closed socket (lapsed plan, bandwidth exhausted, node restart)
+  is retried with backoff up to five minutes while the Indexer runs on. Unset, the feed is off.
+  `/status` shows `mirageConnected` and `mirageLastSlot`.
 - **The `hexo` subgraph**, only if Solami grants this account Index Engine quota. The deploy is
   refused today with a subgraph limit of 0; ADR 0027 has the details. The mapping is built and
   tested in `subgraph/`, and `scripts/subgraph.sh` deploys it (`runbook.md`, "Subgraph").
@@ -200,6 +208,7 @@ RPC_FALLBACK_URL=https://mainnet.helius-rpc.com/?api-key=<helius key>
 BEAM_KEYPAIR=
 BEAM_TIP_LAMPORTS=
 SOLAMI_WEBHOOK_SECRET=
+MIRAGE_STREAM_URL=wss://ws.solami.dev/mirage/stream/<subscription id>?api_key=<key with MirageStream only>
 ```
 
 ```bash
