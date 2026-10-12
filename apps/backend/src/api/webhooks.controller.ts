@@ -19,8 +19,13 @@ import type { FastifyRequest } from "fastify";
 
 import { ChainService } from "../chain/chain.service";
 import type { HexVaultEnv } from "../config/env";
+import { awaitFinalized } from "../indexer/finality";
 import { IndexerService } from "../indexer/indexer.service";
 import { sameKey } from "./access.controller";
+
+// The finality wait moved to indexer/finality.ts when the Mirage feed joined;
+// re-exported so the tests and runbook references keep their names.
+export { FINALITY_CHECKS, FINALITY_INTERVAL_MS, awaitFinalized } from "../indexer/finality";
 
 // Read off live Raw deliveries (probe 2026-10-10, ~40 deliveries on a watched
 // klend reserve): the bare hex HMAC-SHA256 of the raw body, keyed with the
@@ -40,10 +45,6 @@ const SUCCEEDED = "succeeded";
 /** A Solana transaction is at most 1,232 bytes and its log is cut at 10 KB;
  *  the largest probe delivery was 42 KB, so this leaves room. */
 export const MAX_BODY_BYTES = 128 * 1024;
-/** Finality takes ~32 slots (~13 s); give it about 40 s before leaving the
- *  transaction to the RPC walk. */
-export const FINALITY_CHECKS = 10;
-export const FINALITY_INTERVAL_MS = 4_000;
 
 /** Slot of the newest delivery the Indexer took, for `/status`. One process
  *  serves one pool, so module state is the whole store. */
@@ -88,28 +89,6 @@ function parseDelivery(body: unknown): PushedTransaction {
     throw new BadRequestException(`\`${LOGS_PATH.join(".")}\` must be the transaction's log lines.`);
   }
   return { signature, slot, status, logs };
-}
-
-type SignatureStatusLike = { slot: number; err: unknown; confirmationStatus?: string | null } | null;
-
-/**
- * The slot `signature` finalized in, or null if it failed or did not finalize
- * within FINALITY_CHECKS. The slot comes from the RPC, not the delivery: a
- * transaction re-included after a fork lands in another slot. A failed status
- * read counts as "not yet"; the caller logs the null.
- */
-export async function awaitFinalized(
-  status: (signature: string) => Promise<SignatureStatusLike>,
-  signature: string,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()),
-): Promise<number | null> {
-  for (let check = 0; check < FINALITY_CHECKS; check += 1) {
-    if (check > 0) await sleep(FINALITY_INTERVAL_MS);
-    const value = await status(signature).catch(() => null);
-    if (value?.err) return null;
-    if (value?.confirmationStatus === "finalized") return value.slot;
-  }
-  return null;
 }
 
 /**

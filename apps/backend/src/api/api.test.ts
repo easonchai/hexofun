@@ -1319,6 +1319,13 @@ describe.skipIf(!DB_AVAILABLE)("API routes", () => {
     expect(body.webhookLastSlot).toBeNull();
   });
 
+  // MIRAGE_STREAM_URL is unset here, so the feed is off and both read null.
+  it("GET /status carries null Mirage fields with the feed off", async () => {
+    const { body } = await http.get("/status").expect(200);
+    expect(body.mirageLastSlot).toBeNull();
+    expect(body.mirageConnected).toBeNull();
+  });
+
   // Solami ticket 05: unset here, so both are null; with a client, the slot
   // it reports and how far that sits behind the RPC's (1234 in fakeChain).
   it("GET /status carries the subgraph's synced slot and lag, null with it unset or failing", async () => {

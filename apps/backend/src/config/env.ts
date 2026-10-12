@@ -140,6 +140,11 @@ export interface HexVaultEnv {
    *  transactions to `POST /webhooks/solami` (solami-index 09). Absent
    *  switches the route off (404). */
   SOLAMI_WEBHOOK_SECRET?: string;
+  /** The Mirage stream for the Active pool's transactions, the full
+   *  `wss://ws.solami.dev/mirage/stream/<id>?api_key=<key with MirageStream>`
+   *  the dashboard shows. It carries a key, so it is never logged. Absent
+   *  switches the feed off. Mainnet only. */
+  MIRAGE_STREAM_URL?: string;
   /** Solami ticket 08: the swQoS keypair, base58 like `OPERATOR_KEYPAIR`.
    *  Set, operator sends go through Beam with a tip; absent, every send is
    *  `sendRawTransaction` as before. Mainnet only. */
@@ -383,6 +388,7 @@ export function validateEnv(env: Record<string, unknown>): HexVaultEnv {
     ...(env.INVITE_ADMIN_KEY ? { INVITE_ADMIN_KEY: String(env.INVITE_ADMIN_KEY) } : {}),
     ...(launchAtValue !== undefined ? { LAUNCH_AT: launchAtValue } : {}),
     ...(env.SOLAMI_WEBHOOK_SECRET ? { SOLAMI_WEBHOOK_SECRET: String(env.SOLAMI_WEBHOOK_SECRET) } : {}),
+    ...(env.MIRAGE_STREAM_URL ? { MIRAGE_STREAM_URL: mirageStreamUrl(env.MIRAGE_STREAM_URL) } : {}),
     ...(env.BEAM_KEYPAIR
       ? {
           BEAM_KEYPAIR: beamKeypair(env.BEAM_KEYPAIR),
@@ -430,6 +436,20 @@ function beamKeypair(raw: unknown): string {
     // reported below
   }
   if (bytes !== 64) throw new Error("BEAM_KEYPAIR must be a base58 64-byte secret key");
+  return value;
+}
+
+/** A `wss://` URL, or the boot fails. The key rides in its query string, so
+ *  the error never echoes the value. */
+function mirageStreamUrl(raw: unknown): string {
+  const value = String(raw).trim();
+  let protocol = "";
+  try {
+    protocol = new URL(value).protocol;
+  } catch {
+    // reported below
+  }
+  if (protocol !== "wss:") throw new Error("MIRAGE_STREAM_URL must be a wss:// URL");
   return value;
 }
 

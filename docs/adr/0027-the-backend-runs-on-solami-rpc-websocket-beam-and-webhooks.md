@@ -43,17 +43,27 @@ per-account override Solami sets by hand, not a line on any plan, and this accou
 left it at 0. The ask is open. If it is granted, the Indexer's catch-up walk reads the subgraph
 first and falls back to the RPC walk (GLOSSARY: Subgraph). The browser never reads it.
 
+**Mirage as the third live feed (amended 2026-10-12).** Rejected below at first; taken once the
+webhook's docs, which live only inside Solami's dashboard bundle, showed that a webhook with no
+event types fires solely for transactions carrying a decoded event (`transfer`, `swap`, `mint`
+and the like). Round closes, draws and settles carry none, so the webhook never sees most of
+what the Indexer needs. Mirage has no such gate: a saved Yellowstone filter on the Active pool
+address delivers every confirmed transaction touching it as a protobuf `SubscribeUpdate` over a
+plain WebSocket. The decoder is sixty lines over four messages (signature, slot, error, log
+lines), no dependency; frames wait for RPC finality through the same helper the webhook uses,
+then go through `ingestPushed`. The per-byte bill stands, and at the pool's volume is cents. A
+closed socket, for any reason including a lapsed plan, is retried with capped backoff and never
+touches the Indexer's other feeds. Fallback is unsetting `MIRAGE_STREAM_URL`.
+
 ## Rejected
 
-- **Mirage.** The same data `onLogs` already gives, plus a protobuf decoder to write and a
-  per-byte bill.
-- **Yellowstone gRPC.** Available on this account (10 streams), but it needs a gRPC client and
-  filter setup for data the webhook delivers with less code. Reconsider only if the webhook probe
-  fails.
+- **Mirage.** Reversed 2026-10-12, see above.
+- **Yellowstone gRPC.** Available on this account (10 streams), and the same frames Mirage now
+  carries, but it needs a gRPC client where Mirage needs a WebSocket.
 - **Blur and the Data API.** DEX trades, candles, pools, token balances. HexVault reads none of it.
 - **`getTransactionsForAddress` for the catch-up walk.** It returns signatures with slot and
   error, not transactions with logs, so the walk still needs `getTransaction` per signature.
 
-Consequence: on mainnet the backend's core path touches four Solami products (RPC, WebSocket,
-Beam, webhooks), each switchable back to Helius or to the current code by unsetting one variable,
-and the subgraph joins the moment the quota is raised.
+Consequence: on mainnet the backend's core path touches five Solami products (RPC, WebSocket,
+Beam, webhooks, Mirage), each switchable back to Helius or to the current code by unsetting one
+variable, and the subgraph joins the moment the quota is raised.

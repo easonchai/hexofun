@@ -44,6 +44,7 @@ import {
 } from "./live-yield";
 import { readRoundState } from "./round-state";
 import { webhookLastSlot } from "./webhooks.controller";
+import { mirageConnected, mirageLastSlot } from "../indexer/mirage.service";
 
 /** Mirrors programs/hex_vault/src/constants.rs `epoch_status`. */
 export const EPOCH_OPEN = 0;
@@ -861,6 +862,11 @@ export class ApiService {
       // solami-index 09: slot of the newest Solami webhook delivery this
       // process took; null with the route off or nothing delivered yet.
       webhookLastSlot: webhookLastSlot(),
+      // Slot of the newest Mirage frame this process took, and whether its
+      // socket is open; both null with `MIRAGE_STREAM_URL` unset. Module
+      // state like `webhookLastSlot`, so ApiModule needs no IndexerModule.
+      mirageLastSlot: mirageLastSlot(),
+      mirageConnected: mirageConnected(),
       // Solami ticket 08: in-memory Beam send counts since boot, null when off.
       beam: this.chain.beam?.status() ?? null,
       // Solami ticket 05: null with the subgraph unset or its read failed.
