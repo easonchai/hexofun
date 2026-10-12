@@ -166,6 +166,8 @@ export function WalletLayer({
         appId={appId}
         {...(clientId ? { clientId } : {})}
         config={{
+          // Overrides the dashboard's login methods; no "wallet" button.
+          loginMethods: ["google", "email"],
           appearance: {
             theme: "#0E1B2B",
             accentColor: "#B6FF3B",
