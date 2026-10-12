@@ -53,7 +53,10 @@ export default async function handler(req, res) {
 /**
  * The row for a verified identity: by DID, else by email. An email match
  * takes the old row over (typed or Google), keeping its code, referred_by and
- * points. `ref` is stored raw as `referred_by`, never validated, and only on a
+ * points, and stores the new DID: a Privy app switch gives the same email a
+ * new DID, and the next sign-in should find it directly. The DID lookup above
+ * runs first, so the new DID never already belongs to another row here.
+ * `ref` is stored raw as `referred_by`, never validated, and only on a
  * new row; a matching code pays the invitee's `referred` bonus right away.
  * A takeover runs the referral pass too, since the row has only now joined.
  */
@@ -77,7 +80,7 @@ export async function signIn({ did, email }, { ref, referrer, utm, userAgent } =
         ${str(userAgent, 500)}
       )
       on conflict (email) do update
-        set privy_did = coalesce(waitlist.privy_did, excluded.privy_did)
+        set privy_did = excluded.privy_did
       returning id, (xmax = 0) as created
     `,
   );
