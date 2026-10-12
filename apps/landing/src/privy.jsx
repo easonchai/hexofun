@@ -4,6 +4,7 @@
 import { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { getIdentityToken, PrivyProvider, useLogin, usePrivy } from "@privy-io/react-auth";
+import { COOKIES, dropForeignSession } from "./foreign-session.js";
 
 const METHODS = ["email", "google"];
 
@@ -52,6 +53,14 @@ function Bridge() {
     }
   }, [authenticated]);
   return null;
+}
+
+try {
+  if (dropForeignSession(localStorage, PRIVY_APP_ID)) {
+    for (const c of COOKIES) document.cookie = `${c}=; path=/; max-age=0`;
+  }
+} catch {
+  // No localStorage (private mode, blocked storage): nothing stored to drop.
 }
 
 const el = document.createElement("div");
