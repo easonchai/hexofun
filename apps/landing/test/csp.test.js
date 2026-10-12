@@ -10,7 +10,7 @@ const read = (name) => readFile(new URL(`../${name}`, import.meta.url), "utf8");
 test("vercel.json CSP allows every inline script in index.html", async () => {
   const html = await read("index.html");
   const { headers } = JSON.parse(await read("vercel.json"));
-  const csp = headers[0].headers.find((h) => h.key.startsWith("Content-Security-Policy-")).value;
+  const csp = headers[0].headers.find((h) => h.key === "Content-Security-Policy").value;
   const hashes = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
     ([, body]) => `'sha256-${createHash("sha256").update(body).digest("base64")}'`,
   );
