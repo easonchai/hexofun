@@ -1,0 +1,88 @@
+{
+  "src/App.tsx": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    }
+  },
+  "src/ops/AdminPanel.tsx": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/ops/CranksPanel.tsx": {
+    "react/set-state-in-effect": {
+      "count": 2
+    }
+  },
+  "src/ops/GameConfigPanel.tsx": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/ops/RecoveryPanel.tsx": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/ops/VenueSwitchStepper.tsx": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/ops/useOps.tsx": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/panel/BetDrawer.tsx": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/read.ts": {
+    "react/set-state-in-effect": {
+      "count": 2
+    }
+  },
+  "src/screens/Home.tsx": {
+    "react/jsx-key": {
+      "count": 6
+    }
+  },
+  "src/screens/Vault.tsx": {
+    "react/purity": {
+      "count": 1
+    }
+  },
+  "src/shims/buffer.ts": {
+    "typescript/no-useless-empty-export": {
+      "count": 1
+    }
+  },
+  "src/useAccessGate.ts": {
+    "react/set-state-in-effect": {
+      "count": 3
+    }
+  },
+  "src/useRoundEngine.ts": {
+    "react-hooks/exhaustive-deps": {
+      "count": 1
+    },
+    "react/immutability": {
+      "count": 1
+    },
+    "react/refs": {
+      "count": 5
+    }
+  },
+  "src/useSession.ts": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/useStatePoll.ts": {
+    "react/set-state-in-effect": {
+      "count": 1
+    }
+  }
+}

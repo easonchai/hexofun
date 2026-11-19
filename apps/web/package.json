@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "sync-idl": "node scripts/sync-idl.mjs",
     "dither-video": "node scripts/dither-video.mjs",
-    "check": "tsc -p tsconfig.json && vite build && node scripts/check-bundle-keys.mjs",
+    "check": "tsc -p tsconfig.json && oxlint && vite build && node scripts/check-bundle-keys.mjs",
+    "lint": "oxlint",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },

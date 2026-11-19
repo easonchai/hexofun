@@ -1,0 +1,27 @@
+{
+  "src/config/env.test.ts": {
+    "no-unused-vars": {
+      "count": 3
+    }
+  },
+  "src/indexer/indexer.test.ts": {
+    "unicorn/no-new-array": {
+      "count": 1
+    }
+  },
+  "src/operator/operator.service.test.ts": {
+    "no-unsafe-optional-chaining": {
+      "count": 1
+    }
+  },
+  "src/operator/operator.test.ts": {
+    "no-unsafe-optional-chaining": {
+      "count": 3
+    }
+  },
+  "src/snapshot/sum-tree.test.ts": {
+    "unicorn/no-new-array": {
+      "count": 1
+    }
+  }
+}
