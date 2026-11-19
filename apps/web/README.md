@@ -21,12 +21,13 @@ Copy `.env.example` to `.env.local` and adjust. The five variables are
 
 ## Scripts
 
-| script                      | purpose                                                      |
-| --------------------------- | ------------------------------------------------------------ |
-| `dev` / `build` / `preview` | Vite                                                         |
-| `check`                     | `tsc` over `src`                                             |
-| `test`                      | Vitest unit tests (money, tiles, round engine, feed rows)    |
-| `sync-idl`                  | copy `target/idl/hex_vault.json` -> `src/idl/hex_vault.json` |
+| script                      | purpose                                                             |
+| --------------------------- | ------------------------------------------------------------------- |
+| `dev` / `build` / `preview` | Vite                                                                |
+| `check`                     | `tsc`, Oxlint, `vite build`, then the bundle-key check              |
+| `lint`                      | Oxlint (`.oxlintrc.json`; old errors in `oxlint-suppressions.json`) |
+| `test`                      | Vitest unit tests (money, tiles, round engine, feed rows)           |
+| `sync-idl`                  | copy `target/idl/hex_vault.json` -> `src/idl/hex_vault.json`        |
 
 ## Rules baked into the code
 
